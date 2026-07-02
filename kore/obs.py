@@ -132,9 +132,14 @@ class KoreLogger:
     def warning(self, msg: str, **fields) -> None: self._emit("WARN", msg, fields)
     def error(self, msg: str, **fields) -> None: self._emit("ERROR", msg, fields)
 
-    def event(self, kind: str, **fields) -> None:
-        """Structured event (JSONL always; console at INFO)."""
-        self._emit("INFO", kind, fields, kind="event")
+    def event(self, name: str, **fields) -> None:
+        """Structured event (JSONL always; console at INFO).
+
+        ``name`` is positional so callers may freely pass a ``kind=`` data field
+        (e.g. ``event("verify_shape", kind="ok")``) without colliding with the
+        record type.
+        """
+        self._emit("INFO", name, fields, kind="event")
 
     def metric(self, msg: str = "metrics", **kv) -> None:
         self._emit("INFO", msg, kv, kind="metric")

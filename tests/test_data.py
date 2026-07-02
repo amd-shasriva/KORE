@@ -383,9 +383,14 @@ def test_build_dpo_wellformed():
     assert len(rows) == 3  # three preference pairs
     for row in rows:
         assert set(row) == {"prompt", "chosen", "rejected"}
-        assert "FULL_KERNEL" in row["chosen"]
-        assert row["chosen"] != row["rejected"]
         assert isinstance(row["prompt"], list)
+        # conversational trl.DPOTrainer shape: chosen/rejected are message lists
+        assert isinstance(row["chosen"], list)
+        assert isinstance(row["rejected"], list)
+        assert row["chosen"][0]["role"] == "assistant"
+        assert row["rejected"][0]["role"] == "assistant"
+        assert "FULL_KERNEL" in row["chosen"][0]["content"]
+        assert row["chosen"] != row["rejected"]
 
 
 def test_build_rft_wellformed():

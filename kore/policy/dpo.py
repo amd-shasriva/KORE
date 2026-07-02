@@ -1,11 +1,21 @@
 """Stage-2 DPO on ranked preference pairs.
 
-Trains a LoRA policy with ``trl``'s ``DPOTrainer`` against a frozen reference
-(the SFT checkpoint). Plan hyperparameters (see ``configs.DPOConfig``):
-beta = 0.1, ref = SFT, bf16, max_len 16384.
+Trains against a frozen reference (the SFT checkpoint) with ``trl``'s
+``DPOTrainer``. Plan hyperparameters (see ``configs.DPOConfig``): beta = 0.1,
+ref = SFT, bf16, max_len 16384. Full-FT vs LoRA is governed by
+``config.use_lora``; a LoRA adapter is merged into the base before saving.
 
-Dataset is a preference JSONL of ``{"prompt", "chosen", "rejected"}`` rows
-(``prompt`` may be a string or a chat-message list). Heavy imports are guarded.
+Dataset is the *conversational* preference JSONL produced by
+``kore.data.build_datasets.build_dpo``::
+
+    {"prompt":   [ {"role": "system", ...}, {"role": "user", ...} ],
+     "chosen":   [ {"role": "assistant", "content": "FULL_KERNEL:..."} ],
+     "rejected": [ {"role": "assistant", "content": "FULL_KERNEL:..."} ]}
+
+``trl.DPOTrainer`` consumes this conversational shape natively (it applies the
+chat template per column). Legacy string rows (``prompt``/``chosen``/``rejected``
+as plain text) are still accepted for backward compatibility. Heavy imports are
+guarded.
 """
 
 from __future__ import annotations
@@ -19,9 +29,12 @@ from kore.policy.configs import DPOConfig
 def load_preference_jsonl(path: str) -> list[dict]:
     """Read preference rows: ``{"prompt", "chosen", "rejected"}`` per line.
 
-    ``prompt`` may be a plain string or a list of chat messages; ``chosen`` /
-    ``rejected`` are the two candidate completions. Lines missing any field are
-    skipped.
+    Consumes the CONVERSATIONAL DPO schema where ``prompt`` is a chat-message
+    list and ``chosen`` / ``rejected`` are each a single-message assistant
+    completion list (``[{"role": "assistant", "content": ...}]``). Legacy rows
+    where any field is a plain string are passed through unchanged so trl's
+    standard (non-conversational) path still works. Lines missing any of the
+    three fields are skipped.
     """
     rows: list[dict] = []
     with open(path) as f:
@@ -96,7 +109,14 @@ def train(config: DPOConfig) -> dict:
         peft_config=peft_config,
     )
     trainer.train()
-    trainer.save_model(config.output_dir)
+
+    # Merge the LoRA adapter into the base before saving so downstream stages
+    # (GRPO, soup) load a plain full model; full-FT saves weights directly.
+    if config.use_lora:
+        merged = trainer.model.merge_and_unload()
+        merged.save_pretrained(config.output_dir)
+    else:
+        trainer.save_model(config.output_dir)
     tokenizer.save_pretrained(config.output_dir)
     return {"stage": "dpo", "output_dir": config.output_dir, "n_pairs": len(rows)}
 

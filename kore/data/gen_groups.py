@@ -113,7 +113,12 @@ def generate_groups(
                 {"role": "user", "content": prompt},
             ]
             response = teacher.generate(messages)
-            cand_src = extract_kernel(response) or parent_src
+            cand_src = extract_kernel(response)
+            if not cand_src:
+                # Extraction failed: skip this candidate rather than injecting the
+                # parent as a fake candidate (which would pollute the ranking with
+                # a duplicate and manufacture spurious preference pairs).
+                continue
             results.append(_evaluate(env, task, cand_src, cfg))
 
         order = rank_candidates(results)
@@ -135,6 +140,8 @@ def generate_groups(
                 candidates=candidates,
                 preferences=prefs,
                 gpu=task.gpu_target,
+                operation=getattr(task, "operation", None),
+                arch=getattr(task, "gpu_target", None),
             )
         )
         # advance the parent to the best correct candidate, if any, for diversity

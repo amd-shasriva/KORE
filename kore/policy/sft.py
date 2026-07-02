@@ -1,9 +1,13 @@
-"""Repair-weighted supervised fine-tuning (LoRA) for the KORE cold start.
+"""Repair-weighted supervised fine-tuning for the KORE cold start.
 
 Trains on chat-formatted transcripts (repair transitions, verified wins, and
 reasoning traces). Uses trl's SFTTrainer. Note: trl renamed ``max_seq_length`` ->
 ``max_length``; ``assistant_only_loss`` needs a ``{% generation %}`` marker in the
 chat template, which Qwen3's template lacks, so we do not set it.
+
+Full-FT vs LoRA is governed by ``config.use_lora`` (the locked KORE recipe is
+full-FT). When LoRA is used the adapter is merged into the base before saving so
+every downstream stage (DPO, GRPO, soup) can load a plain full model.
 """
 
 from __future__ import annotations
@@ -14,21 +18,43 @@ from typing import Optional
 
 from kore.policy.configs import SFTConfig
 
+# ``_source`` markers (see kore/data/build_datasets.py) that denote a repair
+# (broken -> fixed) transition, which the plan up-weights during SFT.
+REPAIR_SOURCES = ("kernel_repair_opt", "repair")
 
-def load_sft_dataset(path: Path):
+
+def load_sft_dataset(path: Path, repair_weight: float = 1.0,
+                     repair_sources: tuple[str, ...] = REPAIR_SOURCES):
+    """Load a chat JSONL into an HF ``Dataset`` of ``{"messages": [...]}`` rows.
+
+    ``repair_weight`` implements the plan's repair up-weighting. trl's
+    ``SFTTrainer`` computes a token-mean loss and does not expose a per-example
+    scalar loss weight without subclassing ``compute_loss`` (which would also
+    fight its packing/collator path), so we approximate per-example weighting by
+    integer up-sampling: a row whose ``_source`` is a repair marker is emitted
+    ``round(repair_weight)`` times. This raises the effective gradient mass on
+    repair transitions proportional to ``repair_weight`` while keeping trl's
+    stock training path intact.
+    """
     from datasets import Dataset
 
+    factor = max(1, int(round(repair_weight)))
     rows = []
     for line in Path(path).read_text().splitlines():
         line = line.strip()
         if not line:
             continue
         rec = json.loads(line)
-        rows.append({"messages": rec["messages"] if "messages" in rec else rec})
+        messages = rec["messages"] if isinstance(rec, dict) and "messages" in rec else rec
+        row = {"messages": messages}
+        rows.append(row)
+        src = rec.get("_source") if isinstance(rec, dict) else None
+        if factor > 1 and src in repair_sources:
+            rows.extend([dict(row) for _ in range(factor - 1)])
     return Dataset.from_list(rows)
 
 
-def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] = None):
+def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] = None) -> str:
     import torch
     from peft import LoraConfig
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -41,10 +67,15 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
     model = AutoModelForCausalLM.from_pretrained(
         config.model_id, torch_dtype=torch.bfloat16, device_map="auto")
 
-    ds = load_sft_dataset(dataset_path)
-    peft_cfg = LoraConfig(
-        r=config.lora.r, lora_alpha=config.lora.lora_alpha, lora_dropout=config.lora.lora_dropout,
-        target_modules=list(config.lora.target_modules), task_type="CAUSAL_LM")
+    ds = load_sft_dataset(dataset_path, repair_weight=config.repair_loss_weight)
+
+    # Honor the recipe: full-FT (use_lora=False) or LoRA adapter.
+    peft_cfg = None
+    if config.use_lora:
+        peft_cfg = LoraConfig(
+            r=config.lora.r, lora_alpha=config.lora.lora_alpha,
+            lora_dropout=config.lora.lora_dropout,
+            target_modules=list(config.lora.target_modules), task_type="CAUSAL_LM")
 
     args = TRLSFTConfig(
         output_dir=config.output_dir,
@@ -64,6 +95,13 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
     trainer = SFTTrainer(model=model, args=args, train_dataset=ds,
                          peft_config=peft_cfg, processing_class=tok)
     trainer.train()
-    trainer.save_model(config.output_dir)
+
+    # Merge LoRA into the base before saving so downstream stages load a full
+    # model; full-FT just saves the trained weights directly.
+    if config.use_lora:
+        merged = trainer.model.merge_and_unload()
+        merged.save_pretrained(config.output_dir)
+    else:
+        trainer.save_model(config.output_dir)
     tok.save_pretrained(config.output_dir)
     return config.output_dir

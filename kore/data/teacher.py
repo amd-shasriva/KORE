@@ -13,8 +13,36 @@ backend-agnostic.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
-from typing import Callable, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
+
+
+# Bounded exponential-backoff retry defaults for the network-backed teachers.
+_MAX_RETRIES = 4          # total attempts = _MAX_RETRIES
+_BACKOFF_BASE = 1.0       # seconds; delay = _BACKOFF_BASE * 2**attempt
+_BACKOFF_CAP = 30.0       # seconds; never wait longer than this
+_REQUEST_TIMEOUT = 120.0  # per-request wall timeout (seconds)
+
+
+def _retry_call(fn: Callable[[], Any], *, what: str):
+    """Call ``fn`` with bounded exponential backoff on transient failures.
+
+    Retries up to ``_MAX_RETRIES`` times, sleeping ``_BACKOFF_BASE * 2**attempt``
+    (capped at ``_BACKOFF_CAP``) between attempts. Re-raises the last exception
+    if every attempt fails so the caller can decide to skip the sample.
+    """
+    last_exc: Optional[BaseException] = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 - transient network/server errors
+            last_exc = e
+            if attempt == _MAX_RETRIES - 1:
+                break
+            delay = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
+            time.sleep(delay)
+    raise RuntimeError(f"{what} failed after {_MAX_RETRIES} attempts") from last_exc
 
 
 @runtime_checkable
@@ -74,11 +102,24 @@ class VLLMTeacher:
         self.system = system
 
     def generate(self, messages: list[dict]) -> str:
-        r = self.client.chat.completions.create(
-            model=self.model, messages=_ensure_system(messages, self.system),
-            temperature=self.temperature, max_tokens=self.max_tokens,
-        )
-        return r.choices[0].message.content or ""
+        msgs = _ensure_system(messages, self.system)
+
+        def _call():
+            return self.client.chat.completions.create(
+                model=self.model, messages=msgs,
+                temperature=self.temperature, max_tokens=self.max_tokens,
+                timeout=_REQUEST_TIMEOUT,
+            )
+
+        r = _retry_call(_call, what="VLLMTeacher.generate")
+        if not r.choices:
+            return ""
+        choice = r.choices[0]
+        # Truncation guard: a cut-off completion is an incomplete kernel; drop it
+        # rather than let a half-written kernel enter the corpus.
+        if getattr(choice, "finish_reason", None) == "length":
+            return ""
+        return choice.message.content or ""
 
 
 class HFTeacher:
@@ -176,11 +217,22 @@ class ClaudeTeacher:
         if merged and merged[0]["role"] == "assistant":
             merged.insert(0, {"role": "user", "content": "Continue."})
         kw = dict(model=self.model, max_tokens=self.max_tokens,
-                  temperature=self.temperature, messages=merged)
+                  temperature=self.temperature, messages=merged,
+                  timeout=_REQUEST_TIMEOUT)
         if system:
             kw["system"] = system
-        r = self.client.messages.create(**kw)
-        return "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
+
+        r = _retry_call(lambda: self.client.messages.create(**kw),
+                        what="ClaudeTeacher.generate")
+        # Truncation guard: if Anthropic stopped because it hit max_tokens, the
+        # kernel is cut off mid-source. Treat it as truncated and skip it so a
+        # half-written kernel never enters the corpus.
+        if getattr(r, "stop_reason", None) == "max_tokens":
+            return ""
+        content = getattr(r, "content", None)
+        if not content:
+            return ""
+        return "".join(b.text for b in content if getattr(b, "type", "") == "text")
 
 
 def make_teacher(kind: str = "stub", **kwargs) -> TeacherClient:

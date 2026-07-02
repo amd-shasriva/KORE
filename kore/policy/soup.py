@@ -53,16 +53,49 @@ def soup_sweep(base_sd: dict, kore_sd: dict, alphas, eval_fn: Callable[[dict], d
             "gate_satisfied": bool(passed)}
 
 
+def _is_lora_adapter_dir(path: str) -> bool:
+    """A PEFT adapter dir is identified by its ``adapter_config.json``."""
+    import os
+
+    return os.path.isdir(path) and os.path.exists(os.path.join(path, "adapter_config.json"))
+
+
+def _load_kore_model(base_model_id: str, kore_checkpoint: str, dtype):
+    """Load the KORE specialist as a full model.
+
+    If ``kore_checkpoint`` is a LoRA adapter dir (rather than a full checkpoint),
+    load ``base_model_id`` and merge the adapter into it first so the state dict
+    has the same parameter keys/shapes as the base for interpolation.
+    """
+    from transformers import AutoModelForCausalLM
+
+    if _is_lora_adapter_dir(kore_checkpoint):
+        from peft import PeftModel
+
+        base_for_adapter = AutoModelForCausalLM.from_pretrained(base_model_id, torch_dtype=dtype)
+        peft_model = PeftModel.from_pretrained(base_for_adapter, kore_checkpoint)
+        return peft_model.merge_and_unload()
+    return AutoModelForCausalLM.from_pretrained(kore_checkpoint, torch_dtype=dtype)
+
+
 def build_soup(base_model_id: str, kore_checkpoint: str, alpha: float, output_dir: str,
                ref_base_sd: Optional[dict] = None) -> str:
-    """Materialize a souped HF model at ``output_dir`` for a chosen alpha."""
+    """Materialize a souped HF model at ``output_dir`` for a chosen alpha.
+
+    ``kore_checkpoint`` may be a full HF checkpoint OR a LoRA adapter dir; in the
+    latter case the adapter is merged onto ``base_model_id`` before interpolation
+    so both operands share identical parameter keys/shapes.
+    """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    base = AutoModelForCausalLM.from_pretrained(base_model_id, torch_dtype=torch.bfloat16)
-    kore = AutoModelForCausalLM.from_pretrained(kore_checkpoint, torch_dtype=torch.bfloat16)
+    dtype = torch.bfloat16
+    base = AutoModelForCausalLM.from_pretrained(base_model_id, torch_dtype=dtype)
+    kore = _load_kore_model(base_model_id, kore_checkpoint, dtype)
     souped = interpolate_state_dicts(base.state_dict(), kore.state_dict(), alpha)
     kore.load_state_dict(souped)
     kore.save_pretrained(output_dir)
-    AutoTokenizer.from_pretrained(kore_checkpoint).save_pretrained(output_dir)
+
+    tok_src = base_model_id if _is_lora_adapter_dir(kore_checkpoint) else kore_checkpoint
+    AutoTokenizer.from_pretrained(tok_src).save_pretrained(output_dir)
     return output_dir

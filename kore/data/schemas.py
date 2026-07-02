@@ -15,9 +15,12 @@ mixed-type on-disk log (the ``type`` field selects the class on read).
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Iterable, Union
+
+_LOG = logging.getLogger(__name__)
 
 GPU_DEFAULT = "gfx942"
 
@@ -35,6 +38,11 @@ class RepairRecord:
     type: str = "repair"
     operator: str = "repair"
     gpu: str = GPU_DEFAULT
+    # Leakage provenance (KORE Sec 4.4): the source op/arch/shape this record was
+    # generated from, used for leakage-aware train/val/test splitting.
+    operation: str | None = None
+    arch: str | None = None
+    shape: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -51,6 +59,9 @@ class RepairRecord:
             type=d.get("type", "repair"),
             operator=d.get("operator", "repair"),
             gpu=d.get("gpu", GPU_DEFAULT),
+            operation=d.get("operation"),
+            arch=d.get("arch"),
+            shape=d.get("shape"),
         )
 
 
@@ -64,6 +75,10 @@ class RankedGroupRecord:
     preferences: list[list[int]]  # [[chosen_idx, rejected_idx], ...]
     type: str = "ranked_group"
     gpu: str = GPU_DEFAULT
+    # Leakage provenance (KORE Sec 4.4).
+    operation: str | None = None
+    arch: str | None = None
+    shape: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -77,6 +92,9 @@ class RankedGroupRecord:
             preferences=[list(p) for p in d.get("preferences", [])],
             type=d.get("type", "ranked_group"),
             gpu=d.get("gpu", GPU_DEFAULT),
+            operation=d.get("operation"),
+            arch=d.get("arch"),
+            shape=d.get("shape"),
         )
 
 
@@ -93,6 +111,10 @@ class WinRecord:
     snr_db: float | None = None
     type: str = "win"
     gpu: str = GPU_DEFAULT
+    # Leakage provenance (KORE Sec 4.4).
+    operation: str | None = None
+    arch: str | None = None
+    shape: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -109,6 +131,9 @@ class WinRecord:
             snr_db=d.get("snr_db"),
             type=d.get("type", "win"),
             gpu=d.get("gpu", GPU_DEFAULT),
+            operation=d.get("operation"),
+            arch=d.get("arch"),
+            shape=d.get("shape"),
         )
 
 
@@ -142,7 +167,7 @@ def write_jsonl(path: Union[str, Path], records: Iterable[Any]) -> Path:
     """Write records (dataclasses or dicts) to a JSONL file, one per line."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
+    with path.open("w", encoding="utf-8") as f:
         for rec in records:
             f.write(json.dumps(_to_dict(rec)) + "\n")
     return path
@@ -150,19 +175,33 @@ def write_jsonl(path: Union[str, Path], records: Iterable[Any]) -> Path:
 
 def read_jsonl(path: Union[str, Path], typed: bool = True) -> list:
     """Read a JSONL file. If ``typed``, dispatch each line to its record class;
-    otherwise return raw dicts."""
+    otherwise return raw dicts.
+
+    Malformed lines (bad JSON or an unknown/invalid record ``type``) are skipped
+    and logged rather than aborting the whole read, so one corrupt line can't
+    poison an entire shard."""
     path = Path(path)
     out: list = []
     if not path.exists():
         return out
-    with path.open() as f:
-        for line in f:
+    with path.open(encoding="utf-8") as f:
+        for lineno, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
-            d = json.loads(line)
-            if typed and d.get("type") in _TYPE_TO_CLASS:
-                out.append(record_from_dict(d))
-            else:
-                out.append(d)
+            try:
+                d = json.loads(line)
+            except (json.JSONDecodeError, ValueError) as e:
+                _LOG.warning("skipping malformed JSON in %s line %d: %s",
+                             path, lineno, e)
+                continue
+            try:
+                if typed and isinstance(d, dict) and d.get("type") in _TYPE_TO_CLASS:
+                    out.append(record_from_dict(d))
+                else:
+                    out.append(d)
+            except (KeyError, TypeError, ValueError) as e:
+                _LOG.warning("skipping malformed record in %s line %d: %s",
+                             path, lineno, e)
+                continue
     return out

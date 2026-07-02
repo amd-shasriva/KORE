@@ -117,3 +117,60 @@ class VLLMPolicy:
         params = SamplingParams(temperature=temperature, top_p=top_p, max_tokens=max_tokens)
         outputs = self._llm.chat(messages_batch, params)
         return [out.outputs[0].text for out in outputs]
+
+
+def load_generate(model_id: str, *, backend: str = "hf", tensor_parallel_size: int = 1,
+                  max_new_tokens: int = 1024, **kw):
+    """Load ``model_id`` and return a single-example ``generate`` callable.
+
+    The returned ``generate(prompt_or_messages, max_tokens=, temperature=0.0) ->
+    str`` accepts EITHER a plain string prompt OR a chat-message list, so it can
+    drive both simple completion and multi-turn/agentic rollouts. Heavy imports
+    are guarded inside so this module still loads on a CPU box.
+
+    backend:
+      - ``"hf"``   : transformers ``AutoModelForCausalLM`` + ``apply_chat_template``.
+      - ``"vllm"`` : :class:`VLLMPolicy` (fast rollout serving on ROCm).
+    """
+    if backend == "vllm":
+        policy = VLLMPolicy(model_id, tensor_parallel_size=tensor_parallel_size, **kw)
+
+        def generate(prompt_or_messages, max_tokens: int = max_new_tokens,
+                     temperature: float = 0.0) -> str:
+            if isinstance(prompt_or_messages, str):
+                return policy.generate([prompt_or_messages], temperature=temperature,
+                                       max_tokens=max_tokens)[0]
+            return policy.chat([prompt_or_messages], temperature=temperature,
+                               max_tokens=max_tokens)[0]
+
+        return generate
+
+    if backend == "hf":
+        import torch  # guarded heavy import
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(model_id)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16, device_map="auto", **kw)
+        model.eval()
+
+        def generate(prompt_or_messages, max_tokens: int = max_new_tokens,
+                     temperature: float = 0.0) -> str:
+            messages = ([{"role": "user", "content": prompt_or_messages}]
+                        if isinstance(prompt_or_messages, str) else prompt_or_messages)
+            ids = tok.apply_chat_template(
+                messages, add_generation_prompt=True, return_tensors="pt").to(model.device)
+            do_sample = bool(temperature and temperature > 0.0)
+            with torch.no_grad():
+                out = model.generate(
+                    ids, max_new_tokens=max_tokens, do_sample=do_sample,
+                    temperature=temperature if do_sample else None,
+                    pad_token_id=tok.pad_token_id)
+            gen = out[0][ids.shape[1]:]
+            return tok.decode(gen, skip_special_tokens=True)
+
+        return generate
+
+    raise ValueError(f"unknown backend {backend!r}; expected 'hf' or 'vllm'")

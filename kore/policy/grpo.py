@@ -69,6 +69,72 @@ def kevin_turn_returns(turn_rewards: list[float], correct_flags: list[bool],
     return discounted_returns(gated, gamma)
 
 
+def build_kevin_samples(traj_rewards: list[list[float]], traj_correct: list[list[bool]],
+                        gamma: float = 0.4) -> tuple[list[float], list[tuple[int, int]]]:
+    """Flatten m trajectories x n turns into per-turn Kevin-credit samples.
+
+    For each trajectory, per-turn returns are computed with
+    :func:`kevin_turn_returns` (correctness-gated, gamma look-ahead). The
+    returns are concatenated into a single flat list of ``m*n`` samples and an
+    ``index`` list maps each flat position back to ``(traj_idx, turn_idx)``.
+
+    The caller feeds ``returns`` to :func:`group_advantages` so the GRPO
+    baseline is computed across ALL per-turn samples in the group (per-turn-as-
+    sample), which is exactly the Kevin recipe.
+    """
+    returns: list[float] = []
+    index: list[tuple[int, int]] = []
+    for ti, (rewards, corrects) in enumerate(zip(traj_rewards, traj_correct)):
+        for tu, r in enumerate(kevin_turn_returns(rewards, corrects, gamma)):
+            returns.append(r)
+            index.append((ti, tu))
+    return returns, index
+
+
+def token_mean_logprob(seq_logprob: float, n_tokens: int) -> float:
+    """DAPO length-debias: divide a sequence log-prob by its token count.
+
+    Summed sequence log-probs scale with length, so longer completions get a
+    disproportionate gradient. Dividing by the token count (token-mean) removes
+    that length bias before the policy-gradient term is formed.
+    """
+    return seq_logprob / max(int(n_tokens), 1)
+
+
+# --------------------------------------------------------------------------- #
+# CoT masking: drop prior-turn thinking from the multi-turn context
+# --------------------------------------------------------------------------- #
+def mask_cot_turns(turns: list[dict]) -> list[dict]:
+    """Drop prior-turn CoT/thinking from rollout turns before re-rendering context.
+
+    Kevin keeps the durable turn artifact (the ``PROPOSED_CHANGE`` + the
+    ``FULL_KERNEL`` source) but strips the verbose ANALYSIS and any
+    ``<think>...</think>`` spans so context does not accumulate stale reasoning
+    across turns. Returns NEW turn dicts (inputs are left untouched); each result
+    carries an empty ``analysis`` plus the parsed ``proposed_change``/``kernel``
+    so :func:`kore.policy.format.build_transcript` renders a thinking-free turn.
+    """
+    import re
+
+    from kore.policy.format import parse_response
+
+    out: list[dict] = []
+    for turn in turns:
+        nt = dict(turn)
+        raw = turn.get("response")
+        if raw:
+            raw = re.sub(r"<think>[\s\S]*?</think>", "", raw)
+            parsed = parse_response(raw)
+            nt.pop("response", None)
+            nt["analysis"] = ""
+            nt["proposed_change"] = parsed.get("proposed_change", "")
+            nt["kernel"] = parsed.get("kernel", "")
+        else:
+            nt["analysis"] = ""
+        out.append(nt)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # StarPO-S: Echo-Trap mitigation (variance filtering of rollout groups)
 # --------------------------------------------------------------------------- #
@@ -169,19 +235,27 @@ def _train_grpo_verl(config, tasks):
 
 
 def _train_grpo_fallback(config, tasks):
-    """Compact in-process GRPO loop: group rollouts -> reward -> policy-grad.
+    """Compact in-process GRPO loop implementing the locked KORE recipe.
 
-    Uses PEFT/LoRA on top of a frozen base. Gradient checkpointing + PEFT needs
-    ``enable_input_require_grads`` or ``.backward()`` sees no grad path.
+    Per step:
+      1. roll out ``num_trajectories`` groups for each of ``tasks_per_step`` tasks
+         (serial multi-turn refinement, or the agentic tool harness);
+      2. build per-turn Kevin-credit samples (correctness-gated gamma returns)
+         and group-normalize advantages across the ``m*n`` samples of each group;
+      3. apply StarPO-S variance selection across the step's task-groups;
+      4. form a token-mean (DAPO length-debiased) policy-gradient loss with a
+         differentiable k3 KL anchor to the frozen SFT/reference checkpoint.
+
+    Full-FT vs LoRA follows ``config.use_lora`` (the locked recipe is full-FT).
+    When LoRA is used the adapter is merged before saving so soup/serve load a
+    full model. Gradient checkpointing + PEFT needs ``enable_input_require_grads``
+    or ``.backward()`` sees no grad path.
     """
     import torch
-    from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from kore.env.kore_env import KoreEnv
     from kore.policy import anticollapse as ac
-    from kore.policy.format import build_transcript, parse_response, build_turn_feedback
-    from kore.reward.reward import compute_reward
     from kore.tasks.registry import get_task, task_ids
 
     tasks = tasks or task_ids()
@@ -191,80 +265,287 @@ def _train_grpo_fallback(config, tasks):
     if getattr(config, "gradient_checkpointing", True):
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()  # critical for PEFT + grad-ckpt
-    model = get_peft_model(model, LoraConfig(
-        r=config.lora.r, lora_alpha=config.lora.lora_alpha, lora_dropout=0.0,
-        target_modules=list(config.lora.target_modules), task_type="CAUSAL_LM"))
-    model.train()
-    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=config.learning_rate)
 
+    if config.use_lora:
+        from peft import LoraConfig, get_peft_model
+
+        model = get_peft_model(model, LoraConfig(
+            r=config.lora.r, lora_alpha=config.lora.lora_alpha, lora_dropout=0.0,
+            target_modules=list(config.lora.target_modules), task_type="CAUSAL_LM"))
+    model.train()
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(trainable, lr=config.learning_rate)
+
+    ref_model = _load_ref_model(config)  # frozen KL anchor (or None if unavailable)
+
+    tasks_per_step = max(1, getattr(config, "tasks_per_step", 1))
+    task_cursor = 0
     for step in range(config.total_steps):
-        task = get_task(tasks[step % len(tasks)])
-        env = KoreEnv(task)
-        G = config.num_trajectories
-        rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=step) \
-            if config.rc_grpo else [None] * G
-        rewards, logps = [], []
-        for g in range(G):
-            r, lp = _rollout(model, tok, env, task, config, rtoks[g], build_transcript,
-                             parse_response, build_turn_feedback, compute_reward)
-            rewards.append(r)
-            logps.append(lp)
-        if config.starpo_s and not starpo_keep_group(rewards, config.starpo_min_std):
-            print(f"[grpo] step {step} task={task.task_id} collapsed group (std<={config.starpo_min_std}); skip")
+        # ---- 1. roll out a group per task, accumulate for StarPO-S ---- #
+        group_rewards: list[list[float]] = []   # trajectory-level reward per group (variance gate)
+        group_samples: list[list[tuple]] = []   # per group: list of (return, logp) samples
+        group_tasks: list = []
+        for _ in range(tasks_per_step):
+            task = get_task(tasks[task_cursor % len(tasks)])
+            task_cursor += 1
+            env = KoreEnv(task)
+            G = config.num_trajectories
+            rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=step) \
+                if config.rc_grpo else [None] * G
+
+            traj_scores: list[float] = []
+            samples: list[tuple] = []
+            if config.agentic:
+                for g in range(G):
+                    r, lp = _rollout_agentic(model, tok, env, task, config)
+                    traj_scores.append(r)
+                    samples.append((r, lp))
+            else:
+                traj_rewards: list[list[float]] = []
+                traj_correct: list[list[bool]] = []
+                turn_logps: list[list] = []
+                turn_ref_logps: list[list] = []
+                for g in range(G):
+                    rewards, corrects, logps, ref_logps = _rollout(
+                        model, tok, env, task, config, rtoks[g], ref_model)
+                    traj_rewards.append(rewards)
+                    traj_correct.append(corrects)
+                    turn_logps.append(logps)
+                    turn_ref_logps.append(ref_logps)
+                    # trajectory score for the variance gate: best correct kernel.
+                    traj_scores.append(
+                        kevin_trajectory_score(rewards, corrects)
+                        if config.kevin_best_kernel_scoring else (max(rewards) if rewards else 0.0))
+                # per-turn Kevin-credit samples flattened across m*n.
+                returns, index = build_kevin_samples(traj_rewards, traj_correct, config.gamma)
+                for (ti, tu), ret in zip(index, returns):
+                    samples.append((ret, turn_logps[ti][tu], turn_ref_logps[ti][tu]))
+
+            group_rewards.append(traj_scores)
+            group_samples.append(samples)
+            group_tasks.append(task)
+
+        # ---- 2. StarPO-S: keep only high-variance (signal-carrying) groups ---- #
+        if config.starpo_s:
+            keep = set(starpo_select_high_variance(
+                group_rewards, config.starpo_keep_frac, config.starpo_min_std))
+            if not keep:
+                print(f"[grpo] step {step}: all {tasks_per_step} groups collapsed; skip")
+                continue
+        else:
+            keep = set(range(len(group_rewards)))
+
+        # ---- 3. build the policy-gradient loss over kept groups ---- #
+        loss = None
+        n_terms = 0
+        kl_total = None
+        for gi in keep:
+            samples = group_samples[gi]
+            returns = [s[0] for s in samples]
+            advs = group_advantages(returns)
+            if config.sc_grpo_allfail:
+                advs = [a + b for a, b in zip(advs, ac.sc_grpo_allfail_bonus(returns, config.sc_grpo_alpha))]
+            for adv, sample in zip(advs, samples):
+                lp = sample[1]
+                if lp is None:
+                    continue
+                term = -adv * lp
+                loss = term if loss is None else loss + term
+                n_terms += 1
+                # differentiable k3 KL anchor: exp(d) - d - 1, d = ref_lp - lp.
+                if ref_model is not None and len(sample) > 2 and sample[2] is not None:
+                    ref_lp = sample[2]
+                    d = ref_lp - lp
+                    kl = torch.exp(d) - d - 1.0
+                    kl_total = kl if kl_total is None else kl_total + kl
+
+        if loss is None or n_terms == 0:
+            print(f"[grpo] step {step}: no learnable samples; skip")
             continue
-        advs = group_advantages(rewards)
-        if config.sc_grpo_allfail:
-            advs = [a + b for a, b in zip(advs, ac.sc_grpo_allfail_bonus(rewards))]
-        loss = -sum(a * lp for a, lp in zip(advs, logps) if lp is not None) / max(G, 1)
+        loss = loss / n_terms
+        if kl_total is not None:
+            loss = loss + config.ref_anchor_coef * (kl_total / n_terms)
+
         opt.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
+        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
         opt.step()
-        print(f"[grpo] step {step} task={task.task_id} meanR={sum(rewards)/G:.3f} loss={loss.item():.4f}")
+        mean_r = sum(sum(g) / len(g) for g in group_rewards if g) / max(len(group_rewards), 1)
+        print(f"[grpo] step {step} kept={len(keep)}/{tasks_per_step} "
+              f"meanR={mean_r:.3f} loss={loss.item():.4f}")
 
+    # Merge LoRA into the base before saving so soup/serve load a full model.
     out = config.output_dir
-    model.save_pretrained(out)
+    if config.use_lora:
+        merged = model.merge_and_unload()
+        merged.save_pretrained(out)
+    else:
+        model.save_pretrained(out)
     tok.save_pretrained(out)
     return out
 
 
-def _rollout(model, tok, env, task, config, reward_token, build_transcript,
-             parse_response, build_turn_feedback, compute_reward):
-    """One multi-turn trajectory; returns (final_reward, summed_logprob_tensor)."""
+def _load_ref_model(config):
+    """Load the frozen KL-anchor reference (``ref_checkpoint`` or ``model_id``).
+
+    Anchoring RL to the post-SFT reference preserves chat/code/orchestration
+    behavior. Returns ``None`` (and logs) if the ref cannot be loaded so training
+    degrades gracefully to no-KL rather than crashing.
+    """
     import torch
+    from transformers import AutoModelForCausalLM
+
+    ref_id = config.ref_checkpoint or config.model_id
+    try:
+        ref = AutoModelForCausalLM.from_pretrained(ref_id, torch_dtype=torch.bfloat16,
+                                                   device_map="auto")
+        ref.eval()
+        for p in ref.parameters():
+            p.requires_grad_(False)
+        return ref
+    except Exception as e:  # noqa: BLE001
+        print(f"[grpo] KL-anchor ref '{ref_id}' unavailable ({e}); training without KL anchor")
+        return None
+
+
+def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
+    """One multi-turn trajectory (serial refinement).
+
+    Returns ``(rewards, correct_flags, turn_logprobs, ref_logprobs)`` — one entry
+    per turn. Each log-prob is a token-MEAN value (DAPO length-debias);
+    ``ref_logprobs`` are the frozen-reference token-mean log-probs (detached,
+    ``None`` per turn if no ref model) used for the k3 KL anchor. When
+    ``config.cot_masking`` is set, prior-turn thinking is dropped from the
+    context that is re-rendered each turn.
+    """
+    import torch
+
     from kore.policy import anticollapse as ac
+    from kore.policy.format import build_transcript, parse_response, build_turn_feedback
+    from kore.reward.reward import compute_reward
 
     prompt = _task_prompt(task)
     if reward_token:
         prompt = ac.prepend_reward_token(prompt, reward_token)
+
     turns: list[dict] = []
-    total_lp = None
-    final_r = config.reward_compile_fail if hasattr(config, "reward_compile_fail") else -1.0
+    rewards: list[float] = []
+    corrects: list[bool] = []
+    logps: list = []
+    ref_logps: list = []
     for _turn in range(config.num_turns):
-        msgs = build_transcript(prompt, turns)
+        ctx_turns = mask_cot_turns(turns) if config.cot_masking else turns
+        msgs = build_transcript(prompt, ctx_turns)
         ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(model.device)
         gen = model.generate(ids, max_new_tokens=config.max_response_length, do_sample=True,
                              temperature=config.temperature, return_dict_in_generate=True, output_scores=True)
         seq = gen.sequences[0][ids.shape[1]:]
         text = tok.decode(seq, skip_special_tokens=True)
-        lp = _seq_logprob(model, tok, ids, seq)
-        total_lp = lp if total_lp is None else total_lp + lp
+        n_tok = max(int(seq.shape[0]), 1)
+        logps.append(token_mean_logprob(_seq_logprob(model, tok, ids, seq, config.temperature), n_tok))
+        if ref_model is not None:
+            with torch.no_grad():
+                ref_lp = token_mean_logprob(
+                    _seq_logprob(ref_model, tok, ids, seq, config.temperature), n_tok)
+            ref_logps.append(ref_lp.detach())
+        else:
+            ref_logps.append(None)
+
         parsed = parse_response(text)
         obs = env.step(parsed.get("kernel", ""), full_validation=True, multi_shape=True)
         rr = compute_reward(obs, parsed.get("kernel", ""), dtype=task.dtype)
-        final_r = rr.reward
+        rewards.append(rr.reward)
+        corrects.append(bool(rr.correct))
         turns.append({"response": text, "feedback": build_turn_feedback(obs)})
-        if obs.validation_passed and obs.wall_by_shape:
-            break
-    return final_r, total_lp
+    return rewards, corrects, logps, ref_logps
 
 
-def _seq_logprob(model, tok, prompt_ids, gen_ids):
+def _rollout_agentic(model, tok, env, task, config):
+    """One agentic trajectory via :class:`kore.agent.harness.AgentHarness`.
+
+    Drives the multi-turn build/test/bench/pmc tool loop, then folds the
+    ToolRL-style tool-use shaping into the Kevin best-kernel trajectory score via
+    :func:`composite_agentic_reward`. Policy-gradient credit is the token-mean
+    sum of the assistant-turn log-probs (``PG on assistant turns``).
+
+    Limitation: this applies a single trajectory-level composite reward as the PG
+    signal on the pooled assistant turns rather than a full per-tool-turn
+    advantage decomposition; the per-turn kernel-reward trace is not exposed by
+    the harness/executor, so best-kernel scoring (Kevin) is used as the
+    trajectory value. This is the documented minimal-agentic-PG path.
+    """
+    from kore.agent.harness import AgentHarness
+    from kore.agent.tools import tool_use_reward
+
+    policy = _HFChatPolicy(model, tok, config)
+    harness = AgentHarness(task, policy, env, max_turns=config.max_tool_turns)
+    episode = harness.run()
+
+    turn_rewards, turn_correct = _episode_turn_rewards(episode)
+    kernel_score = kevin_trajectory_score(turn_rewards, turn_correct)
+    tool_total = tool_use_reward(episode).get("total", 0.0)
+    reward = composite_agentic_reward(kernel_score, tool_total, config.tool_reward_weight)
+
+    total_lp = None
+    for lp in policy.turn_logprobs:
+        total_lp = lp if total_lp is None else total_lp + lp
+    return reward, total_lp
+
+
+def _episode_turn_rewards(episode):
+    """Best-effort per-turn (reward, correct) trace from an AgentEpisode.
+
+    The harness exposes the trajectory's best kernel reward; a full per-turn
+    kernel-reward trace is not recorded, so we surface a single terminal sample
+    (best_reward, success) which :func:`kevin_trajectory_score` reduces to the
+    best correct kernel — the Kevin trajectory value.
+    """
+    best = getattr(episode, "best_reward", None)
+    success = bool(getattr(episode, "success", False))
+    if best is None:
+        return [0.0], [False]
+    return [float(best)], [success]
+
+
+class _HFChatPolicy:
+    """Adapter exposing ``generate(messages) -> str`` for the AgentHarness.
+
+    Records the token-mean log-prob of each assistant turn so the GRPO loop can
+    apply policy-gradient credit over the assistant turns.
+    """
+
+    def __init__(self, model, tok, config):
+        self.model = model
+        self.tok = tok
+        self.config = config
+        self.turn_logprobs: list = []
+
+    def generate(self, messages) -> str:
+        ids = self.tok.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt").to(self.model.device)
+        gen = self.model.generate(
+            ids, max_new_tokens=self.config.max_response_length, do_sample=True,
+            temperature=self.config.temperature, return_dict_in_generate=True, output_scores=True)
+        seq = gen.sequences[0][ids.shape[1]:]
+        n_tok = max(int(seq.shape[0]), 1)
+        self.turn_logprobs.append(
+            token_mean_logprob(_seq_logprob(self.model, self.tok, ids, seq, self.config.temperature), n_tok))
+        return self.tok.decode(seq, skip_special_tokens=True)
+
+
+def _seq_logprob(model, tok, prompt_ids, gen_ids, temperature: float = 1.0):
+    """Summed log-prob of ``gen_ids`` under ``model`` (temperature-scaled logits).
+
+    Divides the logits by ``temperature`` before ``log_softmax`` so the scored
+    distribution matches the sampling distribution used to generate the tokens.
+    """
     import torch
 
     full = torch.cat([prompt_ids[0], gen_ids]).unsqueeze(0)
     out = model(full)
     logits = out.logits[0, prompt_ids.shape[1] - 1:-1, :]
+    if temperature and temperature > 0:
+        logits = logits / temperature
     logp = torch.log_softmax(logits, dim=-1)
     idx = gen_ids.unsqueeze(-1)
     return logp.gather(-1, idx).squeeze(-1).sum()

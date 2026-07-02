@@ -37,6 +37,7 @@ class Observation:
     cv_pct: Optional[float] = None
     flagged_hack: bool = False
     hack_reason: Optional[str] = None
+    infra_error: bool = False   # timeout/OOM/segfault/import — NOT a kernel signal
 
 
 # Patterns that indicate the "kernel" is cheating rather than computing.
@@ -50,12 +51,30 @@ _HACK_PATTERNS = [
     (r"torch\.nn\.functional\.\w+\s*\(", "delegates to torch.nn.functional"),
     (r"\bF\.(scaled_dot_product_attention|linear|softmax|rms_norm|layer_norm|gelu|silu|conv\w*)\s*\(",
      "delegates to torch.nn.functional"),
+    # aliased torch delegation: `import torch as t; t.matmul(...)`, `from torch import matmul`.
+    (r"\b[A-Za-z_]\w*\.(?:matmul|addmm|baddbmm|einsum|scaled_dot_product_attention)\s*\(",
+     "delegates a heavy op via an aliased handle instead of computing"),
+    (r"\b[A-Za-z_]\w*\.(?:bmm|mm)\s*\(", "delegates a matmul via an aliased handle"),
+    (r"\bfrom\s+torch(?:\.nn)?(?:\.functional)?\s+import\b",
+     "imports torch ops directly (delegation channel)"),
     (r"\.(flash_attn\w*|fused_moe|paged_attention)\s*\(", "calls a fused vendor kernel instead of computing"),
     # copy-reference: returning the oracle's output passes the SNR gate, so it
     # MUST be rejected statically (runtime correctness can never catch it).
     (r"\b(?:import\s+reference|from\s+reference\s+import)\b", "imports the reference oracle"),
+    (r"\bfrom\s+[\w.]*\breference\b\s+import\b", "imports the reference oracle (dotted path)"),
     (r"\b(?:reference|ref_program|ref_impl|matmul_ref|\w+_oracle|oracle)\s*\(",
      "calls the reference oracle instead of computing the result"),
+    # accessing the KORE package (to import the task's oracle) from a kernel.
+    (r"\b(?:import\s+kore\b|from\s+kore\b|kore\.tasks)", "imports the KORE package to reach the oracle"),
+    # dynamic import / code exec — an escape hatch to reach vendor libs / the oracle.
+    (r"\bimportlib\b|__import__\s*\(|\bexec\s*\(|\beval\s*\(", "uses dynamic import/exec to escape"),
+    (r"\bctypes\b|\bcffi\b|\bCDLL\b|dlopen|LoadLibrary", "loads a native lib via ctypes/cffi"),
+    # forging the verifier verdict on stdout.
+    (r"(?:SNR|allclose|median_ms)\s*:", "prints a forged verifier verdict line"),
+    # process/thread/file escape (fork-bomb, background verdict-overwrite, fs escape).
+    (r"\bsubprocess\b|\bmultiprocessing\b|\bthreading\b|os\.system|os\.popen|os\.fork",
+     "spawns processes/threads (isolation escape)"),
+    (r"open\s*\([^)]*['\"][waxr]?[wax]\+?['\"]", "opens a file for writing (filesystem escape)"),
 ]
 _SILENT_FALLBACK = re.compile(r"except\s*[\w. ,()]*:\s*(?:\n\s*)*(?:return|pass|out\s*=)", re.MULTILINE)
 
@@ -109,21 +128,34 @@ class RewardResult:
     detail: str = ""
 
 
-def _all_shapes_pass(obs: Observation, dtype: str, cfg) -> bool:
-    thr = cfg.snr_threshold_for(dtype)
+def _all_shapes_pass(obs: Observation, dtype: str, cfg, snr_threshold: Optional[float] = None) -> bool:
+    thr = snr_threshold if snr_threshold is not None else cfg.snr_threshold_for(dtype)
     if obs.snr_by_shape:
         return all(v is not None and v >= thr for v in obs.snr_by_shape.values())
     return obs.snr_db is not None and obs.snr_db >= thr
 
 
 def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
-                   mode: str = "eval", cfg=CONFIG) -> RewardResult:
+                   mode: str = "eval", cfg=CONFIG,
+                   snr_threshold: Optional[float] = None) -> RewardResult:
     """Lexicographic, anti-hackable reward. Returns a :class:`RewardResult`.
 
-    ``mode`` = "train" | "eval": eval never awards positive reward to a flagged
-    hack; train hard-penalizes it (same here, kept explicit for clarity).
+    Tier order (a strictly better outcome in an earlier tier ALWAYS dominates):
+        hack/compile_fail (<0) < incorrect (0) < correct-but-slow < correct-fast.
+    Correctness is scored with the Kevin reward ``correctness_weight + speedup``
+    (linear, capped) — NOT log — so a correct kernel is *never* punished below an
+    incorrect one, even when slower than the production baseline.
+
+    ``snr_threshold`` overrides the dtype default (honors per-task task.yaml).
     """
     flags: list[str] = []
+
+    # Tier -1: infrastructure error (timeout/OOM/segfault/import) — not the
+    # kernel's fault; caller must NOT cache it and should resample.
+    if obs.infra_error:
+        flags.append("infra")
+        return RewardResult(cfg.reward_incorrect, False, None, "infra", flags,
+                            obs.error_text or "infrastructure error")
 
     # Tier 0: anti-hack scan (a hack that "passes" must never be rewarded).
     hack = obs.hack_reason or (scan_for_hacks(source) if source else None)
@@ -138,23 +170,27 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
                             obs.error_text or "did not compile")
 
     # Tier 2: correctness (validation + SNR gate on all shapes)
-    correct = obs.validation_passed and _all_shapes_pass(obs, dtype, cfg)
+    correct = obs.validation_passed and _all_shapes_pass(obs, dtype, cfg, snr_threshold)
     if not correct:
         flags.append("incorrect")
         return RewardResult(cfg.reward_incorrect, False, None, "incorrect", flags,
                             obs.error_text or "failed correctness/SNR")
 
-    # Tier 3: speed (only once correct)
+    # Tier 3: speed (only once correct). Kevin reward: base + linear speedup,
+    # capped to bound measurement-error outliers. base>0 guarantees every correct
+    # kernel (even a slow one, speedup>0) strictly beats the incorrect tier (0).
     base = cfg.correctness_weight
     su = _worst_speedup(obs)
     if su is None:
         return RewardResult(base, True, None, "correct_no_bench", flags, "correct; no timing")
 
+    su_scored = su
     if su >= cfg.excessive_speedup_flag:
-        flags.append("excessive_speedup")  # likely measurement error; cap shaping
-        su_shaped = cfg.excessive_speedup_flag
-    else:
-        su_shaped = su
-    reward = base + math.log(max(su_shaped, 1e-3))
+        flags.append("excessive_speedup")  # likely measurement error; cap contribution
+        su_scored = cfg.excessive_speedup_flag
+    if obs.cv_pct is not None and obs.cv_pct > cfg.cv_threshold_pct:
+        flags.append("high_variance")  # noisy timing; keep correctness credit, damp speed
+        su_scored = min(su_scored, 1.0)
+    reward = base + max(su_scored, 0.0)
     return RewardResult(reward, True, su, "correct_timed", flags,
                         f"worst-shape speedup {su:.3f}x vs baseline")

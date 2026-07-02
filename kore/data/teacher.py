@@ -148,14 +148,35 @@ class ClaudeTeacher:
 
     def generate(self, messages: list[dict]) -> str:
         system = self.system
-        conv = []
+        conv: list[dict] = []
         for m in messages:
-            if m["role"] == "system":
-                system = m["content"]
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if role == "system":
+                system = content
+                continue
+            if role == "tool":
+                # Anthropic accepts only user/assistant; render Hermes tool
+                # results as a user turn (our protocol is text-based, not native
+                # tool-use blocks).
+                name = m.get("name") or m.get("tool_call_id") or "tool"
+                role = "user"
+                content = f"[tool:{name}] {content}"
+            elif role not in ("user", "assistant"):
+                role = "user"
+            conv.append({"role": role, "content": content})
+        # Merge consecutive same-role turns (Anthropic requires alternation).
+        merged: list[dict] = []
+        for m in conv:
+            if merged and merged[-1]["role"] == m["role"]:
+                merged[-1]["content"] = f"{merged[-1]['content']}\n\n{m['content']}"
             else:
-                conv.append({"role": m["role"], "content": m["content"]})
+                merged.append(dict(m))
+        # The conversation must start with a user turn.
+        if merged and merged[0]["role"] == "assistant":
+            merged.insert(0, {"role": "user", "content": "Continue."})
         kw = dict(model=self.model, max_tokens=self.max_tokens,
-                  temperature=self.temperature, messages=conv)
+                  temperature=self.temperature, messages=merged)
         if system:
             kw["system"] = system
         r = self.client.messages.create(**kw)

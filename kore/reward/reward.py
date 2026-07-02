@@ -159,6 +159,67 @@ def _worst_speedup(obs: Observation) -> Optional[float]:
     return None
 
 
+def _worst_snr(obs: Observation) -> Optional[float]:
+    """Worst-shape SNR (min over shapes), falling back to the primary ``snr_db``.
+
+    Mirrors the correctness gate, which is also scored on the WORST shape, so the
+    sub-threshold credit reflects the same "hardest shape" the gate cares about.
+    """
+    if obs.snr_by_shape:
+        vals = [v for v in obs.snr_by_shape.values() if v is not None]
+        if vals:
+            return min(vals)
+    return obs.snr_db
+
+
+def _subthreshold_credit(obs: Observation, dtype: str, cfg,
+                         snr_threshold: Optional[float]) -> float:
+    """P1: bounded, continuous credit for a compiled-but-INCORRECT kernel.
+
+    Returns ``eps_shape * clamp(worst_snr / snr_threshold, 0, 1)`` — a dense
+    signal proportional to progress toward the correctness gate, so early RL
+    isn't stuck on a flat-zero reward. The value lies in ``[0, eps_shape]`` and,
+    because a kernel in the incorrect tier has worst-shape SNR *below* the gate,
+    it is in practice strictly ``< eps_shape < correctness_weight`` — it can
+    never reach, let alone cross, the correct tier. Returns 0 when shaping is
+    off, when there is no SNR signal, or (by construction of the caller) for a
+    flagged hack / compile-fail / infra error.
+    """
+    if not getattr(cfg, "subthreshold_shaping", False):
+        return 0.0
+    eps = float(getattr(cfg, "eps_shape", 0.0) or 0.0)
+    if eps <= 0.0:
+        return 0.0
+    thr = snr_threshold if snr_threshold is not None else cfg.snr_threshold_for(dtype)
+    snr = _worst_snr(obs)
+    if snr is None or thr is None or thr <= 0.0:
+        return 0.0
+    progress = snr / thr
+    progress = 0.0 if progress < 0.0 else (1.0 if progress > 1.0 else progress)
+    return eps * progress
+
+
+def _format_component(response: Optional[str], cfg) -> float:
+    """P2: bounded format-compliance term for the incorrect/correct tiers.
+
+    ``response`` is the RAW policy output (the FULL_KERNEL contract), NOT the
+    already-extracted kernel. Returns ``+format_weight`` when the response parses
+    to a non-empty kernel (valid contract), ``-format_weight`` when it is
+    malformed, and 0 when no response is supplied (the default — preserves the
+    exact legacy reward for every current caller). The magnitude is kept far
+    below every inter-tier gap, so this term can never flip tier ordering.
+    """
+    if response is None:
+        return 0.0
+    w = float(getattr(cfg, "format_weight", 0.0) or 0.0)
+    if w <= 0.0:
+        return 0.0
+    # Lazy import to avoid any import cycle and to keep the hot path dependency-free.
+    from kore.policy.format import parse_response
+    kernel = (parse_response(response).get("kernel") or "").strip()
+    return w if kernel else -w
+
+
 @dataclass
 class RewardResult:
     reward: float
@@ -178,18 +239,33 @@ def _all_shapes_pass(obs: Observation, dtype: str, cfg, snr_threshold: Optional[
 
 def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
                    mode: str = "eval", cfg=CONFIG,
-                   snr_threshold: Optional[float] = None) -> RewardResult:
+                   snr_threshold: Optional[float] = None,
+                   phase: Optional[str] = None,
+                   response: Optional[str] = None) -> RewardResult:
     """Lexicographic, anti-hackable reward. Returns a :class:`RewardResult`.
 
     Tier order (a strictly better outcome in an earlier tier ALWAYS dominates):
-        hack/compile_fail (<0) < incorrect (0) < correct-but-slow < correct-fast.
+        hack < compile_fail < incorrect (shaped) < correct-but-slow < correct-fast.
     Correctness is scored with the Kevin reward ``correctness_weight + speedup``
     (linear, capped) — NOT log — so a correct kernel is *never* punished below an
     incorrect one, even when slower than the production baseline.
 
+    Shaping upgrades (all bounded so lexicographic dominance holds absolutely):
+      * P1 sub-threshold shaping — a compiled-but-incorrect kernel gets a small
+        continuous credit in ``[0, eps_shape]`` toward the correctness gate,
+        never enough to reach the correct tier. Never applied to a hack/compile
+        failure/infra error.
+      * P2 format term — pass the raw ``response`` (FULL_KERNEL contract) to add
+        a tiny ``±format_weight`` bonus/penalty on the incorrect/correct tiers.
+      * P3 curriculum ``phase`` — ``"correctness"`` zeroes the speed term (every
+        correct kernel scores ``correctness_weight``); ``"full"``/``"latency"``
+        (default) use ``correctness_weight + speedup``. Falls back to
+        ``cfg.reward_phase`` when ``phase`` is None.
+
     ``snr_threshold`` overrides the dtype default (honors per-task task.yaml).
     """
     flags: list[str] = []
+    phase = (phase or getattr(cfg, "reward_phase", "full") or "full").lower()
 
     # Tier -1: infrastructure error (timeout/OOM/segfault/import) — not the
     # kernel's fault; caller must NOT cache it and should resample.
@@ -201,10 +277,12 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
         return rr
 
     # Tier 0: anti-hack scan (a hack that "passes" must never be rewarded).
+    # Punished STRICTLY harder than a compile failure (reward_hack < reward_compile_fail)
+    # and never eligible for any shaping/format credit: cheating is the unique floor.
     hack = obs.hack_reason or (scan_for_hacks(source) if source else None)
     if hack:
         flags.append("hack")
-        rr = RewardResult(cfg.reward_compile_fail, False, None, "hack", flags, str(hack))
+        rr = RewardResult(cfg.reward_hack, False, None, "hack", flags, str(hack))
         _log_decision(rr)
         return rr
 
@@ -220,18 +298,32 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     correct = obs.validation_passed and _all_shapes_pass(obs, dtype, cfg, snr_threshold)
     if not correct:
         flags.append("incorrect")
-        rr = RewardResult(cfg.reward_incorrect, False, None, "incorrect", flags,
-                          obs.error_text or "failed correctness/SNR")
+        # P1 sub-threshold shaping + P2 format term. Bounded so that
+        #   max shaped-incorrect = eps_shape + format_weight < correctness_weight,
+        # i.e. a shaped-incorrect kernel can never reach the correct tier.
+        credit = _subthreshold_credit(obs, dtype, cfg, snr_threshold)
+        fmt = _format_component(response, cfg)
+        if credit > 0.0:
+            flags.append("shaped")
+        reward = cfg.reward_incorrect + credit + fmt
+        detail = obs.error_text or "failed correctness/SNR"
+        if credit > 0.0 or fmt:
+            detail += f" (shaped +{credit:.4f}, format {fmt:+.4f})"
+        rr = RewardResult(reward, False, None, "incorrect", flags, detail)
         _log_decision(rr)
         return rr
 
     # Tier 3: speed (only once correct). Kevin reward: base + linear speedup,
     # capped to bound measurement-error outliers. base>0 guarantees every correct
-    # kernel (even a slow one, speedup>0) strictly beats the incorrect tier (0).
+    # kernel (even a slow one, speedup>0) strictly beats the incorrect tier.
+    # A correct kernel always parses to a kernel, so its format term is +format_weight
+    # (never a penalty) — correct-fast vs correct-slow stays a pure speed ordering.
     base = cfg.correctness_weight
+    fmt = _format_component(response, cfg)
     su = _worst_speedup(obs)
     if su is None:
-        rr = RewardResult(base, True, None, "correct_no_bench", flags, "correct; no timing")
+        rr = RewardResult(base + fmt, True, None, "correct_no_bench", flags,
+                          "correct; no timing")
         _log_decision(rr)
         return rr
 
@@ -242,8 +334,17 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     if obs.cv_pct is not None and obs.cv_pct > cfg.cv_threshold_pct:
         flags.append("high_variance")  # noisy timing; keep correctness credit, damp speed
         su_scored = min(su_scored, 1.0)
-    reward = base + max(su_scored, 0.0)
+    # P3 curriculum: the "correctness" phase zeroes the speed term so every
+    # correct kernel scores exactly correctness_weight (+format); "full"/"latency"
+    # keep the full correctness_weight + speedup.
+    if phase == "correctness":
+        flags.append("phase:correctness")
+        speed_term = 0.0
+    else:
+        speed_term = max(su_scored, 0.0)
+    reward = base + speed_term + fmt
     rr = RewardResult(reward, True, su, "correct_timed", flags,
-                      f"worst-shape speedup {su:.3f}x vs baseline")
+                      f"worst-shape speedup {su:.3f}x vs baseline"
+                      + (" [correctness phase: speed zeroed]" if phase == "correctness" else ""))
     _log_decision(rr)
     return rr

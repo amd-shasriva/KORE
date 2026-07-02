@@ -49,8 +49,22 @@ def discounted_returns(scores: list[float], gamma: float = 0.4) -> list[float]:
     return out
 
 
-def clip_higher_ratio(ratio: float, advantage: float, lo: float = 0.2, hi: float = 0.28) -> float:
-    """DAPO-style asymmetric PPO surrogate (wider upper clip fights collapse)."""
+def clip_higher_ratio(ratio, advantage, lo: float = 0.2, hi: float = 0.28):
+    """DAPO-style asymmetric PPO surrogate (wider upper clip fights collapse).
+
+    Returns ``min(ratio*A, clip(ratio, 1-lo, 1+hi)*A)`` — the surrogate whose
+    NEGATION is the clip-higher policy-gradient loss. Works on plain floats
+    (pure, unit-testable) and, in the training path, on a differentiable 0-dim
+    torch tensor ``ratio``: in that case it stays a tensor (via ``clamp`` /
+    ``minimum``) so the fully-clipped region contributes a well-defined ZERO
+    gradient instead of dropping the autograd graph (which a Python ``min``
+    would do by returning a bare float).
+    """
+    if hasattr(ratio, "clamp"):  # differentiable torch tensor
+        import torch
+
+        clipped = ratio.clamp(1.0 - lo, 1.0 + hi)
+        return torch.minimum(ratio * advantage, clipped * advantage)
     clipped = min(max(ratio, 1.0 - lo), 1.0 + hi)
     return min(ratio * advantage, clipped * advantage)
 
@@ -183,13 +197,44 @@ def starpo_select_high_variance(groups: list[list[float]], keep_frac: float = 0.
     ``keep_frac`` by std. This is the StarPO-S stability lever: train on the
     groups that carry signal, not the ones stuck in a reward-variance collapse.
     """
-    scored = [(i, group_reward_std(g)) for i, g in enumerate(groups)]
-    live = [(i, s) for i, s in scored if s > min_std]
+    live = [(i, group_reward_std(g)) for i, g in enumerate(groups) if starpo_keep_group(g, min_std)]
     if not live:
         return []
     live.sort(key=lambda x: x[1], reverse=True)
     k = max(1, int(round(keep_frac * len(live))))
     return sorted(i for i, _ in live[:k])
+
+
+def dynamic_sampling_refill(roll_fn, target_groups: int, *, min_std: float = 1e-3,
+                            max_attempts: int = 0, dynamic: bool = True,
+                            std_key=None):
+    """DAPO dynamic-sampling collector: OVERSAMPLE-AND-REFILL (item 2).
+
+    Repeatedly calls ``roll_fn(attempt) -> group`` (a freshly rolled task-group)
+    and keeps only NON-DEGENERATE groups (``std_key(group) > min_std``) until
+    ``target_groups`` are collected or ``max_attempts`` rollouts are spent. This
+    replaces StarPO-S drop-and-shrink: instead of rolling a fixed batch and
+    discarding the collapsed groups (shrinking the update), it refills to keep the
+    effective batch size stable. Returns ``(kept_groups, attempts)``.
+
+    ``dynamic=False`` keeps every rolled group (legacy fixed batch of
+    ``target_groups``). ``std_key(group)->float`` extracts the reward-std used for
+    the degeneracy test (default: :func:`group_reward_std` over ``group`` when it
+    is a list of rewards). Pure/CPU-testable via an injected ``roll_fn``.
+    """
+    if std_key is None:
+        std_key = group_reward_std
+    if max_attempts <= 0:
+        max_attempts = (3 * target_groups) if dynamic else target_groups
+    kept: list = []
+    attempts = 0
+    while len(kept) < target_groups and attempts < max_attempts:
+        grp = roll_fn(attempts)
+        attempts += 1
+        if dynamic and std_key(grp) <= min_std:
+            continue  # degenerate: refill (do not count toward target)
+        kept.append(grp)
+    return kept, attempts
 
 
 # --------------------------------------------------------------------------- #
@@ -219,6 +264,67 @@ def value_prefilter(candidates: list, scorer, k: int) -> list[int]:
         return list(range(len(candidates)))
     scored = sorted(range(len(candidates)), key=lambda i: scorer(candidates[i]), reverse=True)
     return sorted(scored[:k])
+
+
+def _value_rank_order(candidate_codes: list[str], task) -> Optional[list[int]]:
+    """Best-first candidate order from the value-model reranker (contract b).
+
+    Calls ``kore.value.rerank.rank_candidates(items, task=None) -> list[int]``
+    defensively: any import error, incompatible signature, or non-permutation
+    result yields ``None`` so the caller can fall back to the natural order
+    (a sibling agent wires the real reranker in parallel).
+    """
+    try:
+        from kore.value.rerank import rank_candidates
+    except Exception:  # noqa: BLE001 - value module unavailable
+        return None
+    try:
+        order = list(rank_candidates(candidate_codes, task=task))
+    except TypeError:
+        return None  # signature not yet the contract-b form
+    except Exception:  # noqa: BLE001 - reranker failed -> fallback
+        return None
+    if sorted(order) != list(range(len(candidate_codes))):
+        return None
+    return [int(i) for i in order]
+
+
+def _prefilter_bench_indices(candidate_codes: list[str], task, k: int) -> list[int]:
+    """Indices of the top-``k`` candidates to actually bench (value prefilter, item 6).
+
+    Ranks all generated candidates best-first via the value model
+    (:func:`_value_rank_order`, contract b) and keeps only the top-``k`` for real
+    compilation+benching — realizing the ~``num_candidates/k``× fewer benches. The
+    rank order is turned into a scorer so selection routes through the pure,
+    unit-tested :func:`value_prefilter` primitive. Falls back to the natural
+    generation order when the reranker is unavailable/incompatible.
+    """
+    n = len(candidate_codes)
+    if n == 0:
+        return []
+    order = _value_rank_order(candidate_codes, task) or list(range(n))
+    rank_pos = {idx: pos for pos, idx in enumerate(order)}
+    # higher score = ranked earlier (better); value_prefilter returns sorted top-k
+    return value_prefilter(list(range(n)), lambda i: -rank_pos.get(i, n), k)
+
+
+def apply_reward_phase(rr, config):
+    """Correctness->latency curriculum masking (item 8).
+
+    ``reward_phase == "correctness"`` masks the SPEED term: a correct kernel is
+    credited exactly the correctness base (no speedup contribution) so the phase
+    trains correctness only. ``"latency"``/``"all"`` keep the full
+    correctness+speed reward. Incorrect/compile-fail/hack tiers are untouched
+    (their signal is correctness). The campaign runs GRPO twice (correctness
+    phase, then latency phase) by flipping ``reward_phase``.
+    """
+    from dataclasses import replace
+
+    phase = getattr(config, "reward_phase", "all")
+    if phase == "correctness" and getattr(rr, "correct", False):
+        base = getattr(config, "correctness_weight", 0.3)
+        return replace(rr, reward=base, speedup=None, tier="correct_masked")
+    return rr
 
 
 # --------------------------------------------------------------------------- #
@@ -251,47 +357,75 @@ def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inproc
     return _train_grpo_inprocess(config, tasks)
 
 
+def _sample_field(sample, idx, default=None):
+    """Defensive positional field access on a GRPO sample tuple.
+
+    A GRPO sample is ``(ret, gen_inputs, ref_logp, old_logp, n_tokens, sc_w)``;
+    older/short tuples (used by unit tests) simply fall back to ``default``.
+    """
+    return sample[idx] if len(sample) > idx else default
+
+
 def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
-                           sc_grpo_allfail: bool, sc_grpo_alpha: float,
-                           backward: bool = True):
+                           clip_ratio_low: float = 0.2, clip_ratio_high: float = 0.28,
+                           variance_floor: float = 0.0, avspo_virtual_k: int = 2,
+                           adv_eps: float = _EPS, backward: bool = True):
     """Micro-batched GRPO loss: one ``backward()`` per sample, grads accumulated.
 
     ``kept_groups`` is a list of groups (the StarPO-S-kept task groups); each
-    group is a list of samples ``(return, gen_inputs, ref_logp_or_None)``.
-    ``logp_fn(gen_inputs) -> tensor`` recomputes that sample's differentiable
-    (token-mean) log-prob against the LIVE policy, or returns ``None`` to skip.
+    group is a list of samples
+    ``(return, gen_inputs, ref_logp, old_logp, n_tokens, sc_weight)`` (trailing
+    fields optional). ``logp_fn(gen_inputs) -> tensor`` recomputes that sample's
+    differentiable *token-mean* log-prob against the LIVE policy (or ``None`` to
+    skip).
 
-    The effective objective is the SAMPLE-MEAN over all kept samples of
-    ``-adv*logp + ref_anchor_coef * k3_kl`` (k3 = ``exp(d)-d-1``, ``d=ref-logp``).
-    Group-normalized advantages (+ optional SC-GRPO all-fail bonus) are computed
-    per group exactly as before. Scaling each term by ``1/n_terms`` before
-    ``backward()`` makes the accumulated gradient IDENTICAL to a single backward
-    on the full mean loss, while only one sample's graph is ever materialized —
-    bounding activation memory to O(1 sample). Returns ``(loss_value, n_terms)``.
+    Objective (P0 upgrades):
+      * **DAPO clip-higher importance ratio** (item 1): with the detached
+        rollout-time ``old_logp`` (token-mean), the turn-level geometric-mean
+        (Turn-PPO) ratio ``r = exp(logp - old_logp)`` drives the asymmetric
+        clipped surrogate ``-min(r*A, clip(r, 1-lo, 1+hi)*A)`` via
+        :func:`clip_higher_ratio`. When ``old_logp`` is absent the term degrades
+        to the ratio-free ``-A*logp`` (back-compat / vanilla PG).
+      * **Global token-mean normalization** (item 3): instead of a per-sequence
+        token-mean averaged over samples, the loss is
+        ``sum_samples(n_tokens * per_sample_term) / sum_samples(n_tokens)`` — one
+        global token-mean across the whole kept batch (DAPO length-debias).
+      * **AVSPO variance floor** (item 4a): group advantages come from
+        :func:`anticollapse.avspo_advantages` (virtual-sample injection when the
+        group std < ``variance_floor``).
+      * **SC-GRPO** (item 4b): a per-sample multiplicative ``sc_weight`` (from
+        per-token KL(teacher||student)) scales the PG term.
+      * k3 KL anchor ``ref_anchor_coef * (exp(d)-d-1)``, ``d = ref-logp`` (item 5
+        keeps this active on the agentic path too).
 
-    Kept intentionally free of model/tokenizer coupling (log-prob recompute is
-    injected via ``logp_fn``) so the equivalence is unit-testable on CPU.
+    Scaling each term by ``1/total_tokens`` before ``backward()`` makes the
+    accumulated gradient IDENTICAL to a single backward on the full global
+    token-mean loss, while only one sample's graph is ever materialized
+    (activation memory O(1 sample)). Returns ``(loss_value, n_terms)``.
+
+    Kept free of model/tokenizer coupling (log-prob recompute injected via
+    ``logp_fn``) so the equivalence is unit-testable on CPU.
     """
     import torch
 
     from kore.policy import anticollapse as ac
 
-    # Pass 1: per-group advantages + count learnable terms (sets the mean scale).
+    # Pass 1: per-group advantages (AVSPO floor) + global token normalizer.
     group_advs: list[list[float]] = []
     n_terms = 0
+    total_tokens = 0
     for samples in kept_groups:
         returns = [s[0] for s in samples]
-        advs = group_advantages(returns)
-        if sc_grpo_allfail:
-            advs = [a + b for a, b in zip(advs, ac.sc_grpo_allfail_bonus(returns, sc_grpo_alpha))]
+        advs = ac.avspo_advantages(returns, variance_floor, avspo_virtual_k, adv_eps)
         group_advs.append(advs)
         for s in samples:
             if s[1]:  # non-empty gen_inputs -> a learnable sample
                 n_terms += 1
-    if n_terms == 0:
+                total_tokens += max(int(_sample_field(s, 4, 1) or 1), 1)
+    if n_terms == 0 or total_tokens == 0:
         return 0.0, 0
 
-    # Pass 2: recompute each sample's log-prob, backward the 1/n_terms-scaled term.
+    # Pass 2: recompute each sample's log-prob, backward the 1/total_tokens term.
     loss_value = 0.0
     for samples, advs in zip(kept_groups, group_advs):
         for adv, sample in zip(advs, samples):
@@ -301,12 +435,22 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
             lp = logp_fn(gen_inputs)
             if lp is None:
                 continue
-            term = -adv * lp
-            ref_lp = sample[2] if len(sample) > 2 else None
+            n_tok = max(int(_sample_field(sample, 4, 1) or 1), 1)
+            old_lp = _sample_field(sample, 3)
+            if old_lp is not None:
+                ratio = torch.exp(lp - old_lp)  # turn-level geometric-mean (Turn-PPO)
+                pg = -clip_higher_ratio(ratio, adv, clip_ratio_low, clip_ratio_high)
+            else:
+                pg = -adv * lp  # vanilla PG (no stored old_logp)
+            sc_w = _sample_field(sample, 5)
+            if sc_w is not None:
+                pg = pg * sc_w  # SC-GRPO KL-weight on the PG term (item 4b)
+            term = pg
+            ref_lp = _sample_field(sample, 2)
             if ref_anchor_coef and ref_lp is not None:
                 d = ref_lp - lp  # differentiable k3 KL anchor: exp(d) - d - 1
                 term = term + ref_anchor_coef * (torch.exp(d) - d - 1.0)
-            scaled = term / n_terms
+            scaled = term * n_tok / total_tokens  # global token-mean (item 3)
             if backward:
                 scaled.backward()  # frees this sample's graph before the next one
             loss_value += float(scaled.detach())
@@ -316,21 +460,21 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
 def _grpo_step_adv_stats(kept_groups, config):
     """Read-only recompute of mean|advantage| + KL-anchored sample count (logging).
 
-    Mirrors pass-1 of :func:`_accumulate_grpo_grads` exactly (group-normalized
-    advantages, optional SC-GRPO all-fail bonus) so the logged ``adv_absmean`` is
-    faithful, without touching the training path or its return. Pure/CPU-cheap.
+    Mirrors pass-1 of :func:`_accumulate_grpo_grads` exactly (AVSPO variance-floor
+    advantages) so the logged ``adv_absmean`` is faithful, without touching the
+    training path or its return. Pure/CPU-cheap.
     """
     from kore.policy import anticollapse as ac
 
+    tau = getattr(config, "variance_floor", 0.0)
+    k = getattr(config, "avspo_virtual_k", 2)
+    eps = getattr(config, "adv_eps", _EPS)
     total = 0.0
     n = 0
     n_kl = 0
     for samples in kept_groups:
         returns = [s[0] for s in samples]
-        advs = group_advantages(returns)
-        if getattr(config, "sc_grpo_allfail", False):
-            advs = [a + b for a, b in
-                    zip(advs, ac.sc_grpo_allfail_bonus(returns, config.sc_grpo_alpha))]
+        advs = ac.avspo_advantages(returns, tau, k, eps)
         for a, s in zip(advs, samples):
             total += abs(a)
             n += 1
@@ -339,17 +483,110 @@ def _grpo_step_adv_stats(kept_groups, config):
     return (total / n if n else 0.0), n_kl
 
 
+def _grpo_step_kl_stat(kept_groups):
+    """Mean k3 KL(policy||ref) diagnostic over kept samples (logging only).
+
+    Wires the pure :func:`kl_k3` estimator: for every kept sample carrying both a
+    detached rollout ``old_logp`` and a frozen-ref token-mean logp, accumulate
+    ``exp(d)-d-1`` (``d = ref - old_logp``). Returns ``None`` when no sample has a
+    ref (KL anchor inactive) so the logger records a null rather than 0.
+    """
+    total, n = 0.0, 0
+    for samples in kept_groups:
+        for s in samples:
+            ref_lp = _sample_field(s, 2)
+            old_lp = _sample_field(s, 3)
+            if ref_lp is None or old_lp is None:
+                continue
+            total += kl_k3(float(old_lp), float(ref_lp))
+            n += 1
+    return (total / n) if n else None
+
+
+def _rc_variance_floor_met(group) -> bool:
+    """RC-GRPO variance-floor diagnostic — wires :func:`anticollapse.variance_floor`.
+
+    Estimates the per-mode conditional means from the group's trajectory scores +
+    reward-control tokens, then checks the realized group variance against the
+    RC-GRPO floor ``(G-1)/G * p(1-p) * eps^2``. Used for logging only.
+    """
+    from kore.policy import anticollapse as ac
+
+    rtoks = group.get("rtoks") or []
+    scores = group.get("traj_scores") or []
+    if len(rtoks) != len(scores) or not scores or any(t is None for t in rtoks):
+        return False
+    means: dict[str, float] = {}
+    for name in set(rtoks):
+        vals = [s for s, t in zip(scores, rtoks) if t == name]
+        if vals:
+            means[name] = sum(vals) / len(vals)
+    return ac.variance_floor(scores, rtoks, means)
+
+
+def _safe_seed_code(task) -> str:
+    """Seed-kernel source for a task, or '' (used as the GTPO code-sim reference)."""
+    try:
+        return task.seed_source or ""
+    except Exception:  # noqa: BLE001 - tasks without a seed file
+        return ""
+
+
+def _token_logp_dist(model, prompt_ids, gen_ids, temperature: float = 1.0):
+    """Per-token log-softmax distribution over the vocab for ``gen_ids`` (GPU path)."""
+    import torch
+
+    full = torch.cat([prompt_ids[0], gen_ids]).unsqueeze(0)
+    out = model(full)
+    logits = out.logits[0, prompt_ids.shape[1] - 1:-1, :]
+    if temperature and temperature > 0:
+        logits = logits / temperature
+    return torch.log_softmax(logits, dim=-1)
+
+
+def _scgrpo_weight(model, tok, gen_inputs, demo_text, config):
+    """Real SC-GRPO per-sample PG weight from per-token KL(teacher||student) (item 4b).
+
+    The teacher is the SAME policy conditioned on a correct kernel used as an
+    in-context demo (``demo_text`` prepended to the sample's prompt); the student
+    is the policy on the original prompt. One extra (teacher) forward per weighted
+    sample. Per-token ``KL(teacher||student) = sum_v p_teacher (logp_teacher -
+    logp_student)`` is aggregated to a bounded multiplicative weight via
+    :func:`anticollapse.scgrpo_weight_from_kl`. GPU-only; the caller guards it.
+    """
+    import torch
+
+    from kore.policy import anticollapse as ac
+
+    if not gen_inputs:
+        return None
+    prompt_ids, gen_ids = gen_inputs[0]
+    student_lp = _token_logp_dist(model, prompt_ids, gen_ids, config.temperature)
+    demo_ids = tok(demo_text, return_tensors="pt").input_ids.to(prompt_ids.device)
+    teacher_prompt = torch.cat([prompt_ids[0], demo_ids[0]]).unsqueeze(0)
+    teacher_lp = _token_logp_dist(model, teacher_prompt, gen_ids, config.temperature)
+    pt = teacher_lp.exp()
+    token_kls = (pt * (teacher_lp - student_lp)).sum(dim=-1)  # per-token KL(teacher||student)
+    return ac.scgrpo_weight_from_kl([float(x) for x in token_kls], scale=1.0,
+                                    w_min=config.sc_grpo_w_min, w_max=config.sc_grpo_w_max)
+
+
 def _train_grpo_fallback(config, tasks):
     """Compact in-process GRPO loop implementing the locked KORE recipe.
 
     Per step:
-      1. roll out ``num_trajectories`` groups for each of ``tasks_per_step`` tasks
-         (serial multi-turn refinement, or the agentic tool harness);
-      2. build per-turn Kevin-credit samples (correctness-gated gamma returns)
-         and group-normalize advantages across the ``m*n`` samples of each group;
-      3. apply StarPO-S variance selection across the step's task-groups;
-      4. form a token-mean (DAPO length-debiased) policy-gradient loss with a
-         differentiable k3 KL anchor to the frozen SFT/reference checkpoint.
+      1. DAPO dynamic sampling (oversample-and-refill) collects ``target_groups``
+         non-degenerate groups — serial multi-turn refinement OR the agentic tool
+         harness — both flattened to per-turn Kevin-credit samples (correctness-
+         gated gamma returns, infra turns dropped);
+      2. anti-collapse shaping: GTPO code-similarity partial reward for all-fail
+         groups + real SC-GRPO KL-weighting for partial-solve groups;
+      3. StarPO-S selects the highest-variance groups to train on;
+      4. a GLOBAL TOKEN-MEAN DAPO clip-higher importance-ratio surrogate
+         (``-min(r*A, clip(r,1-lo,1+hi)*A)``, ``r = exp(logp-old_logp)``) with an
+         AVSPO variance floor and a differentiable k3 KL anchor to the frozen
+         SFT/reference checkpoint, run for ``ppo_epochs`` minibatch passes that
+         reuse the detached rollout ``old_logp``.
 
     Full-FT vs LoRA follows ``config.use_lora`` (the locked recipe is full-FT).
     When LoRA is used the adapter is merged before saving so soup/serve load a
@@ -391,96 +628,144 @@ def _train_grpo_fallback(config, tasks):
     opt = torch.optim.AdamW(trainable, lr=config.learning_rate)
 
     # ---- ref-model (KL anchor) gating: only pay the ~ref-model memory when a KL
-    #      anchor is actually applied (Fix 2). The AGENTIC path pools assistant
-    #      turns into ONE trajectory-level sample and exposes no per-turn ref
-    #      log-prob, so a k3 KL term cannot be applied there — we therefore do NOT
-    #      load the ref in agentic mode (it would sit idle wasting ~28GB) and log
-    #      that the KL anchor is inactive for agentic GRPO. Retention in agentic
-    #      mode is carried by the base-ward model soup (Stage-4), not a live KL.
+    #      anchor is actually applied. The per-turn KL anchor is now ACTIVE on the
+    #      agentic path too (item 5): ``_rollout_agentic`` records per-assistant-turn
+    #      (prompt_ids, gen_ids), so a per-turn frozen-ref log-prob CAN be computed
+    #      exactly as in the serial path. We therefore load the ref whenever
+    #      ref_anchor_coef>0, regardless of agentic mode.
     want_ref = getattr(config, "ref_anchor_coef", 0.0) > 0
     ref_model = None
     if not want_ref:
         print("[grpo] ref_anchor_coef<=0: skipping frozen ref-model load (no KL anchor).")
         log.info("ref-model: skipped", reason="ref_anchor_coef<=0", kl_anchor="inactive")
-    elif config.agentic:
-        print("[grpo] agentic mode: KL-anchor is INACTIVE (no per-turn ref log-prob "
-              "through the tool harness); NOT loading the frozen ref to save memory. "
-              "General-capability retention is handled by the Stage-4 base-ward soup.")
-        log.info("ref-model: skipped", reason="agentic mode (no per-turn ref log-prob)",
-                 kl_anchor="inactive")
     else:
         ref_model = _load_ref_model(config)  # frozen KL anchor (or None if unavailable)
         log.info("ref-model: loaded" if ref_model is not None else "ref-model: unavailable",
                  kl_anchor="active" if ref_model is not None else "inactive",
+                 agentic=bool(config.agentic),
                  ref_checkpoint=config.ref_checkpoint or config.model_id)
 
     tasks_per_step = max(1, getattr(config, "tasks_per_step", 1))
+    target_groups = getattr(config, "target_groups", None) or tasks_per_step
+    dyn = bool(getattr(config, "dynamic_sampling", True)) and bool(config.starpo_s)
+    max_attempts = getattr(config, "max_sampling_attempts", None) or (3 * target_groups if dyn else tasks_per_step)
+    ppo_epochs = max(1, getattr(config, "ppo_epochs", 1))
     task_cursor = 0
+
+    def _one_group(task, seed):
+        """Roll out one task-group -> a dict with per-turn Kevin-credit samples.
+
+        Serial and agentic rollouts are unified: both yield the same per-turn dict
+        (rewards/correct/infra/gen_inputs/ref_logps/old_logps/n_tokens/codes), which
+        is flattened into ``m*n`` per-turn samples via :func:`build_kevin_samples`
+        (infra turns dropped). Samples are MUTABLE lists so GTPO code-sim shaping
+        (item 4c) and SC-GRPO KL-weighting (item 4b) can be applied in-place before
+        the loss.
+        """
+        env = KoreEnv(task)
+        G = config.num_trajectories
+        rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=seed) if config.rc_grpo else [None] * G
+        traj_scores: list[float] = []
+        traj_rewards, traj_correct, traj_infra = [], [], []
+        turn_inputs, turn_ref, turn_old, turn_ntok, turn_codes = [], [], [], [], []
+        for g in range(G):
+            if config.agentic:
+                d = _rollout_agentic(model, tok, env, task, config, ref_model)
+            else:
+                d = _rollout(model, tok, env, task, config, rtoks[g], ref_model)
+            traj_rewards.append(d["rewards"]); traj_correct.append(d["correct"])
+            traj_infra.append(d["infra"]); turn_inputs.append(d["gen_inputs"])
+            turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
+            turn_ntok.append(d["n_tokens"]); turn_codes.append(d["codes"])
+            traj_scores.append(
+                kevin_trajectory_score(d["rewards"], d["correct"])
+                if config.kevin_best_kernel_scoring else (max(d["rewards"]) if d["rewards"] else 0.0))
+            log.debug("rollout", task=task.task_id, traj=g, turns=len(d["rewards"]),
+                      best_reward=traj_scores[-1], correct_turns=sum(1 for c in d["correct"] if c))
+        returns, index = build_kevin_samples(traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra)
+        samples, codes = [], []
+        for (ti, tu), ret in zip(index, returns):
+            samples.append([ret, turn_inputs[ti][tu], turn_ref[ti][tu],
+                            turn_old[ti][tu], turn_ntok[ti][tu], None])
+            codes.append(turn_codes[ti][tu])
+        correct_kernels = [turn_codes[ti][tu] for ti in range(G) for tu in range(len(traj_correct[ti]))
+                           if traj_correct[ti][tu] and turn_codes[ti][tu]]
+        return {"task": task, "traj_scores": traj_scores, "samples": samples, "codes": codes,
+                "correct_kernels": correct_kernels, "any_correct": any(any(c) for c in traj_correct),
+                "rtoks": rtoks, "infra": sum(1 for inf in traj_infra for x in inf if x)}
+
     for step in range(config.total_steps):
-        # ---- 1. roll out a group per task, accumulate for StarPO-S ---- #
-        # Rollout is done WITHOUT retaining a differentiable graph: each sample
-        # stores only the (prompt_ids, gen_ids) needed to recompute its log-prob
-        # at loss time (see ``_recompute_logp``). This is what bounds activation
-        # memory to O(1 sample) during the micro-batched backward below (Fix 1).
-        group_rewards: list[list[float]] = []   # trajectory-level reward per group (variance gate)
-        group_samples: list[list[tuple]] = []   # per group: (return, gen_inputs, ref_logp) samples
-        group_tasks: list = []
-        step_infra = 0                           # infra-error turns dropped this step (logging)
-        for _ in range(tasks_per_step):
+        # ---- 1. DAPO dynamic sampling: OVERSAMPLE-AND-REFILL (item 2) ---- #
+        # Instead of drop-and-shrink (roll exactly tasks_per_step, then drop the
+        # collapsed groups), keep rolling task-groups until ``target_groups``
+        # NON-DEGENERATE (std>min_std) groups are collected, bounded by
+        # ``max_attempts``. This keeps the effective batch size stable under
+        # StarPO-S so a bad step no longer shrinks the update.
+        def _roll(attempt):
+            nonlocal task_cursor
             task = get_task(tasks[task_cursor % len(tasks)])
             task_cursor += 1
-            env = KoreEnv(task)
-            G = config.num_trajectories
-            rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=step) \
-                if config.rc_grpo else [None] * G
+            return _one_group(task, step * 100003 + attempt)
 
-            traj_scores: list[float] = []
-            samples: list[tuple] = []
-            if config.agentic:
-                for g in range(G):
-                    r, gen_inputs = _rollout_agentic(model, tok, env, task, config)
-                    traj_scores.append(r)
-                    samples.append((r, gen_inputs, None))
-                    log.debug("rollout", task=task.task_id, traj=g, turns=len(gen_inputs),
-                              best_reward=r, correct_turns=None)
-            else:
-                traj_rewards: list[list[float]] = []
-                traj_correct: list[list[bool]] = []
-                traj_infra: list[list[bool]] = []
-                turn_inputs: list[list] = []
-                turn_ref_logps: list[list] = []
-                for g in range(G):
-                    rewards, corrects, gen_inputs, ref_logps, infra = _rollout(
-                        model, tok, env, task, config, rtoks[g], ref_model)
-                    traj_rewards.append(rewards)
-                    traj_correct.append(corrects)
-                    traj_infra.append(infra)
-                    turn_inputs.append(gen_inputs)
-                    turn_ref_logps.append(ref_logps)
-                    # trajectory score for the variance gate: best correct kernel.
-                    traj_scores.append(
-                        kevin_trajectory_score(rewards, corrects)
-                        if config.kevin_best_kernel_scoring else (max(rewards) if rewards else 0.0))
-                    log.debug("rollout", task=task.task_id, traj=g, turns=len(rewards),
-                              best_reward=traj_scores[-1], correct_turns=sum(1 for c in corrects if c))
-                step_infra += sum(1 for inf in traj_infra for x in inf if x)
-                # per-turn Kevin-credit samples flattened across m*n; infra turns
-                # are dropped from the batch (Fix 6) via ``traj_infra``.
-                returns, index = build_kevin_samples(
-                    traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra)
-                for (ti, tu), ret in zip(index, returns):
-                    samples.append((ret, turn_inputs[ti][tu], turn_ref_logps[ti][tu]))
+        groups, attempts = dynamic_sampling_refill(
+            _roll, target_groups, min_std=config.starpo_min_std,
+            max_attempts=max_attempts, dynamic=dyn,
+            std_key=lambda g: group_reward_std(g["traj_scores"]))
+        if not groups:
+            print(f"[grpo] step {step}: no non-degenerate groups in {attempts} attempts; skip")
+            log.info("grpo step: dynamic-sampling exhausted — skipping", step=step,
+                     attempts=attempts, target_groups=target_groups, reason="all groups collapsed")
+            log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
+            continue
+        step_infra = sum(g["infra"] for g in groups)
 
-            group_rewards.append(traj_scores)
-            group_samples.append(samples)
-            group_tasks.append(task)
+        # ---- 1b. GTPO all-fail code-similarity shaping (item 4c) ---- #
+        # For an all-fail group (no correct kernel -> Kevin returns all 0), replace
+        # each sample's return with a graded partial reward = code shingle-cosine
+        # similarity to the nearest correct kernel seen this step (or the seed).
+        if config.gtpo_codesim:
+            step_refs = [k for g in groups for k in g["correct_kernels"]]
+            for g in groups:
+                if g["any_correct"] or not g["samples"]:
+                    continue
+                refs = step_refs or ([_safe_seed_code(g["task"])] if _safe_seed_code(g["task"]) else [])
+                partial = ac.gtpo_codesim_shaping(g["codes"], refs, config.gtpo_codesim_scale)
+                for s, p in zip(g["samples"], partial):
+                    s[0] = p
 
-        # ---- 2. StarPO-S: keep only high-variance (signal-carrying) groups ---- #
+        # ---- 1c. Real SC-GRPO KL-weighting for partial-solve groups (item 4b) ---- #
+        # GPU-only: one extra (demo-conditioned) forward per weighted sample; the
+        # per-token KL(teacher||student) is aggregated to a bounded multiplicative
+        # PG weight (:func:`anticollapse.scgrpo_weight_from_kl`). Guarded so a
+        # failure degrades to weight 1.0 (plain PG).
+        if config.sc_grpo:
+            for g in groups:
+                # partial-solve groups: at least one correct kernel to use as the
+                # demo AND at least one non-correct sample to pull toward it.
+                if not g["correct_kernels"] or all(s[0] > 0 for s in g["samples"]):
+                    continue
+                demo = g["correct_kernels"][0]
+                for s in g["samples"]:
+                    try:
+                        s[5] = _scgrpo_weight(model, tok, s[1], demo, config)
+                    except Exception:  # noqa: BLE001 - GPU path only; degrade to plain PG
+                        s[5] = None
+
+        group_rewards = [g["traj_scores"] for g in groups]
+        group_samples = [g["samples"] for g in groups]
+        group_tasks = [g["task"] for g in groups]
+
+        # RC-GRPO variance-floor diagnostic (wire ac.variance_floor).
+        if config.rc_grpo:
+            met = sum(1 for g in groups if _rc_variance_floor_met(g))
+            log.debug("rc_variance_floor", step=step, groups=len(groups), met=met)
+
+        # ---- 2. StarPO-S selector: train on the highest-variance groups ---- #
         if config.starpo_s:
             keep = sorted(starpo_select_high_variance(
                 group_rewards, config.starpo_keep_frac, config.starpo_min_std))
             if not keep:
-                print(f"[grpo] step {step}: all {tasks_per_step} groups collapsed; skip")
+                print(f"[grpo] step {step}: all {len(groups)} groups collapsed; skip")
                 log.info("grpo step: all groups collapsed — skipping", step=step,
                          n_groups=len(group_rewards), reason="zero reward-variance (StarPO-S)",
                          keep_frac=config.starpo_keep_frac, min_std=config.starpo_min_std)
@@ -489,53 +774,61 @@ def _train_grpo_fallback(config, tasks):
         else:
             keep = list(range(len(group_rewards)))
         log.debug("starpo_keep", step=step, kept=len(keep), of=len(group_rewards),
-                  keep_frac=config.starpo_keep_frac, indices=keep)
+                  keep_frac=config.starpo_keep_frac, indices=keep, attempts=attempts)
 
-        # ---- 3. MICRO-BATCHED policy-gradient loss over kept groups (Fix 1) ---- #
+        # ---- 3. MICRO-BATCHED clip-higher loss, multi-epoch (items 1, 3) ---- #
         # One backward() per sample (recomputing that sample's log-prob), grads
-        # accumulated, a single optimizer.step() per step. Scaling each term by
-        # 1/n_terms makes the accumulated gradient identical to a single backward
-        # on the sample-mean loss, while only ONE sample's forward graph is ever
-        # alive (activation memory O(1 sample), not O(tasks_per_step*G*turns)).
+        # accumulated, one optimizer.step() per PPO epoch. Each term is scaled by
+        # 1/total_tokens so the accumulated gradient equals a single backward on
+        # the global token-mean loss, while only ONE sample's graph is ever alive.
+        # ``ppo_epochs`` minibatch passes reuse the detached rollout ``old_logp``.
         kept_groups = [group_samples[gi] for gi in keep]
 
         def _logp_fn(gen_inputs):
             return _recompute_logp(model, tok, gen_inputs, config.temperature) if gen_inputs else None
 
-        opt.zero_grad()
-        loss_value, n_terms = _accumulate_grpo_grads(
-            kept_groups, _logp_fn,
-            ref_anchor_coef=config.ref_anchor_coef,
-            sc_grpo_allfail=config.sc_grpo_allfail, sc_grpo_alpha=config.sc_grpo_alpha)
+        loss_value, n_terms, grad_norm = 0.0, 0, None
+        for _epoch in range(ppo_epochs):
+            opt.zero_grad()
+            loss_value, n_terms = _accumulate_grpo_grads(
+                kept_groups, _logp_fn,
+                ref_anchor_coef=config.ref_anchor_coef,
+                clip_ratio_low=config.clip_ratio_low, clip_ratio_high=config.clip_ratio_high,
+                variance_floor=config.variance_floor, avspo_virtual_k=config.avspo_virtual_k,
+                adv_eps=config.adv_eps)
+            if n_terms == 0:
+                break
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, config.max_grad_norm)
+            opt.step()
         if n_terms == 0:
             print(f"[grpo] step {step}: no learnable samples; skip")
             log.info("grpo step: no learnable samples — skipping", step=step,
                      n_kept_groups=len(keep), reason="all kept samples had empty gen_inputs")
             log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
             continue
-        grad_norm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-        opt.step()
         mean_r = sum(sum(g) / len(g) for g in group_rewards if g) / max(len(group_rewards), 1)
-        print(f"[grpo] step {step} kept={len(keep)}/{tasks_per_step} "
-              f"meanR={mean_r:.3f} loss={loss_value:.4f}")
+        print(f"[grpo] step {step} kept={len(keep)}/{len(groups)} attempts={attempts} "
+              f"epochs={ppo_epochs} meanR={mean_r:.3f} loss={loss_value:.4f}")
 
         # ---- observability: per-step metrics (INFO; few steps) ---- #
         reward_flat = [s for g in group_rewards for s in g]
         reward_mean = sum(reward_flat) / len(reward_flat) if reward_flat else 0.0
         reward_std = group_reward_std(reward_flat)
         adv_absmean, n_kl_samples = _grpo_step_adv_stats(kept_groups, config)
+        kl_val = _grpo_step_kl_stat(kept_groups)  # mean k3 KL(policy||ref) diagnostic
         try:
-            grad_norm_val = float(grad_norm)
+            grad_norm_val = float(grad_norm) if grad_norm is not None else None
         except Exception:  # noqa: BLE001 - some torch builds return a 0-dim tensor
             grad_norm_val = None
         lr_val = opt.param_groups[0]["lr"] if opt.param_groups else config.learning_rate
         last_mean_r = reward_mean
         log.event("grpo_step", step=step,
                   task=",".join(sorted({t.task_id for t in group_tasks})),
-                  n_groups=len(group_rewards), n_kept_groups=len(keep),
+                  n_groups=len(group_rewards), n_kept_groups=len(keep), n_attempts=attempts,
+                  ppo_epochs=ppo_epochs,
                   n_samples=sum(len(s) for s in group_samples), n_infra_dropped=step_infra,
                   reward_mean=reward_mean, reward_std=reward_std, adv_absmean=adv_absmean,
-                  kl=None, kl_coef=config.ref_anchor_coef, n_kl_samples=n_kl_samples,
+                  kl=kl_val, kl_coef=config.ref_anchor_coef, n_kl_samples=n_kl_samples,
                   loss=loss_value, grad_norm=grad_norm_val, lr=lr_val, **gpu_mem_snapshot())
         log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
 
@@ -587,16 +880,21 @@ def _load_ref_model(config):
 def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
     """One multi-turn trajectory (serial refinement).
 
-    Returns ``(rewards, correct_flags, gen_inputs, ref_logprobs, infra_flags)`` —
-    one entry per turn. ``gen_inputs[t]`` is ``[(prompt_ids, gen_ids)]`` (detached
-    token ids) from which the policy log-prob is RECOMPUTED at loss time; nothing
-    differentiable is retained here, so the rollout does not accumulate a forward
-    graph per turn (Fix 1). ``ref_logprobs`` are the frozen-reference token-mean
-    log-probs (detached, ``None`` per turn if no ref model) used for the k3 KL
-    anchor. ``infra_flags[t]`` is True when the turn hit an infrastructure error
-    (timeout/OOM/segfault/import) — the caller drops those turns from the batch
-    (Fix 6). When ``config.cot_masking`` is set, prior-turn thinking is dropped
-    from the context that is re-rendered each turn.
+    Returns a per-turn dict with parallel lists (one entry per turn):
+    ``rewards``, ``correct``, ``infra``, ``gen_inputs`` (each ``[(prompt_ids,
+    gen_ids)]`` detached), ``ref_logps`` (frozen-ref token-mean log-prob or
+    ``None``), ``old_logps`` (detached policy token-mean log-prob AT ROLLOUT — the
+    DAPO importance-ratio anchor, item 1), ``n_tokens`` (for the global
+    token-mean, item 3), and ``codes`` (parsed kernel source, for GTPO code-sim
+    shaping, item 4c). Nothing differentiable is retained; the policy log-prob is
+    RECOMPUTED at loss time so the rollout keeps no forward graph.
+
+    When ``config.value_prefilter`` is set, each turn generates
+    ``num_candidates_per_turn`` candidates, ranks them with the value model
+    (:func:`_prefilter_bench_indices`, contract b) and only BENCHES the top-``k``
+    — the measurement-efficiency lever (item 6). ``config.reward_phase`` applies
+    the correctness->latency curriculum mask (item 8). ``config.cot_masking``
+    drops prior-turn thinking from the re-rendered context.
     """
     import torch
 
@@ -609,66 +907,91 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         prompt = ac.prepend_reward_token(prompt, reward_token)
 
     snr_threshold = getattr(task, "snr_threshold", None)
+    prefilter = bool(getattr(config, "value_prefilter", False))
+    n_cand = max(1, getattr(config, "num_candidates_per_turn", 1)) if prefilter else 1
+
     turns: list[dict] = []
-    rewards: list[float] = []
-    corrects: list[bool] = []
-    gen_inputs: list = []
-    ref_logps: list = []
-    infra_flags: list[bool] = []
+    out = {"rewards": [], "correct": [], "infra": [], "gen_inputs": [],
+           "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": []}
     for _turn in range(config.num_turns):
         ctx_turns = mask_cot_turns(turns) if config.cot_masking else turns
         msgs = build_transcript(prompt, ctx_turns)
         ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            gen = model.generate(ids, max_new_tokens=config.max_response_length, do_sample=True,
-                                 temperature=config.temperature, return_dict_in_generate=True,
-                                 output_scores=True)
-        seq = gen.sequences[0][ids.shape[1]:]
-        text = tok.decode(seq, skip_special_tokens=True)
+
+        # Generate candidate(s) for this turn (no graph retained).
+        cands: list[tuple] = []  # (seq_detached, text, code)
+        for _c in range(n_cand):
+            with torch.no_grad():
+                gen = model.generate(ids, max_new_tokens=config.max_response_length,
+                                     do_sample=True, temperature=config.temperature,
+                                     return_dict_in_generate=True, output_scores=True)
+            seq = gen.sequences[0][ids.shape[1]:].detach()
+            text = tok.decode(seq, skip_special_tokens=True)
+            cands.append((seq, text, parse_response(text).get("kernel", "")))
+
+        # Value-model prefilter: bench only the top-k candidates (item 6).
+        if prefilter and n_cand > 1:
+            bench_idx = _prefilter_bench_indices([c[2] for c in cands], task,
+                                                 getattr(config, "value_prefilter_k", 1))
+        else:
+            bench_idx = list(range(len(cands)))
+
+        best = None  # (seq, text, code, obs, rr)
+        for ci in bench_idx:
+            seq, text, code = cands[ci]
+            obs = env.step(code, full_validation=True, multi_shape=True)
+            rr = apply_reward_phase(
+                compute_reward(obs, code, dtype=task.dtype, snr_threshold=snr_threshold), config)
+            if best is None or (bool(rr.correct), rr.reward) > (bool(best[4].correct), best[4].reward):
+                best = (seq, text, code, obs, rr)
+
+        seq, text, code, obs, rr = best
+        gen_inputs = [(ids.detach(), seq)]
         n_tok = max(int(seq.shape[0]), 1)
-        # Defer the policy log-prob: store only the ids needed to recompute it
-        # (with grad) one sample at a time during the micro-batched backward.
-        gen_inputs.append([(ids.detach(), seq.detach())])
+        # DAPO importance-ratio anchor: detached policy token-mean logp at rollout.
+        with torch.no_grad():
+            old_lp = _recompute_logp(model, tok, gen_inputs, config.temperature)
+        old_lp = old_lp.detach() if old_lp is not None else None
         if ref_model is not None:
             with torch.no_grad():
-                ref_lp = token_mean_logprob(
-                    _seq_logprob(ref_model, tok, ids, seq, config.temperature), n_tok)
-            ref_logps.append(ref_lp.detach())
+                ref_lp = _recompute_logp(ref_model, tok, gen_inputs, config.temperature)
+            ref_lp = ref_lp.detach() if ref_lp is not None else None
         else:
-            ref_logps.append(None)
+            ref_lp = None
 
-        parsed = parse_response(text)
-        obs = env.step(parsed.get("kernel", ""), full_validation=True, multi_shape=True)
-        rr = compute_reward(obs, parsed.get("kernel", ""), dtype=task.dtype,
-                            snr_threshold=snr_threshold)
-        rewards.append(rr.reward)
-        corrects.append(bool(rr.correct))
-        infra_flags.append(bool(getattr(obs, "infra_error", False)) or rr.tier == "infra")
+        out["rewards"].append(rr.reward)
+        out["correct"].append(bool(rr.correct))
+        out["infra"].append(bool(getattr(obs, "infra_error", False)) or rr.tier == "infra")
+        out["gen_inputs"].append(gen_inputs)
+        out["ref_logps"].append(ref_lp)
+        out["old_logps"].append(old_lp)
+        out["n_tokens"].append(n_tok)
+        out["codes"].append(code)
         turns.append({"response": text, "feedback": build_turn_feedback(obs)})
-    return rewards, corrects, gen_inputs, ref_logps, infra_flags
+    return out
 
 
-def _rollout_agentic(model, tok, env, task, config):
+def _rollout_agentic(model, tok, env, task, config, ref_model=None):
     """One agentic trajectory via :class:`kore.agent.harness.AgentHarness`.
 
-    Drives the multi-turn build/test/bench/pmc tool loop, then folds the
-    ToolRL-style tool-use shaping into the Kevin best-kernel trajectory score via
-    :func:`composite_agentic_reward`. Policy-gradient credit is the token-mean
-    sum of the assistant-turn log-probs (``PG on assistant turns``).
+    Item 5: gives the agentic loop the SAME per-turn Kevin credit + per-turn KL
+    anchor as the serial path. The episode's per-turn ``(reward, correct)`` trace
+    (contract a: ``episode.turn_rewards`` / ``episode.turn_correct``) is aligned
+    1:1 with the assistant-turn generations recorded by :class:`_HFChatPolicy`,
+    and the caller feeds them through :func:`build_kevin_samples` exactly like the
+    serial trajectories (correctness-gated gamma returns, per-turn-as-sample).
+    The ToolRL-style tool-use shaping is folded (once) into the best correct
+    turn's reward via :func:`composite_agentic_reward`.
 
-    Limitation: this applies a single trajectory-level composite reward as the PG
-    signal on the pooled assistant turns rather than a full per-tool-turn
-    advantage decomposition; the per-turn kernel-reward trace is not exposed by
-    the harness/executor, so best-kernel scoring (Kevin) is used as the
-    trajectory value. This is the documented minimal-agentic-PG path. Because the
-    harness exposes no per-turn infra/tier trace either, an infra episode simply
-    yields no positive Kevin signal (best_reward None -> reward 0) rather than
-    being explicitly dropped; there is no per-turn signal to prune.
-
-    Returns ``(reward, gen_inputs)`` where ``gen_inputs`` is the list of
-    ``(prompt_ids, gen_ids)`` for the assistant turns; the summed token-mean
-    log-prob is RECOMPUTED at loss time (Fix 1) so the rollout retains no graph.
+    Returns the SAME per-turn dict shape as :func:`_rollout` (``rewards``,
+    ``correct``, ``infra``, ``gen_inputs``, ``ref_logps``, ``old_logps``,
+    ``n_tokens``, ``codes``). ``ref_logps`` are populated when ``ref_model`` is
+    provided — the per-turn KL anchor is now ACTIVE in agentic mode (item 5). If
+    the harness/episode exposes no per-turn trace, this degrades to a single
+    terminal (best_reward, success) sample (Kevin trajectory value).
     """
+    import torch
+
     from kore.agent.harness import AgentHarness
     from kore.agent.tools import tool_use_reward
 
@@ -677,21 +1000,57 @@ def _rollout_agentic(model, tok, env, task, config):
     episode = harness.run()
 
     turn_rewards, turn_correct = _episode_turn_rewards(episode)
-    kernel_score = kevin_trajectory_score(turn_rewards, turn_correct)
-    tool_total = tool_use_reward(episode).get("total", 0.0)
-    reward = composite_agentic_reward(kernel_score, tool_total, config.tool_reward_weight)
+    turn_inputs = list(policy.turn_inputs)  # per assistant turn: (prompt_ids, gen_ids)
 
-    return reward, list(policy.turn_inputs)
+    # Fold ToolRL orchestration shaping ONCE into the best correct turn's reward.
+    tool_total = tool_use_reward(episode).get("total", 0.0)
+    if any(turn_correct):
+        bi = max((i for i, c in enumerate(turn_correct) if c), key=lambda i: turn_rewards[i])
+        turn_rewards = list(turn_rewards)
+        turn_rewards[bi] = composite_agentic_reward(
+            turn_rewards[bi], tool_total, config.tool_reward_weight)
+
+    # Align the per-turn credit trace with the recorded assistant generations.
+    n = min(len(turn_inputs), len(turn_rewards), len(turn_correct))
+    out = {"rewards": [], "correct": [], "infra": [], "gen_inputs": [],
+           "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": []}
+    for t in range(n):
+        gen_inputs = [turn_inputs[t]]
+        prompt_ids, gen_ids = turn_inputs[t]
+        with torch.no_grad():
+            old_lp = _recompute_logp(model, tok, gen_inputs, config.temperature)
+        old_lp = old_lp.detach() if old_lp is not None else None
+        if ref_model is not None:
+            with torch.no_grad():
+                ref_lp = _recompute_logp(ref_model, tok, gen_inputs, config.temperature)
+            ref_lp = ref_lp.detach() if ref_lp is not None else None
+        else:
+            ref_lp = None
+        out["rewards"].append(float(turn_rewards[t]))
+        out["correct"].append(bool(turn_correct[t]))
+        out["infra"].append(False)  # harness exposes no per-turn infra trace
+        out["gen_inputs"].append(gen_inputs)
+        out["ref_logps"].append(ref_lp)
+        out["old_logps"].append(old_lp)
+        out["n_tokens"].append(max(int(gen_ids.shape[0]), 1))
+        out["codes"].append("")  # per-turn kernel source not exposed by the harness
+    return out
 
 
 def _episode_turn_rewards(episode):
-    """Best-effort per-turn (reward, correct) trace from an AgentEpisode.
+    """Per-turn ``(reward, correct)`` trace from an AgentEpisode.
 
-    The harness exposes the trajectory's best kernel reward; a full per-turn
-    kernel-reward trace is not recorded, so we surface a single terminal sample
-    (best_reward, success) which :func:`kevin_trajectory_score` reduces to the
-    best correct kernel — the Kevin trajectory value.
+    Prefers the contract-(a) per-turn fields ``episode.turn_rewards`` /
+    ``episode.turn_correct`` (a sibling agent records them on the harness) so the
+    agentic loop gets the SAME per-turn Kevin credit as the serial path (item 5).
+    Falls back to a single terminal ``(best_reward, success)`` sample — which
+    :func:`kevin_trajectory_score` reduces to the best correct kernel — when the
+    per-turn trace is absent (the harness records only the trajectory best today).
     """
+    tr = getattr(episode, "turn_rewards", None)
+    tc = getattr(episode, "turn_correct", None)
+    if tr is not None and tc is not None and len(tr) == len(tc) and len(tr) > 0:
+        return [float(x) for x in tr], [bool(x) for x in tc]
     best = getattr(episode, "best_reward", None)
     success = bool(getattr(episode, "success", False))
     if best is None:
@@ -727,21 +1086,31 @@ class _HFChatPolicy:
         return self.tok.decode(seq, skip_special_tokens=True)
 
 
-def _recompute_logp(model, tok, gen_inputs, temperature: float = 1.0):
-    """Recompute a sample's summed token-mean log-prob against the live policy.
+def _sample_token_count(gen_inputs) -> int:
+    """Total generated-token count across a sample's ``(prompt_ids, gen_ids)`` pairs."""
+    return sum(max(int(gen_ids.shape[0]), 1) for _prompt_ids, gen_ids in gen_inputs)
 
-    ``gen_inputs`` is a list of ``(prompt_ids, gen_ids)`` pairs (one per assistant
-    turn that carries PG credit — a single pair for a serial-refinement turn, the
-    whole assistant-turn list for an agentic trajectory). Recomputing here rather
-    than at rollout time keeps only ONE sample's forward graph alive during the
-    micro-batched backward (activation memory O(1 sample); Fix 1).
+
+def _recompute_logp(model, tok, gen_inputs, temperature: float = 1.0):
+    """Recompute a sample's *token-mean* log-prob against the live policy.
+
+    ``gen_inputs`` is a list of ``(prompt_ids, gen_ids)`` pairs (a single pair for
+    a serial-refinement turn or an agentic assistant turn). The returned value is
+    the global token-mean ``sum_pairs(sum_token_logp) / sum_pairs(n_tokens)`` — a
+    single number per sample, matching the detached rollout-time ``old_logp`` so
+    the importance ratio ``exp(logp - old_logp)`` is the turn-level geometric-mean
+    (Turn-PPO) ratio. Recomputing here (not at rollout) keeps only ONE sample's
+    forward graph alive during the micro-batched backward (activation O(1)).
     """
     total = None
+    n_tok = 0
     for prompt_ids, gen_ids in gen_inputs:
-        n_tok = max(int(gen_ids.shape[0]), 1)
-        lp = token_mean_logprob(_seq_logprob(model, tok, prompt_ids, gen_ids, temperature), n_tok)
-        total = lp if total is None else total + lp
-    return total
+        s = _seq_logprob(model, tok, prompt_ids, gen_ids, temperature)
+        total = s if total is None else total + s
+        n_tok += max(int(gen_ids.shape[0]), 1)
+    if total is None:
+        return None
+    return token_mean_logprob(total, n_tok)  # DAPO length-debias (item 3)
 
 
 def _seq_logprob(model, tok, prompt_ids, gen_ids, temperature: float = 1.0):

@@ -22,7 +22,15 @@ GPU_DEFAULT = "gfx942"
 
 @dataclass
 class AgenticTrajectoryRecord:
-    """A full agentic tool-use trajectory for one task."""
+    """A full agentic tool-use trajectory for one task.
+
+    Carries the GEAK-style cognition alongside the tool-use loop so SFT teaches
+    the whole behavior, not just the mechanics: ``reflections`` are the
+    structured post-failure introspections and ``phase_trace`` records the
+    correctness->optimization phase the agent was in on each turn. Both are
+    ALSO woven into ``messages`` (as ``<reflect>`` blocks / phase system prompts)
+    so a plain messages-only trainer still consumes them.
+    """
 
     task_id: str
     messages: list[dict]              # system + user + assistant(tool_call) + tool
@@ -31,6 +39,8 @@ class AgenticTrajectoryRecord:
     best_reward: Optional[float]
     turns_to_best: Optional[int]
     success: bool
+    reflections: list[dict] = field(default_factory=list)   # [{turn,root_cause,...}]
+    phase_trace: list[dict] = field(default_factory=list)    # [{turn,phase}]
     provenance: dict = field(default_factory=dict)
     type: str = "agentic"
     gpu: str = GPU_DEFAULT
@@ -48,6 +58,8 @@ class AgenticTrajectoryRecord:
             best_reward=d.get("best_reward"),
             turns_to_best=d.get("turns_to_best"),
             success=bool(d.get("success", False)),
+            reflections=list(d.get("reflections", []) or []),
+            phase_trace=list(d.get("phase_trace", []) or []),
             provenance=dict(d.get("provenance", {}) or {}),
             type=d.get("type", "agentic"),
             gpu=d.get("gpu", GPU_DEFAULT),

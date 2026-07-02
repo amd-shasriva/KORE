@@ -57,6 +57,56 @@ def _pair_token_stats(rows: list[dict], tokenizer, sample: int = 512) -> dict:
         return {"n_pairs": len(rows), "tok_stats_error": repr(e)}
 
 
+def build_trl_dpo_kwargs(config) -> dict:
+    """Assemble the kwargs for ``trl.DPOConfig`` from a KORE :class:`DPOConfig`.
+
+    PURE (imports no torch/trl) so the IPO / cDPO + FSDP config path is unit-
+    testable on CPU. Two knobs counter deterministic-preference overfitting on
+    hard negatives (a real risk once preferences come from on-policy relabeling):
+
+      * ``loss_type`` — the trl DPO loss variant. ``"ipo"`` uses the IPO
+        (bounded, MSE-style) objective which does not push the implicit reward gap
+        to infinity on easy/near-deterministic pairs. Others: ``"sigmoid"``
+        (vanilla DPO, default), ``"hinge"``, etc.
+      * ``label_smoothing`` — conservative-DPO (cDPO): treats preference labels as
+        soft (``1 - eps`` / ``eps``), so a noisy/mislabeled hard negative can't
+        dominate the gradient.
+
+    Both are read via ``getattr`` so a plain ``DPOConfig`` (which has neither
+    field) still works — set them as attributes (per round, alongside a refreshed
+    ``ref_model_id``) for iterative DPO. FSDP kwargs are merged for the
+    distributed full-FT path; under FSDP activation-checkpointing is routed
+    through ``fsdp_config`` (so ``gradient_checkpointing`` is disabled here to
+    avoid the redundant-AllGather warning)."""
+    use_fsdp = fsdp_enabled(config)
+    kwargs = dict(
+        output_dir=config.output_dir,
+        beta=config.beta,
+        learning_rate=config.learning_rate,
+        lr_scheduler_type=config.lr_scheduler_type,
+        num_train_epochs=config.num_train_epochs,
+        warmup_ratio=config.warmup_ratio,
+        per_device_train_batch_size=config.per_device_train_batch_size,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+        max_length=config.max_length,
+        max_prompt_length=config.max_prompt_length,
+        bf16=config.bf16,
+        gradient_checkpointing=config.gradient_checkpointing and not use_fsdp,
+        logging_steps=config.logging_steps,
+        save_steps=config.save_steps,
+        seed=config.seed,
+        report_to=config.report_to,
+    )
+    loss_type = getattr(config, "loss_type", None)
+    if loss_type:
+        kwargs["loss_type"] = str(loss_type)
+    label_smoothing = getattr(config, "label_smoothing", None)
+    if label_smoothing:
+        kwargs["label_smoothing"] = float(label_smoothing)
+    kwargs.update(build_fsdp_kwargs(config))
+    return kwargs
+
+
 def load_preference_jsonl(path: str) -> list[dict]:
     """Read preference rows: ``{"prompt", "chosen", "rejected"}`` per line.
 
@@ -99,7 +149,6 @@ def train(config: DPOConfig) -> dict:
     # only for full-FT (use_lora=False) launched distributed; LoRA and single
     # process keep the current path. DPO never set device_map, so nothing to strip
     # there — under FSDP the model is loaded plain and the Trainer wraps it.
-    use_fsdp = fsdp_enabled(config)
     fsdp_kwargs = build_fsdp_kwargs(config)
 
     tokenizer = AutoTokenizer.from_pretrained(config.model_id)
@@ -109,6 +158,9 @@ def train(config: DPOConfig) -> dict:
     log.info("dpo: dataset loaded", dataset=config.dataset_path, model=config.model_id,
              use_lora=bool(config.use_lora), beta=config.beta, epochs=config.num_train_epochs,
              distributed=bool(config.distributed), fsdp=bool(fsdp_kwargs),
+             ref_model_id=getattr(config, "ref_model_id", None),
+             loss_type=getattr(config, "loss_type", None),
+             label_smoothing=getattr(config, "label_smoothing", None),
              **_pair_token_stats(rows, tokenizer))
 
     dataset = Dataset.from_list(rows)
@@ -116,38 +168,19 @@ def train(config: DPOConfig) -> dict:
     dtype = torch.bfloat16 if config.bf16 else torch.float32
     model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=dtype)
 
-    # With LoRA, TRL uses the frozen base weights as the implicit reference, so
-    # an explicit ref model is optional. Load one only if a distinct id is set.
+    # Reference refresh (iterative DPO): ``ref_model_id`` is the frozen reference
+    # for THIS round — the previous round's trained policy. For full-FT we load it
+    # explicitly. With LoRA, trl uses the frozen base (``model_id``, itself last
+    # round's merged checkpoint) as the implicit reference, so refreshing = simply
+    # pointing ``model_id`` at the new checkpoint each round; passing an explicit
+    # ref_model alongside a peft_config is unsupported by trl, so we skip it there.
     ref_model = None
     if not config.use_lora and config.ref_model_id and config.ref_model_id != config.model_id:
         ref_model = AutoModelForCausalLM.from_pretrained(config.ref_model_id, torch_dtype=dtype)
 
     peft_config = _peft_config(config) if config.use_lora else None
 
-    # Under FSDP full_shard, route activation checkpointing through fsdp_config
-    # (see build_fsdp_kwargs) instead of TrainingArguments.gradient_checkpointing
-    # to avoid the redundant-AllGather warning.
-    grad_ckpt = config.gradient_checkpointing and not use_fsdp
-
-    trl_args = TRLDPOConfig(
-        output_dir=config.output_dir,
-        beta=config.beta,
-        learning_rate=config.learning_rate,
-        lr_scheduler_type=config.lr_scheduler_type,
-        num_train_epochs=config.num_train_epochs,
-        warmup_ratio=config.warmup_ratio,
-        per_device_train_batch_size=config.per_device_train_batch_size,
-        gradient_accumulation_steps=config.gradient_accumulation_steps,
-        max_length=config.max_length,
-        max_prompt_length=config.max_prompt_length,
-        bf16=config.bf16,
-        gradient_checkpointing=grad_ckpt,
-        logging_steps=config.logging_steps,
-        save_steps=config.save_steps,
-        seed=config.seed,
-        report_to=config.report_to,
-        **fsdp_kwargs,
-    )
+    trl_args = TRLDPOConfig(**build_trl_dpo_kwargs(config))
 
     # Lightweight per-log-step observability callback (guarded transformers import).
     from transformers import TrainerCallback
@@ -212,12 +245,23 @@ def _peft_config(config: Any):
 # fields (including "dataset_path"), with an optional nested "lora" object.
 # --------------------------------------------------------------------------- #
 def dpo_config_from_dict(d: dict) -> DPOConfig:
-    """Build a :class:`DPOConfig` from a plain dict (nested ``lora`` supported)."""
+    """Build a :class:`DPOConfig` from a plain dict (nested ``lora`` supported).
+
+    ``loss_type`` / ``label_smoothing`` (IPO / cDPO knobs, not fields on the base
+    dataclass) are accepted here and attached as attributes so the JSON config
+    path — and per-round iterative DPO — can select them without a schema change.
+    """
     d = dict(d)
     lora = d.pop("lora", None)
+    loss_type = d.pop("loss_type", None)
+    label_smoothing = d.pop("label_smoothing", None)
     cfg = DPOConfig(**d)
     if lora is not None:
         cfg.lora = LoRAConfig(**lora)
+    if loss_type is not None:
+        cfg.loss_type = loss_type
+    if label_smoothing is not None:
+        cfg.label_smoothing = label_smoothing
     return cfg
 
 

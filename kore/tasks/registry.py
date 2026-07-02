@@ -1,13 +1,64 @@
-"""Discover and load KORE tasks from ``kore/tasks/<id>/task.yaml``."""
+"""Discover and load KORE tasks from ``kore/tasks/<id>/task.yaml``.
+
+Also defines the **train / held-out generalization split**. A whole operator
+*family* (plus any arch-specific task) is deterministically RESERVED as held-out
+so that training data-generation never sees it and eval measures generalization
+to an unseen family — mirroring KernelBench/GEAK's train-vs-heldout discipline.
+"""
 
 from __future__ import annotations
 
+import random
 from functools import lru_cache
 from pathlib import Path
 
 from kore.tasks.base import Task
 
 TASKS_DIR = Path(__file__).resolve().parent
+
+# The arch we train on; anything else is arch-specific and is held out (e.g. a
+# gfx950/CDNA4-only kernel must never leak into the gfx942 training set).
+TRAIN_ARCH = "gfx942"
+
+# Whole operator families reserved for the held-out generalization set. Reserving
+# an ENTIRE family (not a random subset) is what makes this a true generalization
+# test: the policy is trained without ever seeing the attention family.
+HELDOUT_FAMILIES: tuple[str, ...] = ("attention",)
+
+
+def operator_family(task: Task) -> str:
+    """Coarse operator family for a task (used for the generalization split)."""
+    op = (getattr(task, "operation", None) or getattr(task, "task_id", "") or "").lower()
+    if "attn" in op or "attention" in op:
+        return "attention"
+    if "topk" in op:
+        return "moe_router"
+    if "moe" in op:
+        return "moe"
+    if "rmsnorm" in op:
+        return "rmsnorm"
+    if "layernorm" in op:
+        return "layernorm"
+    if "gemm" in op or "matmul" in op:
+        return "gemm"
+    if "quant" in op:
+        return "quant"
+    if "rope" in op:
+        return "rope"
+    if "softmax" in op:
+        return "softmax"
+    if "gelu" in op or "silu" in op or "relu" in op:
+        return "activation"
+    return op or "other"
+
+
+def is_heldout(task: Task) -> bool:
+    """A task is held out if its family is reserved OR it is arch-specific."""
+    if operator_family(task) in HELDOUT_FAMILIES:
+        return True
+    if (getattr(task, "gpu_target", None) or TRAIN_ARCH) != TRAIN_ARCH:
+        return True
+    return False
 
 
 @lru_cache(maxsize=1)
@@ -35,3 +86,42 @@ def get_task(task_id: str) -> Task:
     if task_id not in tasks:
         raise KeyError(f"unknown task '{task_id}'; known: {sorted(tasks)}")
     return tasks[task_id]
+
+
+# --------------------------------------------------------------------------- #
+# Train / held-out generalization split
+# --------------------------------------------------------------------------- #
+def heldout_tasks() -> list[Task]:
+    """Tasks RESERVED for held-out generalization eval (never seen in training).
+
+    Deterministic and independent of any seed — the reserved set is a function of
+    the operator family + arch alone, so training data-gen can safely exclude it.
+    """
+    return [t for t in all_tasks() if is_heldout(t)]
+
+
+def train_tasks() -> list[Task]:
+    """Tasks available for training data-generation (complement of held-out)."""
+    return [t for t in all_tasks() if not is_heldout(t)]
+
+
+def heldout_families() -> set[str]:
+    """The operator families that actually appear in the held-out split."""
+    return {operator_family(t) for t in heldout_tasks()}
+
+
+def split_tasks(seed: int = 0) -> dict[str, object]:
+    """Deterministic train/held-out split.
+
+    The held-out set is FIXED (reserved operator families + arch-specific tasks)
+    regardless of ``seed`` so training can never leak into it; ``seed`` only
+    controls the reproducible ordering WITHIN each split (useful for sharding or
+    cross-validation folds). Returns
+    ``{"train": [...], "heldout": [...], "seed": seed}``.
+    """
+    train = sorted(train_tasks(), key=lambda t: t.task_id)
+    held = sorted(heldout_tasks(), key=lambda t: t.task_id)
+    rng = random.Random(seed)
+    rng.shuffle(train)
+    rng.shuffle(held)
+    return {"train": train, "heldout": held, "seed": seed}

@@ -20,17 +20,27 @@ from kore.agent.tools import (
     validate_tool_call,
     tool_use_reward,
 )
+from kore.agent.tools import W_REFLECT, W_OUTCOME
 from kore.agent.format import (
     parse_tool_calls,
+    parse_reflection,
+    render_reflection,
     render_tool_result,
     episode_to_chat,
     build_agent_system_prompt,
     render_tool_call_message,
     strip_thinking,
 )
-from kore.agent.harness import AgentHarness, AgentEpisode
+from kore.agent.harness import (
+    AgentHarness,
+    AgentEpisode,
+    WinsKB,
+    build_agent_user_prompt,
+    PHASE_CORRECTNESS,
+    PHASE_OPTIMIZE,
+)
 from kore.agent.schema import AgenticTrajectoryRecord
-from kore.data.schemas import write_jsonl, read_jsonl
+from kore.data.schemas import write_jsonl, read_jsonl, WinRecord
 from kore.data.teacher import StubTeacher, TeacherClient
 from kore.data.gen_agentic import generate_agentic_trajectories
 
@@ -421,3 +431,262 @@ def test_generate_agentic_keep_only_useful_filters_attempts():
 
 def test_stubteacher_is_teacherclient():
     assert isinstance(scripted_teacher(["x"]), TeacherClient)
+
+
+# --------------------------------------------------------------------------- #
+# 10. Per-turn reward trace (RL CONTRACT)
+# --------------------------------------------------------------------------- #
+def test_agent_episode_exposes_per_turn_reward_trace():
+    env = FakeEnv()
+    ep = AgentHarness(FakeTask(), scripted_teacher(_win_script()), env,
+                      max_turns=8, use_kb=False).run()
+
+    # Parallel arrays, one entry per turn (RL contract for GRPO Kevin credit).
+    assert len(ep.turn_rewards) == ep.turns_used
+    assert len(ep.turn_correct) == ep.turns_used
+    assert all(isinstance(r, float) for r in ep.turn_rewards)
+    assert all(isinstance(c, bool) for c in ep.turn_correct)
+
+    # Correctness only after the fixed kernel (turns 0/1 are wrong builds/tests).
+    assert ep.turn_correct[0] is False and ep.turn_correct[1] is False
+    assert ep.turn_correct[2] is True and ep.turn_correct[-1] is True
+    # The best reward is reflected in the trace and is the max over correct turns.
+    assert ep.best_reward is not None
+    assert max(ep.turn_rewards) == ep.best_reward
+    # Trajectory-level summary still present.
+    assert ep.turns_to_best == 3 and ep.success is True
+
+
+# --------------------------------------------------------------------------- #
+# 11. Structured reflection: parsing + bounded reward
+# --------------------------------------------------------------------------- #
+def test_parse_reflection_json_and_lines_and_render_roundtrip():
+    block = ('<reflect>\n{"root_cause": "snr too low", "evidence": '
+             '"worst SNR 5.0", "planned_fix": "rewrite reduction"}\n</reflect>')
+    r = parse_reflection("thinking...\n" + block)
+    assert r["root_cause"] == "snr too low"
+    assert r["evidence"] == "worst SNR 5.0"
+    assert r["planned_fix"] == "rewrite reduction"
+
+    # key: value fallback when the block isn't valid JSON
+    r2 = parse_reflection("<reflect>\nroot_cause: bad tile\nplanned_fix: retune\n</reflect>")
+    assert r2["root_cause"] == "bad tile" and r2["planned_fix"] == "retune"
+
+    # no block -> None
+    assert parse_reflection("no reflection here") is None
+    assert parse_reflection("") is None
+
+    # render -> parse round-trip
+    payload = {"root_cause": "a", "evidence": "b", "planned_fix": "c"}
+    assert parse_reflection(render_reflection(payload)) == payload
+
+
+def test_harness_captures_reflections_and_bounded_reward():
+    env = FakeEnv()
+    reflect = render_reflection({
+        "root_cause": "kernel failed to compile",
+        "evidence": "SyntaxError: bad",   # references the ACTUAL build error
+        "planned_fix": "fix the kernel signature",
+    })
+    script = [
+        _mk_call("build", {"kernel_src": "__BAD__"}),           # turn0: compile fail
+        reflect + "\n" + _mk_call("test", {"kernel_src": "fixed"}),  # turn1: reflect+fix
+        _mk_call("bench", {"kernel_src": "__FAST__"}) + "\n" + _mk_call("keep", {}),
+        "done",
+    ]
+    ep = AgentHarness(FakeTask(), scripted_teacher(script), env,
+                      max_turns=8, use_kb=False).run()
+
+    assert len(ep.reflections) == 1
+    assert ep.reflections[0]["turn"] == 1
+    assert ep.reflections[0]["root_cause"] == "kernel failed to compile"
+
+    comp = tool_use_reward(ep)
+    assert comp["n_reflections"] == 1
+    # grounded + complete reflection -> full reflection score, but BOUNDED.
+    assert comp["reflection"] == 1.0
+    assert 0.0 <= comp["reflection"] <= 1.0
+    # the reflection term can never dominate the verified kernel outcome.
+    assert W_REFLECT < W_OUTCOME
+    assert W_REFLECT * comp["reflection"] < W_OUTCOME * comp["outcome"]
+
+
+def test_reflection_reward_grounding_and_completeness():
+    trace = [{"name": "build", "valid_name": True, "valid_params": True,
+              "malformed": False, "result": {"ok": False, "error": "SyntaxError: bad"}}]
+    base = {"tool_trace": trace, "best_reward": None, "keep_decisions": [],
+            "success": False}
+
+    grounded = tool_use_reward({**base, "reflections": [
+        {"root_cause": "syntaxerror in signature", "evidence": "SyntaxError: bad",
+         "planned_fix": "fix it"}]})
+    empty = tool_use_reward({**base, "reflections": [
+        {"root_cause": "", "evidence": "", "planned_fix": ""}]})
+    ungrounded = tool_use_reward({**base, "reflections": [
+        {"root_cause": "generic guess", "evidence": "nothing specific",
+         "planned_fix": "try again"}]})
+
+    assert grounded["reflection"] == 1.0
+    assert empty["reflection"] == 0.0
+    # complete-but-ungrounded gets completeness credit only (0.5), not grounding.
+    assert ungrounded["reflection"] == 0.5
+    # no reflections at all -> neutral zero (never negative).
+    assert tool_use_reward(base)["reflection"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# 12. Debugging-trap avoidance
+# --------------------------------------------------------------------------- #
+def test_trap_avoidance_reseeds_after_k_stalls():
+    env = FakeEnv()
+    # never reaches correctness -> every turn is non-improving
+    script = [_mk_call("test", {"kernel_src": "cand __WRONG__"})] * 6
+    ep = AgentHarness(FakeTask(), scripted_teacher(script), env, max_turns=6,
+                      reseed_patience=3, seed_src="seed", use_kb=False).run()
+
+    # After K=3 consecutive stalls the lineage is re-seeded exactly once (the
+    # last turn can't reseed since there is nothing after it).
+    assert len(ep.reseeds) == 1
+    assert ep.reseeds[0]["turn"] == 2
+    assert ep.reseeds[0]["stall"] == 3
+    assert ep.reseeds[0]["reseeded"] is True
+    assert ep.reseeds[0]["seeded_from"] == "task_seed"
+
+    # a fresh 1-shot user prompt was injected to restart the design
+    reseed_prompts = [m for m in ep.messages
+                      if m["role"] == "user" and "abandon" in m["content"]]
+    assert len(reseed_prompts) == 1
+
+
+def test_trap_avoidance_does_not_fire_when_improving():
+    env = FakeEnv()
+    ep = AgentHarness(FakeTask(), scripted_teacher(_win_script()), env,
+                      max_turns=8, reseed_patience=3, use_kb=False).run()
+    assert ep.reseeds == []  # steady progress -> no reseed
+
+
+# --------------------------------------------------------------------------- #
+# 13. Correctness -> optimization phase split
+# --------------------------------------------------------------------------- #
+def test_phase_split_switches_prompt_on_correctness():
+    # phase-specific system prompts are distinct and self-describing
+    p_correct = build_agent_system_prompt(phase=PHASE_CORRECTNESS)
+    p_opt = build_agent_system_prompt(phase=PHASE_OPTIMIZE)
+    assert "PHASE 1" in p_correct and "PHASE 2" in p_opt
+    assert p_correct != p_opt
+
+    env = FakeEnv()
+    ep = AgentHarness(FakeTask(), scripted_teacher(_win_script()), env,
+                      max_turns=8, use_kb=False).run()
+
+    phases = [p["phase"] for p in ep.phase_trace]
+    assert len(ep.phase_trace) == ep.turns_used
+    # correctness first (turns 0-2), optimize after the first correct kernel
+    assert phases[0] == PHASE_CORRECTNESS
+    assert phases[-1] == PHASE_OPTIMIZE
+    assert PHASE_CORRECTNESS in phases and PHASE_OPTIMIZE in phases
+    # the live system prompt was swapped to the phase-2 (optimize) prompt
+    assert "PHASE 2" in ep.messages[0]["content"]
+
+
+def test_phase_stays_correctness_when_never_correct():
+    env = FakeEnv()
+    script = [_mk_call("test", {"kernel_src": "cand __WRONG__"}), "done"]
+    ep = AgentHarness(FakeTask(), scripted_teacher(script), env, max_turns=4,
+                      use_kb=False).run()
+    assert all(p["phase"] == PHASE_CORRECTNESS for p in ep.phase_trace)
+    assert "PHASE 1" in ep.messages[0]["content"]
+
+
+# --------------------------------------------------------------------------- #
+# 14. Inference-time knowledge base (GEAK KB)
+# --------------------------------------------------------------------------- #
+def _write_win(tmp_path):
+    wins_dir = tmp_path / "wins"
+    rec = WinRecord(
+        task_id="gemm_bf16",
+        trajectory=[{"role": "system", "content": "s"}],
+        initial_wall_us=2.0, final_wall_us=1.0, speedup=2.5,
+        final_source="# WINNING_GEMM_KERNEL\nimport triton\n",
+        snr_db=41.0, operation="gemm", arch="gfx942",
+    )
+    write_jsonl(wins_dir / "gemm.jsonl", [rec])
+    return str(wins_dir)
+
+
+def test_kb_retrieval_injects_prior_wins(tmp_path):
+    wins_dir = _write_win(tmp_path)
+    kb = WinsKB.from_dir(wins_dir)
+    hits = kb.retrieve("gemm", "bf16", k=2)
+    assert len(hits) == 1
+    assert "WINNING_GEMM_KERNEL" in hits[0]["final_source"]
+
+    # injected into the opening user prompt of the episode
+    env = FakeEnv()
+    ep = AgentHarness(FakeTask(), scripted_teacher(_win_script()), env,
+                      max_turns=8, kb=kb).run()
+    user0 = ep.messages[1]["content"]
+    assert "Prior winning kernels" in user0
+    assert "WINNING_GEMM_KERNEL" in user0
+
+
+def test_kb_is_noop_when_no_wins(tmp_path):
+    # empty KB (no wins dir) -> retrieval returns nothing, prompt unchanged
+    empty = WinsKB.from_dir(str(tmp_path / "does_not_exist"))
+    assert empty.retrieve("gemm", "bf16", k=3) == []
+    assert WinsKB([]).retrieve("gemm", "bf16", k=3) == []
+
+    env = FakeEnv()
+    ep = AgentHarness(FakeTask(), scripted_teacher(_win_script()), env,
+                      max_turns=8, use_kb=False).run()
+    assert "Prior winning kernels" not in ep.messages[1]["content"]
+
+
+def test_kb_does_not_leak_across_op_families(tmp_path):
+    wins_dir = _write_win(tmp_path)  # a gemm win
+    kb = WinsKB.from_dir(wins_dir)
+    # an attention task should NOT retrieve the gemm win
+    assert kb.retrieve("flash_attention", "bf16", k=2) == []
+
+
+# --------------------------------------------------------------------------- #
+# 15. gen_agentic carries reflections + phase structure
+# --------------------------------------------------------------------------- #
+def _reflect_win_script():
+    reflect = render_reflection({
+        "root_cause": "snr too low",
+        "evidence": "worst SNR 5.0 < 25.0",
+        "planned_fix": "rewrite the reduction",
+    })
+    return [
+        _mk_call("test", {"kernel_src": "cand __WRONG__"}),          # fail
+        reflect + "\n" + _mk_call("test", {"kernel_src": "cand fixed"}),  # reflect+fix
+        _mk_call("bench", {"kernel_src": "cand __FAST__"}) + "\n" + _mk_call("keep", {}),
+        "done",
+    ]
+
+
+def test_gen_agentic_records_carry_cognition():
+    env = FakeEnv()
+    teacher = scripted_teacher(_reflect_win_script())
+    recs = generate_agentic_trajectories(FakeTask(), teacher, env, n=1, max_turns=8)
+    assert len(recs) == 1
+    rec = recs[0]
+
+    # reflections + phase structure captured on the record
+    assert rec.reflections and rec.reflections[0]["root_cause"] == "snr too low"
+    assert {p["phase"] for p in rec.phase_trace} == {PHASE_CORRECTNESS, PHASE_OPTIMIZE}
+
+    # provenance surfaces the cognition + the RL per-turn trace
+    prov = rec.provenance
+    assert prov["n_reflections"] == 1
+    assert set(prov["phases"]) == {PHASE_CORRECTNESS, PHASE_OPTIMIZE}
+    assert len(prov["turn_rewards"]) == len(prov["turn_correct"])
+
+    # the reflection is woven into the trainable messages (SFT teaches cognition)
+    assert any(m["role"] == "assistant" and "<reflect>" in m["content"]
+               for m in rec.messages)
+
+    # still trainer-valid + round-trips losslessly
+    assert all("role" in m and "content" in m for m in rec.messages)
+    assert AgenticTrajectoryRecord.from_dict(rec.to_dict()) == rec

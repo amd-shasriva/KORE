@@ -5,7 +5,9 @@ from __future__ import annotations
 import math
 
 from kore.reward.reward import Observation
-from kore.eval.fastp import fastp, fast_p_curve, geometric_mean_speedup
+from kore.eval.fastp import (
+    fastp, fast_p_curve, geometric_mean_speedup, pass_at_k, fast_p_at_k, mean_ci,
+)
 from kore.eval import bakeoff
 from kore.eval import report
 
@@ -162,3 +164,149 @@ def test_e2e_module_imports():
     assert hasattr(e2e, "e2e_throughput")
     assert hasattr(e2e, "e2e_accuracy")
     assert hasattr(e2e, "Workload")
+
+
+# --- pass@k / fast_p@k (unbiased best-of-N estimators) ----------------------
+
+def test_pass_at_k_matches_closed_form():
+    # n=4, c=2, k=1 -> 0.5 ; k=2 -> 1 - C(2,2)/C(4,2) = 1 - 1/6
+    assert abs(pass_at_k(4, 2, 1) - 0.5) < 1e-12
+    assert abs(pass_at_k(4, 2, 2) - (1.0 - 1.0 / 6.0)) < 1e-12
+    # boundary conditions
+    assert pass_at_k(4, 0, 2) == 0.0          # no successes
+    assert pass_at_k(4, 4, 1) == 1.0          # all succeed
+    assert pass_at_k(4, 3, 2) == 1.0          # n-c < k -> every draw hits
+    assert pass_at_k(0, 0, 1) == 0.0          # degenerate
+    assert pass_at_k(5, 2, 10) == pass_at_k(5, 2, 5)  # k clamped to n
+
+
+def test_pass_at_k_monotonic_in_k():
+    vals = [pass_at_k(8, 3, k) for k in range(1, 9)]
+    for a, b in zip(vals, vals[1:]):
+        assert b >= a - 1e-12
+
+
+def test_fast_p_at_k_requires_correct_and_fast():
+    # 4 samples: 2 correct+2x, 1 correct+slow, 1 wrong. At p=1.0 only the 2x count.
+    is_correct = [True, True, True, False]
+    actual = [1.0, 1.0, 4.0, 1.0]     # third is slower than baseline
+    baseline = [2.0, 2.0, 2.0, 2.0]
+    # c(success at p=1) = 2 -> fast_1@1 = pass_at_k(4, 2, 1) = 0.5
+    assert abs(fast_p_at_k(is_correct, baseline, actual, 1, 1.0) - 0.5) < 1e-12
+    # at p=1.0 with k=2 -> 1 - C(2,2)/C(4,2)
+    assert abs(fast_p_at_k(is_correct, baseline, actual, 2, 1.0) - (1 - 1 / 6)) < 1e-12
+
+
+def test_mean_ci_basic():
+    mc = mean_ci([0.5, 0.5, 0.5])
+    assert abs(mc["mean"] - 0.5) < 1e-12 and mc["ci95"] == 0.0 and mc["n"] == 3
+    mc2 = mean_ci([0.0, 1.0])
+    assert mc2["n"] == 2 and mc2["ci95"] > 0 and mc2["lo"] < mc2["mean"] < mc2["hi"]
+    assert mean_ci([])["n"] == 0
+
+
+# --- torch-eager second fast_p curve ----------------------------------------
+
+def _obs_2x_with_torch(torch_ms: float = 3.0) -> Observation:
+    o = _obs_2x()                       # 2x vs production baseline (baseline_ms=1.0)
+    o.torch_baseline_ms = torch_ms      # torch-eager is torch_ms x the production time
+    return o
+
+
+def test_torch_eager_second_curve():
+    tasks = ["t1", "t2"]
+    dry = {"t1": [_obs_2x_with_torch(3.0)], "t2": [_obs_2x_with_torch(3.0)]}
+    res = bakeoff.evaluate_policy(_benign_policy, tasks, budget=1, dry_run=dry)
+    # speedup vs torch = (torch/prod) * prod_speedup = 3 * 2 = 6
+    assert abs(res["geometric_mean_speedup_vs_torch"] - 6.0) < 1e-6
+    assert res["fast_p_vs_torch"][2.0] == 1.0     # 6 > 2 (unlike production, 2 not > 2)
+    assert res["fast_p"][2.0] == 0.0
+    md = report.format_fastp_report(res)
+    assert "vs torch-eager" in md
+
+
+def test_torch_curve_absent_without_torch_times():
+    tasks = ["t1"]
+    dry = {"t1": [_obs_2x()]}            # no torch_baseline_ms attribute
+    res = bakeoff.evaluate_policy(_benign_policy, tasks, budget=1, dry_run=dry)
+    assert "fast_p_vs_torch" not in res
+
+
+# --- multi-seed fast_p with CI ----------------------------------------------
+
+def test_multiseed_fastp_mean_ci():
+    tasks = ["t1", "t2"]
+
+    def seed_dry(sd):
+        if sd == 0:
+            return {"t1": [_obs_2x()], "t2": [_obs_2x()]}
+        return {"t1": [_obs_2x()], "t2": [_obs_incorrect_slow()]}
+
+    agg = bakeoff.evaluate_policy_multiseed(
+        _benign_policy, tasks, seeds=[0, 1, 2], budget=1, seed_dry_run=seed_dry,
+    )
+    assert agg["num_seeds"] == 3
+    mc = agg["fast_p_mean_ci"][1.0]
+    # seed0 -> 1.0, seeds 1&2 -> 0.5 => mean = (1.0+0.5+0.5)/3
+    assert abs(mc["mean"] - (2.0 / 3.0)) < 1e-9
+    assert mc["ci95"] > 0
+    md = report.render_markdown(agg)
+    assert "multi-seed" in md and "CI95" in md
+
+
+def _obs_incorrect_slow() -> Observation:
+    # correct=False path: SNR below the bf16 gate -> not counted correct
+    return Observation(
+        compiled=True, snr_db=5.0, wall_ms=0.5, baseline_ms=1.0,
+        wall_by_shape={"s": 0.5}, baseline_by_shape={"s": 1.0},
+        snr_by_shape={"s": 5.0}, validation_passed=True, dtype="bf16",
+    )
+
+
+# --- best-of-N pass@k over a parallel eval ----------------------------------
+
+def test_best_of_n_pass_at_k_report():
+    seq = [_obs_2x(), _obs_2x(), _obs_2x()]
+    res = bakeoff.evaluate_policy(_benign_policy, ["t1"], budget=3,
+                                  mode="parallel", dry_run={"t1": seq})
+    pk = bakeoff.best_of_n_pass_at_k(res, ks=[1, 2], ps=[1.0, 2.0])
+    assert pk["pass_at_k"][1] == 1.0            # all 3 correct
+    assert pk["fast_p_at_k"]["k=1,p=1"] == 1.0  # all 3 correct + 2x > 1
+    assert pk["fast_p_at_k"]["k=1,p=2"] == 0.0  # none > 2x
+    md = report.render_markdown(pk)
+    assert "pass@k" in md
+
+
+# --- registry train/held-out split ------------------------------------------
+
+def test_registry_heldout_split_is_partition():
+    from kore.tasks import registry as reg
+    train = {t.task_id for t in reg.train_tasks()}
+    held = {t.task_id for t in reg.heldout_tasks()}
+    allids = set(reg.task_ids())
+    assert train.isdisjoint(held)
+    assert train | held == allids
+    assert len(held) >= 1
+    # >=1 WHOLE operator family reserved (the attention family here)
+    assert "attention" in reg.heldout_families()
+
+
+def test_registry_split_tasks_deterministic_and_stable_heldout():
+    from kore.tasks import registry as reg
+    s0a = reg.split_tasks(0)
+    s0b = reg.split_tasks(0)
+    s7 = reg.split_tasks(7)
+    order0 = [t.task_id for t in s0a["train"]]
+    assert order0 == [t.task_id for t in s0b["train"]]      # deterministic per seed
+    # held-out membership is FIXED regardless of seed (training never sees it)
+    held0 = {t.task_id for t in s0a["heldout"]}
+    held7 = {t.task_id for t in s7["heldout"]}
+    assert held0 == held7 == {t.task_id for t in reg.heldout_tasks()}
+
+
+def test_registry_operator_family_known_ops():
+    from kore.tasks import registry as reg
+    fam = {t.task_id: reg.operator_family(t) for t in reg.all_tasks()}
+    assert fam.get("rmsnorm_aiter") == "rmsnorm"
+    assert fam.get("gemm_bf16") == "gemm"
+    assert fam.get("flash_attn_decode_bf16") == "attention"

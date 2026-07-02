@@ -112,6 +112,63 @@ def test_starpo_all_collapsed_returns_empty():
     assert grpo.starpo_select_high_variance([[1.0, 1.0], [2.0, 2.0]]) == []
 
 
+def test_dynamic_sampling_refill_oversamples_past_degenerate():
+    # DAPO dynamic sampling (item 2): a stream where attempts 1 and 3 are
+    # degenerate (collapsed) groups must be REFILLED, not shrink the batch.
+    stream = [
+        [1.0, 0.0],   # attempt 0: signal -> keep
+        [2.0, 2.0],   # attempt 1: collapsed -> refill
+        [0.0, 1.0],   # attempt 2: signal -> keep
+        [3.0, 3.0],   # attempt 3: collapsed -> refill
+        [ -1.0, 1.0], # attempt 4: signal -> keep (target reached)
+        [5.0, 6.0],   # attempt 5: never rolled
+    ]
+    kept, attempts = grpo.dynamic_sampling_refill(
+        lambda i: stream[i], target_groups=3, min_std=1e-3, max_attempts=10)
+    assert kept == [[1.0, 0.0], [0.0, 1.0], [-1.0, 1.0]]  # exactly 3 non-degenerate
+    assert attempts == 5                                    # 2 collapsed refilled
+    # bounded: if the stream never yields enough signal, stop at max_attempts.
+    kept2, attempts2 = grpo.dynamic_sampling_refill(
+        lambda i: [1.0, 1.0], target_groups=3, min_std=1e-3, max_attempts=4)
+    assert kept2 == [] and attempts2 == 4
+    # dynamic=False keeps every rolled group (legacy fixed batch).
+    kept3, attempts3 = grpo.dynamic_sampling_refill(
+        lambda i: [1.0, 1.0], target_groups=2, min_std=1e-3, max_attempts=10, dynamic=False)
+    assert len(kept3) == 2 and attempts3 == 2
+
+
+def test_episode_turn_rewards_prefers_contract_per_turn_trace():
+    # item 5 / contract (a): when the episode exposes per-turn rewards+correct,
+    # they drive the SAME per-turn Kevin credit as the serial path.
+    class Ep:
+        turn_rewards = [0.0, 1.5, 2.0]
+        turn_correct = [False, True, True]
+        best_reward = 2.0
+        success = True
+
+    tr, tc = grpo._episode_turn_rewards(Ep())
+    assert tr == [0.0, 1.5, 2.0] and tc == [False, True, True]
+    # feeding them through build_kevin_samples == the serial per-turn credit.
+    returns, index = grpo.build_kevin_samples([tr], [tc], gamma=0.4)
+    assert index == [(0, 0), (0, 1), (0, 2)]
+    # gated=[0,1.5,2]: R2=2, R1=1.5+0.4*2=2.3, R0=0+0.4*2.3=0.92
+    assert [round(x, 6) for x in returns] == [0.92, 2.3, 2.0]
+
+    # fallback: no per-turn trace -> single terminal (best_reward, success) sample.
+    class EpBest:
+        best_reward = 1.2
+        success = True
+
+    tr2, tc2 = grpo._episode_turn_rewards(EpBest())
+    assert tr2 == [1.2] and tc2 == [True]
+
+    class EpNone:
+        best_reward = None
+        success = False
+
+    assert grpo._episode_turn_rewards(EpNone()) == ([0.0], [False])
+
+
 # --------------------------------------------------------------------------- #
 # KL k3 estimator
 # --------------------------------------------------------------------------- #
@@ -233,12 +290,20 @@ def test_soup_sweep_order_independent_with_snapshot():
 # --------------------------------------------------------------------------- #
 # micro-batched GRPO backward (Fix 1): grad-equivalence to a single-backward mean
 # --------------------------------------------------------------------------- #
-def test_microbatch_grad_matches_accumulated_mean_loss():
-    """Per-sample (1/n)-scaled backward accumulates the SAME gradient as one
-    backward on the full sample-mean loss, while only one graph is ever alive."""
+def test_microbatch_grad_matches_global_token_mean_clip_higher_loss():
+    """Micro-batched per-sample (1/total_tokens)-scaled backward accumulates the
+    SAME gradient as ONE backward on the full GLOBAL TOKEN-MEAN clip-higher loss.
+
+    Math legitimately changed (items 1 + 3): the objective is now the DAPO
+    clip-higher importance-ratio surrogate ``-min(r*A, clip(r,1-lo,1+hi)*A)`` with
+    ``r = exp(logp - old_logp)`` (turn-level geometric-mean ratio), aggregated as a
+    global token-mean ``sum(n_tok*term)/sum(n_tok)`` — NOT the old ratio-free
+    sample-mean ``-adv*logp``. Sample tuple is now
+    ``(ret, gen_inputs, ref_logp, old_logp, n_tokens, sc_weight)``.
+    """
     import torch
 
-    from kore.policy.grpo import _accumulate_grpo_grads, group_advantages
+    from kore.policy.grpo import _accumulate_grpo_grads, clip_higher_ratio, group_advantages
 
     torch.manual_seed(0)
     w = torch.nn.Parameter(torch.randn(4))
@@ -251,49 +316,101 @@ def test_microbatch_grad_matches_accumulated_mean_loss():
     }
 
     def logp_fn(gen_inputs):
-        # gen_inputs: list of keys; recomputed log-prob = sum of w . coeff terms.
+        # gen_inputs: list of keys; recomputed token-mean log-prob = sum of w.coeff.
         total = None
         for key in gen_inputs:
             lp = (w * coeffs[key]).sum()
             total = lp if total is None else total + lp
         return total
 
-    coef = 0.05
-    # samples = (return, gen_inputs, ref_logp_or_None); a KL anchor on two samples.
+    coef, lo, hi = 0.05, 0.2, 0.28
+    # samples = [ret, gen_inputs, ref_logp, old_logp, n_tokens, sc_weight].
+    # old_logp is set away from lp so the importance ratio is genuinely != 1 (some
+    # samples land in the clipped region), and n_tokens varies (global token-mean).
     kept_groups = [
-        [(1.0, ["a"], torch.tensor(0.2)), (0.0, ["b"], None), (2.0, ["c", "d"], torch.tensor(-0.1))],
-        [(-1.0, ["e"], None), (0.5, ["a", "b"], None)],
+        [[1.0, ["a"], torch.tensor(0.2), torch.tensor(-0.3), 5, None],
+         [0.0, ["b"], None, torch.tensor(0.1), 3, None],
+         [2.0, ["c", "d"], torch.tensor(-0.1), torch.tensor(0.4), 8, None]],
+        [[-1.0, ["e"], None, torch.tensor(-0.2), 2, None],
+         [0.5, ["a", "b"], None, torch.tensor(0.0), 6, None]],
     ]
 
-    def full_mean_loss():
-        terms = []
+    def full_global_token_mean_loss():
+        terms, total_tokens = [], 0
         for samples in kept_groups:
-            advs = group_advantages([s[0] for s in samples])
+            advs = group_advantages([s[0] for s in samples])  # AVSPO tau=0 == plain GRPO
             for adv, s in zip(advs, samples):
                 lp = logp_fn(s[1])
-                term = -adv * lp
+                old_lp = s[3]
+                ratio = torch.exp(lp - old_lp)
+                pg = -clip_higher_ratio(ratio, adv, lo, hi)
+                term = pg
                 if s[2] is not None:
                     d = s[2] - lp
                     term = term + coef * (torch.exp(d) - d - 1.0)
-                terms.append(term)
-        return sum(terms) / len(terms)
+                n_tok = s[4]
+                terms.append(term * n_tok)
+                total_tokens += n_tok
+        return sum(terms) / total_tokens
 
-    # reference: build the whole loss, single backward.
+    # reference: build the whole global token-mean loss, single backward.
     w.grad = None
-    loss = full_mean_loss()
+    loss = full_global_token_mean_loss()
     loss.backward()
     grad_ref = w.grad.clone()
 
-    # micro-batched: per-sample scaled backward, grads accumulated.
+    # micro-batched: per-sample (1/total_tokens)-scaled backward, grads accumulated.
     w.grad = None
     loss_val, n_terms = _accumulate_grpo_grads(
         kept_groups, logp_fn, ref_anchor_coef=coef,
-        sc_grpo_allfail=False, sc_grpo_alpha=0.1)
+        clip_ratio_low=lo, clip_ratio_high=hi, variance_floor=0.0)
     grad_mb = w.grad.clone()
 
     assert n_terms == 5
     assert torch.allclose(grad_ref, grad_mb, atol=1e-6)
     assert abs(loss_val - float(loss.detach())) < 1e-6
+
+
+def test_clip_higher_ratio_tensor_gradient_clips_upper():
+    """The tensor path stays differentiable and ZEROES the gradient in the
+    upper-clip region for a positive advantage (DAPO clip-higher), while flowing
+    the plain PG gradient near ratio==1."""
+    import torch
+
+    from kore.policy.grpo import clip_higher_ratio
+
+    # ratio well above 1+hi with A>0 -> surrogate clipped -> zero gradient.
+    old = torch.tensor(0.0)
+    lp = torch.nn.Parameter(torch.tensor(1.0))          # ratio = exp(1) ~ 2.718 > 1.28
+    ratio = torch.exp(lp - old)
+    surr = clip_higher_ratio(ratio, 1.0, 0.2, 0.28)     # advantage +1
+    (-surr).backward()
+    assert abs(float(lp.grad)) < 1e-7                   # clipped -> no gradient
+
+    # ratio ~ 1 -> surrogate == advantage*ratio -> gradient == -A (plain PG).
+    lp2 = torch.nn.Parameter(torch.tensor(0.0))
+    ratio2 = torch.exp(lp2 - old)                        # == 1.0
+    surr2 = clip_higher_ratio(ratio2, 0.5, 0.2, 0.28)
+    (-surr2).backward()
+    assert abs(float(lp2.grad) - (-0.5)) < 1e-6          # d(-r*A)/dlp = -A*r = -0.5
+
+
+def test_prefilter_bench_indices_selects_topk(monkeypatch):
+    """Value-model bench prefilter wiring (item 6): only the top-k candidates by
+    the reranker are benched. The rerank order is honored and the fallback
+    (reranker unavailable) degrades to the natural order."""
+    from kore.policy import grpo
+
+    cands = ["k0", "k1", "k2", "k3", "k4"]
+    # reranker ranks index 3 best, then 1, then 4, ... (best-first).
+    monkeypatch.setattr(grpo, "_value_rank_order", lambda codes, task: [3, 1, 4, 0, 2])
+    idx = grpo._prefilter_bench_indices(cands, task=None, k=2)
+    assert idx == [1, 3]                    # top-2 by rank (3,1), returned sorted by index
+    # k >= n benches everything.
+    assert grpo._prefilter_bench_indices(cands, task=None, k=10) == [0, 1, 2, 3, 4]
+    # reranker unavailable -> natural order fallback (bench the first k).
+    monkeypatch.setattr(grpo, "_value_rank_order", lambda codes, task: None)
+    assert grpo._prefilter_bench_indices(cands, task=None, k=2) == [0, 1]
 
 
 # --------------------------------------------------------------------------- #

@@ -141,17 +141,21 @@ def cmd_value_train(args) -> int:
 
 def cmd_eval(args) -> int:
     from kore.eval.bakeoff import matched_budget_bakeoff
+    from kore.eval.policies import model_policy, seed_policy
     from kore.eval.report import format_bakeoff_table
     from kore.env.kore_env import KoreEnv
     from kore.tasks.registry import all_tasks, get_task
 
     tasks = [get_task(t) for t in args.tasks.split(",")] if args.tasks else all_tasks()
 
-    def seed_policy(task, feedback=None):
-        return task.seed_source
+    # Always score the seed baseline; when a checkpoint is given, ALSO score the
+    # trained model (so the bake-off reflects what training produced, not the seed).
+    policies = {"seed": seed_policy}
+    if args.checkpoint:
+        policies["kore"] = model_policy(args.checkpoint, backend=args.backend)
 
     res = matched_budget_bakeoff(
-        {"seed": seed_policy}, tasks, budget=args.budget,
+        policies, tasks, budget=args.budget,
         env_factory=(lambda t: KoreEnv(t)) if not args.dry_run else None,
         dry_run=None,
     )
@@ -215,6 +219,9 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("eval")
     e.add_argument("--tasks", default=None)
     e.add_argument("--budget", type=int, default=5)
+    e.add_argument("--checkpoint", default=None,
+                   help="trained checkpoint to score as the 'kore' policy (else seed-only)")
+    e.add_argument("--backend", default="hf")
     e.add_argument("--dry-run", action="store_true", dest="dry_run")
     e.set_defaults(func=cmd_eval)
     return p

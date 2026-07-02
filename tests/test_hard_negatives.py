@@ -237,7 +237,9 @@ def test_build_hard_negative_group_is_dpo_ready():
     for row in rows:
         assert set(row) == {"prompt", "chosen", "rejected"}
         assert row["chosen"] != row["rejected"]
-        assert "FULL_KERNEL" in row["chosen"]
+        # conversational trl.DPOTrainer shape: chosen/rejected are message lists
+        assert isinstance(row["chosen"], list)
+        assert "FULL_KERNEL" in row["chosen"][0]["content"]
 
 
 def test_meets_hard_negative_target():

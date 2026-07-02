@@ -119,5 +119,7 @@ def generate_wins(
             final_source=best_src,
             snr_db=best_snr,
             gpu=task.gpu_target,
+            operation=getattr(task, "operation", None),
+            arch=getattr(task, "gpu_target", None),
         )
     ]

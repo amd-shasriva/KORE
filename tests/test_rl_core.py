@@ -27,6 +27,50 @@ def test_kevin_turn_returns_gates_on_correctness():
     assert abs(r[0] - 1.28) < 1e-9
 
 
+def test_build_kevin_samples_flattens_mxn_with_index_map():
+    # 2 trajectories x 2 turns -> 4 flat per-turn samples with (traj, turn) map.
+    traj_rewards = [[9.0, 2.0], [1.0, 5.0]]
+    traj_correct = [[False, True], [True, True]]
+    returns, index = grpo.build_kevin_samples(traj_rewards, traj_correct, gamma=0.4)
+    assert index == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    # traj0 gated=[0,2]: R0=0+0.4*2=0.8, R1=2 ; traj1 gated=[1,5]: R0=1+0.4*5=3.0, R1=5
+    assert [round(x, 6) for x in returns] == [0.8, 2.0, 3.0, 5.0]
+    # equivalent to concatenating per-trajectory kevin_turn_returns.
+    expect = (grpo.kevin_turn_returns(traj_rewards[0], traj_correct[0], 0.4)
+              + grpo.kevin_turn_returns(traj_rewards[1], traj_correct[1], 0.4))
+    assert [round(x, 6) for x in returns] == [round(x, 6) for x in expect]
+
+
+def test_token_mean_logprob_length_debias():
+    # token-mean divides the summed sequence log-prob by its token count.
+    assert abs(grpo.token_mean_logprob(-6.0, 3) - (-2.0)) < 1e-12
+    # guards against zero-length (div-by-zero) -> treated as 1 token.
+    assert abs(grpo.token_mean_logprob(-4.0, 0) - (-4.0)) < 1e-12
+
+
+def test_mask_cot_turns_drops_thinking_keeps_kernel():
+    turns = [{
+        "response": (
+            "<think>secret reasoning</think>\n"
+            "ANALYSIS:\nverbose chain of thought here\n\n"
+            "PROPOSED_CHANGE:\nbump BLOCK_M to 128\n\n"
+            "FULL_KERNEL:\n```python\n@triton.jit\ndef k():\n    pass\n```"
+        ),
+        "feedback": "RESULT: CORRECT",
+    }]
+    masked = grpo.mask_cot_turns(turns)
+    m = masked[0]
+    # thinking + analysis are dropped; the durable artifact is preserved.
+    assert m["analysis"] == ""
+    assert "response" not in m
+    assert "BLOCK_M" in m["proposed_change"]
+    assert "@triton.jit" in m["kernel"]
+    assert "secret reasoning" not in m.get("kernel", "")
+    # feedback (verifier signal) is retained; original input is untouched.
+    assert m["feedback"] == "RESULT: CORRECT"
+    assert "response" in turns[0]
+
+
 # --------------------------------------------------------------------------- #
 # StarPO-S variance filtering
 # --------------------------------------------------------------------------- #

@@ -51,18 +51,25 @@ def _agentic_rows(data_root: Path) -> list[dict]:
 
 def assemble_multicap_sources(
     data_root, tasks, teacher, config, total: int, *, seed: int = 0,
-    use_hf: bool = False,
+    use_hf: bool = False, kernel_records: Optional[list] = None,
 ) -> dict[str, list]:
     """Build the ``{source_key: [chat rows]}`` dict for build_multicap_sft.
 
     Kernel repair/opt comes from generated repair+wins records; agentic from
     generated trajectories; kernel QA is synthesized from task seeds via the
     teacher; the ~45% general half comes from general_replay.
+
+    ``kernel_records`` overrides the on-disk repair+wins scan with an explicit
+    record list — used by the campaign to build SFT from a leakage-split TRAIN
+    partition only (so held-out op families never leak into training).
     """
     data_root = Path(data_root)
     tasks = list(tasks)
 
-    krecs = _read_dir(data_root, "repair") + _read_dir(data_root, "wins")
+    if kernel_records is None:
+        krecs = _read_dir(data_root, "repair") + _read_dir(data_root, "wins")
+    else:
+        krecs = list(kernel_records)
     kernel_repair_opt = bd.build_sft(krecs) if krecs else []
 
     agentic_rows = _agentic_rows(data_root)
@@ -86,19 +93,27 @@ def assemble_multicap_sources(
 
 def build_multicap_dataset(
     data_root, tasks, teacher, config, total: int, *, seed: int = 0,
-    use_hf: bool = False, verbose: bool = True,
+    use_hf: bool = False, verbose: bool = True, kernel_records: Optional[list] = None,
 ) -> list[dict]:
-    """Assemble + mix the Stage-1 multi-capability SFT dataset."""
+    """Assemble + mix the Stage-1 multi-capability SFT dataset.
+
+    ``kernel_records``, when given, supplies the kernel repair/opt records
+    directly (a leakage-split TRAIN partition) instead of scanning ``data_root``.
+    """
     sources = assemble_multicap_sources(data_root, tasks, teacher, config, total,
-                                        seed=seed, use_hf=use_hf)
+                                        seed=seed, use_hf=use_hf,
+                                        kernel_records=kernel_records)
     return build_multicap_sft(sources, config, total, seed=seed, verbose=verbose)
 
 
-def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None) -> dict:
+def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
+                                  group_records: Optional[list] = None) -> dict:
     """Stage-2 DPO rows = ranked-group prefs + labeled reward-hack hard negatives.
 
     ``correct_source_fn(task)->str`` supplies the trusted 'chosen' kernel for the
-    hard-negative group (defaults to the task's verified seed). Returns
+    hard-negative group (defaults to the task's verified seed). ``group_records``,
+    when given, supplies the ranked-group records directly (a leakage-split TRAIN
+    partition) instead of scanning ``data_root``. Returns
     ``{rows, n_hard, n_total, meets_target}`` where meets_target checks the >=8%
     hard-negative floor.
     """
@@ -106,7 +121,8 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None) -
     tasks = list(tasks)
     correct_source_fn = correct_source_fn or (lambda t: t.seed_source)
 
-    group_records = _read_dir(data_root, "groups")
+    if group_records is None:
+        group_records = _read_dir(data_root, "groups")
     base_rows = bd.build_dpo(group_records) if group_records else []
 
     hard_groups = [build_hard_negative_group(correct_source_fn(t), t) for t in tasks]

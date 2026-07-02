@@ -26,10 +26,14 @@ torch installed.
 from __future__ import annotations
 
 import glob
+import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Callable, Optional
+
+_LOG = logging.getLogger(__name__)
 
 
 # --- Example op builders. Each returns (callable, example_inputs). torch is
@@ -88,15 +92,78 @@ EXAMPLE_OPS: list[dict] = [
 ]
 
 
+def _validate_generated_triton(
+    src: str,
+    pytorch_fn: Callable,
+    example_inputs: tuple,
+    device: str,
+) -> Optional[bool]:
+    """Best-effort execute the captured Inductor module vs the torch reference.
+
+    Returns:
+      * ``True``  — the captured ``call(...)`` ran and matched ``pytorch_fn``.
+      * ``False`` — it ran but produced a numerically wrong result (reject).
+      * ``None``  — execution could not be attempted (no GPU / no ``call`` entry /
+        exec failed). The caller documents this and falls back to trusting
+        Inductor's correct-by-construction lowering.
+    """
+    try:
+        import torch
+    except Exception:
+        return None
+
+    # We can only meaningfully execute Inductor's generated Triton on a CUDA/HIP
+    # device; on a CPU-only box the kernels won't run, so we can't validate.
+    try:
+        if not torch.cuda.is_available():
+            _LOG.info("synthetic: no GPU available; skipping execution validation")
+            return None
+    except Exception:
+        return None
+
+    try:
+        inputs = tuple(
+            t.to(device) if hasattr(t, "to") else t for t in example_inputs
+        )
+        ref = pytorch_fn(*inputs)
+
+        ns: dict = {"__name__": "kore_synthetic_captured"}
+        exec(compile(src, "<inductor_output_code>", "exec"), ns)  # noqa: S102
+        call = ns.get("call")
+        if not callable(call):
+            _LOG.info("synthetic: captured module has no callable `call`; "
+                      "skipping execution validation")
+            return None
+
+        out = call([t for t in inputs])
+        got = out[0] if isinstance(out, (list, tuple)) else out
+        ok = bool(torch.allclose(got.to(ref.dtype), ref, rtol=1e-2, atol=1e-2))
+        if not ok:
+            _LOG.warning("synthetic: captured Triton disagreed with torch reference")
+        return ok
+    except Exception as e:  # noqa: BLE001 - execution is strictly best-effort
+        _LOG.info("synthetic: could not execute captured module (%s); "
+                  "skipping execution validation", e)
+        return None
+
+
 def generate_triton_via_inductor(
     pytorch_fn: Callable,
     example_inputs: tuple,
     device: str = "cuda",
+    validate: bool = True,
 ) -> Optional[str]:
     """Compile ``pytorch_fn`` with TorchInductor and return generated Triton.
 
-    Returns the captured ``output_code.py`` source (containing ``@triton.jit``
-    kernels) or ``None`` if capture failed / no Triton was produced.
+    Returns the captured ``output_code.py`` source or ``None`` if capture failed,
+    no ``@triton.jit`` kernel was produced, or (when it could be executed) the
+    captured kernel disagreed with the torch reference.
+
+    Acceptance requires an actual ``@triton.jit`` kernel in the source. When
+    ``validate`` is set we additionally *best-effort* execute the captured module
+    against ``pytorch_fn``; if execution can't run (CPU-only box / no ``call``
+    entry) we log and keep the source, trusting Inductor's correct-by-
+    construction lowering (documented in ``_validate_generated_triton``).
     """
     try:
         import torch
@@ -131,8 +198,16 @@ def generate_triton_via_inductor(
                 src = Path(path).read_text()
             except Exception:
                 continue
-            if "triton" in src or "@triton.jit" in src:
-                return src
+            # Require a real Triton kernel, not just a mention of the word.
+            if not re.search(r"@triton\.jit", src):
+                continue
+            if validate:
+                verdict = _validate_generated_triton(
+                    src, pytorch_fn, example_inputs, device
+                )
+                if verdict is False:
+                    continue  # ran but numerically wrong -> reject this capture
+            return src
         return None
     except Exception:
         return None

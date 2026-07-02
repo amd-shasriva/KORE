@@ -12,6 +12,7 @@ Import-guarded like the other trainers.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from kore.policy.configs import SFTConfig
 from kore.policy import sft
@@ -47,7 +48,11 @@ def filter_correct_and_faster(
 
 
 def train(config: SFTConfig) -> dict:
-    """RFT is SFT on verified-correct-and-faster self-generated samples."""
-    result = sft.train(config)
-    result["stage"] = "rft"
-    return result
+    """RFT is SFT on verified-correct-and-faster self-generated samples.
+
+    Delegates to :func:`sft.train_sft` (the real SFT entrypoint) using
+    ``config.dataset_path`` as the already-filtered chat corpus, then tags the
+    stage for the caller.
+    """
+    output_dir = sft.train_sft(config, Path(config.dataset_path))
+    return {"stage": "rft", "output_dir": output_dir}

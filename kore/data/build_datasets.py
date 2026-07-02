@@ -8,8 +8,8 @@
 
 Plus corpus hygiene:
   - ``dedup_by_source_hash``: drop records with a duplicate representative source.
-  - ``leakage_split``: split by a grouping key (default operation+shape) so the
-    same op/shape never appears in more than one of train/val/test.
+  - ``leakage_split``: split by a grouping key (default operation-family+arch) so
+    the same op family never appears in more than one of train/val/test.
 
 Everything here is PURE (no GPU / teacher) and unit-testable.
 """
@@ -72,11 +72,19 @@ def build_sft(records: Iterable[Any]) -> list[dict]:
 
 # --- DPO ---
 def build_dpo(records: Iterable[Any]) -> list[dict]:
-    """Preference rows from ranked groups.
+    """Preference rows from ranked groups, in trl's *conversational* DPO shape.
 
     Each ``[chosen_idx, rejected_idx]`` preference becomes a DPO row whose
-    ``chosen``/``rejected`` are the candidate sources wrapped as assistant
-    completions, sharing a single ``prompt`` chat context."""
+    ``prompt`` is a chat-message list and whose ``chosen``/``rejected`` are each a
+    single-message assistant completion list wrapping the candidate source under
+    the FULL_KERNEL contract — i.e. ``trl.DPOTrainer``'s conversational schema:
+
+        {"prompt": [ ...chat... ],
+         "chosen":   [{"role": "assistant", "content": "FULL_KERNEL:..."}],
+         "rejected": [{"role": "assistant", "content": "FULL_KERNEL:..."}]}
+
+    Degenerate pairs where the chosen and rejected sources are identical are
+    skipped (no learnable preference signal)."""
     out: list[dict] = []
     for raw in records:
         rec = _as_record(raw)
@@ -90,11 +98,19 @@ def build_dpo(records: Iterable[Any]) -> list[dict]:
             ci, ri = pair
             if not (0 <= ci < len(cands) and 0 <= ri < len(cands)):
                 continue
+            chosen_src = cands[ci].get("source", "")
+            rejected_src = cands[ri].get("source", "")
+            if chosen_src == rejected_src:
+                continue  # degenerate: identical sources carry no preference
             out.append(
                 {
                     "prompt": prompt,
-                    "chosen": _wrap_full_kernel(cands[ci].get("source", "")),
-                    "rejected": _wrap_full_kernel(cands[ri].get("source", "")),
+                    "chosen": [
+                        {"role": "assistant", "content": _wrap_full_kernel(chosen_src)}
+                    ],
+                    "rejected": [
+                        {"role": "assistant", "content": _wrap_full_kernel(rejected_src)}
+                    ],
                 }
             )
     return out
@@ -164,22 +180,23 @@ def dedup_by_source_hash(records: Iterable[Any]) -> list:
 
 
 # --- hygiene: leakage-aware split ---
-def _op_from_task_id(task_id: str) -> str:
-    return (task_id or "").split("_")[0] if task_id else ""
-
-
-def _group_key(rec: Any, by: tuple) -> str:
+def _group_key(rec: Any, by: tuple = ("operation", "arch")) -> str:
     """Build a grouping key from ``by`` fields, tolerating missing fields.
 
-    Fields are looked up on the record's dict; ``operation`` falls back to the
-    leading token of ``task_id`` so gemm_bf16 -> 'gemm'."""
+    Fields are looked up on the record's dict. The ``operation`` field is
+    normalized to its op *family* via ``mutate.infer_family`` (so gemm_bf16 and
+    gemm_fp8_a8w8 group together as 'gemm'), falling back to ``task_id`` when the
+    provenance field is absent. This replaces the brittle leading-``_`` split so
+    the same op family never leaks across train/val/test."""
+    from kore.data.mutate import infer_family
+
     rec = _as_record(rec)
     d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
     parts: list[str] = []
     for field in by:
         val = d.get(field)
-        if val is None and field == "operation":
-            val = _op_from_task_id(d.get("task_id", ""))
+        if field == "operation":
+            val = infer_family(val or d.get("task_id", ""))
         parts.append(str(val) if val is not None else "")
     key = "|".join(parts)
     return key or str(d.get("task_id", ""))
@@ -187,7 +204,7 @@ def _group_key(rec: Any, by: tuple) -> str:
 
 def leakage_split(
     records: Iterable[Any],
-    by: tuple = ("operation", "shape"),
+    by: tuple = ("operation", "arch"),
     ratios: tuple = (0.8, 0.1, 0.1),
     seed: int = 0,
 ) -> tuple[list, list, list]:

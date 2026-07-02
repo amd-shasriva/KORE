@@ -49,8 +49,12 @@ def make_repair_record(
     broken_obs,
 ) -> Optional[RepairRecord]:
     """Given a known-broken kernel + its observation, get a teacher repair and
-    emit a RepairRecord (whether or not the fix ended up correct — child_snr_db
-    records the outcome). Returns None if the teacher produced no kernel."""
+    emit a RepairRecord ONLY when the repair actually validates.
+
+    The broken side must genuinely fail (``failure_class`` is not None) and the
+    teacher's fix must pass full validation, otherwise we would mislabel a still-
+    broken kernel as a correct SFT target. Returns None if the teacher produced
+    no kernel, the fix crashed, or the fix did not pass validation."""
     failure_class = _failure_class(broken_obs)
     if failure_class is None:
         return None
@@ -68,12 +72,16 @@ def make_repair_record(
     if not fixed_src:
         return None
 
-    child_snr = None
     try:
         fixed_obs = env.step(fixed_src, full_validation=True, multi_shape=True)
-        child_snr = fixed_obs.snr_db
     except Exception:
         fixed_obs = None
+
+    # Only accept the repair as an SFT target if it genuinely passes validation;
+    # otherwise it is a mislabeled still-broken kernel.
+    if fixed_obs is None or not getattr(fixed_obs, "validation_passed", False):
+        return None
+    child_snr = fixed_obs.snr_db
 
     messages = messages + [{"role": "assistant", "content": response}]
     return RepairRecord(
@@ -84,6 +92,8 @@ def make_repair_record(
         messages=messages,
         child_snr_db=child_snr,
         gpu=task.gpu_target,
+        operation=getattr(task, "operation", None),
+        arch=getattr(task, "gpu_target", None),
     )
 
 

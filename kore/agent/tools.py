@@ -22,6 +22,7 @@ Nothing here imports torch/vllm; the only GPU contact is the injected env.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -174,6 +175,7 @@ class ToolExecutor:
         self.task = task
         self.dtype = getattr(task, "dtype", "fp32")
 
+        self.seed_src: Optional[str] = seed_src
         self.committed_src: Optional[str] = seed_src
         self.committed_reward: Optional[float] = None
         self.candidate_src: Optional[str] = None
@@ -191,6 +193,26 @@ class ToolExecutor:
     # -- helpers ---------------------------------------------------------- #
     def set_turn(self, turn: int) -> None:
         self._turn = turn
+
+    def reseed_lineage(self) -> dict:
+        """Abandon the current candidate lineage and roll back to the seed.
+
+        Debugging-trap escape (P1): after too many non-improving turns the
+        harness discards the dead candidate/committed lineage and restarts from
+        the task's seed kernel. The best *correct* kernel found so far is
+        PRESERVED (``best_src``/``best_reward`` are untouched) so a reset can
+        never lose real progress — it only stops the policy from patching a
+        kernel that is going nowhere.
+        """
+        self.committed_src = self.seed_src
+        self.committed_reward = None
+        self.candidate_src = None
+        self.candidate_reward = None
+        self.candidate_correct = False
+        return {"ok": True, "reseeded": True,
+                "seeded_from": "task_seed" if self.seed_src else "empty",
+                "preserved_best_reward": _round(
+                    self.best_reward if self.best_reward != float("-inf") else None)}
 
     def _obs_dict(self, obs) -> dict:
         return {
@@ -352,6 +374,7 @@ W_PARAM = 0.15       # +valid params / schema
 W_FORMAT = 0.10      # +well-formed tool-call syntax
 W_OUTCOME = 1.00     # +best-kernel reward (correctness first, then speed)
 W_KEEP_REVERT = 0.20  # +correct keep/revert decisions
+W_REFLECT = 0.10     # +reflection quality (BOUNDED so it can't dominate outcome)
 P_MALFORMED = 0.30   # -malformed call fraction
 P_FAILED = 0.10      # -failed (build/test) call fraction
 
@@ -380,6 +403,7 @@ def tool_use_reward(episode: Any) -> dict:
     trace = list(_episode_field(episode, "tool_trace", []) or [])
     best_reward = _episode_field(episode, "best_reward", None)
     keep_decisions = list(_episode_field(episode, "keep_decisions", []) or [])
+    reflections = list(_episode_field(episode, "reflections", []) or [])
     success = bool(_episode_field(episode, "success", False))
 
     n = len(trace)
@@ -399,6 +423,7 @@ def tool_use_reward(episode: Any) -> dict:
         and best_reward != float("-inf") else 0.0
 
     kr_score = _keep_revert_score(keep_decisions)
+    reflect_score = _reflection_score(reflections, trace)
 
     malformed_pen = -P_MALFORMED * (n_malformed / n) if n else 0.0
     failed_pen = -P_FAILED * (n_failed / n) if n else 0.0
@@ -410,6 +435,7 @@ def tool_use_reward(episode: Any) -> dict:
         + W_FORMAT * format_score
         + W_OUTCOME * outcome
         + W_KEEP_REVERT * kr_score
+        + W_REFLECT * reflect_score
         + penalty
     )
 
@@ -419,12 +445,14 @@ def tool_use_reward(episode: Any) -> dict:
         "format": round(format_score, 4),
         "outcome": round(outcome, 4),
         "keep_revert": round(kr_score, 4),
+        "reflection": round(reflect_score, 4),
         "penalty": round(penalty, 4),
         "total": round(total, 4),
         "n_calls": n,
         "n_malformed": n_malformed,
         "n_bad_param": n_bad_param,
         "n_failed": n_failed,
+        "n_reflections": len(reflections),
         "success": success,
     }
 
@@ -436,6 +464,58 @@ def _is_failed_call(t: dict) -> bool:
         return False
     res = t.get("result") or {}
     return res.get("ok") is False
+
+
+_REFLECT_FIELDS = ("root_cause", "evidence", "planned_fix")
+
+
+def _reflection_score(reflections: list[dict], trace: list[dict]) -> float:
+    """Bounded [0,1] quality of the episode's reflections (GEAK/Reflexion).
+
+    Each reflection scores on two halves: (a) COMPLETENESS — the fraction of
+    ``root_cause``/``evidence``/``planned_fix`` fields that are non-empty; and
+    (b) GROUNDING — whether it references the ACTUAL error text surfaced by a
+    failed tool call this episode (not a generic guess). Averaged over
+    reflections; 0.0 when there were none. Pure and bounded so, at
+    ``W_REFLECT``, it can never dominate the verified kernel reward.
+    """
+    if not reflections:
+        return 0.0
+    error_texts = _episode_error_texts(trace)
+    scores: list[float] = []
+    for r in reflections:
+        if not isinstance(r, dict):
+            continue
+        present = [str(r.get(k, "") or "").strip() for k in _REFLECT_FIELDS]
+        completeness = sum(1 for p in present if p) / len(_REFLECT_FIELDS)
+        grounded = 1.0 if _references_error(" ".join(present), error_texts) else 0.0
+        scores.append(0.5 * completeness + 0.5 * grounded)
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def _episode_error_texts(trace: list[dict]) -> list[str]:
+    out: list[str] = []
+    for t in trace:
+        res = t.get("result") if isinstance(t, dict) else None
+        if isinstance(res, dict):
+            err = res.get("error")
+            if isinstance(err, str) and err.strip():
+                out.append(err.lower())
+    return out
+
+
+def _references_error(text: str, error_texts: list[str]) -> bool:
+    """True if ``text`` shares a meaningful token with any observed error."""
+    if not text or not error_texts:
+        return False
+    tokens = {w for w in re.findall(r"[a-z0-9_]{4,}", text.lower())}
+    if not tokens:
+        return False
+    for err in error_texts:
+        err_tokens = set(re.findall(r"[a-z0-9_]{4,}", err))
+        if tokens & err_tokens:
+            return True
+    return False
 
 
 def _keep_revert_score(decisions: list[dict]) -> float:

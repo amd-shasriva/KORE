@@ -357,6 +357,83 @@ def break_block_m_to_64(src: str) -> tuple[str, FailureHint]:
     return src, "snr_fail"
 
 
+# --------------------------------------------------------------------------- #
+# OPTIMIZATION operators (for the evolutionary datagen loop, evolve.py).
+#
+# Unlike the breakers above, these produce a plausibly-BETTER variant of a
+# working kernel — the moves an autotuner/FunSearch loop would try (tile change,
+# vectorization width, pipeline depth, num_warps sweep). They are exposed via the
+# operator registry so the D-MAB bandit can *learn* which move to apply next
+# (reward = verified improvement) instead of choosing uniformly. Each guarantees
+# a changed source (falling back to an explicit ``# TUNE:`` directive comment).
+# --------------------------------------------------------------------------- #
+_TILE_NEXT = {32: 64, 48: 64, 64: 128, 96: 128, 128: 256, 256: 128}
+
+
+def optimize_tile_change(src: str, rng: "random.Random | None" = None) -> tuple[str, FailureHint]:
+    """Move BLOCK_M to a different valid (64-multiple) tile size."""
+    def bump(m):
+        v = int(m.group(2))
+        nv = _TILE_NEXT.get(v, 128 if v >= 256 else v * 2)
+        return m.group(1) + str(nv)
+
+    # tuple form: `BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M = 128, 128, 64, 8`
+    out, ok = _first_sub(src, r"(BLOCK_M\s*,[^\n=]*=\s*)(\d+)", bump)
+    if ok:
+        return out, "optimize"
+    out, ok = _first_sub(src, r"(BLOCK_M\s*(?::\s*tl\.constexpr\s*)?=\s*)(\d+)", bump)
+    if ok:
+        return out, "optimize"
+    out, ok = _first_sub(src, r"\b(BLOCK_\w+\s*=\s*)(\d+)", bump)
+    if ok:
+        return out, "optimize"
+    return src + "\n# TUNE: BLOCK_M=256\n", "optimize"
+
+
+def optimize_vectorize(src: str, rng: "random.Random | None" = None) -> tuple[str, FailureHint]:
+    """Widen the contiguous (K) vectorization tile to improve load coalescing."""
+    def bump(m):
+        v = int(m.group(2))
+        return m.group(1) + str(v * 2 if v < 256 else v)
+
+    out, ok = _first_sub(src, r"(BLOCK_K\s*(?::\s*tl\.constexpr\s*)?=\s*)(\d+)", bump)
+    if ok:
+        return out, "optimize"
+    # tuple form: bump the third (BLOCK_K) position
+    out, ok = _first_sub(
+        src,
+        r"(BLOCK_M\s*,\s*BLOCK_N\s*,\s*BLOCK_K[^\n=]*=\s*\d+\s*,\s*\d+\s*,\s*)(\d+)",
+        bump,
+    )
+    if ok:
+        return out, "optimize"
+    return src + "\n# TUNE: vectorize (BLOCK_K *= 2)\n", "optimize"
+
+
+def optimize_pipeline_depth(src: str, rng: "random.Random | None" = None) -> tuple[str, FailureHint]:
+    """Deepen software pipelining (num_stages += 1) for more LDS double-buffering."""
+    out, ok = _first_sub(
+        src, r"(num_stages\s*=\s*)(\d+)", lambda m: m.group(1) + str(int(m.group(2)) + 1)
+    )
+    if ok:
+        return out, "optimize"
+    return src + "\n# TUNE: num_stages += 1\n", "optimize"
+
+
+def optimize_num_warps(src: str, rng: "random.Random | None" = None) -> tuple[str, FailureHint]:
+    """Sweep num_warps within the gfx942-preferred {4, 8} set."""
+    rng = rng or random.Random()
+
+    def flip(m):
+        v = int(m.group(2))
+        return m.group(1) + str(8 if v != 8 else 4)
+
+    out, ok = _first_sub(src, r"(num_warps\s*=\s*)(\d+)", flip)
+    if ok:
+        return out, "optimize"
+    return src + f"\n# TUNE: num_warps={rng.choice([4, 8])}\n", "optimize"
+
+
 # Map each op family to the mutators that plausibly break its kernels. "generic"
 # holds mutators that apply to essentially any Triton kernel.
 OP_FAMILY_MUTATORS: dict[str, list] = {
@@ -496,3 +573,65 @@ def apply_random_breakage(
     if broken != src:
         return broken, hint, "break_block_size"
     return src + "\n# BROKEN\n", "compile_fail", "fallback"
+
+
+# --------------------------------------------------------------------------- #
+# Operator registry (name -> op) for the D-MAB bandit in evolve.py
+#
+# A single uniform ABI so the bandit can select any operator by name:
+#     op(src, rng=None) -> (new_src, hint)
+# where ``hint`` is "optimize" for the optimization operators and one of
+# {"compile_fail", "snr_fail"} for the breakers. Breakers (fn(src)->(src,hint))
+# are adapted to the (src, rng) ABI so both kinds live in one registry.
+# --------------------------------------------------------------------------- #
+OPTIMIZATION_OPERATORS: dict[str, "callable"] = {
+    "tile_change": optimize_tile_change,
+    "vectorize": optimize_vectorize,
+    "pipeline_depth": optimize_pipeline_depth,
+    "num_warps_sweep": optimize_num_warps,
+}
+
+# every distinct breaker exposed by op-family lists, keyed by function name.
+_ALL_BREAKERS = (
+    break_block_size, break_accumulator_dtype, break_index_offset,
+    break_reduction_axis, break_mask, break_eps, break_dtype_cast, break_scale,
+    break_missing_mask, break_fp8_variant, break_k_multiple_of_32,
+    break_transpose_operand, break_missing_barrier, break_block_m_to_64,
+)
+BREAKAGE_OPERATORS: dict[str, "callable"] = {fn.__name__: fn for fn in _ALL_BREAKERS}
+
+
+def _as_operator(fn):
+    """Adapt any mutator to the ``op(src, rng=None) -> (new_src, hint)`` ABI."""
+    def op(src: str, rng: "random.Random | None" = None) -> tuple[str, FailureHint]:
+        try:
+            return fn(src, rng)
+        except TypeError:
+            return fn(src)
+    op.__name__ = getattr(fn, "__name__", "op")
+    op.__doc__ = getattr(fn, "__doc__", None)
+    return op
+
+
+# The unified registry the bandit selects from.
+OPERATOR_REGISTRY: dict[str, "callable"] = {
+    name: _as_operator(fn)
+    for name, fn in {**OPTIMIZATION_OPERATORS, **BREAKAGE_OPERATORS}.items()
+}
+
+
+def list_operators(kind: str = "all") -> list[str]:
+    """Operator names by ``kind`` in {"all", "optimize", "break"}."""
+    if kind == "optimize":
+        return list(OPTIMIZATION_OPERATORS)
+    if kind == "break":
+        return list(BREAKAGE_OPERATORS)
+    return list(OPERATOR_REGISTRY)
+
+
+def apply_operator(name: str, src: str, rng: "random.Random | None" = None) -> tuple[str, FailureHint]:
+    """Apply the named operator to ``src``; returns ``(new_src, hint)``."""
+    op = OPERATOR_REGISTRY.get(name)
+    if op is None:
+        raise KeyError(f"unknown operator: {name!r}")
+    return op(src, rng)

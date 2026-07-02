@@ -31,6 +31,10 @@ _FENCED_JSON_RE = re.compile(
     r"```(?:json|tool_call|tool)?\s*\n?(\{.*?\})\s*```", re.DOTALL
 )
 _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+_REFLECT_RE = re.compile(r"<reflect>\s*(.*?)\s*</reflect>", re.DOTALL | re.IGNORECASE)
+
+# The three fields of a structured (GEAK/Reflexion) reflection turn.
+REFLECT_FIELDS = ("root_cause", "evidence", "planned_fix")
 
 
 # --------------------------------------------------------------------------- #
@@ -124,6 +128,62 @@ def parse_tool_calls(text: str) -> list[dict]:
     return calls
 
 
+# --------------------------------------------------------------------------- #
+# Structured reflection (GEAK/Reflexion) — a parsed block, NOT a tool primitive
+# --------------------------------------------------------------------------- #
+def parse_reflection(text: str) -> Optional[dict]:
+    """Extract a structured ``<reflect>{json}</reflect>`` block from ``text``.
+
+    A reflection is the policy's post-failure introspection with three fields:
+    ``root_cause`` (why the last attempt failed), ``evidence`` (the concrete
+    signal it read — an error line, SNR, counter) and ``planned_fix`` (the next
+    concrete change). Returns a dict with all three keys as strings (missing
+    ones default to ``""``) or ``None`` when no block is present. Never raises.
+
+    Tolerant of a bare-object form (``{"root_cause": ...}`` with no wrapper) and
+    of plain-text ``key: value`` lines inside the block when the JSON is broken.
+    """
+    if not text:
+        return None
+    m = _REFLECT_RE.search(text)
+    body = m.group(1).strip() if m else None
+    if body is None:
+        # Bare-object fallback: a top-level JSON object carrying reflect fields.
+        obj = _try_json(text.strip())
+        if isinstance(obj, dict) and any(k in obj for k in REFLECT_FIELDS):
+            return _norm_reflection(obj)
+        return None
+    obj = _try_json(body)
+    if isinstance(obj, dict):
+        return _norm_reflection(obj)
+    parsed = _parse_reflection_lines(body)
+    return parsed if parsed else _norm_reflection({"root_cause": body})
+
+
+def _norm_reflection(obj: dict) -> dict:
+    out = {k: str(obj.get(k, "") or "").strip() for k in REFLECT_FIELDS}
+    return out
+
+
+def _parse_reflection_lines(body: str) -> Optional[dict]:
+    """Parse ``root_cause: ...`` style lines when the block isn't valid JSON."""
+    found: dict = {}
+    for line in body.splitlines():
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip().lower().replace(" ", "_")
+        if key in REFLECT_FIELDS:
+            found[key] = val.strip()
+    return _norm_reflection(found) if found else None
+
+
+def render_reflection(reflection: dict) -> str:
+    """Render a reflection dict as a ``<reflect>{json}</reflect>`` block."""
+    payload = {k: str(reflection.get(k, "") or "") for k in REFLECT_FIELDS}
+    return f"<reflect>\n{json.dumps(payload)}\n</reflect>"
+
+
 def _looks_like_call(obj: Any) -> bool:
     return isinstance(obj, dict) and (
         "name" in obj or "tool" in obj or "tool_name" in obj or "function" in obj
@@ -211,11 +271,53 @@ You may call these functions. To call one, emit a Hermes tool call:
 Tool results are returned to you as messages with role "tool". Make ONE focused \
 change per turn, verify it, then keep (commit) or revert (discard) it."""
 
+_REFLECT_GUIDE = """\
+After ANY failed build/test/bench, first REFLECT before your next tool call. \
+Emit a structured reflection block:
+<reflect>
+{"root_cause": <why it failed>, "evidence": <the exact error/SNR/counter you \
+read>, "planned_fix": <the concrete change you will make next>}
+</reflect>
+A good reflection names the ACTUAL error you observed (not a generic guess) and \
+a specific fix. Do not keep patching a dead kernel — if two or three attempts \
+do not improve, abandon that lineage and re-seed a fresh design from the task."""
 
-def build_agent_system_prompt(tools: Optional[list[dict]] = None) -> str:
-    """Hermes-style system prompt advertising the tool schemas as JSON."""
+# Phase-specific guidance (correctness-first, then optimize-for-speed).
+_PHASE_CORRECTNESS = """\
+CURRENT PHASE — PHASE 1 (CORRECTNESS). Your ONLY goal right now is a NUMERICALLY \
+CORRECT kernel that passes the SNR gate on every validation shape. Ignore speed \
+for now; use build/test to reach correctness, then keep it."""
+_PHASE_OPTIMIZE = """\
+CURRENT PHASE — PHASE 2 (OPTIMIZE). You already have a correct kernel. Now \
+MAXIMIZE the worst-shape speedup vs the production baseline while STAYING \
+correct. Use bench/pmc to find bottlenecks; keep only correct improvements and \
+revert any regression."""
+
+_PHASE_PROMPTS = {
+    "correctness": _PHASE_CORRECTNESS,
+    "phase1": _PHASE_CORRECTNESS,
+    "optimize": _PHASE_OPTIMIZE,
+    "optimization": _PHASE_OPTIMIZE,
+    "phase2": _PHASE_OPTIMIZE,
+}
+
+
+def build_agent_system_prompt(
+    tools: Optional[list[dict]] = None, phase: Optional[str] = None
+) -> str:
+    """Hermes-style system prompt advertising the tool schemas as JSON.
+
+    ``phase`` selects the correctness->optimization sub-phase guidance
+    ("correctness" | "optimize"); when ``None`` a neutral both-phases prompt is
+    produced. The reflection protocol is always advertised so the policy knows
+    how to introspect after a failure.
+    """
     tools = tools or TOOL_SCHEMAS
-    lines = [_HERMES_HEADER, "", "<tools>"]
+    lines = [_HERMES_HEADER, "", _REFLECT_GUIDE]
+    phase_block = _PHASE_PROMPTS.get((phase or "").lower())
+    if phase_block:
+        lines.extend(["", phase_block])
+    lines.extend(["", "<tools>"])
     for t in tools:
         lines.append(json.dumps(t))
     lines.append("</tools>")

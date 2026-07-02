@@ -147,26 +147,28 @@ class GRPOConfig:
     gamma: float = 0.4                     # discounted-sum look-ahead across turns
     per_turn_as_sample: bool = True
 
-    # --- GRPO objective ---
+    # --- GRPO objective (DAPO clip-higher + importance ratio + multi-epoch) ---
     kl_coef: float = 0.0                   # Kevin: KL = 0
     clip_ratio_low: float = 0.2            # Clip-Higher lower bound (1 - 0.2)
     clip_ratio_high: float = 0.28          # Clip-Higher upper bound (1 + 0.28)
     adv_eps: float = 1e-6                  # group-normalization epsilon
+    ppo_epochs: int = 2                    # minibatch passes per rollout batch (reuse old_logp)
 
-    # --- Optimization ---
-    learning_rate: float = 1e-6
+    # --- Optimization (Kevin recipe) ---
+    learning_rate: float = 2e-6            # Kevin: 2e-6
     lr_scheduler_type: str = "constant"
     warmup_ratio: float = 0.0
+    max_grad_norm: float = 0.5             # Kevin: grad-norm clip 0.5
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     total_steps: int = 500
     max_prompt_length: int = 16384
-    max_response_length: int = 8192
+    max_response_length: int = 16384       # Kevin: 16384
     bf16: bool = True
     gradient_checkpointing: bool = True
 
-    # --- Rollout sampling ---
-    temperature: float = 1.0
+    # --- Rollout sampling (Kevin recipe) ---
+    temperature: float = 0.9               # Kevin: 0.9
     top_p: float = 1.0
 
     # --- Serving / parallelism ---
@@ -179,9 +181,22 @@ class GRPOConfig:
     # --- Anti-collapse ladder (see anticollapse.py) ---
     rc_grpo: bool = False                  # reward-conditioned rollouts (variance floor)
     rc_p_high: float = 0.5                 # fraction of <|high_reward|> tokens
-    gtpo_turn_credit: bool = False         # turn-level credit assignment
-    sc_grpo_allfail: bool = False          # all-fail diversity bonus
-    sc_grpo_alpha: float = 0.1
+    # AVSPO virtual-sample injection: when a group's reward std < variance_floor,
+    # inject ``avspo_virtual_k`` virtual samples into the NORMALIZATION stats only
+    # (no PG term) to guarantee a variance floor. 0.0 disables (pure GRPO).
+    variance_floor: float = 0.0            # AVSPO tau trigger (0 disables)
+    avspo_virtual_k: int = 2               # #virtual samples injected at +/- tau
+    # Real SC-GRPO: for partial-solve groups, re-score other turns' tokens with a
+    # correct kernel as an in-context demo (teacher) and weight the per-token PG
+    # term by per-token KL(teacher||student). One extra forward per weighted sample.
+    sc_grpo: bool = False
+    sc_grpo_w_min: float = 0.5             # SC-GRPO multiplicative weight floor
+    sc_grpo_w_max: float = 2.0             # SC-GRPO multiplicative weight ceiling
+    # GTPO code-similarity shaping: for ALL-FAIL groups, give a graded partial
+    # reward = normalized code shingle-cosine similarity to the nearest correct
+    # kernel (or the seed reference), so an all-fail group still carries signal.
+    gtpo_codesim: bool = False
+    gtpo_codesim_scale: float = 0.3        # magnitude of the partial reward in [0, scale]
 
     # --- Kevin multi-turn credit (best-kernel scoring + CoT masking) ---
     kevin_best_kernel_scoring: bool = True  # trajectory value = best correct kernel
@@ -191,15 +206,25 @@ class GRPOConfig:
     ref_checkpoint: Optional[str] = None    # defaults to model_id (the SFT ckpt)
     ref_anchor_coef: float = 1e-3           # KL-to-reference coef (chat/code retention)
 
-    # --- StarPO-S stabilization (Echo-Trap mitigation) ---
+    # --- StarPO-S stabilization + DAPO dynamic sampling (oversample-and-refill) ---
     starpo_s: bool = True
     starpo_min_std: float = 1e-3            # drop zero-variance (collapsed) groups
     starpo_keep_frac: float = 0.75          # keep top-variance fraction of groups
+    dynamic_sampling: bool = True           # DAPO: refill non-degenerate groups (not drop-and-shrink)
+    target_groups: Optional[int] = None     # #non-degenerate groups to collect (default: tasks_per_step)
+    max_sampling_attempts: Optional[int] = None  # bound on oversampling (default: 3x target_groups)
 
     # --- Measurement efficiency: value-model bench prefilter ---
     value_prefilter: bool = False
+    num_candidates_per_turn: int = 8        # generate N per turn, bench only the top-k
     value_prefilter_k: int = 4              # bench only top-k candidates by value model
     value_model_path: Optional[str] = None
+
+    # --- Correctness -> latency curriculum (P1) ---
+    # "correctness": mask the speed term (train correctness only); "latency":
+    # full correctness+speed reward; "all": no masking. The campaign runs GRPO
+    # twice (correctness phase, then latency phase) by flipping this flag.
+    reward_phase: str = "all"
 
     # --- Agentic tool-use RL (ToolRL reward shaping) ---
     agentic: bool = False                   # rollouts drive build/test/bench/pmc tools

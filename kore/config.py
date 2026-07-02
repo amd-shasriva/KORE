@@ -45,6 +45,35 @@ class KoreConfig:
     excessive_speedup_flag: float = 10.0
     reward_compile_fail: float = -1.0
     reward_incorrect: float = 0.0
+    # A flagged reward-hack is punished STRICTLY harder than an honest compile
+    # failure: actively cheating is worse than failing to build. This keeps the
+    # anti-hack floor as the unique minimum of the tier ladder
+    # (hack < compile_fail < incorrect < correct). Must stay < reward_compile_fail.
+    reward_hack: float = -1.5
+
+    # --- reward-shaping upgrades (literature review) -----------------------
+    # P1 — bounded continuous sub-threshold shaping (LLM-VeriOpt style).
+    # A compiled-but-incorrect kernel earns a small credit proportional to how
+    # close its worst-shape SNR is to the correctness gate, instead of a flat 0
+    # (sparse reward -> early-RL collapse). The credit is bounded in
+    # [0, eps_shape] and eps_shape is kept STRICTLY below correctness_weight so a
+    # shaped-incorrect kernel can NEVER reach the correct tier (lexicographic
+    # dominance holds absolutely). Never applied to a flagged hack / compile-fail.
+    subthreshold_shaping: bool = True
+    eps_shape: float = 0.05  # invariant: 0 < eps_shape + format_weight < correctness_weight
+
+    # P2 — format-compliance term (Compiler-R1 style). Small bonus for emitting a
+    # valid FULL_KERNEL contract (parses to a kernel), small penalty for malformed
+    # output. Symmetric magnitude, applied only to the incorrect/correct tiers and
+    # bounded so tiny (<< every inter-tier gap) it can never flip tier ordering.
+    format_weight: float = 0.02  # invariant: 2*format_weight < smallest inter-tier gap
+
+    # P3 — correctness->latency curriculum phase for compute_reward:
+    #   "full"        : correctness_weight + speedup (default; current behavior)
+    #   "correctness" : zero the speed term -> every correct kernel == correctness_weight
+    #                   (run a correctness-only GRPO phase first)
+    #   "latency"     : full correctness_weight + speedup (same as "full")
+    reward_phase: str = "full"
 
     # multi-turn credit
     gamma: float = 0.4

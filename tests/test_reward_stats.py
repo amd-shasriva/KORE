@@ -92,14 +92,20 @@ def test_reward_correct_timed_worst_shape_speedup():
 
 def test_correct_but_slow_still_beats_incorrect():
     """P0 regression: a correct kernel slower than baseline must NEVER score
-    below an incorrect kernel (0.0), or GRPO advantages invert."""
+    below an incorrect kernel, or GRPO advantages invert."""
     slow = Observation(compiled=True, validation_passed=True, snr_by_shape={"s": 99.0},
                        wall_by_shape={"s": 4.0}, baseline_by_shape={"s": 1.0})  # 0.25x
     incorrect = Observation(compiled=True, validation_passed=True, snr_by_shape={"s": 5.0})
     r_slow = compute_reward(slow, "x=1", dtype="bf16")
     r_bad = compute_reward(incorrect, "x=1", dtype="bf16")
     assert r_slow.correct is True and r_slow.reward > r_bad.reward
-    assert r_slow.reward > 0.0 >= r_bad.reward
+    # CHANGED (P1 sub-threshold shaping): the incorrect kernel now earns a small
+    # continuous credit (eps_shape * clamp(snr/threshold)) instead of a flat 0,
+    # so ``r_bad.reward`` is a small POSITIVE value rather than exactly 0.0. The
+    # invariant that matters is unchanged: it stays strictly BELOW the correct
+    # tier (correctness_weight), so a correct-but-slow kernel still dominates.
+    assert 0.0 < r_bad.reward < CONFIG.correctness_weight
+    assert r_slow.reward >= CONFIG.correctness_weight
 
 
 def test_reward_hack_beats_nothing():
@@ -107,7 +113,12 @@ def test_reward_hack_beats_nothing():
                       wall_by_shape={"s": 0.1}, baseline_by_shape={"s": 1.0})
     rr = compute_reward(obs, "import aiter\nout = aiter.rms_norm(x)", dtype="bf16")
     assert rr.correct is False and "hack" in rr.flags
-    assert rr.reward == CONFIG.reward_compile_fail
+    # CHANGED: a flagged hack is now punished STRICTLY harder than a compile
+    # failure (reward_hack < reward_compile_fail) — cheating is the unique floor.
+    assert rr.reward == CONFIG.reward_hack
+    assert CONFIG.reward_hack < CONFIG.reward_compile_fail
+    # A hack that "passes" every gate still gets NO shaping/format credit.
+    assert "shaped" not in rr.flags
 
 
 def test_excessive_speedup_flagged_and_capped():
@@ -116,3 +127,204 @@ def test_excessive_speedup_flagged_and_capped():
     rr = compute_reward(obs, "x=1", dtype="bf16")
     assert "excessive_speedup" in rr.flags
     assert abs(rr.reward - (CONFIG.correctness_weight + CONFIG.excessive_speedup_flag)) < 1e-9
+
+
+# =========================================================================== #
+# Reward-shaping upgrades (P1 sub-threshold shaping / P2 format / P3 curriculum)
+#
+# All of the tests below keep the lexicographic anti-hack guarantee intact:
+#   hack < compile_fail < incorrect(shaped) < correct-slow < correct-fast.
+# =========================================================================== #
+import dataclasses  # noqa: E402
+
+
+_DT = "bf16"  # snr threshold 25.0
+
+
+def _obs_incorrect(snr: float, dtype: str = _DT) -> Observation:
+    """Compiled + validated but SNR below the gate -> incorrect tier."""
+    return Observation(compiled=True, validation_passed=True,
+                       snr_by_shape={"s": snr}, dtype=dtype)
+
+
+def _obs_correct(speedup: float | None) -> Observation:
+    """Correct kernel with a given worst-shape speedup (None = no timing)."""
+    if speedup is None:
+        return Observation(compiled=True, validation_passed=True, snr_by_shape={"s": 99.0})
+    return Observation(compiled=True, validation_passed=True, snr_by_shape={"s": 99.0},
+                       wall_by_shape={"s": 1.0 / speedup}, baseline_by_shape={"s": 1.0})
+
+
+_VALID_CONTRACT = "FULL_KERNEL:\n```python\nimport triton\n@triton.jit\ndef k():\n    pass\n```"
+_MALFORMED = "ANALYSIS: here is my prose answer with no kernel block at all."
+
+
+# --------------------------------------------------------------------------- #
+# config invariants: the numeric bounds that PROVE ordering can never break
+# --------------------------------------------------------------------------- #
+def test_shaping_config_bounds_guarantee_ordering():
+    c = CONFIG
+    # hack is the unique floor, strictly below an honest compile failure.
+    assert c.reward_hack < c.reward_compile_fail < c.reward_incorrect
+    # Even the MAX shaped-incorrect (full sub-threshold credit + a format bonus)
+    # stays strictly below the MIN correct reward (base minus a format penalty).
+    max_incorrect = c.reward_incorrect + c.eps_shape + c.format_weight
+    min_correct = c.correctness_weight - c.format_weight
+    assert max_incorrect < min_correct
+    # The worst malformed compile/incorrect output still sits above the hack floor.
+    assert c.reward_compile_fail < c.reward_incorrect - c.format_weight
+    assert c.reward_hack < c.reward_compile_fail - c.format_weight
+
+
+# --------------------------------------------------------------------------- #
+# P1: bounded continuous sub-threshold shaping
+# --------------------------------------------------------------------------- #
+def test_subthreshold_shaping_is_continuous_and_monotonic():
+    """Higher SNR (closer to the gate) => strictly more shaped credit, but the
+    reward stays flat-incorrect-tier (< eps_shape, < correct)."""
+    r_lo = compute_reward(_obs_incorrect(2.0), "x=1", dtype=_DT)
+    r_mid = compute_reward(_obs_incorrect(12.5), "x=1", dtype=_DT)  # halfway to 25
+    r_hi = compute_reward(_obs_incorrect(24.9), "x=1", dtype=_DT)   # just below gate
+    for r in (r_lo, r_mid, r_hi):
+        assert r.correct is False and r.tier == "incorrect"
+    assert r_lo.reward < r_mid.reward < r_hi.reward          # monotone in progress
+    # halfway SNR (12.5/25 = 0.5) -> exactly half of eps_shape of credit.
+    assert abs(r_mid.reward - (CONFIG.reward_incorrect + 0.5 * CONFIG.eps_shape)) < 1e-9
+    # every shaped value is strictly bounded below eps_shape and the correct tier.
+    assert r_hi.reward < CONFIG.eps_shape < CONFIG.correctness_weight
+
+
+def test_subthreshold_shaping_can_be_disabled():
+    """With shaping off, a compiled-but-incorrect kernel is flat reward_incorrect
+    (the legacy sparse behavior) — proves the knob works."""
+    cfg = dataclasses.replace(CONFIG, subthreshold_shaping=False)
+    rr = compute_reward(_obs_incorrect(20.0), "x=1", dtype=_DT, cfg=cfg)
+    assert rr.tier == "incorrect" and rr.reward == cfg.reward_incorrect
+    assert "shaped" not in rr.flags
+
+
+def test_shaped_incorrect_strictly_below_every_correct():
+    """The whole point of the P1 bound: no shaped-incorrect kernel, at ANY SNR,
+    can reach even the slowest / no-timing correct kernel."""
+    correct_min = min(
+        compute_reward(_obs_correct(0.01), "x=1", dtype=_DT).reward,   # extremely slow
+        compute_reward(_obs_correct(None), "x=1", dtype=_DT).reward,   # correct, no bench
+    )
+    for snr in (0.0, 5.0, 12.5, 20.0, 24.9):
+        r = compute_reward(_obs_incorrect(snr), "x=1", dtype=_DT)
+        assert r.correct is False
+        assert r.reward < correct_min
+
+
+# --------------------------------------------------------------------------- #
+# hack / compile-fail are NEVER shaped
+# --------------------------------------------------------------------------- #
+def test_hack_and_compile_fail_never_shaped():
+    # A hack that would otherwise "pass" correctness gets the pure hack floor.
+    hack = compute_reward(_obs_correct(5.0), "import aiter\nout = aiter.rms_norm(x)", dtype=_DT)
+    assert hack.tier == "hack" and hack.reward == CONFIG.reward_hack
+    assert "shaped" not in hack.flags
+    # A compile failure gets the pure compile-fail floor, no shaping/format even
+    # if we hand it a perfectly-formatted response.
+    cf = compute_reward(Observation(compiled=False, dtype=_DT), "x=1", dtype=_DT,
+                        response=_VALID_CONTRACT)
+    assert cf.tier == "compile_fail" and cf.reward == CONFIG.reward_compile_fail
+    assert "shaped" not in cf.flags
+
+
+# --------------------------------------------------------------------------- #
+# P2: format-compliance term, bounded so it can never flip ordering
+# --------------------------------------------------------------------------- #
+def test_format_bonus_and_penalty_are_bounded():
+    base_incorrect = compute_reward(_obs_incorrect(10.0), "x=1", dtype=_DT).reward
+    good = compute_reward(_obs_incorrect(10.0), "x=1", dtype=_DT, response=_VALID_CONTRACT)
+    bad = compute_reward(_obs_incorrect(10.0), "x=1", dtype=_DT, response=_MALFORMED)
+    # valid contract adds +format_weight, malformed subtracts it, symmetric & tiny.
+    assert abs(good.reward - (base_incorrect + CONFIG.format_weight)) < 1e-9
+    assert abs(bad.reward - (base_incorrect - CONFIG.format_weight)) < 1e-9
+    # bounded so it can NEVER flip a tier: a malformed-but-correct kernel still
+    # outranks a valid-contract shaped-incorrect kernel.
+    correct_bad_fmt = compute_reward(_obs_correct(0.01), "x=1", dtype=_DT, response=_MALFORMED)
+    incorrect_good_fmt = compute_reward(_obs_incorrect(24.9), "x=1", dtype=_DT,
+                                        response=_VALID_CONTRACT)
+    assert correct_bad_fmt.correct is True
+    assert correct_bad_fmt.reward > incorrect_good_fmt.reward
+    # no response supplied -> no format term at all (legacy behavior preserved).
+    assert abs(compute_reward(_obs_incorrect(10.0), "x=1", dtype=_DT).reward
+               - base_incorrect) < 1e-9
+
+
+# --------------------------------------------------------------------------- #
+# P3: correctness -> latency curriculum
+# --------------------------------------------------------------------------- #
+def test_correctness_phase_zeroes_speed_term():
+    fast = _obs_correct(4.0)
+    slow = _obs_correct(0.25)
+    r_fast = compute_reward(fast, "x=1", dtype=_DT, phase="correctness")
+    r_slow = compute_reward(slow, "x=1", dtype=_DT, phase="correctness")
+    # In the correctness phase speed is irrelevant: both correct kernels score
+    # exactly correctness_weight regardless of their (very different) speedups.
+    assert r_fast.correct is r_slow.correct is True
+    assert abs(r_fast.reward - CONFIG.correctness_weight) < 1e-9
+    assert abs(r_slow.reward - CONFIG.correctness_weight) < 1e-9
+    assert "phase:correctness" in r_fast.flags
+
+
+def test_latency_and_full_phases_use_speed():
+    fast = _obs_correct(4.0)
+    r_full = compute_reward(fast, "x=1", dtype=_DT, phase="full")
+    r_latency = compute_reward(fast, "x=1", dtype=_DT, phase="latency")
+    r_default = compute_reward(fast, "x=1", dtype=_DT)  # cfg.reward_phase = "full"
+    for r in (r_full, r_latency, r_default):
+        assert abs(r.reward - (CONFIG.correctness_weight + 4.0)) < 1e-9
+
+
+def test_phase_defaults_to_config():
+    cfg = dataclasses.replace(CONFIG, reward_phase="correctness")
+    rr = compute_reward(_obs_correct(4.0), "x=1", dtype=_DT, cfg=cfg)
+    assert abs(rr.reward - cfg.correctness_weight) < 1e-9  # config drives the phase
+
+
+# --------------------------------------------------------------------------- #
+# EXHAUSTIVE lexicographic ordering with shaping ON (the anti-hack guarantee)
+# --------------------------------------------------------------------------- #
+def test_full_lexicographic_ordering_with_shaping_on():
+    """hack < compile_fail < incorrect(shaped, every SNR) < correct-slow
+    < correct-fast — swept across SNRs, speeds, phases, and format status."""
+    hack = compute_reward(_obs_correct(5.0), "y = torch.matmul(a, b)", dtype=_DT)
+    compile_fail = compute_reward(Observation(compiled=False, dtype=_DT), "x=1", dtype=_DT)
+    assert hack.tier == "hack" and compile_fail.tier == "compile_fail"
+    assert hack.reward < compile_fail.reward
+
+    # every shaped-incorrect outcome (any SNR, any format) beats compile_fail and
+    # loses to every correct outcome.
+    correct_slow = compute_reward(_obs_correct(0.1), "x=1", dtype=_DT)     # 0.1x, slow
+    correct_fast = compute_reward(_obs_correct(8.0), "x=1", dtype=_DT)     # 8x, fast
+    assert correct_slow.correct and correct_fast.correct
+    assert correct_slow.reward < correct_fast.reward  # speed strictly orders correct
+
+    incorrect_rewards = []
+    for snr in (0.0, 3.0, 10.0, 24.9):
+        for resp in (None, _VALID_CONTRACT, _MALFORMED):
+            r = compute_reward(_obs_incorrect(snr), "x=1", dtype=_DT, response=resp)
+            assert r.tier == "incorrect"
+            incorrect_rewards.append(r.reward)
+
+    assert max(incorrect_rewards) < correct_slow.reward     # never reaches correct
+    assert min(incorrect_rewards) > compile_fail.reward     # always above compile-fail
+    # full strict chain on representative points:
+    assert (hack.reward < compile_fail.reward < min(incorrect_rewards)
+            <= max(incorrect_rewards) < correct_slow.reward < correct_fast.reward)
+
+
+def test_all_task_seeds_stay_clean_and_rewardable():
+    """The 15 shipped task seeds must never be flagged as hacks (anti-hack must
+    not over-fire) and, when correct, must land in the correct tier."""
+    from kore.tasks.registry import all_tasks
+
+    tasks = all_tasks()
+    assert len(tasks) == 15
+    for t in tasks:
+        assert scan_for_hacks(t.seed_source) is None, f"{t.name}: seed wrongly flagged"
+        rr = compute_reward(_obs_correct(2.0), t.seed_source, dtype=t.dtype)
+        assert rr.correct is True and rr.tier == "correct_timed"

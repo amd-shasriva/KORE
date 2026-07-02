@@ -24,7 +24,15 @@ from typing import Callable, Optional, Sequence
 
 from kore.config import CONFIG, KoreConfig
 from kore.reward.reward import Observation, compute_reward
-from kore.eval.fastp import DEFAULT_PS, fast_p_curve, fastp, geometric_mean_speedup
+from kore.eval.fastp import (
+    DEFAULT_PS,
+    fast_p_at_k,
+    fast_p_curve,
+    fastp,
+    geometric_mean_speedup,
+    mean_ci,
+    pass_at_k,
+)
 
 # A policy maps (task, feedback) -> kernel source. ``feedback`` is None on the
 # first turn (or in parallel mode) and otherwise carries the previous turn's
@@ -112,15 +120,23 @@ def _run_task(
     budget: int,
     mode: str,
     cfg: KoreConfig,
+    torch_baseline: Optional[object] = None,
 ) -> dict:
     """Run one task under a matched budget; return best-correct-speedup record.
 
     mode "serial"   : one trajectory of ``budget`` turns; feedback accumulates.
     mode "parallel" : ``budget`` independent single-turn samples; no feedback.
+
+    ``torch_baseline`` (optional) supplies a torch-eager baseline time per task
+    (dict ``{task_id: ms}`` or callable ``task -> ms``) so a SECOND fast_p curve
+    (vs torch-eager, KernelBench-comparable) can be reported alongside the
+    production AITER/hipBLASLt curve. It may also be carried on the Observation
+    as a ``torch_baseline_ms`` attribute (e.g. filled by ``driver --impl torch``).
     """
     dtype = _task_dtype(task)
     best_speedup: Optional[float] = None
     best_reward: Optional[float] = None
+    best_obs: Optional[Observation] = None
     benches_used = 0
     benches_to_best: Optional[int] = None
     trajectory: list[dict] = []
@@ -142,6 +158,7 @@ def _run_task(
             if best_speedup is None or rr.speedup > best_speedup:
                 best_speedup = rr.speedup
                 best_reward = rr.reward
+                best_obs = obs
                 benches_to_best = benches_used
         # serial mode conditions the next turn on this turn's outcome
         feedback = _feedback(obs, rr)
@@ -152,6 +169,11 @@ def _run_task(
     baseline_time = 1.0
     actual_time = (1.0 / best_speedup) if correct else float("inf")
 
+    # torch-eager (KernelBench-comparable) baseline for a SECOND fast_p curve.
+    # Expressed relative to the production baseline (=1.0): torch_ms/prod_ms, so
+    # speedup_vs_torch = torch_baseline_time / actual_time = (torch/prod)*speedup.
+    torch_baseline_time = _torch_baseline_time(task, best_obs, torch_baseline) if correct else None
+
     return {
         "task_id": _task_id(task),
         "correct": correct,
@@ -159,10 +181,26 @@ def _run_task(
         "best_reward": best_reward,
         "baseline_time": baseline_time,
         "actual_time": actual_time,
+        "torch_baseline_time": torch_baseline_time,
         "benches_used": benches_used,
         "benches_to_best": benches_to_best,
         "trajectory": trajectory,
     }
+
+
+def _torch_baseline_time(task, best_obs, torch_baseline) -> Optional[float]:
+    """Torch-eager baseline time normalized to the production baseline (=1.0)."""
+    if best_obs is None:
+        return None
+    tb = None
+    if torch_baseline is not None:
+        tb = torch_baseline(task) if callable(torch_baseline) else torch_baseline.get(_task_id(task))
+    if tb is None:
+        tb = getattr(best_obs, "torch_baseline_ms", None)
+    prod_ms = getattr(best_obs, "baseline_ms", None)
+    if tb and prod_ms and prod_ms > 0:
+        return float(tb) / float(prod_ms)
+    return None
 
 
 def _assemble(per_task: list[dict], budget: int, mode: str, ps: Sequence[float]) -> dict:
@@ -171,7 +209,7 @@ def _assemble(per_task: list[dict], budget: int, mode: str, ps: Sequence[float])
     actual_speed = [t["actual_time"] for t in per_task]
     n = len(per_task)
     curve = fast_p_curve(is_correct, baseline_speed, actual_speed, n, ps)
-    return {
+    out = {
         "mode": mode,
         "budget": budget,
         "n": n,
@@ -185,6 +223,20 @@ def _assemble(per_task: list[dict], budget: int, mode: str, ps: Sequence[float])
         "num_correct": sum(1 for c in is_correct if c),
     }
 
+    # SECOND fast_p curve vs the torch-eager baseline (KernelBench-comparable),
+    # reported only when torch-eager times are available. ``None`` torch times
+    # contribute 0 (uncorrected denominator ``n``), exactly like a missing bench.
+    torch_speed = [t.get("torch_baseline_time") for t in per_task]
+    if any(v is not None for v in torch_speed):
+        torch_curve = fast_p_curve(is_correct, torch_speed, actual_speed, n, ps)
+        out["fast_p_curve_vs_torch"] = torch_curve
+        out["fast_p_vs_torch"] = {p: v for p, v in torch_curve}
+        out["torch_baseline_speed"] = torch_speed
+        out["geometric_mean_speedup_vs_torch"] = geometric_mean_speedup(
+            is_correct, torch_speed, actual_speed
+        )
+    return out
+
 
 def evaluate_policy(
     policy_fn: PolicyFn,
@@ -196,6 +248,7 @@ def evaluate_policy(
     dry_run: Optional[object] = None,
     ps: Sequence[float] = DEFAULT_PS,
     cfg: KoreConfig = CONFIG,
+    torch_baseline: Optional[object] = None,
 ) -> dict:
     """Evaluate one policy over ``tasks`` under a matched measurement budget.
 
@@ -205,9 +258,15 @@ def evaluate_policy(
 
     Provide either ``env_factory`` (live ``KoreEnv`` runs) or ``dry_run``
     (precomputed ``Observation`` objects) for CPU-only testing.
+
+    ``torch_baseline`` optionally supplies torch-eager times (``{task_id: ms}``
+    or ``task -> ms``) to add a second fast_p curve vs torch-eager.
     """
     measure = _make_measure_fn(env_factory, dry_run)
-    per_task = [_run_task(policy_fn, task, measure, budget, mode, cfg) for task in tasks]
+    per_task = [
+        _run_task(policy_fn, task, measure, budget, mode, cfg, torch_baseline=torch_baseline)
+        for task in tasks
+    ]
     return _assemble(per_task, budget, mode, ps)
 
 
@@ -305,3 +364,114 @@ def benches_to_best(value_scores: Sequence[float], true_speedups: Sequence[float
         "best_idx": best_idx,
         "speedup_at_best": true_speedups[best_idx],
     }
+
+
+# --------------------------------------------------------------------------- #
+# Multi-seed fast_p with confidence intervals (report mean +/- CI over seeds)
+# --------------------------------------------------------------------------- #
+def aggregate_fastp_over_seeds(per_seed_results: Sequence[dict],
+                               ps: Sequence[float] = DEFAULT_PS) -> dict:
+    """Aggregate several single-seed ``evaluate_policy`` results into mean +/- CI.
+
+    For every ``p`` we report the mean fast_p across seeds and its 95% CI (normal
+    approx), plus the same for correctness count and geometric-mean speedup.
+    """
+    results = list(per_seed_results)
+
+    def _fp(res: dict, p: float) -> float:
+        fp = res.get("fast_p", {})
+        if float(p) in fp:
+            return float(fp[float(p)])
+        if p in fp:
+            return float(fp[p])
+        return 0.0
+
+    fast_p_mean_ci = {float(p): mean_ci([_fp(r, p) for r in results]) for p in ps}
+    torch_present = any("fast_p_vs_torch" in r for r in results)
+    fast_p_vs_torch_mean_ci = None
+    if torch_present:
+        def _fpt(res: dict, p: float) -> float:
+            fp = res.get("fast_p_vs_torch", {})
+            return float(fp.get(float(p), fp.get(p, 0.0)))
+        fast_p_vs_torch_mean_ci = {float(p): mean_ci([_fpt(r, p) for r in results]) for p in ps}
+
+    return {
+        "num_seeds": len(results),
+        "fast_p_mean_ci": fast_p_mean_ci,
+        "fast_p_vs_torch_mean_ci": fast_p_vs_torch_mean_ci,
+        "num_correct_mean_ci": mean_ci([r.get("num_correct", 0) for r in results]),
+        "geomean_mean_ci": mean_ci([r.get("geometric_mean_speedup", 0.0) for r in results]),
+        "per_seed_fast_p": [r.get("fast_p", {}) for r in results],
+    }
+
+
+def evaluate_policy_multiseed(
+    policy_fn: PolicyFn,
+    tasks: Sequence,
+    seeds: Sequence[int] = (0, 1, 2),
+    env_factory: Optional[Callable[[object], object]] = None,
+    budget: int = 5,
+    mode: str = "serial",
+    *,
+    dry_run: Optional[object] = None,
+    seed_dry_run: Optional[Callable[[int], object]] = None,
+    ps: Sequence[float] = DEFAULT_PS,
+    cfg: KoreConfig = CONFIG,
+    torch_baseline: Optional[object] = None,
+) -> dict:
+    """Evaluate a policy over >=3 seeds and report fast_p as mean +/- CI.
+
+    Each seed is a full ``evaluate_policy`` run. Use ``seed_dry_run`` (a callable
+    ``seed -> dry_run source``) to vary fabricated observations per seed in tests;
+    otherwise the same ``dry_run``/``env_factory`` is reused for every seed.
+    """
+    seeds = list(seeds)
+    per_seed: list[dict] = []
+    for sd in seeds:
+        dr = seed_dry_run(sd) if seed_dry_run is not None else dry_run
+        res = evaluate_policy(
+            policy_fn, tasks, env_factory=env_factory, budget=budget, mode=mode,
+            dry_run=dr, ps=ps, cfg=cfg, torch_baseline=torch_baseline,
+        )
+        res["seed"] = sd
+        per_seed.append(res)
+    agg = aggregate_fastp_over_seeds(per_seed, ps)
+    agg.update({"seeds": seeds, "mode": mode, "budget": budget,
+                "n": len(tasks), "per_seed": per_seed})
+    return agg
+
+
+# --------------------------------------------------------------------------- #
+# Unbiased best-of-N: pass@k and fast_p@k over a parallel-sampling eval
+# --------------------------------------------------------------------------- #
+def best_of_n_pass_at_k(eval_result: dict, ks: Sequence[int] = (1,),
+                        ps: Sequence[float] = DEFAULT_PS) -> dict:
+    """Unbiased pass@k and fast_p@k from a parallel best-of-N eval result.
+
+    Each task's trajectory is treated as ``n`` independent samples. pass@k is the
+    per-task unbiased estimate averaged over the split; fast_p@k additionally
+    requires the sample to be faster than the production baseline by a factor p.
+    Use ``mode="parallel"`` in ``evaluate_policy`` so samples are independent.
+    """
+    per_task = eval_result.get("per_task", [])
+    ks = list(ks)
+    pass_k: dict[int, float] = {}
+    fast_pk: dict[str, float] = {}
+    for k in ks:
+        p_vals = []
+        for t in per_task:
+            traj = t.get("trajectory", [])
+            n = len(traj)
+            c = sum(1 for s in traj if s.get("correct"))
+            p_vals.append(pass_at_k(n, c, k))
+        pass_k[k] = (sum(p_vals) / len(p_vals)) if p_vals else 0.0
+        for p in ps:
+            f_vals = []
+            for t in per_task:
+                traj = t.get("trajectory", [])
+                n = len(traj)
+                c = sum(1 for s in traj
+                        if s.get("correct") and (s.get("speedup") or 0.0) > p)
+                f_vals.append(pass_at_k(n, c, k))
+            fast_pk[f"k={k},p={float(p):g}"] = (sum(f_vals) / len(f_vals)) if f_vals else 0.0
+    return {"ks": ks, "pass_at_k": pass_k, "fast_p_at_k": fast_pk, "n": len(per_task)}

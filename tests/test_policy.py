@@ -144,19 +144,64 @@ def test_variance_floor_collapse_below_floor():
     assert ac.variance_floor(rewards, tokens, means) is False
 
 
-def test_sc_grpo_allfail_bonus():
-    # All-fail collapsed group -> zero-mean diversity spread.
-    bonus = ac.sc_grpo_allfail_bonus([0.0, 0.0, 0.0, 0.0], alpha=0.1)
-    assert abs(sum(bonus)) < 1e-9
-    assert max(bonus) > 0 and min(bonus) < 0
-    # Non-collapsed group -> no-op.
-    assert ac.sc_grpo_allfail_bonus([1.0, 0.0, 0.0], alpha=0.1) == [0.0, 0.0, 0.0]
+def test_avspo_advantages_variance_floor():
+    # AVSPO (item 4a): a near-degenerate group (tiny spread) would collapse under
+    # plain GRPO; injecting k virtual samples at +/- tau raises the denominator so
+    # advantages stay finite and BOUNDED below the un-floored (huge) values.
+    returns = [0.0, 0.0, 0.0, 1e-4]  # std ~ 4e-5, far below tau
+    tau = 0.5
+    plain = ac.avspo_advantages(returns, tau=0.0)            # tau=0 disables -> pure GRPO
+    floored = ac.avspo_advantages(returns, tau=tau, k=2)
+    # floor injection strictly SHRINKS the advantage magnitude (bigger denom).
+    assert max(abs(a) for a in floored) < max(abs(a) for a in plain)
+    # denominator is the augmented std: aug_std = sqrt((n*var + k*tau^2)/(n+k)).
+    import math
+    n = len(returns); mean = sum(returns) / n
+    var = sum((r - mean) ** 2 for r in returns) / n
+    aug_std = math.sqrt((n * var + 2 * tau ** 2) / (n + 2))
+    assert aug_std >= math.sqrt(2 * tau ** 2 / (n + 2)) > 0.0   # guaranteed floor
+    for a, r in zip(floored, returns):
+        assert abs(a - (r - mean) / (aug_std + 1e-6)) < 1e-9
+    # exactly len(returns) advantages: virtual samples get NO PG term.
+    assert len(floored) == len(returns)
+    # a group whose std already exceeds tau is untouched (== plain GRPO).
+    hi = [-2.0, 2.0, 0.0]
+    assert ac.avspo_advantages(hi, tau=0.5) == ac.avspo_advantages(hi, tau=0.0)
 
 
-def test_gtpo_turn_credit_zero_mean():
-    credit = ac.gtpo_turn_credit([1.0, 2.0, 3.0], gamma=0.4)
-    assert abs(sum(credit)) < 1e-9  # mean-centered turn credit
-    assert len(credit) == 3
+def test_scgrpo_weight_from_kl_bounded():
+    # SC-GRPO (item 4b): higher mean per-token KL -> larger PG weight, clipped.
+    assert ac.scgrpo_weight_from_kl([]) == 1.0                     # no tokens -> neutral
+    assert abs(ac.scgrpo_weight_from_kl([0.0, 0.0]) - 1.0) < 1e-9  # zero KL -> neutral
+    w = ac.scgrpo_weight_from_kl([0.5, 0.5], scale=1.0)
+    assert abs(w - 1.5) < 1e-9                                     # 1 + 1.0*0.5
+    assert ac.scgrpo_weight_from_kl([100.0], w_max=2.0) == 2.0     # clipped to ceiling
+    assert ac.scgrpo_weight_from_kl([-100.0], w_min=0.5) == 0.5    # clipped to floor
+
+
+def test_gtpo_codesim_shaping():
+    # GTPO all-fail shaping (item 4c): partial reward = scale * max shingle-cosine
+    # similarity to the nearest reference kernel, in [0, scale].
+    ref = "def k(): a = tl.load(x); b = a + 1; tl.store(y, b)"
+    codes = [
+        "def k(): a = tl.load(x); b = a + 1; tl.store(y, b)",  # identical -> ~scale
+        "totally unrelated python text here nothing alike",     # dissimilar -> ~0
+    ]
+    out = ac.gtpo_codesim_shaping(codes, [ref], scale=0.3)
+    assert 0.29 < out[0] <= 0.3001
+    assert out[1] < out[0]
+    assert all(0.0 <= v <= 0.3 + 1e-9 for v in out)
+    # no references -> all zeros (group stays collapsed, dropped by StarPO-S).
+    assert ac.gtpo_codesim_shaping(codes, [], scale=0.3) == [0.0, 0.0]
+
+
+def test_code_shingle_cosine_symmetric_and_bounded():
+    a = "x = tl.load(p); y = x * 2"
+    assert abs(ac.code_shingle_cosine(a, a) - 1.0) < 1e-9
+    assert ac.code_shingle_cosine(a, "") == 0.0
+    s = ac.code_shingle_cosine(a, "x = tl.load(p); y = x * 3")
+    assert 0.0 < s < 1.0
+    assert abs(ac.code_shingle_cosine(a, "z=1") - ac.code_shingle_cosine("z=1", a)) < 1e-9
 
 
 # --------------------------------------------------------------------------- #

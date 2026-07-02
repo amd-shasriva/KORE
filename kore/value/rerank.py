@@ -17,22 +17,118 @@ Analogue (KORE.pdf Sec 4.5):
     the best kernel vs. random order? This is exactly how Ansor / Compiler-World-
     Models report cost-model quality. All three metrics are PURE (numpy only,
     no scipy).
+
+P0 CONTRACT (imported by the GRPO rollout to bench only the top-k):
+
+    rank_candidates(items, task=None) -> list[int]      # indices, best-first
+    score_candidates(items, task=None) -> list[float]   # predicted utility
+
+``items`` is a list of candidates, each either a kernel-source ``str`` or a dict
+that may carry a ``source`` plus problem metadata; ``task`` (a :class:`Task` or a
+plain dict, optional) supplies the shared problem context (operation, dtype,
+shape) merged into every item. A candidate's schedule features are read from its
+source, so the ranking is action/schedule-conditioned.
+
+Robustness: when no fitted model is available (cold start / untrained) the
+functions fall back to a cheap, deterministic source-heuristic ranking, so the
+rollout can always call ``rank_candidates`` and get a sane best-first order.
 """
 
 from __future__ import annotations
 
-from typing import Sequence
+import math
+from typing import Any, Optional, Sequence
 
 import numpy as np
 
-from kore.value.features import featurize_many
+from kore.value.features import extract_schedule_features, featurize_many
+
+# --------------------------------------------------------------------------- #
+# Default model wiring (so the rollout can call rank_candidates(items, task)
+# with no model argument). Kept in-memory and explicit for test determinism.
+# --------------------------------------------------------------------------- #
+_DEFAULT_MODEL: Any = None
 
 
-def score_candidates(model, metas: Sequence[dict]) -> np.ndarray:
-    """Scalar utility per candidate: p_compile * p_snr_pass * exp(e_log_speedup)."""
+def set_default_model(model: Any) -> None:
+    """Install the value model used by ``rank_candidates`` when none is passed."""
+    global _DEFAULT_MODEL
+    _DEFAULT_MODEL = model
+
+
+def get_default_model() -> Any:
+    """Return the currently installed default model (or None)."""
+    return _DEFAULT_MODEL
+
+
+def load_default_model(path: Optional[str] = None) -> Any:
+    """Load a saved :class:`ValueModel` from disk and install it as default.
+
+    Returns the model, or None if the file is missing / unreadable (leaving the
+    heuristic fallback in place). Safe to call at rollout start.
+    """
+    from kore.value.model import ValueModel
+
+    if path is None:
+        try:
+            from kore.config import CONFIG
+
+            path = str(CONFIG.runs_dir / "value" / "value_model.pkl")
+        except Exception:
+            return None
+    try:
+        model = ValueModel.load(path)
+    except Exception:
+        return None
+    set_default_model(model)
+    return model
+
+
+# --------------------------------------------------------------------------- #
+# item / task -> meta plumbing
+# --------------------------------------------------------------------------- #
+def _task_meta(task: Any) -> dict:
+    """Extract shared problem context from a Task (or dict) into a meta dict."""
+    if task is None:
+        return {}
+    if isinstance(task, dict):
+        return dict(task)
+    meta: dict = {}
+    for attr in ("operation", "dtype", "pmc_bottleneck"):
+        v = getattr(task, attr, None)
+        if v is not None:
+            meta[attr] = v
+    shapes = getattr(task, "shapes", None)
+    if shapes:
+        first = shapes[0]
+        dims = getattr(first, "dims", None)
+        if isinstance(dims, dict):
+            meta.update(dims)
+    return meta
+
+
+def _item_meta(item: Any, task_meta: dict) -> dict:
+    """Normalize one candidate + shared task context into a featurizer meta."""
+    if isinstance(item, str):
+        meta = {"source": item}
+    elif isinstance(item, dict):
+        meta = dict(item)
+    else:  # object exposing .source (e.g. a candidate record)
+        meta = {"source": getattr(item, "source", "") or ""}
+    for k, v in task_meta.items():
+        meta.setdefault(k, v)
+    return meta
+
+
+def _is_usable_model(model: Any) -> bool:
+    if model is None or not hasattr(model, "predict"):
+        return False
+    # ValueModel exposes `.fitted`; a hand-rolled stub without it is assumed ready.
+    return bool(getattr(model, "fitted", True))
+
+
+def _model_utility(model: Any, metas: Sequence[dict]) -> np.ndarray:
     X = featurize_many(metas)
-    if X.shape[0] == 0:
-        return np.zeros(0, dtype=np.float64)
     pred = model.predict(X)
     p_c = np.asarray(pred["p_compile"], dtype=np.float64)
     p_s = np.asarray(pred["p_snr_pass"], dtype=np.float64)
@@ -41,10 +137,67 @@ def score_candidates(model, metas: Sequence[dict]) -> np.ndarray:
     return p_c * p_s * np.exp(np.clip(e_ls, -50.0, 50.0))
 
 
-def rank_candidates(model, metas: Sequence[dict]) -> list[int]:
-    """Return candidate indices ordered best-first by utility."""
-    scores = score_candidates(model, metas)
-    # negate for descending; stable sort keeps input order on ties
+def _heuristic_scores(metas: Sequence[dict]) -> np.ndarray:
+    """Cheap source-only goodness score for the untrained cold-start path.
+
+    Rewards the gfx942 discipline the cost model would eventually learn: MFMA via
+    tl.dot, an fp32 accumulator, 64-multiple (and power-of-2) tiles, num_warps in
+    {4, 8}, software pipelining, bounds masking, and a K reduction loop. A move
+    with no source scores 0 (nothing to prefer)."""
+    out: list[float] = []
+    for m in metas:
+        s = extract_schedule_features(m.get("source", "") or "")
+        if not s["has_source"]:
+            out.append(0.0)
+            continue
+        v = 0.0
+        v += 1.0 if s["has_tl_dot"] else 0.0
+        v += 1.0 if s["has_fp32_acc"] else 0.0
+        v += 0.5 if s["has_mask"] else 0.0
+        v += 0.5 if s["has_reduction_loop"] else 0.0
+        v += 1.0 * float(s["blocks_mult64"])
+        v += 0.5 * float(s["blocks_pow2"])
+        if s["num_warps"] in (4, 8):
+            v += 0.5
+        if s["num_stages"] and s["num_stages"] >= 2:
+            v += 0.25
+        if s["tile_area"]:
+            v += 0.1 * math.log1p(s["tile_area"])
+        out.append(v)
+    return np.asarray(out, dtype=np.float64)
+
+
+# --------------------------------------------------------------------------- #
+# P0 contract: score / rank
+# --------------------------------------------------------------------------- #
+def score_candidates(items: Sequence[Any], task: Any = None, model: Any = None) -> list[float]:
+    """Predicted utility per candidate (higher is better).
+
+    utility = p_compile * p_snr_pass * exp(e_log_speedup) under a fitted value
+    model, else a source-heuristic score (see :func:`_heuristic_scores`)."""
+    task_meta = _task_meta(task)
+    metas = [_item_meta(it, task_meta) for it in items]
+    if not metas:
+        return []
+    if model is None:
+        model = get_default_model()
+    if _is_usable_model(model):
+        arr = _model_utility(model, metas)
+    else:
+        arr = _heuristic_scores(metas)
+    arr = np.nan_to_num(np.asarray(arr, dtype=np.float64), nan=0.0,
+                        posinf=1e30, neginf=0.0)
+    return [float(x) for x in arr]
+
+
+def rank_candidates(items: Sequence[Any], task: Any = None, model: Any = None) -> list[int]:
+    """Return candidate indices ordered best-first by predicted utility.
+
+    Robust to a missing / untrained model (heuristic fallback). Stable sort keeps
+    input order on ties, so a degenerate all-equal score yields identity order."""
+    scores = np.asarray(score_candidates(items, task=task, model=model), dtype=np.float64)
+    if scores.size == 0:
+        return []
     order = np.argsort(-scores, kind="stable")
     return [int(i) for i in order]
 

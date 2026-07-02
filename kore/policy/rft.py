@@ -47,6 +47,44 @@ def filter_correct_and_faster(
     return kept
 
 
+def collect_onpolicy_wins(records, min_speedup: float = 1.0) -> list[dict]:
+    """RFT chat-SFT rows from ON-POLICY self-play wins.
+
+    RFT = SFT on the policy's own verified-correct(-and-faster) samples. This
+    adapts the records produced by ``kore.data.onpolicy`` so RFT can learn from
+    the states the policy visits, not just teacher data. Accepts a mix of:
+
+      * ``RankedGroupRecord`` — on-policy relabel groups; the top-ranked candidate
+        of each group is taken as the win (via ``build_datasets.build_rft``).
+      * ``WinRecord`` — a full winning trajectory; kept when its ``speedup`` clears
+        ``min_speedup`` (or is unknown).
+      * raw ``dict`` self-play rows carrying ``{correct, speedup, messages}`` — the
+        same shape :func:`filter_correct_and_faster` consumes from disk.
+
+    Returns ``{"messages": [...]}`` rows (identical to the SFT corpus shape), so
+    the caller can write them out and point ``SFTConfig.dataset_path`` at them for
+    :func:`train`. Pure (no GPU / model)."""
+    from kore.data.build_datasets import build_rft
+    from kore.data.schemas import RankedGroupRecord, WinRecord
+
+    rows: list[dict] = []
+    groups: list = []
+    for rec in records:
+        if isinstance(rec, RankedGroupRecord):
+            groups.append(rec)
+        elif isinstance(rec, WinRecord):
+            if rec.trajectory and (rec.speedup is None or rec.speedup >= min_speedup):
+                rows.append({"messages": list(rec.trajectory)})
+        elif isinstance(rec, dict):
+            speedup = rec.get("speedup")
+            if (rec.get("correct") and rec.get("messages")
+                    and speedup is not None and speedup >= min_speedup):
+                rows.append({"messages": list(rec["messages"])})
+    if groups:
+        rows.extend(build_rft(groups))
+    return rows
+
+
 def train(config: SFTConfig) -> dict:
     """RFT is SFT on verified-correct-and-faster self-generated samples.
 

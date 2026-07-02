@@ -45,9 +45,61 @@ def snr_db(out, ref_out) -> float:
     return 20.0 * math.log10(signal / noise) if signal > 0 else -999.0
 
 
+def _num_correct_trials() -> int:
+    """KernelBench-fidelity: >=5 reseeded correctness trials (env-overridable)."""
+    try:
+        n = int(os.environ.get("KORE_CORRECTNESS_TRIALS", "5"))
+    except ValueError:
+        n = 5
+    return max(5, n)
+
+
+def _bench_cold() -> bool:
+    """Cold-cache (L2-flushed) timing by default; KORE_BENCH_COLD=0 -> warm."""
+    return os.environ.get("KORE_BENCH_COLD", "1") != "0"
+
+
+_L2_SCRATCH = None
+
+
+def _flush_l2(device: str = "cuda") -> None:
+    """Evict the GPU last-level cache (L2/Infinity) between timed iters by
+    overwriting a scratch buffer larger than it, so each iter is cold-cache
+    like KernelBench. Enqueued BEFORE the start event, so it is never timed."""
+    global _L2_SCRATCH
+    if _L2_SCRATCH is None:
+        _L2_SCRATCH = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=device)
+    _L2_SCRATCH.zero_()
+
+
+def _time_fn(fn, warmup: int, iters: int) -> int:
+    """Warmup + median-of-iters timing. Flushes the L2 between timed iters when
+    cold-cache is enabled (default), matching KernelBench's cold measurement."""
+    cold = _bench_cold()
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    st = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    en = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    for i in range(iters):
+        if cold:
+            _flush_l2()
+        st[i].record(); fn(); en[i].record()
+    torch.cuda.synchronize()
+    times = sorted(s.elapsed_time(e) for s, e in zip(st, en))
+    for t in times:
+        print(f"wall_ms: {t:.4f}")
+    print(f"median_ms: {times[len(times) // 2]:.4f}")
+    return 0
+
+
 def run_correctness(shape, mode) -> int:
     dev = "cuda"
-    seeds = [0] if mode not in ("stability", "determinism") else [0, 1, 2, 3, 4]
+    # KernelBench multi-trial: >=5 DIFFERENT input seeds; the candidate passes
+    # only if EVERY trial passes both allclose and the SNR gate. We print the
+    # worst-trial SNR + the AND of allclose so the env's last-match parse gets
+    # the conservative worst case.
+    seeds = list(range(_num_correct_trials()))
     fn = _load_candidate()
     worst, maxd, ok = 999.0, 0.0, True
     for s in seeds:
@@ -81,22 +133,12 @@ def run_bench(shape, impl, warmup, iters) -> int:
     (x,) = ref.get_inputs(shape, device=dev, seed=0)
     if impl == "reference":
         fn = lambda: aiter_dynamic_per_token_quant(x)
+    elif impl == "torch":
+        fn = lambda: ref.per_token_quant_ref(x)
     else:
         cand = _load_candidate()
         fn = lambda: cand(x)
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    st = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    en = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    for i in range(iters):
-        st[i].record(); fn(); en[i].record()
-    torch.cuda.synchronize()
-    times = sorted(s.elapsed_time(e) for s, e in zip(st, en))
-    for t in times:
-        print(f"wall_ms: {t:.4f}")
-    print(f"median_ms: {times[len(times) // 2]:.4f}")
-    return 0
+    return _time_fn(fn, warmup, iters)
 
 
 def main() -> int:
@@ -106,7 +148,7 @@ def main() -> int:
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--iters", type=int, default=30)
     p.add_argument("--bench-mode", action="store_true")
-    p.add_argument("--impl", default="candidate", choices=["candidate", "reference"])
+    p.add_argument("--impl", default="candidate", choices=["candidate", "reference", "torch"])
     a = p.parse_args()
     shape = ref.parse_shape(a.shape)
     return run_bench(shape, a.impl, a.warmup, a.iters) if a.bench_mode else run_correctness(shape, a.mode)

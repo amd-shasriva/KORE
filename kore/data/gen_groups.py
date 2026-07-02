@@ -52,8 +52,58 @@ def rank_candidates(results: list[dict]) -> list[int]:
     )
 
 
-def build_preferences(results: list[dict]) -> list[list[int]]:
-    """All [chosen_idx, rejected_idx] pairs where chosen is strictly better."""
+def _speed_tie(a: dict, b: dict, band: float) -> bool:
+    """True if two candidates' speedups are indistinguishable within ``band``.
+
+    ``band`` is a fractional tolerance (e.g. 0.03 == 3%). Missing speedups only
+    tie one another (a benched-vs-unbenched pair is a real difference)."""
+    sa, sb = a.get("speedup"), b.get("speedup")
+    if sa is not None and sb is not None and sa > 0 and sb > 0:
+        hi, lo = (sa, sb) if sa >= sb else (sb, sa)
+        return (hi / lo - 1.0) <= band
+    if sa is None and sb is None:
+        return True
+    return False
+
+
+def _snr_tie(a: dict, b: dict, band_db: float) -> bool:
+    """True if two candidates' SNRs are within ``band_db`` dB of each other."""
+    na, nb = a.get("snr_db"), b.get("snr_db")
+    if na is not None and nb is not None:
+        return abs(float(na) - float(nb)) <= band_db
+    if na is None and nb is None:
+        return True
+    return False
+
+
+def _is_noise_tie(a: dict, b: dict, speedup_noise_band: float,
+                  snr_noise_band_db: float) -> bool:
+    """A measurement-noise tie between two CORRECT candidates.
+
+    The ranking is lexicographic (speedup first, then SNR). Two correct
+    candidates whose speedups agree within ``speedup_noise_band`` *and* whose
+    SNRs agree within ``snr_noise_band_db`` differ only by measurement noise, so
+    the ordering between them is spurious and must not become a DPO preference.
+    Only correct-vs-correct pairs can be noise ties: a correct-vs-incorrect or
+    compiled-vs-noncompiling ordering is always a real preference."""
+    if not (a.get("correct") and b.get("correct")):
+        return False
+    return (_speed_tie(a, b, speedup_noise_band)
+            and _snr_tie(a, b, snr_noise_band_db))
+
+
+def build_preferences(
+    results: list[dict],
+    speedup_noise_band: float = 0.0,
+    snr_noise_band_db: float = 0.0,
+) -> list[list[int]]:
+    """All [chosen_idx, rejected_idx] pairs where chosen is strictly better.
+
+    MARGIN GATE: when ``speedup_noise_band`` / ``snr_noise_band_db`` are > 0, a
+    strict ordering between two correct candidates that is within the noise band
+    on BOTH speedup and SNR is dropped (a measurement-noise tie is not a real
+    preference). With the default 0.0 bands nothing extra is dropped, so the pure
+    ranking behaviour is preserved exactly."""
     prefs: list[list[int]] = []
     n = len(results)
     for i in range(n):
@@ -62,6 +112,9 @@ def build_preferences(results: list[dict]) -> list[list[int]]:
             if i == j:
                 continue
             if ki > _quality_key(results[j]):
+                if _is_noise_tie(results[i], results[j],
+                                 speedup_noise_band, snr_noise_band_db):
+                    continue  # margin gate: within-noise tie, not a preference
                 prefs.append([i, j])
     return prefs
 
@@ -92,6 +145,21 @@ def _evaluate(env, task, source: str, cfg) -> dict:
     }
 
 
+def resolve_noise_bands(cfg) -> tuple[float, float]:
+    """(speedup_noise_band, snr_noise_band_db) for the preference margin gate.
+
+    Reads optional ``cfg`` overrides, else derives the speed band from the
+    verifier's timing ``noise_floor_pct`` (so a "faster" candidate must clear the
+    measured timing noise to earn a preference). The SNR band defaults to 0.0
+    (SNR differences above the correctness gate are treated as real unless a
+    band is configured)."""
+    speed_band = getattr(cfg, "preference_speedup_noise_band", None)
+    if speed_band is None:
+        speed_band = float(getattr(cfg, "noise_floor_pct", 0.0)) / 100.0
+    snr_band = float(getattr(cfg, "preference_snr_noise_band_db", 0.0))
+    return float(speed_band), snr_band
+
+
 def generate_groups(
     task,
     teacher: TeacherClient,
@@ -104,6 +172,7 @@ def generate_groups(
     """Produce ranked groups: ``n_parents`` groups of ``k`` candidates each."""
     with log.stage("generate_groups", task=task.task_id, n_parents=n_parents, k=k):
         rng = random.Random(seed)
+        speed_band, snr_band = resolve_noise_bands(cfg)
         modes = ["exploit", "explore", "repair"]
         records: list[RankedGroupRecord] = []
         parent_src = task.seed_source
@@ -150,7 +219,7 @@ def generate_groups(
                 }
                 for i, r in enumerate(results)
             ]
-            prefs = build_preferences(results)
+            prefs = build_preferences(results, speed_band, snr_band)
             records.append(
                 RankedGroupRecord(
                     task_id=task.task_id,
@@ -176,5 +245,6 @@ def generate_groups(
         log.metric(
             "groups_summary", task=task.task_id, parents=len(records),
             candidates=tot_candidates, correct=tot_correct, pairs=tot_pairs,
+            speedup_noise_band=speed_band, snr_noise_band_db=snr_band,
         )
         return records

@@ -52,12 +52,43 @@ def _error_text(obs) -> str:
     return f"correctness failed (snr_db={obs.snr_db})"
 
 
+def _diagnostic_assistant(failure_class: str, error_text: str, fixed_src: str) -> str:
+    """Fold the verifier's error into a self-diagnose-then-fix assistant turn.
+
+    LLM-VeriOpt format: a ``<think>`` block that reads the exact verifier
+    diagnostic and reasons about the fix class, followed by an ``<answer>`` block
+    carrying ONLY the verified fixed kernel under the FULL_KERNEL contract. SFT on
+    this teaches the model to diagnose the concrete failure before emitting a fix,
+    instead of blindly rewriting. The kernel stays in the standard FULL_KERNEL
+    block so ``extract_kernel`` (and every downstream builder) parses it
+    unchanged."""
+    guidance = {
+        "compile_fail": (
+            "This is a COMPILE failure. I will fix the specific syntax/type/shape "
+            "error the verifier reported without rewriting the kernel structure."
+        ),
+        "snr_fail": (
+            "This is a CORRECTNESS (low-SNR) failure. The numerics are wrong — I "
+            "will restore fp32 accumulation / correct masking / indexing / block "
+            "alignment rather than change the algorithm."
+        ),
+    }.get(failure_class, "I will fix the specific failure the verifier reported.")
+    think = (
+        "The verifier rejected the current kernel. Diagnostic:\n"
+        f"{error_text.strip()}\n"
+        f"{guidance}"
+    )
+    answer = "FULL_KERNEL:\n```python\n" + fixed_src.strip() + "\n```\n"
+    return f"<think>\n{think}\n</think>\n<answer>\n{answer}</answer>"
+
+
 def make_repair_record(
     task,
     teacher: TeacherClient,
     env,
     broken_src: str,
     broken_obs,
+    diagnostic: bool = True,
 ) -> Optional[RepairRecord]:
     """Given a known-broken kernel + its observation, get a teacher repair and
     emit a RepairRecord ONLY when the repair actually validates.
@@ -65,7 +96,13 @@ def make_repair_record(
     The broken side must genuinely fail (``failure_class`` is not None) and the
     teacher's fix must pass full validation, otherwise we would mislabel a still-
     broken kernel as a correct SFT target. Returns None if the teacher produced
-    no kernel, the fix crashed, or the fix did not pass validation."""
+    no kernel, the fix crashed, or the fix did not pass validation.
+
+    When ``diagnostic`` is True (default), the stored assistant turn is rewritten
+    into the diagnose-then-fix ``<think>...</think><answer>FULL_KERNEL:...</answer>``
+    format (LLM-VeriOpt), folding the verifier's ``error_text`` into the reasoning
+    so SFT learns to self-diagnose. The emitted fix is always the VERIFIED kernel
+    only — the "only emit verified fixes" rule is unchanged."""
     failure_class = _failure_class(broken_obs)
     if failure_class is None:
         return None
@@ -119,7 +156,11 @@ def make_repair_record(
     child_snr = fixed_obs.snr_db
     _emit(True, None, fixed_obs=fixed_obs, child_snr=child_snr)
 
-    messages = messages + [{"role": "assistant", "content": response}]
+    if diagnostic:
+        assistant = _diagnostic_assistant(failure_class, error, fixed_src)
+    else:
+        assistant = response
+    messages = messages + [{"role": "assistant", "content": assistant}]
     return RepairRecord(
         task_id=task.task_id,
         failure_class=failure_class,
@@ -140,11 +181,13 @@ def generate_repairs(
     n: int,
     seed: int = 0,
     natural_fraction: float = 0.3,
+    diagnostic: bool = True,
 ) -> list[RepairRecord]:
     """Produce up to ``n`` RepairRecords for ``task``.
 
     A ``natural_fraction`` of attempts mine naturally-failed teacher generations;
-    the rest inject a breakage into the seed and repair that.
+    the rest inject a breakage into the seed and repair that. ``diagnostic``
+    selects the diagnose-then-fix assistant format (see ``make_repair_record``).
     """
     with log.stage("generate_repairs", task=task.task_id, n=n,
                    natural_fraction=natural_fraction):
@@ -173,7 +216,8 @@ def generate_repairs(
                 continue  # breakage didn't actually break — skip
             _ctx.attempt = {"idx": attempts, "mutator": _name,
                             "broke_verified_fail": True}
-            rec = make_repair_record(task, teacher, env, broken_src, broken_obs)
+            rec = make_repair_record(task, teacher, env, broken_src, broken_obs,
+                                     diagnostic=diagnostic)
             if rec is not None:
                 records.append(rec)
             log.progress(attempts, max(1, n_injected * 5), "repair",
@@ -182,7 +226,8 @@ def generate_repairs(
         injected_kept = len(records)
 
         # (2) Naturally-failed teacher turns.
-        natural = mine_natural_failures(task, teacher, env, n_natural, seed=seed + 1)
+        natural = mine_natural_failures(task, teacher, env, n_natural, seed=seed + 1,
+                                        diagnostic=diagnostic)
         records += natural
         result = records[:n]
         log.metric(
@@ -200,6 +245,7 @@ def mine_natural_failures(
     env,
     n: int,
     seed: int = 0,
+    diagnostic: bool = True,
 ) -> list[RepairRecord]:
     """Sample teacher rewrites of the seed; whenever one fails, mine a repair."""
     with log.stage("mine_natural_failures", task=task.task_id, n=n):
@@ -233,7 +279,8 @@ def mine_natural_failures(
                 continue  # it worked — not a repair opportunity
             _ctx.attempt = {"idx": attempts, "mutator": f"natural:{mode}",
                             "broke_verified_fail": True}
-            rec = make_repair_record(task, teacher, env, cand_src, obs)
+            rec = make_repair_record(task, teacher, env, cand_src, obs,
+                                     diagnostic=diagnostic)
             if rec is not None:
                 records.append(rec)
             log.progress(attempts, budget, "natural_mine",

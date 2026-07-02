@@ -14,7 +14,18 @@ Design analogue (KORE.pdf Sec 4.5):
     cheap predictor of a measurement is enough to prune the search and cut the
     number of expensive evaluations several-fold.
 
-Everything here is PURE (numpy only) and deterministic, so it is trivially
+Two feature families are concatenated into one fixed-length vector:
+  1. PROBLEM/CONTEXT features (operation, shape, dtype, parent stats, PMC
+     bottleneck) — what the move is being applied *to*.
+  2. CANDIDATE-SCHEDULE features extracted from the kernel SOURCE itself (BLOCK
+     sizes, num_warps/num_stages, tiling area, vectorization width, tl.dot/MFMA
+     presence, LDS/pipeline hints, loop structure). This is the Ansor/NLTSP move:
+     the cost model is *action-conditioned* — it sees the actual schedule the
+     candidate encodes, not only the problem it targets. When a move carries no
+     source these features are all zero, so the vector layout (and every existing
+     model) stays backward-compatible.
+
+Everything here is PURE (numpy + re only) and deterministic, so it is trivially
 testable and reproducible. Categoricals are one-hot encoded; sizes are
 log-scaled (kernel cost scales multiplicatively with problem size, so log space
 is the natural feature space, exactly as Ansor log-transforms tile extents).
@@ -23,6 +34,7 @@ is the natural feature space, exactly as Ansor log-transforms tile extents).
 from __future__ import annotations
 
 import math
+import re
 from typing import Iterable, Sequence
 
 import numpy as np
@@ -106,6 +118,184 @@ def _log1p_pos(x: float) -> float:
     return math.log1p(max(0.0, float(x)))
 
 
+def _is_pow2(x: int) -> bool:
+    return x > 0 and (x & (x - 1)) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Candidate-schedule extraction (Ansor / NLTSP: featurize the SCHEDULE)
+#
+# These parse the proposed kernel source for the knobs a cost model needs to be
+# action-conditioned. All patterns are best-effort and side-effect-free; a knob
+# that isn't found is simply absent (None / 0), so a partial or exotic kernel
+# still featurizes cleanly.
+# --------------------------------------------------------------------------- #
+_BLOCK_NAMES = ("BLOCK_M", "BLOCK_N", "BLOCK_K", "GROUP_M")
+
+# Names whose schedule value we surface as an ordered numeric block. Keep this in
+# sync with SCHEDULE_FEATURE_NAMES below.
+SCHEDULE_FEATURE_NAMES: list[str] = [
+    "sched_has_source",
+    "sched_log_block_m",
+    "sched_log_block_n",
+    "sched_log_block_k",
+    "sched_log_group_m",
+    "sched_log_tile_area",
+    "sched_blocks_mult64",
+    "sched_blocks_pow2",
+    "sched_log_num_warps",
+    "sched_log_num_stages",
+    "sched_has_tl_dot",
+    "sched_has_mfma",
+    "sched_has_fp32_acc",
+    "sched_has_mask",
+    "sched_has_reduction_loop",
+    "sched_log_n_loads",
+    "sched_log_n_stores",
+    "sched_log_n_loops",
+    "sched_log_vec_width",
+]
+
+
+def _scalar_assign(src: str, name: str):
+    """First *simple* assignment / constexpr default of `name` (e.g. BLOCK_M=128).
+
+    Only accepts a line whose left-hand side is exactly ``name`` (optionally with
+    a ``: tl.constexpr`` annotation) so a tuple LHS like
+    ``BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M = ...`` never mis-binds via its tail name.
+    """
+    for line in src.splitlines():
+        if "=" not in line:
+            continue
+        lhs = line.split("=", 1)[0]
+        lhs_name = lhs.split(":", 1)[0].strip()
+        if lhs_name == name:
+            m = re.search(r"=\s*(\d+)", line)
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def _tuple_assign(src: str, name: str):
+    """Value of `name` when set positionally in a tuple assignment, e.g.
+    ``BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M = 128, 128, 64, 8``."""
+    for m in re.finditer(
+        r"^[ \t]*([A-Za-z_][\w\s,]*?)\s*=\s*([-\d][\d\s,]*\d|\d)\s*$",
+        src,
+        re.MULTILINE,
+    ):
+        lhs = [t.strip() for t in m.group(1).split(",") if t.strip()]
+        rhs = [t.strip() for t in m.group(2).split(",") if t.strip()]
+        if name in lhs and len(lhs) == len(rhs):
+            try:
+                return int(rhs[lhs.index(name)])
+            except ValueError:
+                continue
+    return None
+
+
+def _block_value(src: str, name: str):
+    v = _scalar_assign(src, name)
+    if v is not None:
+        return v
+    return _tuple_assign(src, name)
+
+
+def _kwarg_int(src: str, name: str):
+    m = re.search(rf"\b{name}\b\s*=\s*(\d+)", src)
+    return int(m.group(1)) if m else None
+
+
+def extract_schedule_features(source: str) -> dict:
+    """Parse a candidate kernel SOURCE into raw schedule knobs.
+
+    Returns a plain dict of the schedule descriptors used by :func:`featurize`
+    (and by the untrained heuristic ranker in ``rerank``). Missing knobs are
+    ``None``/``0`` so a partial kernel still featurizes.
+    """
+    src = source or ""
+    has_source = bool(src.strip())
+    bm = _block_value(src, "BLOCK_M")
+    bn = _block_value(src, "BLOCK_N")
+    bk = _block_value(src, "BLOCK_K")
+    gm = _block_value(src, "GROUP_M")
+    blocks = [b for b in (bm, bn, bk) if b is not None]
+
+    num_warps = _kwarg_int(src, "num_warps")
+    num_stages = _kwarg_int(src, "num_stages")
+
+    has_tl_dot = bool(re.search(r"\btl\.dot\s*\(", src))
+    has_mfma = bool(re.search(r"mfma|matrix_core|v_mfma", src, re.IGNORECASE))
+    has_fp32_acc = bool(
+        re.search(r"tl\.zeros\([^)]*float32", src)
+        or re.search(r"dtype\s*=\s*tl\.float32", src)
+        or re.search(r"\.to\(tl\.float32\)", src)
+    )
+    has_mask = bool(re.search(r"\bmask\s*=", src))
+    # a reduction loop over the K contraction dimension (software pipelining site)
+    has_reduction_loop = bool(
+        re.search(r"for\s+\w+\s+in\s+range\([^)]*\bK\b", src)
+        or re.search(r"for\s+\w+\s+in\s+range\([^)]*BLOCK_K", src)
+    )
+    n_loads = len(re.findall(r"\btl\.load\s*\(", src))
+    n_stores = len(re.findall(r"\btl\.store\s*\(", src))
+    n_loops = len(re.findall(r"\bfor\s+\w+\s+in\s+", src))
+
+    tile_area = (bm * bn) if (bm is not None and bn is not None) else None
+    blocks_mult64 = 1.0 if (blocks and all(b % 64 == 0 for b in blocks)) else 0.0
+    blocks_pow2 = 1.0 if (blocks and all(_is_pow2(b) for b in blocks)) else 0.0
+    # contiguous vectorization width: the innermost (K) tile drives coalesced
+    # loads; fall back to the N tile, else 0.
+    vec_width = bk if bk is not None else (bn if bn is not None else 0)
+
+    return {
+        "has_source": has_source,
+        "block_m": bm,
+        "block_n": bn,
+        "block_k": bk,
+        "group_m": gm,
+        "num_warps": num_warps,
+        "num_stages": num_stages,
+        "has_tl_dot": has_tl_dot,
+        "has_mfma": has_mfma,
+        "has_fp32_acc": has_fp32_acc,
+        "has_mask": has_mask,
+        "has_reduction_loop": has_reduction_loop,
+        "n_loads": n_loads,
+        "n_stores": n_stores,
+        "n_loops": n_loops,
+        "tile_area": tile_area,
+        "blocks_mult64": blocks_mult64,
+        "blocks_pow2": blocks_pow2,
+        "vec_width": vec_width,
+    }
+
+
+def _schedule_vector(source: str) -> list[float]:
+    s = extract_schedule_features(source)
+    return [
+        1.0 if s["has_source"] else 0.0,
+        _log1p_pos(s["block_m"] or 0),
+        _log1p_pos(s["block_n"] or 0),
+        _log1p_pos(s["block_k"] or 0),
+        _log1p_pos(s["group_m"] or 0),
+        _log1p_pos(s["tile_area"] or 0),
+        float(s["blocks_mult64"]),
+        float(s["blocks_pow2"]),
+        _log1p_pos(s["num_warps"] or 0),
+        _log1p_pos(s["num_stages"] or 0),
+        1.0 if s["has_tl_dot"] else 0.0,
+        1.0 if s["has_mfma"] else 0.0,
+        1.0 if s["has_fp32_acc"] else 0.0,
+        1.0 if s["has_mask"] else 0.0,
+        1.0 if s["has_reduction_loop"] else 0.0,
+        _log1p_pos(s["n_loads"]),
+        _log1p_pos(s["n_stores"]),
+        _log1p_pos(s["n_loops"]),
+        _log1p_pos(s["vec_width"] or 0),
+    ]
+
+
 def _build_feature_names() -> list[str]:
     names: list[str] = []
     names += [f"op={o}" for o in OPERATIONS]
@@ -121,6 +311,8 @@ def _build_feature_names() -> list[str]:
         "log_parent_vgpr",
         "has_parent",
     ]
+    # candidate-schedule block (Ansor/NLTSP action-conditioned features)
+    names += list(SCHEDULE_FEATURE_NAMES)
     return names
 
 
@@ -135,7 +327,13 @@ def featurize(meta: dict) -> np.ndarray:
         operation (str), M/N/K or dims/shape, dtype (str),
         diff_size (int, chars changed vs parent),
         parent_snr (float), parent_wall_ms (float), parent_vgpr (int),
-        pmc_bottleneck (str in {compute, balanced, memory, unknown}).
+        pmc_bottleneck (str in {compute, balanced, memory, unknown}),
+        source (str): the candidate kernel source. When present, the
+            candidate-schedule block (BLOCK sizes, num_warps/num_stages, tiling,
+            vectorization width, tl.dot/MFMA, LDS/pipeline hints, loop structure)
+            is extracted so the model is action/schedule-conditioned. When
+            absent, that block is all-zero and the vector is unchanged from the
+            problem-only layout (backward-compatible).
     """
     meta = meta or {}
     vec: list[float] = []
@@ -178,6 +376,9 @@ def featurize(meta: dict) -> np.ndarray:
     vec.append(_log1p_pos(meta.get("parent_wall_ms", 0.0)))
     vec.append(_log1p_pos(meta.get("parent_vgpr", 0)))
     vec.append(1.0 if has_parent else 0.0)
+
+    # --- candidate-schedule block (from the kernel SOURCE, if provided) ---
+    vec += _schedule_vector(meta.get("source", "") or "")
 
     arr = np.asarray(vec, dtype=np.float32)
     assert arr.shape[0] == N_FEATURES, (

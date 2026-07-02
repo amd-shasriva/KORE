@@ -99,6 +99,109 @@ class _NumpyLogistic:
         return 1.0 / (1.0 + np.exp(-np.clip(z, -30, 30)))
 
 
+class PairwiseRanker:
+    """Linear RankNet-style pairwise ranker (pure numpy).
+
+    Learns a scalar score ``s(x) = w·x_std + b`` by descending the pairwise
+    logistic loss over WITHIN-GROUP candidate pairs. For every pair ``(i, j)`` in
+    the same group with realized utility ``u_i > u_j`` the loss pushes
+    ``s_i > s_j``; each pair is throughput-weighted by the utility margin (and,
+    optionally, by per-sample weights) so the ranker spends its capacity ordering
+    the *fast* kernels at the top of the group — the part of the ranking the GRPO
+    top-k selector actually benches.
+
+    This is the listwise/pairwise supervision the pointwise regressor lacks: it
+    is trained to get the ORDER right within a group, not to hit an absolute
+    log-speedup target, which is what "measurement efficiency" ultimately needs.
+    """
+
+    def __init__(self, lr: float = 0.3, n_iter: int = 400, l2: float = 1e-3):
+        self.lr = lr
+        self.n_iter = n_iter
+        self.l2 = l2
+        self.w: Optional[np.ndarray] = None
+        self.b: float = 0.0
+        self.mu: Optional[np.ndarray] = None
+        self.sd: Optional[np.ndarray] = None
+        self.fitted = False
+
+    @staticmethod
+    def _group_pairs(group_ids: np.ndarray, utils: np.ndarray):
+        """Yield (i, j, margin) for same-group pairs with util_i > util_j."""
+        pairs_i: list[int] = []
+        pairs_j: list[int] = []
+        margins: list[float] = []
+        order = np.argsort(group_ids, kind="stable")
+        gid_sorted = group_ids[order]
+        start = 0
+        n = len(order)
+        while start < n:
+            end = start
+            while end + 1 < n and gid_sorted[end + 1] == gid_sorted[start]:
+                end += 1
+            members = order[start : end + 1]
+            for a in members:
+                for b in members:
+                    if a == b:
+                        continue
+                    du = float(utils[a] - utils[b])
+                    if du > 0:
+                        pairs_i.append(int(a))
+                        pairs_j.append(int(b))
+                        margins.append(du)
+            start = end + 1
+        return (
+            np.asarray(pairs_i, dtype=int),
+            np.asarray(pairs_j, dtype=int),
+            np.asarray(margins, dtype=np.float64),
+        )
+
+    def fit(self, X, group_ids, utils, sample_weight=None) -> "PairwiseRanker":
+        X = np.asarray(X, dtype=np.float64)
+        group_ids = np.asarray(group_ids).ravel()
+        utils = np.asarray(utils, dtype=np.float64).ravel()
+        n, d = X.shape
+        self.mu, self.sd = _standardize_fit(X)
+        Xs = (X - self.mu) / self.sd
+        self.w = np.zeros(d)
+        self.b = 0.0
+
+        pi, pj, margins = self._group_pairs(group_ids, utils)
+        if pi.size == 0:
+            # No orderable pairs (e.g. all-equal utilities): leave a zero scorer,
+            # which yields a stable, ordering-preserving (identity) ranking.
+            self.fitted = True
+            return self
+
+        # pair weights: utility margin (throughput weighting) x geo-mean sample wt
+        pw = margins.copy()
+        if sample_weight is not None:
+            sw = np.asarray(sample_weight, dtype=np.float64).ravel()
+            sw = np.clip(sw, 1e-8, None)
+            pw = pw * np.sqrt(sw[pi] * sw[pj])
+        pw = pw / (pw.mean() + 1e-12)
+
+        npairs = pi.size
+        for _ in range(self.n_iter):
+            diff = Xs[pi] - Xs[pj]                      # (npairs, d)
+            s = diff @ self.w                            # score margin
+            p = 1.0 / (1.0 + np.exp(-np.clip(s, -30, 30)))
+            g = (p - 1.0) * pw                           # dL/ds for target=1
+            grad_w = diff.T @ g / npairs + self.l2 * self.w
+            self.w -= self.lr * grad_w
+        self.fitted = True
+        return self
+
+    def predict(self, X) -> np.ndarray:
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim == 1:
+            X = X[None, :]
+        if self.w is None:
+            return np.zeros(X.shape[0], dtype=np.float64)
+        Xs = (X - self.mu) / self.sd
+        return Xs @ self.w + self.b
+
+
 class _NumpyRidge:
     """Weighted ridge regression (closed form) on standardized features."""
 
@@ -205,6 +308,10 @@ class ValueModel:
             self.clf_snr = _NumpyLogistic()
             self.reg_speedup = _NumpyRidge()
         self.fitted = False
+        # Optional pairwise ranking head (trained on within-group order). When
+        # present it supplies a schedule-aware ordering signal that complements
+        # the pointwise regressor; see train_value.train_ranking.
+        self.ranker: Optional["PairwiseRanker"] = None
 
     def fit(
         self,
@@ -240,6 +347,23 @@ class ValueModel:
             "p_snr_pass": p_snr,
             "e_log_speedup": e_log,
         }
+
+    def fit_ranker(self, X, group_ids, utils, sample_weight=None) -> "ValueModel":
+        """Fit/attach the pairwise ranking head from within-group order."""
+        self.ranker = PairwiseRanker().fit(X, group_ids, utils, sample_weight=sample_weight)
+        return self
+
+    def rank_scores(self, X: np.ndarray) -> np.ndarray:
+        """Ordering score. Uses the ranking head when present, else the pointwise
+        utility E[speedup] gated by validity (the reranker default)."""
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim == 1:
+            X = X[None, :]
+        if self.ranker is not None and getattr(self.ranker, "fitted", False):
+            return np.asarray(self.ranker.predict(X), dtype=np.float64)
+        pred = self.predict(X)
+        return (pred["p_compile"] * pred["p_snr_pass"]
+                * np.exp(np.clip(pred["e_log_speedup"], -50.0, 50.0)))
 
     def save(self, path: str) -> None:
         with open(path, "wb") as f:

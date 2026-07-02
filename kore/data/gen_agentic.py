@@ -45,11 +45,19 @@ def episode_to_record(
     extra_provenance: Optional[dict] = None,
 ) -> AgenticTrajectoryRecord:
     """Convert a finished episode into an :class:`AgenticTrajectoryRecord`."""
+    reflections = list(getattr(episode, "reflections", []) or [])
+    phase_trace = list(getattr(episode, "phase_trace", []) or [])
+    reseeds = list(getattr(episode, "reseeds", []) or [])
     provenance = {
         "category": _category(episode),
         "teacher": type(teacher).__name__ if teacher is not None else None,
         "turns_used": episode.turns_used,
         "n_tool_calls": len(episode.tool_trace),
+        "n_reflections": len(reflections),
+        "n_reseeds": len(reseeds),
+        "phases": sorted({p.get("phase") for p in phase_trace if p.get("phase")}),
+        "turn_rewards": list(getattr(episode, "turn_rewards", []) or []),
+        "turn_correct": list(getattr(episode, "turn_correct", []) or []),
         "tool_use_reward": tool_use_reward(episode),
     }
     if extra_provenance:
@@ -63,6 +71,8 @@ def episode_to_record(
         best_reward=episode.best_reward,
         turns_to_best=episode.turns_to_best,
         success=episode.success,
+        reflections=reflections,
+        phase_trace=phase_trace,
         provenance=provenance,
         gpu=getattr(task, "gpu_target", "gfx942"),
     )

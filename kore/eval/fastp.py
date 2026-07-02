@@ -100,3 +100,70 @@ def geometric_mean_speedup(
     if not logs:
         return 0.0
     return math.exp(sum(logs) / len(logs))
+
+
+# --------------------------------------------------------------------------- #
+# Unbiased best-of-N estimators (pass@k / fast_p@k) + multi-seed CI
+# --------------------------------------------------------------------------- #
+def pass_at_k(n: int, c: int, k: int) -> float:
+    """Unbiased pass@k estimator (Chen et al. / HumanEval).
+
+    Given ``n`` independent samples of which ``c`` are "successes", the expected
+    fraction of size-``k`` draws (without replacement) that contain at least one
+    success is ``1 - C(n-c, k) / C(n, k)``. This is the standard low-variance
+    estimator used for parallel best-of-N; it avoids the high variance of the
+    naive ``1 - (1-c/n)**k`` plug-in.
+    """
+    n, c, k = int(n), int(c), int(k)
+    if n <= 0 or k <= 0:
+        return 0.0
+    k = min(k, n)
+    c = max(0, min(c, n))
+    if c <= 0:
+        return 0.0
+    if n - c < k:  # every size-k draw must contain a success
+        return 1.0
+    return 1.0 - math.comb(n - c, k) / math.comb(n, k)
+
+
+def fast_p_at_k(
+    is_correct: Sequence[bool],
+    baseline_speed: Sequence[float],
+    actual_speed: Sequence[float],
+    k: int,
+    p: float,
+    n: int | None = None,
+) -> float:
+    """Unbiased fast_p@k: pass@k where a "success" is a sample that is BOTH
+    correct AND faster than the baseline by more than a factor ``p``.
+
+    ``n`` overrides the sample count (defaults to the number of samples given);
+    ``c`` is the number of samples that are correct AND ``baseline/actual > p``.
+    """
+    m = min(len(is_correct), len(baseline_speed), len(actual_speed))
+    total = m if n is None else int(n)
+    c = 0
+    for i in range(m):
+        if is_correct[i] and _speedup(baseline_speed[i], actual_speed[i]) > p:
+            c += 1
+    return pass_at_k(total, c, k)
+
+
+def mean_ci(values: Sequence[float], z: float = 1.96) -> dict:
+    """Mean and (normal-approx) confidence half-width of ``values``.
+
+    Returns ``{mean, std, sem, ci95, lo, hi, n}``. With <2 samples the CI is 0
+    (a single seed carries no variance estimate). ``z=1.96`` -> 95% CI.
+    """
+    vals = [float(v) for v in values]
+    n = len(vals)
+    if n == 0:
+        return {"mean": 0.0, "std": 0.0, "sem": 0.0, "ci95": 0.0, "lo": 0.0, "hi": 0.0, "n": 0}
+    mu = sum(vals) / n
+    if n < 2:
+        return {"mean": mu, "std": 0.0, "sem": 0.0, "ci95": 0.0, "lo": mu, "hi": mu, "n": n}
+    var = sum((v - mu) ** 2 for v in vals) / (n - 1)
+    std = math.sqrt(var)
+    sem = std / math.sqrt(n)
+    ci = z * sem
+    return {"mean": mu, "std": std, "sem": sem, "ci95": ci, "lo": mu - ci, "hi": mu + ci, "n": n}

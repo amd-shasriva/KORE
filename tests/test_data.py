@@ -24,6 +24,8 @@ from kore.data.prompts import (
 from kore.data.teacher import StubTeacher, TeacherClient
 from kore.data import mutate
 from kore.data.gen_groups import rank_candidates, build_preferences
+from kore.data.gen_repair import make_repair_record
+from kore.reward.reward import Observation
 from kore.data.build_datasets import (
     build_sft,
     build_dpo,
@@ -345,6 +347,114 @@ def test_rank_candidates_ordering():
     ]
     order = rank_candidates(results)
     assert order == [1, 0, 2, 3]
+
+
+# --------------------------------------------------------------------------- #
+# margin gate (measurement-noise ties -> non-preferences)
+# --------------------------------------------------------------------------- #
+def test_build_preferences_default_no_gate():
+    # default 0.0 bands preserve the pure ranking behaviour exactly
+    results = [
+        {"compiled": True, "correct": True, "speedup": 1.5, "snr_db": 40.0},
+        {"compiled": True, "correct": True, "speedup": 3.0, "snr_db": 41.0},
+    ]
+    assert build_preferences(results) == [[1, 0]]
+
+
+def test_build_preferences_margin_gate_drops_near_ties():
+    results = [
+        {"compiled": True, "correct": True, "speedup": 2.00, "snr_db": 40.0},
+        {"compiled": True, "correct": True, "speedup": 2.02, "snr_db": 40.1},
+    ]
+    # ungated: 2.02 > 2.00 is a strict ordering
+    assert build_preferences(results) == [[1, 0]]
+    # margin-gated: within 3% speed AND 0.5 dB SNR -> measurement-noise tie -> drop
+    gated = build_preferences(results, speedup_noise_band=0.03, snr_noise_band_db=0.5)
+    assert gated == []
+
+
+def test_build_preferences_margin_gate_keeps_real_speed_win():
+    results = [
+        {"compiled": True, "correct": True, "speedup": 1.0, "snr_db": 40.0},
+        {"compiled": True, "correct": True, "speedup": 3.0, "snr_db": 40.0},
+    ]
+    prefs = build_preferences(results, speedup_noise_band=0.03, snr_noise_band_db=0.5)
+    assert [1, 0] in prefs  # a real 3x speedup is not a noise tie
+
+
+def test_build_preferences_margin_gate_keeps_cross_tier():
+    # correct-vs-incorrect is always a real preference, regardless of the bands
+    results = [
+        {"compiled": True, "correct": True, "speedup": 2.0, "snr_db": 40.0},
+        {"compiled": True, "correct": False, "speedup": None, "snr_db": 5.0},
+    ]
+    prefs = build_preferences(results, speedup_noise_band=0.99, snr_noise_band_db=100.0)
+    assert [0, 1] in prefs
+
+
+# --------------------------------------------------------------------------- #
+# diagnostic-augmented repair corpus (LLM-VeriOpt <think>/<answer>)
+# --------------------------------------------------------------------------- #
+class _RepairTask:
+    task_id = "gemm_bf16"
+    dtype = "bf16"
+    gpu_target = "gfx942"
+    operation = "gemm"
+
+
+class _FixEnv:
+    """Env whose fix always validates (the repair path only steps the fix)."""
+
+    def step(self, source, full_validation=True, multi_shape=True):
+        return Observation(compiled=True, validation_passed=True, snr_db=40.0,
+                           snr_by_shape={"primary": 40.0}, wall_ms=1.0,
+                           baseline_ms=2.0, dtype="bf16")
+
+
+def _broken_snr_obs():
+    return Observation(compiled=True, validation_passed=False, snr_db=5.0,
+                       snr_by_shape={"primary": 5.0},
+                       error_text="worst SNR 5.0 < 25.0 dB", dtype="bf16")
+
+
+def test_make_repair_record_diagnostic_format():
+    teacher = StubTeacher(fn=lambda m: "FULL_KERNEL:\n```python\ndef k():\n    return 1\n```")
+    rec = make_repair_record(_RepairTask(), teacher, _FixEnv(),
+                             broken_src="def broken():\n    return 0",
+                             broken_obs=_broken_snr_obs())
+    assert rec is not None
+    assert rec.failure_class == "snr_fail"
+    content = rec.messages[-1]["content"]
+    assert rec.messages[-1]["role"] == "assistant"
+    # well-formed diagnose-then-fix format
+    assert "<think>" in content and "</think>" in content
+    assert "<answer>" in content and "</answer>" in content
+    # the verifier error is folded into the reasoning
+    assert "worst SNR 5.0" in content
+    # the verified fix is still parseable as a FULL_KERNEL block
+    assert extract_kernel(content).strip() == "def k():\n    return 1"
+
+
+def test_make_repair_record_plain_format_when_disabled():
+    resp = "ANALYSIS: ok\nFULL_KERNEL:\n```python\ndef k():\n    return 1\n```"
+    teacher = StubTeacher(fn=lambda m: resp)
+    rec = make_repair_record(_RepairTask(), teacher, _FixEnv(),
+                             broken_src="def broken():\n    return 0",
+                             broken_obs=_broken_snr_obs(), diagnostic=False)
+    assert rec is not None
+    content = rec.messages[-1]["content"]
+    assert content == resp
+    assert "<think>" not in content
+
+
+def test_make_repair_record_none_when_broken_side_passes():
+    # if the "broken" observation actually passed, there's nothing to repair
+    passing = Observation(compiled=True, validation_passed=True, snr_db=40.0,
+                          snr_by_shape={"primary": 40.0}, dtype="bf16")
+    teacher = StubTeacher()
+    rec = make_repair_record(_RepairTask(), teacher, _FixEnv(),
+                             broken_src="x", broken_obs=passing)
+    assert rec is None
 
 
 def test_build_preferences():

@@ -161,7 +161,77 @@ class GRPOConfig:
     sc_grpo_allfail: bool = False          # all-fail diversity bonus
     sc_grpo_alpha: float = 0.1
 
+    # --- Kevin multi-turn credit (best-kernel scoring + CoT masking) ---
+    kevin_best_kernel_scoring: bool = True  # trajectory value = best correct kernel
+    cot_masking: bool = True                # drop prior-turn thinking from context
+
+    # --- Retention: KL anchor to the post-SFT multi-capability checkpoint ---
+    ref_checkpoint: Optional[str] = None    # defaults to model_id (the SFT ckpt)
+    ref_anchor_coef: float = 1e-3           # KL-to-reference coef (chat/code retention)
+
+    # --- StarPO-S stabilization (Echo-Trap mitigation) ---
+    starpo_s: bool = True
+    starpo_min_std: float = 1e-3            # drop zero-variance (collapsed) groups
+    starpo_keep_frac: float = 0.75          # keep top-variance fraction of groups
+
+    # --- Measurement efficiency: value-model bench prefilter ---
+    value_prefilter: bool = False
+    value_prefilter_k: int = 4              # bench only top-k candidates by value model
+    value_model_path: Optional[str] = None
+
+    # --- Agentic tool-use RL (ToolRL reward shaping) ---
+    agentic: bool = False                   # rollouts drive build/test/bench/pmc tools
+    tool_reward_weight: float = 0.2         # weight on ToolRL-style shaping term
+    max_tool_turns: int = 8
+
     seed: int = 0
     logging_steps: int = 1
     save_steps: int = 50
     report_to: str = "none"
+
+
+@dataclass
+class MidTrainConfig:
+    """Stage-0 continued pretraining on the ROCm/HIP/Triton corpus."""
+
+    model_id: str = MODEL_14B
+    corpus_path: str = "data/midtrain/corpus.jsonl"
+    output_dir: str = "runs/midtrain"
+    general_replay_frac: float = 0.15       # 10-15% general shards (strong-shift regime)
+    learning_rate: float = 1e-5
+    lr_scheduler_type: str = "cosine"
+    num_train_epochs: float = 1.0
+    warmup_ratio: float = 0.05
+    max_seq_length: int = 8192
+    bf16: bool = True
+    gradient_checkpointing: bool = True
+    use_lora: bool = False                  # full-FT (large ROCm distribution shift)
+
+
+@dataclass
+class MultiCapSFTConfig(SFTConfig):
+    """Stage-1 multi-capability SFT mixture (kernel + general + agentic).
+
+    Fractions of the training mix (must sum ~1.0). ~45% general = the retention
+    backbone; ~10% agentic tool-use trajectories = the orchestration skill.
+    """
+
+    frac_kernel_repair_opt: float = 0.35
+    frac_kernel_qa: float = 0.10
+    frac_agentic_tooluse: float = 0.10
+    frac_general_code: float = 0.20
+    frac_math_reasoning: float = 0.15
+    frac_general_chat: float = 0.10
+    use_lora: bool = False                  # full-FT, governed by replay + small LR
+    num_train_epochs: float = 3.0
+
+
+@dataclass
+class SoupConfig:
+    """Stage-4 base-ward model soup (WiSE-FT interpolation)."""
+
+    base_model_id: str = MODEL_14B          # the instruct base to interpolate toward
+    kore_checkpoint: str = "runs/grpo"
+    output_dir: str = "runs/soup"
+    alphas: tuple = (0.7, 0.8, 0.9)         # weight on the KORE specialist
+    epsilon: float = 0.005                  # max tolerated general-metric regression

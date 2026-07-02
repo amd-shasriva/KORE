@@ -1,0 +1,7 @@
+# SMOKE SUBSET — MT-Bench-style open-ended prompts scored by an LLM judge. NOT the full bench.
+# TODO: load the full MT-Bench question set + a strong judge (e.g. GPT-4) for a real run. See judge= hook in retention.py.
+# Fields: question, reference (optional gold answer to help a reference-guided judge). Scores are on a 1-10 scale.
+{"id": "mt-0", "question": "Explain in one or two sentences what a GPU kernel is.", "reference": "A GPU kernel is a function that runs in parallel across many threads on the GPU to perform a computation such as a matrix multiply or normalization."}
+{"id": "mt-1", "question": "Briefly describe the difference between memory-bound and compute-bound kernels.", "reference": "A memory-bound kernel is limited by memory bandwidth (data movement), while a compute-bound kernel is limited by arithmetic throughput (FLOPs)."}
+{"id": "mt-2", "question": "Write a short two-line haiku about autumn leaves.", "reference": null}
+{"id": "mt-3", "question": "Give one concise tip for reducing register (VGPR) pressure in a Triton kernel.", "reference": "Reduce the tile size or reuse registers / spill intermediates to LDS so fewer VGPRs are live at once, improving occupancy."}

@@ -110,29 +110,41 @@ class ClaudeTeacher:
         AMD_LLM_GATEWAY_URL, AMD_LLM_API_KEY, and optionally AMD_NTID.
     """
 
-    def __init__(self, model: str = "claude-opus-4-8", temperature: float = 0.7,
+    GATEWAY_URL = "https://llm-api.amd.com/Anthropic"
+
+    def __init__(self, model: str = "claude-opus-4.8", temperature: float = 0.7,
                  max_tokens: int = 8192, system: Optional[str] = None):
         import anthropic
 
         load_env_local()
-        base_url = os.environ.get("AMD_LLM_GATEWAY_URL")
-        api_key = os.environ.get("AMD_LLM_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+        api_key = (os.environ.get("AMD_LLM_API_KEY")
+                   or os.environ.get("LLM_GATEWAY_KEY"))
         if not api_key:
             raise RuntimeError("AMD_LLM_API_KEY not set (put it in .env.local)")
-        headers = {}
-        sub = os.environ.get("AMD_LLM_SUBSCRIPTION_KEY", api_key)
-        if sub:
-            headers["Ocp-Apim-Subscription-Key"] = sub
-        if os.environ.get("AMD_NTID"):
-            headers["X-User-Id"] = os.environ["AMD_NTID"]
-        kw = {"api_key": api_key, "default_headers": headers}
-        if base_url:
-            kw["base_url"] = base_url
-        self.client = anthropic.Anthropic(**kw)
-        self.model = model
+        base_url = os.environ.get("AMD_LLM_GATEWAY_URL", self.GATEWAY_URL)
+        user = self._resolve_user()
+        version = os.environ.get("AMD_LLM_API_VERSION", "2023-10-16")
+        # AMD gateway auth is via the Ocp-Apim header; the SDK api_key is a dummy.
+        self.client = anthropic.Anthropic(
+            api_key="dummy", base_url=base_url,
+            default_headers={
+                "Ocp-Apim-Subscription-Key": api_key,
+                "user": user,
+                "anthropic-version": version,
+            },
+        )
+        self.model = os.environ.get("KORE_TEACHER_MODEL", model)
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.system = system
+
+    @staticmethod
+    def _resolve_user() -> str:
+        for var in ("AMD_NTID", "GEAK_USER", "USER"):
+            v = (os.environ.get(var) or "").strip()
+            if v and v != "root":
+                return v if "@" in v else f"{v}@amd.com"
+        return "unknown"
 
     def generate(self, messages: list[dict]) -> str:
         system = self.system

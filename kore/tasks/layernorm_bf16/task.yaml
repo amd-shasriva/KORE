@@ -1,0 +1,19 @@
+task_id: layernorm_bf16
+operation: layernorm
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0   # bf16 LayerNorm, correctness oracle = torch-fp32
+shapes:
+  minimal: {M: 64, N: 512}
+  primary: {M: 4096, N: 4096}          # Llama-3-8B hidden
+  validation:
+    - {M: 2048, N: 8192}               # Llama-3-70B hidden
+    - {M: 8192, N: 5120}               # Qwen3 hidden
+    - {M: 4096, N: 8191}               # non-pow2 N tail (edge S1, masking)
+# Affine LayerNorm (weight + bias) over the last dim. Correctness oracle =
+# torch-fp32 layer_norm. Baseline (--impl reference) = AITER layer_norm (CK).
+targets:
+  snr_db: 30.0
+  comparison_baseline: aiter_layer_norm   # the REAL serving bar (CK)

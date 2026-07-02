@@ -1,0 +1,19 @@
+task_id: gemm_bf16
+operation: gemm
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0   # bf16 dense GEMM, correctness oracle = torch-fp32 matmul
+shapes:
+  minimal: {M: 64, N: 512, K: 512}
+  primary: {M: 4096, N: 4096, K: 4096}   # prefill, compute-bound square GEMM
+  validation:
+    - {M: 1, N: 4096, K: 4096}       # decode GEMV (tiny-M, memory-bound)
+    - {M: 8192, N: 8192, K: 4096}    # large prefill
+    - {M: 4096, N: 4096, K: 4095}    # non-pow2 K tail (edge S1/S5, K masking)
+# Y = A[M,K] @ B[K,N], bf16, fp32 accumulate. Correctness oracle = torch-fp32
+# matmul. Baseline (--impl reference) = torch.matmul -> hipBLASLt on ROCm.
+targets:
+  snr_db: 30.0
+  comparison_baseline: hipblaslt_gemm_bf16   # the REAL serving bar (hipBLASLt)

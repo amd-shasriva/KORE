@@ -51,6 +51,11 @@ _HACK_PATTERNS = [
     (r"\bF\.(scaled_dot_product_attention|linear|softmax|rms_norm|layer_norm|gelu|silu|conv\w*)\s*\(",
      "delegates to torch.nn.functional"),
     (r"\.(flash_attn\w*|fused_moe|paged_attention)\s*\(", "calls a fused vendor kernel instead of computing"),
+    # copy-reference: returning the oracle's output passes the SNR gate, so it
+    # MUST be rejected statically (runtime correctness can never catch it).
+    (r"\b(?:import\s+reference|from\s+reference\s+import)\b", "imports the reference oracle"),
+    (r"\b(?:reference|ref_program|ref_impl|matmul_ref|\w+_oracle|oracle)\s*\(",
+     "calls the reference oracle instead of computing the result"),
 ]
 _SILENT_FALLBACK = re.compile(r"except\s*[\w. ,()]*:\s*(?:\n\s*)*(?:return|pass|out\s*=)", re.MULTILINE)
 

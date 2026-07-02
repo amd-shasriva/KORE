@@ -1,0 +1,21 @@
+task_id: flash_attn_prefill_bf16
+operation: flash_attn_prefill
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+# bf16 causal-GQA prefill vs fp32 SDPA oracle. Online-softmax accumulation in
+# bf16 lands ~45-49 dB in practice; gate at 25 dB (the KORE low-precision
+# attention bar) leaves comfortable margin while still rejecting a missing
+# max-subtraction / wrong-rescale / bad-mask kernel.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 8, KV: 2, S: 256, D: 128}
+  primary: {B: 1, H: 32, KV: 8, S: 2048, D: 128}   # Llama-3.1-8B
+  validation:
+    - {B: 1, H: 32, KV: 8, S: 4096, D: 128}         # Llama-3.1-8B longer ctx
+    - {B: 2, H: 16, KV: 16, S: 2048, D: 128}        # MHA (1:1)
+    - {B: 1, H: 32, KV: 8, S: 1000, D: 128}         # non-multiple-of-BLOCK seqlen edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn   # AITER CK/ASM FMHA prefill

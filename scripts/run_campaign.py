@@ -41,7 +41,9 @@ from pathlib import Path
 from kore.obs import configure, get_logger, gpu_mem_snapshot
 
 ALL_STAGES = ["datagen", "agentic", "build", "midtrain", "sft", "dpo", "grpo", "soup", "eval"]
-DEFAULT_STAGES = ["datagen", "agentic", "build", "sft", "dpo", "grpo", "soup", "eval"]
+# Stage-0 mid-train (continued pretraining) runs FIRST so its checkpoint becomes
+# the base for Stage-1 SFT (see ctx["midtrain_ckpt"] -> _stage_sft).
+DEFAULT_STAGES = ["midtrain", "datagen", "agentic", "build", "sft", "dpo", "grpo", "soup", "eval"]
 
 # Kernel metric key used to drive the soup alpha sweep (fast_p at p=1.0).
 _SOUP_KERNEL_KEY = "kernel_fast1"
@@ -99,10 +101,13 @@ _IMPORT_CHECKS = [
     ("kore.data.build_datasets", "leakage_split", True, ["records", "by"]),
     ("kore.data.build_datasets", "dedup_by_source_hash", True, []),
     ("kore.data.schemas", "read_jsonl", True, []),
+    ("kore.policy.configs", "MidTrainConfig", True, []),
     ("kore.policy.configs", "MultiCapSFTConfig", True, []),
     ("kore.policy.configs", "DPOConfig", True, []),
     ("kore.policy.configs", "GRPOConfig", True, []),
     ("kore.policy.configs", "SoupConfig", True, []),
+    ("kore.data.midtrain_corpus", "build_midtrain_corpus", True, ["out_path", "config"]),
+    ("kore.policy.midtrain", "train_midtrain", True, ["config", "corpus_path"]),
     ("kore.policy.sft", "train_sft", True, []),
     ("kore.policy.dpo", "train", True, []),
     ("kore.policy.grpo", "train_grpo", True, ["tasks", "backend"]),
@@ -173,15 +178,15 @@ def _load_manifest_into_ctx(ctx) -> None:
     except Exception as e:  # noqa: BLE001
         _log("resume", f"WARNING: could not read manifest ({e}); starting fresh")
         return
-    for k in ("sft_ckpt", "dpo_ckpt", "grpo_ckpt", "final"):
+    for k in ("midtrain_ckpt", "sft_ckpt", "dpo_ckpt", "grpo_ckpt", "final"):
         if m.get(k):
             ctx[k] = m[k]
     ctx["done_stages"] = set(m.get("done_stages") or [])
     if m.get("eval_tasks"):
         ctx["eval_task_ids"] = list(m["eval_tasks"])
     _log("resume", f"manifest loaded: done={sorted(ctx['done_stages'])} "
-                   f"sft={ctx['sft_ckpt']} dpo={ctx['dpo_ckpt']} "
-                   f"grpo={ctx['grpo_ckpt']} final={ctx['final']}")
+                   f"midtrain={ctx['midtrain_ckpt']} sft={ctx['sft_ckpt']} "
+                   f"dpo={ctx['dpo_ckpt']} grpo={ctx['grpo_ckpt']} final={ctx['final']}")
 
 
 def _save_manifest(ctx) -> None:
@@ -191,6 +196,7 @@ def _save_manifest(ctx) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "model": ctx["base"],
+        "midtrain_ckpt": ctx.get("midtrain_ckpt"),
         "sft_ckpt": ctx.get("sft_ckpt"),
         "dpo_ckpt": ctx.get("dpo_ckpt"),
         "grpo_ckpt": ctx.get("grpo_ckpt"),
@@ -226,7 +232,7 @@ def _artifact_of(ctx, stage: str):
         "datagen": str(dr / "repair"),
         "agentic": str(dr / "agentic"),
         "build": str(dr / "sft" / "multicap.jsonl"),
-        "midtrain": str(dr / "midtrain"),
+        "midtrain": ctx.get("midtrain_ckpt"),
         "sft": ctx.get("sft_ckpt"),
         "dpo": ctx.get("dpo_ckpt"),
         "grpo": ctx.get("grpo_ckpt"),
@@ -243,7 +249,7 @@ def _artifact_ok(ctx, stage: str) -> bool:
         "agentic": lambda: (dr / "agentic").exists(),
         "build": lambda: (dr / "sft" / "multicap.jsonl").exists()
                           and (dr / "dpo" / "pairs.jsonl").exists(),
-        "midtrain": lambda: True,  # optional stage; nothing to verify
+        "midtrain": lambda: _path_exists(ctx.get("midtrain_ckpt")),
         "sft": lambda: _path_exists(ctx.get("sft_ckpt")),
         "dpo": lambda: _path_exists(ctx.get("dpo_ckpt")),
         "grpo": lambda: _path_exists(ctx.get("grpo_ckpt")),
@@ -265,8 +271,8 @@ def run(args) -> int:
 
     ctx = {
         "data_root": data_root, "tasks": tasks, "dry": dry, "args": args,
-        "base": args.model, "sft_ckpt": None, "dpo_ckpt": None,
-        "grpo_ckpt": None, "final": None, "metrics": {},
+        "base": args.model, "midtrain_ckpt": None, "sft_ckpt": None,
+        "dpo_ckpt": None, "grpo_ckpt": None, "final": None, "metrics": {},
         "done_stages": set(), "eval_task_ids": None, "current_stage": "-",
     }
 
@@ -500,14 +506,45 @@ def _stage_build(ctx):
 
 
 def _stage_midtrain(ctx):
+    """Stage-0: build the ROCm/HIP/Triton corpus (if missing) then continued-pretrain.
+
+    The trained checkpoint is threaded in as the base for Stage-1 SFT via
+    ``ctx["midtrain_ckpt"]`` (see ``_stage_sft``). Honors --lora/--full-ft; the
+    locked full-FT recipe of a 14B needs a sharded multi-GPU launch (the trainer
+    defers to the distributed launcher — see docs/rl_server.md).
+    """
     if ctx["dry"]:
-        _log("midtrain", "would full-FT continued-pretrain on ROCm/Triton corpus (~15% general replay)")
+        _log("midtrain", "would build the ROCm/HIP/Triton corpus (build_midtrain_corpus: "
+                         "kore task kernels+refs, PyTorch->Triton pairs, repo Triton/HIP "
+                         "source, rocprof/tuning docs, ~15% general replay) then full-FT "
+                         "continued-pretrain (train_midtrain) -> SFT base")
         return
+    from kore.data.midtrain_corpus import build_midtrain_corpus
+    from kore.policy.configs import MidTrainConfig
+    from kore.policy.midtrain import train_midtrain
+
     corpus = ctx["data_root"] / "midtrain" / "corpus.jsonl"
+    cfg = MidTrainConfig(model_id=ctx["base"], corpus_path=str(corpus),
+                         output_dir=ctx["args"].midtrain_out,
+                         use_lora=ctx["args"].lora)
+
+    # 1. Build the corpus from local sources if it is not already on disk.
     if not corpus.exists():
-        _log("midtrain", f"no corpus at {corpus}; skipping Stage-0 (optional)")
-        return
-    _log("midtrain", "Stage-0 continued pretraining (full-FT) — see docs/rl_server.md for the multi-GPU launch")
+        report = build_midtrain_corpus(corpus, cfg, seed=0, use_hf=ctx["args"].use_hf)
+        _log("midtrain", f"built corpus -> {corpus}: {report['total']} chunks "
+                         f"(general_frac={report['general_frac']}, "
+                         f"dropped_dup={report['n_dropped_dup']})")
+        for src, n in report["counts"].items():
+            LOG.metric("midtrain_corpus_source", source=src, n=n)
+    else:
+        _log("midtrain", f"reusing existing corpus at {corpus}")
+
+    # 2. Continued pretraining (full-FT locked recipe; --lora for single-GPU smoke).
+    mt_t0 = time.time()
+    ctx["midtrain_ckpt"] = train_midtrain(cfg, corpus_path=str(corpus))
+    LOG.progress(1, 1, "midtrain", t_start=mt_t0)
+    _log("midtrain", f"-> {ctx['midtrain_ckpt']} (this checkpoint becomes the SFT base)")
+    _retention_gate(ctx, stage="midtrain", candidate=ctx["midtrain_ckpt"], base=ctx["base"])
 
 
 def _stage_sft(ctx):
@@ -517,9 +554,14 @@ def _stage_sft(ctx):
     from kore.policy.configs import MultiCapSFTConfig
     from kore.policy.sft import train_sft
 
+    # Start Stage-1 SFT from the Stage-0 mid-train checkpoint when present (the
+    # continued-pretrained base); fall back to the raw base otherwise.
+    sft_base = ctx.get("midtrain_ckpt") or ctx["base"]
+    if ctx.get("midtrain_ckpt"):
+        _log("sft", f"starting from mid-train checkpoint {sft_base}")
     # Fix 8: --lora keeps the 14B validation run single-GPU-feasible (full-FT of a
     # 14B needs an FSDP/DeepSpeed multi-GPU launch — see docs/rl_server.md).
-    cfg = MultiCapSFTConfig(model_id=ctx["base"], output_dir=ctx["args"].sft_out,
+    cfg = MultiCapSFTConfig(model_id=sft_base, output_dir=ctx["args"].sft_out,
                             use_lora=ctx["args"].lora)
     ctx["sft_ckpt"] = train_sft(cfg, ctx["data_root"] / "sft" / "multicap.jsonl")
     _log("sft", f"-> {ctx['sft_ckpt']}")
@@ -756,6 +798,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-agentic", type=int, default=16, dest="n_agentic")
     p.add_argument("--max-tool-turns", type=int, default=8, dest="max_tool_turns")
     p.add_argument("--sft-total", type=int, default=20000, dest="sft_total")
+    p.add_argument("--midtrain-out", default="runs/midtrain", dest="midtrain_out")
     p.add_argument("--sft-out", default="runs/sft", dest="sft_out")
     p.add_argument("--dpo-out", default="runs/dpo", dest="dpo_out")
     p.add_argument("--grpo-out", default="runs/grpo", dest="grpo_out")

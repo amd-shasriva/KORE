@@ -2,8 +2,24 @@
 
 Pure, import-safe math (group advantages, discounted turn returns, asymmetric
 "clip-higher" surrogate) lives at module top so it is unit-testable without any
-heavy deps. ``train_grpo`` prefers a verl backend and falls back to a compact
-transformers+PEFT loop that rolls out against the verified :class:`KoreEnv`.
+heavy deps.
+
+``train_grpo`` dispatches to one of two FIRST-CLASS backends:
+
+* ``"verl"`` — a distributed verl + SGLang GRPO run on a dedicated ROCm box
+  (14B/32B/70B; the production scale-out path). See :func:`_train_grpo_verl`,
+  :func:`build_verl_grpo_config`, ``scripts/launch_verl.sh`` and
+  ``docs/rl_server.md``. verl and SGLang pin a different torch than the verified
+  env, so they live in an isolated venv/box — never silently substituted.
+* ``"inprocess"`` (a.k.a. ``"fallback"``) — a complete, GPU-proven, in-process
+  transformers+PEFT loop that rolls out against the verified :class:`KoreEnv`.
+  This is a real, tested backend (single-GPU / LoRA bring-up), not a
+  degraded last resort. See :func:`_train_grpo_inprocess`.
+
+``backend="auto"`` uses verl when it is importable and otherwise the in-process
+backend (with an INFO log); it never crashes. ``backend="verl"`` is explicit and
+raises a clear, actionable install error when verl is missing (no silent
+fallback — the caller asked for verl on purpose).
 """
 
 from __future__ import annotations
@@ -232,24 +248,342 @@ def composite_agentic_reward(kernel_reward: float, tool_reward: float = 0.0,
 # --------------------------------------------------------------------------- #
 # training entrypoint
 # --------------------------------------------------------------------------- #
+# Actionable message when backend="verl" is chosen but verl cannot be imported.
+_VERL_MISSING_MSG = (
+    "backend='verl' was requested but the `verl` package is not importable in "
+    "this environment.\n"
+    "verl + SGLang pin a different torch than KORE's verified env (they could "
+    "NOT co-install here: torch 2.11 vs the ROCm 2.10 wheel), so they must run "
+    "in a dedicated ROCm venv/box. Provision it with the recipe in "
+    "docs/rl_server.md, or run the launcher directly:\n\n"
+    "    bash scripts/launch_verl.sh --model <hf-id-or-path> --tasks <t1,t2,...> "
+    "--out runs/grpo --backend verl\n\n"
+    "That script (1) creates .venv-verl, (2) installs the AMD ROCm vLLM/SGLang "
+    "wheel + verl from the ROCm wheel index, (3) starts the SGLang rollout "
+    "server, and (4) runs `python -m verl.trainer.main_ppo` with the KORE GRPO "
+    "config + reward. Once `python -c \"import verl\"` succeeds inside that venv, "
+    "re-run with backend='verl' (or backend='auto')."
+)
+
+
+def _verl_available() -> bool:
+    """True iff the ``verl`` package can be imported (no side effects/import)."""
+    import importlib.util
+
+    return importlib.util.find_spec("verl") is not None
+
+
 def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "auto"):
-    """Dispatch to verl if available, else the built-in fallback loop."""
-    if backend in ("auto", "verl"):
-        try:
-            import verl  # noqa: F401
+    """Run multi-turn GRPO and return the output checkpoint dir (a ``str``).
 
-            return _train_grpo_verl(config, tasks)
-        except Exception as e:  # noqa: BLE001
-            if backend == "verl":
-                raise
-            print(f"[grpo] verl unavailable ({e}); using fallback loop")
-    return _train_grpo_fallback(config, tasks)
+    ``backend`` selects one of two first-class backends (see the module
+    docstring):
+
+    * ``"verl"``      — distributed verl + SGLang (production scale-out). Raises
+                        an actionable install error if verl is not importable
+                        (never silently falls back).
+    * ``"inprocess"`` / ``"fallback"`` — the in-process transformers+PEFT loop
+                        against the verified env (single-GPU / LoRA bring-up).
+    * ``"auto"``      — verl if importable, else the in-process backend (INFO
+                        log). Never crashes on a missing verl.
+    """
+    backend = (backend or "auto").lower()
+    if backend not in ("auto", "verl", "fallback", "inprocess"):
+        raise ValueError(
+            f"unknown grpo backend {backend!r}; expected one of "
+            "'auto', 'verl', 'inprocess'/'fallback'")
+
+    if backend in ("inprocess", "fallback"):
+        log.info("grpo backend: in-process (first-class transformers+PEFT loop)",
+                 backend=backend, model=getattr(config, "model_id", None))
+        return _train_grpo_inprocess(config, tasks)
+
+    if backend == "verl":
+        if not _verl_available():
+            raise RuntimeError(_VERL_MISSING_MSG)
+        log.info("grpo backend: verl (explicit)", model=getattr(config, "model_id", None))
+        return _train_grpo_verl(config, tasks)
+
+    # backend == "auto": prefer verl, degrade gracefully to in-process.
+    if _verl_available():
+        log.info("grpo backend=auto: verl importable — using verl",
+                 model=getattr(config, "model_id", None))
+        return _train_grpo_verl(config, tasks)
+    log.info("grpo backend=auto: verl NOT importable — using in-process backend "
+             "(no crash; run scripts/launch_verl.sh on a ROCm box for verl)",
+             model=getattr(config, "model_id", None))
+    return _train_grpo_inprocess(config, tasks)
 
 
-def _train_grpo_verl(config, tasks):
-    raise NotImplementedError(
-        "verl backend runs via the isolated server recipe in docs/rl_server.md; "
-        "use backend='fallback' for the in-process loop.")
+# --------------------------------------------------------------------------- #
+# verl backend: config builder (pure) + reward fn + launcher
+# --------------------------------------------------------------------------- #
+def build_verl_grpo_config(config, tasks: Optional[list[str]] = None,
+                           model_path: Optional[str] = None,
+                           reward_fn_path: Optional[str] = None,
+                           reward_fn_name: str = "kore_verl_reward") -> dict:
+    """Build a verl PPO/GRPO config dict from a :class:`GRPOConfig` (PURE).
+
+    This is deliberately import-safe (does NOT import verl) so it can be
+    unit-tested on CPU. It maps the KORE/Kevin recipe onto verl's
+    ``verl.trainer.main_ppo`` config tree:
+
+    * ``algorithm.adv_estimator = "grpo"`` (group-normalized advantages),
+      ``algorithm.gamma`` = discounted-turn look-ahead.
+    * ``actor_rollout_ref.rollout``: SGLang rollout, ``n = num_trajectories``
+      (group size), ``tensor_model_parallel_size``, sampling temp/top_p, and
+      ``multi_turn.enable`` + ``max_assistant_turns = num_turns`` (serial
+      refinement).
+    * ``actor_rollout_ref.actor``: ``use_kl_loss`` + ``kl_loss_coef =
+      ref_anchor_coef`` with the low-variance k3 KL (retention anchor),
+      Clip-Higher via ``clip_ratio_low``/``clip_ratio_high``, token-mean loss
+      aggregation (DAPO length-debias), grad clip.
+    * ``actor_rollout_ref.model``: LoRA (rank/alpha/target_modules) when
+      ``use_lora`` else full-FT (``lora_rank = 0``).
+    * ``custom_reward_function``: KORE's verified reward
+      (:func:`kore_verl_reward`, which runs :func:`kore.reward.compute_reward`
+      over the verified :class:`KoreEnv`) — NOT a learned reward model.
+
+    ``tasks`` is recorded under ``data.kore_tasks`` for the launcher/dataset
+    builder; ``reward_fn_path`` defaults to this module's file.
+    """
+    import os
+
+    model = model_path or config.model_id
+    use_lora = bool(getattr(config, "use_lora", False))
+    lora = getattr(config, "lora", None)
+    reward_path = reward_fn_path or os.path.abspath(__file__)
+    out_dir = getattr(config, "output_dir", "runs/grpo")
+    data_dir = os.path.join(out_dir, "data")
+    train_file = os.path.join(data_dir, "kore_train.parquet")
+    max_len = config.max_prompt_length + config.max_response_length
+    tp = config.tensor_parallel_size
+    use_kl_loss = config.ref_anchor_coef > 0
+
+    return {
+        "algorithm": {
+            "adv_estimator": "grpo",
+            "gamma": config.gamma,
+            "lam": 1.0,
+            # KL is applied as an actor loss (retention anchor), NOT folded into
+            # the reward — matches the in-process k3 KL anchor.
+            "use_kl_in_reward": False,
+            "kl_ctrl": {"kl_coef": config.kl_coef},
+        },
+        "data": {
+            "train_files": train_file,
+            "val_files": train_file,
+            "train_batch_size": config.tasks_per_step,
+            "max_prompt_length": config.max_prompt_length,
+            "max_response_length": config.max_response_length,
+            "return_raw_chat": True,
+            "shuffle": True,
+            "kore_tasks": list(tasks) if tasks else None,
+        },
+        "actor_rollout_ref": {
+            "model": {
+                "path": model,
+                "use_remove_padding": True,
+                "enable_gradient_checkpointing": bool(config.gradient_checkpointing),
+                "lora_rank": (lora.r if (use_lora and lora is not None) else 0),
+                "lora_alpha": (lora.lora_alpha if (use_lora and lora is not None) else 0),
+                "target_modules": (list(lora.target_modules)
+                                   if (use_lora and lora is not None) else "all-linear"),
+            },
+            "actor": {
+                "strategy": "fsdp2",
+                "optim": {
+                    "lr": config.learning_rate,
+                    "lr_warmup_steps_ratio": config.warmup_ratio,
+                    "warmup_style": config.lr_scheduler_type,
+                },
+                "ppo_mini_batch_size": config.tasks_per_step,
+                "ppo_micro_batch_size_per_gpu": config.per_device_train_batch_size,
+                # Retention KL anchor: low-variance k3 (Schulman) KL to the ref.
+                "use_kl_loss": use_kl_loss,
+                "kl_loss_coef": config.ref_anchor_coef,
+                "kl_loss_type": "low_var_kl",
+                # Clip-Higher (DAPO): asymmetric PPO clip fights entropy collapse.
+                "clip_ratio_low": config.clip_ratio_low,
+                "clip_ratio_high": config.clip_ratio_high,
+                # DAPO length-debias: token-mean aggregation of the PG loss.
+                "loss_agg_mode": "token-mean",
+                "entropy_coeff": 0.0,
+                "grad_clip": 1.0,
+                "use_dynamic_bsz": True,
+            },
+            "rollout": {
+                "name": "sglang",
+                # multi-turn serial refinement requires the async server mode.
+                "mode": "async",
+                "n": config.num_trajectories,
+                "tensor_model_parallel_size": tp,
+                "gpu_memory_utilization": 0.6,
+                "max_model_len": max_len,
+                "max_num_batched_tokens": max_len,
+                "temperature": config.temperature,
+                "top_p": config.top_p,
+                "multi_turn": {
+                    "enable": True,
+                    "max_assistant_turns": config.num_turns,
+                },
+            },
+            "ref": {
+                "log_prob_micro_batch_size_per_gpu": config.per_device_train_batch_size,
+                # only materialize the frozen ref when a KL anchor is active.
+                "fsdp_config": {"param_offload": not use_kl_loss},
+            },
+        },
+        "reward_model": {
+            # KORE uses a verified rule-based reward function, not a reward model.
+            "enable": False,
+            "reward_manager": "naive",
+        },
+        "custom_reward_function": {
+            "path": reward_path,
+            "name": reward_fn_name,
+        },
+        "trainer": {
+            "total_epochs": 1,
+            "total_training_steps": config.total_steps,
+            "n_gpus_per_node": tp,
+            "nnodes": 1,
+            "save_freq": config.save_steps,
+            "test_freq": -1,
+            "project_name": "kore-grpo",
+            "experiment_name": os.path.basename(out_dir.rstrip("/")) or "grpo",
+            "default_local_dir": out_dir,
+            "logger": ["console"],
+        },
+    }
+
+
+def kore_verl_reward(data_source=None, solution_str: str = "", ground_truth=None,
+                     extra_info=None, **kwargs) -> float:
+    """verl custom reward: KORE's verified reward over the verified env.
+
+    verl calls this per rollout with the generated ``solution_str`` and the row's
+    ``extra_info`` (which carries ``task_id``). It parses the FULL_KERNEL, runs it
+    through the verified :class:`KoreEnv` (compile -> 5-stage validation + SNR
+    gate -> on-box speedup vs the production baseline), and returns
+    :func:`kore.reward.compute_reward`'s scalar reward — the SAME anti-hackable,
+    measured signal the in-process backend uses. Import-safe at module load
+    (heavy deps are imported lazily here, inside verl's worker).
+    """
+    from kore.env.kore_env import KoreEnv
+    from kore.policy.format import parse_response
+    from kore.reward.reward import compute_reward
+    from kore.tasks.registry import get_task
+
+    info = extra_info or {}
+    task_id = info.get("task_id") or ground_truth
+    task = get_task(task_id)
+    kernel = parse_response(solution_str or "").get("kernel", "")
+    obs = KoreEnv(task).step(kernel, full_validation=True, multi_shape=True)
+    rr = compute_reward(obs, kernel, dtype=task.dtype,
+                        snr_threshold=getattr(task, "snr_threshold", None))
+    return float(rr.reward)
+
+
+def _hydra_val(v) -> str:
+    """Render a python value as a Hydra CLI-override token."""
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (list, tuple)):
+        return "[" + ",".join(str(x) for x in v) + "]"
+    return str(v)
+
+
+def _verl_hydra_overrides(cfg: dict, prefix: str = "") -> list[str]:
+    """Flatten a nested config dict into ``key.subkey=value`` Hydra overrides."""
+    items: list[str] = []
+    for k, v in cfg.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            items.extend(_verl_hydra_overrides(v, prefix=f"{key}."))
+        else:
+            items.append(f"{key}={_hydra_val(v)}")
+    return items
+
+
+def _write_verl_dataset(config, tasks, out_dir: str) -> str:
+    """Materialize the verl train dataset (one row per KORE task) as parquet.
+
+    Each row is a verl RL sample: a chat ``prompt`` (the KORE optimize-this-kernel
+    instruction), a rule-style ``reward_model`` marker, and ``extra_info.task_id``
+    so :func:`kore_verl_reward` can bind the rollout back to its verified task.
+    """
+    import os
+
+    from kore.tasks.registry import get_task
+
+    rows = []
+    for tid in tasks:
+        task = get_task(tid)
+        rows.append({
+            "data_source": "kore",
+            "prompt": [{"role": "user", "content": _task_prompt(task)}],
+            "ability": "kernel-opt",
+            "reward_model": {"style": "rule", "ground_truth": tid},
+            "extra_info": {"task_id": tid, "dtype": task.dtype},
+        })
+    data_dir = os.path.join(out_dir, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    path = os.path.join(data_dir, "kore_train.parquet")
+    import pandas as pd  # verl requires pandas/pyarrow; only needed on the launch box
+
+    pd.DataFrame(rows).to_parquet(path)
+    return path
+
+
+def _train_grpo_verl(config, tasks: Optional[list[str]] = None) -> str:
+    """Launch a real verl + SGLang GRPO run and return the checkpoint dir.
+
+    Assumes verl is importable (the router guarantees this for ``backend="verl"``
+    and ``"auto"``). Builds the verl config from the GRPOConfig
+    (:func:`build_verl_grpo_config`), materializes the resolved config JSON + the
+    task dataset, then invokes ``python -m verl.trainer.main_ppo`` with the config
+    as Hydra overrides. verl brings up the SGLang rollout server (async multi-turn)
+    itself; the fully-manual isolated-box recipe lives in ``scripts/launch_verl.sh``
+    / ``docs/rl_server.md``.
+    """
+    import importlib.util
+    import json
+    import os
+    import subprocess
+    import sys
+
+    if importlib.util.find_spec("verl") is None:  # defensive: never a silent fallback
+        raise RuntimeError(_VERL_MISSING_MSG)
+
+    from kore.tasks.registry import task_ids
+
+    tasks = tasks or task_ids()
+    out = config.output_dir
+    os.makedirs(out, exist_ok=True)
+
+    cfg = build_verl_grpo_config(config, tasks)
+    train_file = _write_verl_dataset(config, tasks, out)
+    cfg["data"]["train_files"] = train_file
+    cfg["data"]["val_files"] = train_file
+    # kore_tasks is metadata for the launcher, not a verl config key.
+    cfg["data"].pop("kore_tasks", None)
+
+    cfg_path = os.path.join(out, "verl_grpo_config.json")
+    with open(cfg_path, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+    overrides = _verl_hydra_overrides(cfg)
+    log.info("grpo verl: launching main_ppo", model=config.model_id, n_tasks=len(tasks),
+             tensor_parallel_size=config.tensor_parallel_size,
+             num_trajectories=config.num_trajectories, num_turns=config.num_turns,
+             use_kl_loss=(config.ref_anchor_coef > 0), config_path=cfg_path, out=out)
+    cmd = [sys.executable, "-m", "verl.trainer.main_ppo", *overrides]
+    subprocess.run(cmd, check=True)
+    log.metric("grpo_done", backend="verl", steps=config.total_steps, out=out)
+    return out
 
 
 def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
@@ -553,6 +887,11 @@ def _train_grpo_fallback(config, tasks):
     log.metric("grpo_done", steps=config.total_steps, mean_reward_last=last_mean_r, out=out,
                **gpu_mem_snapshot())
     return out
+
+
+# Back-compat name kept; ``_train_grpo_inprocess`` is the preferred, first-class
+# name for the in-process transformers+PEFT GRPO backend.
+_train_grpo_inprocess = _train_grpo_fallback
 
 
 def _load_ref_model(config):

@@ -43,7 +43,29 @@ class LoRAConfig:
 
 
 @dataclass
-class SFTConfig:
+class DistributedMixin:
+    """FSDP / distributed full-FT knobs shared by SFT & DPO.
+
+    These only take effect for **full fine-tuning** (``use_lora=False``) that was
+    launched as a multi-process job (via ``scripts/launch_distributed.sh`` /
+    ``accelerate launch``). A single-process run (CPU tests, single-GPU LoRA)
+    ignores them entirely and keeps the legacy ``device_map="auto"`` path, so
+    nothing changes for the LoRA recipe or for the CPU test suite.
+
+    ``fsdp`` mirrors HF ``TrainingArguments.fsdp`` (e.g. ``"full_shard auto_wrap"``,
+    ``"full_shard auto_wrap offload"``). ``fsdp_transformer_layer_cls`` names the
+    decoder block to shard/wrap; when ``None`` it is auto-detected from
+    ``model_id`` (Qwen3 / Qwen2 / Llama families — covers the 14B/32B/70B bases).
+    """
+
+    distributed: bool = False
+    fsdp: str = "full_shard auto_wrap"
+    fsdp_transformer_layer_cls: Optional[str] = None
+    fsdp_cpu_offload: bool = False
+
+
+@dataclass
+class SFTConfig(DistributedMixin):
     """Stage-1 repair-weighted SFT (also reused by RFT on self-gen samples)."""
 
     model_id: str = MODEL_14B
@@ -77,7 +99,7 @@ class SFTConfig:
 
 
 @dataclass
-class DPOConfig:
+class DPOConfig(DistributedMixin):
     """Stage-2 DPO on ranked preference pairs; reference = the SFT policy."""
 
     model_id: str = MODEL_14B              # start from the SFT checkpoint
@@ -235,3 +257,78 @@ class SoupConfig:
     output_dir: str = "runs/soup"
     alphas: tuple = (0.7, 0.8, 0.9)         # weight on the KORE specialist
     epsilon: float = 0.005                  # max tolerated general-metric regression
+
+
+# --------------------------------------------------------------------------- #
+# FSDP wiring helpers (pure — no torch/transformers, safe on CPU / in tests)
+# --------------------------------------------------------------------------- #
+
+# HF decoder-block class names by model family. Auto-wrap needs the exact class
+# so FSDP shards one transformer layer per unit (the ZeRO-3-equivalent recipe).
+def detect_transformer_layer_cls(model_id: str) -> str:
+    """Best-effort map a HF ``model_id`` to its decoder layer class for FSDP wrap.
+
+    Covers the KORE bases: Qwen3 (14B/32B), DeepSeek-R1-Distill-Qwen (32B ->
+    Qwen2), DeepSeek-R1-Distill-Llama (70B -> Llama). Falls back to the Qwen3
+    block (the bring-up default). ``llama`` is checked first because the 70B id
+    contains ``Llama`` but not ``qwen``.
+    """
+    mid = (model_id or "").lower()
+    if "llama" in mid:
+        return "LlamaDecoderLayer"
+    if "qwen3" in mid:
+        return "Qwen3DecoderLayer"
+    if "qwen2" in mid or "qwen" in mid:
+        return "Qwen2DecoderLayer"
+    if "mistral" in mid:
+        return "MistralDecoderLayer"
+    return "Qwen3DecoderLayer"
+
+
+def fsdp_enabled(config) -> bool:
+    """True iff this run should take the distributed FSDP full-FT path.
+
+    FSDP is used only for full fine-tuning (``use_lora=False``) launched as a
+    distributed job (``distributed=True``). LoRA and single-process runs keep the
+    legacy ``device_map`` path unchanged.
+    """
+    return bool(getattr(config, "distributed", False)) and not bool(getattr(config, "use_lora", False))
+
+
+def build_fsdp_kwargs(config) -> dict:
+    """Translate a KORE config into HF ``TrainingArguments`` FSDP kwargs.
+
+    Returns ``{}`` (i.e. *keep the current single-process / device_map path*)
+    unless :func:`fsdp_enabled` is true. Otherwise returns::
+
+        {"fsdp": "<sharding string>", "fsdp_config": { ... }}
+
+    Notes:
+      * Activation (gradient) checkpointing is routed through ``fsdp_config``
+        rather than ``TrainingArguments.gradient_checkpointing`` — under
+        ``full_shard`` the latter adds a redundant AllGather (HF warns about it).
+      * ``cpu_ram_efficient_loading`` + ``sync_module_states`` let rank-0 stream
+        the checkpoint and broadcast, which is what makes 32B/70B fit.
+    """
+    if not fsdp_enabled(config):
+        return {}
+    layer_cls = getattr(config, "fsdp_transformer_layer_cls", None) or detect_transformer_layer_cls(
+        getattr(config, "model_id", "")
+    )
+    fsdp_str = getattr(config, "fsdp", "full_shard auto_wrap") or "full_shard auto_wrap"
+    if getattr(config, "fsdp_cpu_offload", False) and "offload" not in fsdp_str:
+        fsdp_str = f"{fsdp_str} offload"
+    fsdp_config = {
+        "transformer_layer_cls_to_wrap": [layer_cls],
+        "activation_checkpointing": bool(getattr(config, "gradient_checkpointing", False)),
+        "backward_prefetch": "backward_pre",
+        "forward_prefetch": False,
+        "use_orig_params": True,
+        "sync_module_states": True,
+        "cpu_ram_efficient_loading": True,
+        "limit_all_gathers": True,
+        "state_dict_type": "SHARDED_STATE_DICT",
+    }
+    if getattr(config, "fsdp_cpu_offload", False):
+        fsdp_config["offload_params"] = True
+    return {"fsdp": fsdp_str, "fsdp_config": fsdp_config}

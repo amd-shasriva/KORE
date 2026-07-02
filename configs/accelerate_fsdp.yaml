@@ -1,0 +1,56 @@
+# KORE distributed full fine-tuning — FSDP full-shard (ZeRO-3 equivalent).
+#
+# Used by scripts/launch_distributed.sh:
+#   accelerate launch --config_file configs/accelerate_fsdp.yaml \
+#       -m kore.policy.sft  <config.json>
+#   accelerate launch --config_file configs/accelerate_fsdp.yaml \
+#       -m kore.policy.dpo  <config.json>
+#
+# This shards params + grads + optimizer state across all 8 ranks (FULL_SHARD ==
+# ZeRO-3), keeps compute in bf16, wraps one transformer decoder block per FSDP
+# unit, and turns on activation checkpointing — the recipe that makes a 14B
+# full-FT fit on 8x MI300 with no CPU offload.
+#
+# NOTE: kore.policy.sft / kore.policy.dpo ALSO set FSDP via HF TrainingArguments
+# (from the JSON config's `fsdp` / `fsdp_transformer_layer_cls` fields), and
+# TrainingArguments re-exports the FSDP_* env vars, so the trainer's settings are
+# authoritative and stay consistent with this file. Edit both if you change the
+# wrap class for a non-Qwen3 base (e.g. LlamaDecoderLayer for the 70B).
+#
+# Sizing cheatsheet (see docs/DISTRIBUTED.md for full per-size configs):
+#   14B  -> this file as-is (8 GPUs, no offload).
+#   32B  -> flip `fsdp_offload_params: true` (optimizer/param CPU offload) OR add nodes.
+#   70B  -> `fsdp_offload_params: true` + multi-node (num_machines>1) and set the
+#           wrap class to LlamaDecoderLayer (DeepSeek-R1-Distill-Llama-70B).
+
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: FSDP
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+machine_rank: 0
+main_process_ip: null
+main_process_port: null
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 8            # 8x MI300-class GPUs (gfx942); one process per GPU
+rdzv_backend: static
+same_network: true
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+
+fsdp_config:
+  fsdp_version: 1
+  fsdp_reshard_after_forward: FULL_SHARD          # ZeRO-3 equivalent (shard params+grads+optim)
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer  # 14B/32B Qwen3; use LlamaDecoderLayer for the 70B
+  fsdp_backward_prefetch: BACKWARD_PRE
+  fsdp_forward_prefetch: false
+  fsdp_state_dict_type: SHARDED_STATE_DICT        # scalable ckpt sharding for 32B/70B
+  fsdp_use_orig_params: true
+  fsdp_activation_checkpointing: true             # trade compute for memory (needed at 14B+)
+  fsdp_cpu_ram_efficient_loading: true            # rank-0 streams weights, broadcasts
+  fsdp_sync_module_states: true
+  fsdp_offload_params: false                      # 14B: keep on GPU. 32B/70B: set true

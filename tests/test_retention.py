@@ -397,3 +397,262 @@ def test_extract_first_json_and_code_fence():
     assert R._extract_first_json("no json here") is None
     fenced = "```python\nprint('hi')\n```"
     assert "print('hi')" in R._strip_code_fences(fenced)
+
+
+# ---------------------------------------------------------------------------
+# FULL bench loading (HF datasets) — monkeypatched, CPU/offline
+# ---------------------------------------------------------------------------
+#
+# Every test here monkeypatches ``datasets.load_dataset`` so NO network is
+# touched: either it returns fake rows in the upstream schema (exercising the
+# real mappers -> source == "full-hf"), or it raises (exercising the smoke
+# fallback -> source == "smoke").
+
+def _fake_load_dataset(rows_by_path):
+    """Build a ``datasets.load_dataset`` stand-in dispatching on the dataset path."""
+
+    def fake(path, *args, **kwargs):
+        if path in rows_by_path:
+            return list(rows_by_path[path])
+        raise FileNotFoundError(f"no fake rows for {path!r}")
+
+    return fake
+
+
+def _patch_datasets(monkeypatch, rows_by_path):
+    import datasets  # installed; we only replace the loader entry point
+
+    monkeypatch.setattr(datasets, "load_dataset", _fake_load_dataset(rows_by_path))
+
+
+def test_full_falls_back_to_smoke_when_offline(monkeypatch):
+    import datasets
+
+    def boom(*a, **k):
+        raise RuntimeError("offline: no HF access")
+
+    monkeypatch.setattr(datasets, "load_dataset", boom)
+
+    gen = make_perfect_generate()
+    out = R.run_retention_suite(gen, full=True, judge=lambda q, a, r=None: 10.0)
+    # Every bench must fall back to the bundled smoke set...
+    for b in R.DEFAULT_BENCHES:
+        assert out["sources"][b] == "smoke", b
+    # ...and the smoke suite still scores perfectly with the perfect stub model.
+    assert out["full"] is True
+    assert out["aggregate"] == pytest.approx(1.0)
+
+
+def test_full_flag_and_env_both_trigger_full_loading(monkeypatch):
+    rows = [{"question": "2+2?", "choices": ["3", "4", "5", "6"], "answer": 1, "subject": "math"}]
+    _patch_datasets(monkeypatch, {"cais/mmlu": rows})
+
+    # (a) explicit full=True
+    res_flag = R.MMLUScorer(full=True).score(lambda p, **k: "answer: B")
+    assert res_flag["source"] == "full-hf"
+    assert res_flag["n"] == 1 and res_flag["accuracy"] == 1.0
+
+    # (b) env var KORE_EVAL_FULL, no flag
+    monkeypatch.setenv("KORE_EVAL_FULL", "1")
+    res_env = R.MMLUScorer().score(lambda p, **k: "answer: B")
+    assert res_env["source"] == "full-hf" and res_env["n"] == 1
+
+
+def test_mmlu_full_metric_on_fake_split(monkeypatch):
+    rows = [
+        {"question": "2+2?", "choices": ["3", "4", "5", "6"], "answer": 1, "subject": "math"},
+        {"question": "Capital of France?", "choices": ["Paris", "Rome", "Berlin", "Madrid"], "answer": 0},
+    ]
+    _patch_datasets(monkeypatch, {"cais/mmlu": rows})
+
+    def gen(prompt, **kw):
+        for r in rows:
+            if r["question"] in prompt:
+                return f"answer: {R._norm_letter(r['answer'])}"
+        return "?"
+
+    res = R.MMLUScorer(full=True).score(gen)
+    assert res["source"] == "full-hf"
+    assert res["n"] == 2 and res["accuracy"] == 1.0
+
+
+def test_humaneval_full_metric_on_fake_split(monkeypatch):
+    rows = [
+        {
+            "task_id": "HE/f0",
+            "entry_point": "add",
+            "prompt": 'def add(a, b):\n    """add"""\n',
+            "canonical_solution": "    return a + b\n",
+            "test": "def check(candidate):\n    assert candidate(1, 2) == 3\n    assert candidate(-1, 1) == 0\n",
+        }
+    ]
+    _patch_datasets(monkeypatch, {"openai_humaneval": rows})
+
+    res_ok = R.HumanEvalScorer(full=True).score(lambda p, **k: "    return a + b\n")
+    assert res_ok["source"] == "full-hf"
+    assert res_ok["pass@1"] == 1.0
+
+    res_bad = R.HumanEvalScorer(full=True).score(lambda p, **k: "    return a - b\n")
+    assert res_bad["pass@1"] == 0.0
+
+
+def test_livecodebench_full_metric_on_fake_native_split(monkeypatch):
+    rows = [
+        {
+            "question_id": "lcb0",
+            "question_content": "Return a + b.",
+            "starter_code": "def add(a, b):\n",
+            "metadata": '{"func_name": "add"}',
+            "public_test_cases": '[{"input": "1\\n2", "output": "3", "testtype": "functional"}]',
+        }
+    ]
+    _patch_datasets(monkeypatch, {"livecodebench/code_generation_lite": rows})
+
+    res = R.LiveCodeBenchScorer(full=True).score(lambda p, **k: "def add(a, b):\n    return a + b\n")
+    assert res["source"] == "full-hf"
+    assert res["pass_rate"] == 1.0
+
+
+def test_ifeval_full_metric_on_fake_split(monkeypatch):
+    rows = [
+        {
+            "key": 1,
+            "prompt": "write it lowercase and include the word kernel",
+            "instruction_id_list": ["change_case:english_lowercase", "keywords:existence"],
+            "kwargs": [{}, {"keywords": ["kernel"]}],
+        }
+    ]
+    _patch_datasets(monkeypatch, {"google/IFEval": rows})
+
+    res = R.IFEvalScorer(full=True).score(lambda p, **k: "the kernel is fast")
+    assert res["source"] == "full-hf"
+    assert res["prompt_strict_accuracy"] == 1.0
+    assert res["instruction_accuracy"] == 1.0
+
+
+def test_bfcl_full_metric_on_fake_nested_split(monkeypatch):
+    rows = [
+        {
+            "id": "bf0",
+            "question": [[{"role": "user", "content": "Add 2 and 3"}]],
+            "function": [{"name": "add", "parameters": ["a", "b"]}],
+            "answer": {"name": "add", "arguments": {"a": 2, "b": 3}},
+        }
+    ]
+    _patch_datasets(monkeypatch, {"gorilla-llm/berkeley-function-calling-leaderboard": rows})
+
+    res = R.BFCLScorer(full=True).score(
+        lambda p, **k: '{"name": "add", "arguments": {"a": 2, "b": 3}}'
+    )
+    assert res["source"] == "full-hf"
+    assert res["accuracy"] == 1.0 and res["name_accuracy"] == 1.0
+
+
+def test_mtbench_full_metric_on_fake_split(monkeypatch):
+    rows = [{"question_id": 1, "question": "Explain GPU kernels", "reference": "a kernel runs on the gpu"}]
+    _patch_datasets(monkeypatch, {"lmsys/mt_bench": rows})
+
+    res = R.MTBenchScorer(judge=lambda q, a, r=None: 9.0, full=True).score(lambda p, **k: "an answer")
+    assert res["source"] == "full-hf"
+    assert res["n"] == 1 and res["mean_judge_score"] == 9.0
+
+
+def test_run_retention_suite_reports_full_sources(monkeypatch):
+    rows = [{"question": "2+2?", "choices": ["3", "4", "5", "6"], "answer": 1}]
+    _patch_datasets(monkeypatch, {"cais/mmlu": rows})  # only MMLU has a fake full split
+
+    gen = make_perfect_generate()
+    out = R.run_retention_suite(gen, full=True, judge=lambda q, a, r=None: 10.0)
+    # MMLU loaded the fake full split; the rest fell back to smoke.
+    assert out["sources"]["mmlu"] == "full-hf"
+    for b in [x for x in R.DEFAULT_BENCHES if x != "mmlu"]:
+        assert out["sources"][b] == "smoke", b
+
+
+def test_explicit_items_take_precedence_over_full(monkeypatch):
+    # Even with full requested, explicit items win and are marked as such.
+    rows = [{"question": "ignored", "choices": ["a", "b", "c", "d"], "answer": 0}]
+    _patch_datasets(monkeypatch, {"cais/mmlu": rows})
+    items = R.load_bench("mmlu")
+    sc = R.MMLUScorer(items=items, full=True)
+    sc.score(lambda p, **k: "A")
+    assert sc.source == "explicit"
+
+
+# ---------------------------------------------------------------------------
+# E2E serving eval (stub backend, CPU/offline)
+# ---------------------------------------------------------------------------
+
+from kore.eval import e2e_sglang_vllm as E  # noqa: E402
+
+
+def _stub_llm(prompt, max_tokens=128, temperature=0.0, **kw):
+    p = prompt.lower()
+    if "2 + 2" in p or "2+2" in p:
+        return "4"
+    if "capital of france" in p:
+        return "Paris"
+    if "opposite of hot" in p:
+        return "cold"
+    if "days are in a week" in p:
+        return "7"
+    return "some tokens here " * 4  # a few whitespace tokens for throughput
+
+
+def test_e2e_throughput_runs_with_stub_model_generate():
+    w = E.Workload(num_requests=4, max_new_tokens=16)
+    res = E.e2e_throughput("m", "kernel", w, engine="vllm", model_generate=_stub_llm)
+    assert res.kind == "throughput" and res.unit == "tokens/s"
+    assert res.candidate_value > 0
+    assert res.passed is True
+
+
+def test_e2e_throughput_gate_threshold_vs_baseline():
+    w = E.Workload(num_requests=4, max_new_tokens=16)
+    # A giant baseline the stub cannot beat -> not passed.
+    res = E.e2e_throughput("m", "kernel", w, model_generate=_stub_llm, baseline_tokens_per_s=1e12)
+    assert res.passed is False
+
+
+def test_e2e_accuracy_runs_with_stub_model_generate():
+    res = E.e2e_accuracy("m", "kernel", engine="sglang", model_generate=_stub_llm)
+    assert res.kind == "accuracy" and res.unit == "accuracy"
+    assert res.candidate_value == pytest.approx(1.0)
+    assert res.passed is True
+
+
+def test_e2e_accuracy_regression_fails_against_baseline():
+    def wrong(prompt, **kw):
+        return "totally wrong"
+
+    res = E.e2e_accuracy("m", "kernel", model_generate=wrong, baseline_accuracy=0.9)
+    assert res.candidate_value == 0.0
+    assert res.passed is False
+
+
+def test_e2e_raises_only_when_no_backend():
+    with pytest.raises(E.E2ENotProvisioned):
+        E.e2e_throughput("m", "kernel", E.Workload())
+    with pytest.raises(E.E2ENotProvisioned):
+        E.e2e_accuracy("m", "kernel")
+
+
+def test_e2e_unknown_engine_rejected():
+    with pytest.raises(ValueError):
+        E.e2e_throughput("m", "kernel", E.Workload(), engine="tensorrt", model_generate=_stub_llm)
+
+
+def test_e2e_gate_is_pure_and_combines_measurements():
+    tput = E.E2EResult("vllm", "throughput", 100.0, 120.0, "tokens/s", passed=True)
+    acc = E.E2EResult("vllm", "accuracy", 0.80, 0.805, "accuracy", passed=True)
+    g = E.e2e_gate(tput, acc)
+    assert g["accept"] is True
+    assert g["throughput_improved"] is True and g["accuracy_held"] is True
+
+    slower = E.E2EResult("vllm", "throughput", 100.0, 90.0, "tokens/s", passed=False)
+    g2 = E.e2e_gate(slower, acc)
+    assert g2["accept"] is False and g2["throughput_improved"] is False
+
+    acc_regressed = E.E2EResult("vllm", "accuracy", 0.80, 0.70, "accuracy", passed=False)
+    g3 = E.e2e_gate(tput, acc_regressed)
+    assert g3["accept"] is False and g3["accuracy_held"] is False

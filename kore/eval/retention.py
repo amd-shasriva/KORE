@@ -24,8 +24,11 @@ Design constraints:
     code benches (HumanEval / LiveCodeBench) run generated code in a *separate*
     sandboxed subprocess with a wall-clock timeout (see :func:`_run_python_program`).
   - **Bundled samples are SMOKE-sized.** Each bench ships ~10-20 canonical items
-    under ``kore/eval/data/<bench>.jsonl``, clearly marked. Swap in the full set
-    by pointing the scorer at the real split (each JSONL row uses the same schema).
+    under ``kore/eval/data/<bench>.jsonl``, clearly marked. Pass ``full=True`` /
+    ``n=`` (or set ``KORE_EVAL_FULL=1``) to pull the REAL HuggingFace splits
+    (see :data:`FULL_HF_SOURCES`) mapped onto the same per-row schema; any
+    failure (no ``datasets``, offline, schema drift) falls back to smoke and the
+    source used is reported per bench.
 """
 
 from __future__ import annotations
@@ -90,6 +93,312 @@ def load_bench(name: str, data_dir: Optional[Path] = None) -> list[dict]:
                 continue
             items.append(json.loads(s))
     return items
+
+
+# ---------------------------------------------------------------------------
+# FULL benchmark loading (HuggingFace ``datasets``, lazily / offline-safe)
+# ---------------------------------------------------------------------------
+#
+# The bundled JSONL files above are SMOKE-sized. For a *real* retention run we
+# want the full public splits. These are fetched via HuggingFace ``datasets``
+# — but that import (and the network round-trip) is deferred to call time and
+# wrapped so that ANY failure (missing dep, offline box, schema drift) falls
+# back to the bundled smoke set. That keeps this module import-clean and keeps
+# CI / this CPU box fully functional with no network.
+#
+# Each loader maps the upstream row schema onto the SAME per-row schema the
+# smoke JSONL uses, so every scorer and every metric definition is unchanged
+# regardless of which source produced the items. Selection is controlled by
+# ``full: bool`` / ``n: int|None`` on each scorer (or the ``KORE_EVAL_FULL``
+# env var); ``n`` caps how many items are pulled (``None`` == the whole split).
+
+# Upstream HuggingFace sources per bench (documented; used by the loaders).
+FULL_HF_SOURCES: dict[str, str] = {
+    "mmlu": "cais/mmlu",
+    "humaneval": "openai_humaneval",
+    "livecodebench": "livecodebench/code_generation_lite",
+    "ifeval": "google/IFEval",
+    "bfcl": "gorilla-llm/berkeley-function-calling-leaderboard",
+    "mtbench": "lmsys/mt_bench",
+}
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _hf_load_split(
+    path: str,
+    config: Optional[str] = None,
+    split: str = "test",
+    n: Optional[int] = None,
+) -> list[dict]:
+    """Return up to ``n`` rows of a HF dataset split as plain dicts.
+
+    ``import datasets`` is intentionally done here (not at module top) so the
+    heavy dependency is only paid when a full run is explicitly requested.
+    Streaming is used when ``n`` is set so we do not materialize a huge split.
+    """
+    import datasets  # heavy + optional; guarded on purpose
+
+    stream = n is not None
+    if config is not None:
+        ds = datasets.load_dataset(path, config, split=split, streaming=stream)
+    else:
+        ds = datasets.load_dataset(path, split=split, streaming=stream)
+    rows: list[dict] = []
+    for i, row in enumerate(ds):
+        if n is not None and i >= n:
+            break
+        rows.append(dict(row))
+    return rows
+
+
+def _full_mmlu(n: Optional[int]) -> list[dict]:
+    rows = _hf_load_split("cais/mmlu", "all", "test", n)
+    out: list[dict] = []
+    for i, r in enumerate(rows):
+        out.append(
+            {
+                "id": r.get("id", f"mmlu-full-{i}"),
+                "subject": r.get("subject"),
+                "question": r["question"],
+                "choices": list(r["choices"]),
+                "answer": r["answer"],  # int index or letter; _norm_letter handles both
+            }
+        )
+    return out
+
+
+def _full_humaneval(n: Optional[int]) -> list[dict]:
+    rows = _hf_load_split("openai_humaneval", None, "test", n)
+    out: list[dict] = []
+    for i, r in enumerate(rows):
+        entry = r["entry_point"]
+        test = r["test"]
+        # openai_humaneval ships ``def check(candidate): ...`` and expects the
+        # entry point to be passed in; wire that call so the program actually runs.
+        if "check(" not in test.split("def check", 1)[-1]:
+            test = test.rstrip() + f"\n\ncheck({entry})\n"
+        out.append(
+            {
+                "task_id": r.get("task_id", f"HE-full-{i}"),
+                "entry_point": entry,
+                "prompt": r["prompt"],
+                "canonical_solution": r.get("canonical_solution", ""),
+                "test": test,
+            }
+        )
+    return out
+
+
+def _map_lcb_row(r: dict, i: int) -> Optional[dict]:
+    # Passthrough if a mirror already exposes our smoke schema.
+    if r.get("test") and r.get("prompt"):
+        return {
+            "task_id": r.get("task_id", f"LCB-full-{i}"),
+            "entry_point": r.get("entry_point", ""),
+            "prompt": r["prompt"],
+            "reference_solution": r.get("reference_solution", ""),
+            "test": r["test"],
+            "time_limit_s": float(r.get("time_limit_s", 6.0)),
+        }
+    # Native livecodebench/code_generation_lite functional mapping.
+    try:
+        meta = r.get("metadata")
+        if isinstance(meta, str):
+            meta = json.loads(meta) if meta else {}
+        func_name = (meta or {}).get("func_name")
+        pub = r.get("public_test_cases")
+        if isinstance(pub, str):
+            pub = json.loads(pub)
+        if not (func_name and pub):
+            return None
+        test_lines = []
+        for tc in pub:
+            if tc.get("testtype") != "functional":
+                return None  # stdin/stdout problems need a different harness
+            args = [ln for ln in str(tc["input"]).split("\n") if ln.strip()]
+            call = ", ".join(args)
+            test_lines.append(f"assert {func_name}({call}) == {str(tc['output']).strip()}")
+        prompt = (r.get("question_content", "") + "\n\n" + (r.get("starter_code") or "")).strip()
+        return {
+            "task_id": r.get("question_id", f"LCB-full-{i}"),
+            "entry_point": func_name,
+            "prompt": prompt,
+            "test": "\n".join(test_lines) + "\n",
+            "time_limit_s": 6.0,
+        }
+    except Exception:
+        return None
+
+
+def _full_livecodebench(n: Optional[int]) -> list[dict]:
+    rows = _hf_load_split("livecodebench/code_generation_lite", None, "test", n)
+    out: list[dict] = []
+    for i, r in enumerate(rows):
+        it = _map_lcb_row(r, i)
+        if it:
+            out.append(it)
+    return out
+
+
+# Map the subset of official IFEval instruction ids we can check programmatically
+# (see IFEVAL_CHECKS) onto our checker specs. Unsupported ids are skipped.
+def _map_ifeval_instructions(id_list, kwargs_list) -> list[dict]:
+    specs: list[dict] = []
+    kwargs_list = kwargs_list or [{}] * len(id_list)
+    for iid, kw in zip(id_list, kwargs_list):
+        kw = kw or {}
+        if iid == "change_case:english_lowercase":
+            specs.append({"type": "all_lowercase"})
+        elif iid == "change_case:english_capital":
+            specs.append({"type": "all_uppercase"})
+        elif iid == "punctuation:no_comma":
+            specs.append({"type": "no_commas"})
+        elif iid == "keywords:existence":
+            for w in kw.get("keywords", []) or []:
+                specs.append({"type": "keyword_include", "keyword": w})
+        elif iid == "keywords:forbidden_words":
+            for w in kw.get("forbidden_words", []) or []:
+                specs.append({"type": "keyword_forbidden", "keyword": w})
+        elif iid == "startend:end_checker":
+            ep = kw.get("end_phrase")
+            if ep:
+                specs.append({"type": "ends_with", "suffix": ep})
+        elif iid == "detectable_format:number_bullet_lists":
+            nb = kw.get("num_bullets")
+            if nb is not None:
+                specs.append({"type": "num_bullets", "n": nb})
+        # else: instruction type we cannot verify offline -> skip it
+    return specs
+
+
+def _full_ifeval(n: Optional[int]) -> list[dict]:
+    rows = _hf_load_split("google/IFEval", None, "train", n)
+    out: list[dict] = []
+    for i, r in enumerate(rows):
+        specs = _map_ifeval_instructions(r.get("instruction_id_list", []), r.get("kwargs", []))
+        if not specs:
+            continue  # nothing checkable in this row
+        out.append({"id": r.get("key", f"if-full-{i}"), "prompt": r["prompt"], "instructions": specs})
+    return out
+
+
+def _bfcl_extract_question(q) -> Optional[str]:
+    """Pull the (last) user turn text out of BFCL's nested message structure."""
+
+    def walk(x):
+        if isinstance(x, dict):
+            if x.get("role") in (None, "user") and "content" in x:
+                return x["content"]
+            return None
+        if isinstance(x, list):
+            found = None
+            for e in x:
+                r = walk(e)
+                if r:
+                    found = r
+            return found
+        if isinstance(x, str):
+            return x
+        return None
+
+    return walk(q)
+
+
+def _map_bfcl_row(r: dict, i: int) -> Optional[dict]:
+    tools = r.get("tools") or r.get("function") or r.get("functions")
+    if isinstance(tools, dict):
+        tools = [tools]
+    q = r.get("question")
+    if not isinstance(q, str):
+        q = _bfcl_extract_question(q)
+    ans = r.get("answer") or r.get("ground_truth")
+    if isinstance(ans, list) and ans:
+        ans = ans[0]
+    if not (q and isinstance(ans, dict) and ans.get("name")):
+        return None
+    return {
+        "id": r.get("id", f"bfcl-full-{i}"),
+        "question": q,
+        "tools": tools or [],
+        "answer": {"name": ans["name"], "arguments": ans.get("arguments", {})},
+    }
+
+
+def _full_bfcl(n: Optional[int]) -> list[dict]:
+    rows = _hf_load_split("gorilla-llm/berkeley-function-calling-leaderboard", "simple", "train", n)
+    out: list[dict] = []
+    for i, r in enumerate(rows):
+        it = _map_bfcl_row(r, i)
+        if it:
+            out.append(it)
+    return out
+
+
+def _full_mtbench(n: Optional[int]) -> list[dict]:
+    try:
+        rows = _hf_load_split("lmsys/mt_bench", None, "train", n)
+    except Exception:
+        rows = _hf_load_split("HuggingFaceH4/mt_bench_prompts", None, "train", n)
+    out: list[dict] = []
+    for i, r in enumerate(rows):
+        q = r.get("question")
+        if q is None:
+            p = r.get("prompt") or r.get("turns")
+            q = p[0] if isinstance(p, list) and p else p
+        ref = r.get("reference")
+        if isinstance(ref, list):
+            ref = ref[0] if ref else None
+        if not q:
+            continue
+        out.append({"id": r.get("question_id", f"mt-full-{i}"), "question": q, "reference": ref})
+    return out
+
+
+_FULL_LOADERS: dict[str, Callable[[Optional[int]], list[dict]]] = {
+    "mmlu": _full_mmlu,
+    "humaneval": _full_humaneval,
+    "livecodebench": _full_livecodebench,
+    "ifeval": _full_ifeval,
+    "bfcl": _full_bfcl,
+    "mtbench": _full_mtbench,
+}
+
+
+def load_full_bench(name: str, n: Optional[int] = None) -> list[dict]:
+    """Load the full (HF) split for ``name`` mapped to the smoke row schema.
+
+    Raises on any failure (missing ``datasets``, offline, schema drift) — callers
+    (:func:`_resolve_bench_items`) treat that as the signal to fall back to smoke.
+    """
+    loader = _FULL_LOADERS.get(name)
+    if loader is None:
+        raise ValueError(f"unknown bench: {name!r} (known: {tuple(_FULL_LOADERS)})")
+    return loader(n)
+
+
+def _resolve_bench_items(scorer) -> list[dict]:
+    """Shared item resolution for every scorer.
+
+    Order of precedence: explicit ``items=`` > full HF split (if requested and it
+    succeeds) > bundled smoke set. Records the chosen source on ``scorer.source``
+    so :meth:`score` can report it (``"explicit"`` / ``"full-hf"`` / ``"smoke"``).
+    """
+    if scorer.items is not None:
+        scorer.source = "explicit"
+        return scorer.items
+    if scorer.full or _truthy_env("KORE_EVAL_FULL"):
+        try:
+            full = load_full_bench(scorer.name, scorer.n)
+            if full:
+                scorer.source = "full-hf"
+                return full
+        except Exception:
+            pass  # offline / missing dep / schema drift -> smoke fallback
+    scorer.source = "smoke"
+    return load_bench(scorer.name, scorer.data_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -255,9 +564,12 @@ class MMLUScorer:
     name: str = "mmlu"
     items: Optional[list[dict]] = None
     data_dir: Optional[Path] = None
+    full: bool = False
+    n: Optional[int] = None
+    source: Optional[str] = None
 
     def _load(self) -> list[dict]:
-        return self.items if self.items is not None else load_bench("mmlu", self.data_dir)
+        return _resolve_bench_items(self)
 
     def score(self, model_generate: ModelGenerate) -> dict:
         items = self._load()
@@ -273,7 +585,7 @@ class MMLUScorer:
             per_item.append({"id": it.get("id"), "pred": pred, "gold": gold, "correct": ok})
         n = len(items)
         acc = correct / n if n else 0.0
-        return {"score": acc, "accuracy": acc, "n": n, "correct": correct, "per_item": per_item}
+        return {"score": acc, "accuracy": acc, "n": n, "correct": correct, "source": self.source, "per_item": per_item}
 
 
 # ---------------------------------------------------------------------------
@@ -293,9 +605,12 @@ class HumanEvalScorer:
     items: Optional[list[dict]] = None
     data_dir: Optional[Path] = None
     timeout: float = 10.0
+    full: bool = False
+    n: Optional[int] = None
+    source: Optional[str] = None
 
     def _load(self) -> list[dict]:
-        return self.items if self.items is not None else load_bench("humaneval", self.data_dir)
+        return _resolve_bench_items(self)
 
     @staticmethod
     def build_program(item: dict, completion: str) -> str:
@@ -324,7 +639,7 @@ class HumanEvalScorer:
             per_item.append({"task_id": it.get("task_id"), "passed": res["passed"], "detail": res["detail"]})
         n = len(items)
         p1 = passed / n if n else 0.0
-        return {"score": p1, "pass@1": p1, "n": n, "passed": passed, "per_item": per_item}
+        return {"score": p1, "pass@1": p1, "n": n, "passed": passed, "source": self.source, "per_item": per_item}
 
 
 # ---------------------------------------------------------------------------
@@ -343,9 +658,12 @@ class LiveCodeBenchScorer:
     name: str = "livecodebench"
     items: Optional[list[dict]] = None
     data_dir: Optional[Path] = None
+    full: bool = False
+    n: Optional[int] = None
+    source: Optional[str] = None
 
     def _load(self) -> list[dict]:
-        return self.items if self.items is not None else load_bench("livecodebench", self.data_dir)
+        return _resolve_bench_items(self)
 
     def score(self, model_generate: ModelGenerate) -> dict:
         items = self._load()
@@ -378,6 +696,7 @@ class LiveCodeBenchScorer:
             "n": n,
             "passed": passed,
             "mean_elapsed_s": (sum(times) / len(times)) if times else 0.0,
+            "source": self.source,
             "per_item": per_item,
         }
 
@@ -446,9 +765,12 @@ class IFEvalScorer:
     name: str = "ifeval"
     items: Optional[list[dict]] = None
     data_dir: Optional[Path] = None
+    full: bool = False
+    n: Optional[int] = None
+    source: Optional[str] = None
 
     def _load(self) -> list[dict]:
-        return self.items if self.items is not None else load_bench("ifeval", self.data_dir)
+        return _resolve_bench_items(self)
 
     def score(self, model_generate: ModelGenerate) -> dict:
         items = self._load()
@@ -472,6 +794,7 @@ class IFEvalScorer:
             "prompt_strict_accuracy": prompt_acc,
             "instruction_accuracy": inst_acc,
             "n": n,
+            "source": self.source,
             "per_item": per_item,
         }
 
@@ -509,9 +832,12 @@ class BFCLScorer:
     name: str = "bfcl"
     items: Optional[list[dict]] = None
     data_dir: Optional[Path] = None
+    full: bool = False
+    n: Optional[int] = None
+    source: Optional[str] = None
 
     def _load(self) -> list[dict]:
-        return self.items if self.items is not None else load_bench("bfcl", self.data_dir)
+        return _resolve_bench_items(self)
 
     def score(self, model_generate: ModelGenerate) -> dict:
         items = self._load()
@@ -536,6 +862,7 @@ class BFCLScorer:
             "accuracy": acc,
             "name_accuracy": (name_ok / n) if n else 0.0,
             "n": n,
+            "source": self.source,
             "per_item": per_item,
         }
 
@@ -572,9 +899,12 @@ class MTBenchScorer:
     items: Optional[list[dict]] = None
     data_dir: Optional[Path] = None
     judge: JudgeFn = default_stub_judge
+    full: bool = False
+    n: Optional[int] = None
+    source: Optional[str] = None
 
     def _load(self) -> list[dict]:
-        return self.items if self.items is not None else load_bench("mtbench", self.data_dir)
+        return _resolve_bench_items(self)
 
     def score(self, model_generate: ModelGenerate) -> dict:
         items = self._load()
@@ -592,6 +922,7 @@ class MTBenchScorer:
             "score": mean_raw / 10.0,  # normalized to [0, 1] for the aggregate
             "mean_judge_score": mean_raw,  # raw 1-10 MT-Bench scale
             "n": n,
+            "source": self.source,
             "per_item": per_item,
         }
 
@@ -611,20 +942,33 @@ DEFAULT_BENCHES: tuple[str, ...] = (
 )
 
 
-def build_scorer(name: str, *, judge: Optional[JudgeFn] = None, data_dir: Optional[Path] = None, **kw) -> Scorer:
-    """Instantiate a scorer by bench name. ``judge`` applies only to MT-Bench."""
+def build_scorer(
+    name: str,
+    *,
+    judge: Optional[JudgeFn] = None,
+    data_dir: Optional[Path] = None,
+    full: bool = False,
+    n: Optional[int] = None,
+    **kw,
+) -> Scorer:
+    """Instantiate a scorer by bench name. ``judge`` applies only to MT-Bench.
+
+    ``full``/``n`` select the FULL HuggingFace split (with offline fallback to
+    smoke) — see :func:`load_full_bench`.
+    """
+    common = dict(data_dir=data_dir, full=full, n=n)
     if name == "mmlu":
-        return MMLUScorer(data_dir=data_dir, **kw)
+        return MMLUScorer(**common, **kw)
     if name == "humaneval":
-        return HumanEvalScorer(data_dir=data_dir, **kw)
+        return HumanEvalScorer(**common, **kw)
     if name == "livecodebench":
-        return LiveCodeBenchScorer(data_dir=data_dir, **kw)
+        return LiveCodeBenchScorer(**common, **kw)
     if name == "ifeval":
-        return IFEvalScorer(data_dir=data_dir, **kw)
+        return IFEvalScorer(**common, **kw)
     if name == "bfcl":
-        return BFCLScorer(data_dir=data_dir, **kw)
+        return BFCLScorer(**common, **kw)
     if name == "mtbench":
-        return MTBenchScorer(judge=judge or default_stub_judge, data_dir=data_dir, **kw)
+        return MTBenchScorer(judge=judge or default_stub_judge, **common, **kw)
     raise ValueError(f"unknown bench: {name!r} (known: {DEFAULT_BENCHES})")
 
 
@@ -647,6 +991,8 @@ def run_retention_suite(
     benches: Sequence[str] = DEFAULT_BENCHES,
     judge: Optional[JudgeFn] = None,
     *,
+    full: bool = False,
+    n: Optional[int] = None,
     data_dir: Optional[Path] = None,
     scorers: Optional[Sequence[Scorer]] = None,
 ) -> dict:
@@ -672,10 +1018,14 @@ def run_retention_suite(
 
         base = run_retention_suite(gen, judge=my_gpt4_judge)
 
-    For the full (non-smoke) benchmark, point each scorer at the real split by
-    constructing scorers explicitly with ``items=<full split>`` (same row schema
-    as the bundled JSONL) and passing them via ``scorers=``. A strong judge is
-    passed via ``judge=`` for MT-Bench.
+    For the full (non-smoke) benchmark, pass ``full=True`` (or set the
+    ``KORE_EVAL_FULL=1`` env var) to pull each bench's real HuggingFace split
+    (see :data:`FULL_HF_SOURCES`); ``n`` caps items per bench. If ``datasets`` is
+    missing, the box is offline, or any upstream schema drifts, each bench
+    silently falls back to its bundled smoke set — the chosen source is reported
+    per bench under ``"sources"``. You can also point a scorer at an arbitrary
+    split by constructing it with ``items=<rows>`` and passing ``scorers=``. A
+    strong judge is passed via ``judge=`` for MT-Bench.
 
     Returns::
 
@@ -684,17 +1034,21 @@ def run_retention_suite(
           "scores": {bench: primary_score in [0,1]},   # <- feed to StageGate general_keys
           "aggregate": mean(primary scores),
           "per_bench": {bench: full metric dict},
+          "sources": {bench: "full-hf" | "smoke" | "explicit"},
+          "full": bool,   # whether a full run was requested (flag or env)
         }
     """
     if scorers is None:
-        scorers = [build_scorer(b, judge=judge, data_dir=data_dir) for b in benches]
+        scorers = [build_scorer(b, judge=judge, data_dir=data_dir, full=full, n=n) for b in benches]
 
     per_bench: dict[str, dict] = {}
     scores: dict[str, float] = {}
+    sources: dict[str, Optional[str]] = {}
     for sc in scorers:
         result = sc.score(model_generate)
         per_bench[sc.name] = result
         scores[sc.name] = float(result.get("score", 0.0))
+        sources[sc.name] = result.get("source", getattr(sc, "source", None))
 
     aggregate = (sum(scores.values()) / len(scores)) if scores else 0.0
     return {
@@ -702,6 +1056,8 @@ def run_retention_suite(
         "scores": scores,
         "aggregate": aggregate,
         "per_bench": per_bench,
+        "sources": sources,
+        "full": bool(full or _truthy_env("KORE_EVAL_FULL")),
     }
 
 
@@ -719,6 +1075,8 @@ __all__ = [
     "default_stub_judge",
     "IFEVAL_CHECKS",
     "DEFAULT_BENCHES",
+    "FULL_HF_SOURCES",
+    "load_full_bench",
     "build_scorer",
     "chat_model_generate",
     "run_retention_suite",

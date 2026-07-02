@@ -12,8 +12,6 @@ import torch
 import triton
 import triton.language as tl
 
-_SQRT_2_OVER_PI = 0.7978845608028654
-
 
 @triton.jit
 def _gelu_tanh_kernel(
@@ -27,7 +25,7 @@ def _gelu_tanh_kernel(
     offs = col * BLOCK_N + tl.arange(0, BLOCK_N)
     mask = offs < N
     x = tl.load(x_ptr + row * stride_xm + offs, mask=mask, other=0.0).to(tl.float32)
-    inner = _SQRT_2_OVER_PI * (x + 0.044715 * x * x * x)
+    inner = 0.7978845608028654 * (x + 0.044715 * x * x * x)  # sqrt(2/pi) * (...)
     # tanh(z) = 2*sigmoid(2z) - 1  (portable on ROCm Triton, avoids libdevice).
     tanh = 2.0 * tl.sigmoid(2.0 * inner) - 1.0
     y = 0.5 * x * (1.0 + tanh)

@@ -1,0 +1,21 @@
+task_id: fused_moe_silu_bf16
+operation: fused_moe_silu
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+# bf16 top-k fused MoE (grouped GEMM + SiLU-mul) vs fp32 oracle. fp32-accumulation
+# candidate lands ~40+ dB; gate at 25 dB (KORE bf16 bar). Router assignment is the
+# unbalanced 32-expert trace (DATASET_SPEC §1.6) with a guaranteed 0-token last
+# expert (the mandatory MoE 0-token / giant-expert edge).
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 32, E: 8, topk: 2, D: 256, I: 256}
+  primary: {M: 256, E: 32, topk: 8, D: 1024, I: 768}   # 32-expert top-8, unbalanced + 0-token expert
+  validation:
+    - {M: 512, E: 32, topk: 8, D: 1024, I: 768}         # more tokens, same 32-expert imbalance
+    - {M: 128, E: 8, topk: 2, D: 1024, I: 1408}         # Mixtral-style top-2
+    - {M: 64, E: 32, topk: 8, D: 1024, I: 768}          # small-batch; 0-token expert edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_fused_moe   # AITER CK 2-stage fused MoE (SiLU)

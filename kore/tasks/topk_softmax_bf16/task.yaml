@@ -1,0 +1,21 @@
+task_id: topk_softmax_bf16
+operation: topk_softmax
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+# MoE router: fp32 softmax over experts -> top-k select -> renormalize, from bf16
+# gate logits. Scored on a dense [M,E] scatter (selection + weights,
+# order-independent). The fp32 softmax path lands very high SNR; gate at 25 dB
+# (KORE bf16 bar) still cleanly rejects a wrong-topk / missing-renorm kernel.
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 16, E: 8, topk: 2}
+  primary: {M: 4096, E: 32, topk: 8}
+  validation:
+    - {M: 8192, E: 32, topk: 8}      # more tokens
+    - {M: 2048, E: 8, topk: 2}        # Mixtral router
+    - {M: 1024, E: 256, topk: 8}      # DeepSeek-V3 router (256 experts)
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_topk_softmax   # AITER topk_softmax

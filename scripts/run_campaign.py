@@ -524,6 +524,8 @@ def _stage_grpo(ctx):
                    agentic=True, starpo_s=True, ref_checkpoint=sft, use_lora=use_lora)
     if use_lora:
         grpo_kw.update(num_trajectories=8, tasks_per_step=2, num_turns=3)
+    if ctx["args"].grpo_steps:
+        grpo_kw["total_steps"] = ctx["args"].grpo_steps
     cfg = GRPOConfig(**grpo_kw)
     ctx["grpo_ckpt"] = train_grpo(cfg, tasks=train_task_ids, backend=ctx["args"].grpo_backend)
     _log("grpo", f"-> {ctx['grpo_ckpt']}")
@@ -708,6 +710,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dpo-out", default="runs/dpo", dest="dpo_out")
     p.add_argument("--grpo-out", default="runs/grpo", dest="grpo_out")
     p.add_argument("--grpo-backend", default="fallback", dest="grpo_backend")
+    p.add_argument("--grpo-steps", type=int, default=None, dest="grpo_steps")
     p.add_argument("--soup-out", default="runs/soup", dest="soup_out")
     p.add_argument("--eval-budget", type=int, default=5, dest="eval_budget")
     return p

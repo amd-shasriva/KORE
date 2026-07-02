@@ -13,9 +13,9 @@ build/
 dist/
 
 # large / generated artifacts (kept out of git; regenerable)
-runs/**/checkpoint-*/
-runs/**/adapter_model*.safetensors
-runs/**/*.bin
+# ignore all run output subdirs (checkpoints/adapters/models) but keep the
+# small replay_*.jsonl verification caches at runs/ top level.
+runs/*/
 *.log
 
 # vendored external repos (large; cloned separately)

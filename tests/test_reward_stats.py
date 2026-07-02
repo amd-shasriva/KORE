@@ -35,6 +35,21 @@ def test_scan_flags_aiter_and_torch_delegation():
     assert scan_for_hacks("try:\n    k()\nexcept Exception:\n    return ref") is not None
 
 
+def test_scan_blocks_post_verdict_and_aliased_delegation():
+    # post-verdict forgery channels (beat last-match parsing)
+    assert scan_for_hacks("import atexit\natexit.register(lambda: print('x'))") is not None
+    assert scan_for_hacks("import signal\nsignal.signal(2, lambda *a: None)") is not None
+    assert scan_for_hacks("class K:\n def __del__(self): pass") is not None
+    # delegation bypasses
+    assert scan_for_hacks("import torch as t\ndef f(x): return t.softmax(x,-1)") is not None
+    assert scan_for_hacks("import torch.nn.functional as fn\ndef f(x): return fn.gelu(x)") is not None
+    assert scan_for_hacks("def f(x): return x.matmul(x)") is not None
+    assert scan_for_hacks("import torch\ndef f(x): return getattr(torch,'mat'+'mul')(x,x)") is not None
+    assert scan_for_hacks("import torch\nm=torch.matmul\ndef f(x): return m(x,x)") is not None
+    # legitimate Triton must NOT be flagged
+    assert scan_for_hacks("import triton.language as tl\n@triton.jit\ndef k():\n    y = tl.sigmoid(x)") is None
+
+
 def test_scan_ignores_comments_and_docstrings():
     clean = (
         '"""This kernel matches aiter.rms_norm layout for MI300."""\n'

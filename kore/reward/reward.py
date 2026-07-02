@@ -51,12 +51,28 @@ _HACK_PATTERNS = [
     (r"torch\.nn\.functional\.\w+\s*\(", "delegates to torch.nn.functional"),
     (r"\bF\.(scaled_dot_product_attention|linear|softmax|rms_norm|layer_norm|gelu|silu|conv\w*)\s*\(",
      "delegates to torch.nn.functional"),
-    # aliased torch delegation: `import torch as t; t.matmul(...)`, `from torch import matmul`.
-    (r"\b[A-Za-z_]\w*\.(?:matmul|addmm|baddbmm|einsum|scaled_dot_product_attention)\s*\(",
-     "delegates a heavy op via an aliased handle instead of computing"),
-    (r"\b[A-Za-z_]\w*\.(?:bmm|mm)\s*\(", "delegates a matmul via an aliased handle"),
-    (r"\bfrom\s+torch(?:\.nn)?(?:\.functional)?\s+import\b",
-     "imports torch ops directly (delegation channel)"),
+    # aliased delegation via a handle: `import torch as t; t.matmul(...)`, `fn.gelu(...)`,
+    # `x.softmax(...)`. Excludes the Triton language namespaces (`tl.`/`triton.`),
+    # which legitimately provide tl.sigmoid/tl.exp/etc.
+    (r"\b(?!tl\.)(?!triton\.)[A-Za-z_]\w*\.(?:matmul|addmm|baddbmm|einsum|"
+     r"scaled_dot_product_attention|softmax|log_softmax|gelu|silu|elu|sigmoid|"
+     r"layer_norm|rms_norm|group_norm|batch_norm|linear|conv\w*)\s*\(",
+     "delegates an op via a handle instead of computing"),
+    (r"\b(?!tl\.)(?!triton\.)[A-Za-z_]\w*\.(?:bmm|mm)\s*\(", "delegates a matmul via an aliased handle"),
+    (r"\bfrom\s+torch(?:\.\w+)*\s+import\b", "imports torch ops directly (delegation channel)"),
+    # aliasing the torch import (`import torch as t`, `import torch.nn.functional as fn`).
+    (r"\bimport\s+torch(?:\.\w+)*\s+as\s+\w+", "aliases the torch import (delegation channel)"),
+    # binding a torch op for later delegation (`m = torch.matmul; m(a,b)`).
+    (r"=\s*torch\.(?:matmul|mm|bmm|addmm|baddbmm|einsum|softmax|log_softmax|gelu|silu|"
+     r"layer_norm|rms_norm|scaled_dot_product_attention|linear|conv\w*)\b",
+     "binds a torch op for later delegation"),
+    # dynamic attribute lookup on a numeric lib to dodge literal-name scans.
+    (r"getattr\s*\(\s*(?:torch|np|numpy|F|nn|aiter|__builtins__|builtins)\b",
+     "dynamic getattr on a numeric library (delegation/escape channel)"),
+    # post-verdict forgery channels: code that runs AFTER the driver prints its
+    # verdict (atexit/signal/__del__/excepthook) can beat the last-match parse.
+    (r"\batexit\b|signal\.signal|\bfaulthandler\b|sys\.excepthook|def\s+__del__\b",
+     "registers a shutdown/exit/signal hook (post-verdict forgery channel)"),
     (r"\.(flash_attn\w*|fused_moe|paged_attention)\s*\(", "calls a fused vendor kernel instead of computing"),
     # copy-reference: returning the oracle's output passes the SNR gate, so it
     # MUST be rejected statically (runtime correctness can never catch it).

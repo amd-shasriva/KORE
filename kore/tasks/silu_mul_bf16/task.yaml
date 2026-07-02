@@ -1,0 +1,17 @@
+task_id: silu_mul_bf16
+operation: silu_and_mul
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0   # bf16, correctness oracle = torch-fp32
+shapes:
+  minimal: {M: 64, N: 512}
+  primary: {M: 4096, N: 14336}     # llama-style gated MLP inter dim
+  validation:
+    - {M: 2048, N: 14336}
+    - {M: 8192, N: 11008}
+# input is (M, 2*N); baseline measured on-box via --impl reference == AITER silu_and_mul
+targets:
+  snr_db: 30.0
+  comparison_baseline: aiter_silu_and_mul   # the REAL serving bar

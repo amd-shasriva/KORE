@@ -1,0 +1,19 @@
+task_id: gemm_fp8_a8w8
+operation: gemm_fp8
+dtype: fp8_e4m3fnuz
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 25.0   # fp8 e4m3fnuz gate (low precision)
+shapes:
+  minimal: {M: 8, N: 512, K: 512}
+  primary: {M: 4096, N: 4096, K: 4096}   # prefill
+  validation:
+    - {M: 1, N: 4096, K: 4096}    # decode bs=1
+    - {M: 8, N: 4096, K: 4096}    # decode
+    - {M: 64, N: 4096, K: 4096}   # small batch decode
+# fp8 A and W (per-tensor scales), bf16 out. Correctness oracle = torch-fp32
+# matmul of the dequantized inputs. Baseline (--impl reference) = AITER gemm_a8w8.
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_gemm_a8w8   # the REAL serving bar (fp8 CK)

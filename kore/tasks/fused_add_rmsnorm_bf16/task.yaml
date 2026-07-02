@@ -1,0 +1,17 @@
+task_id: fused_add_rmsnorm_bf16
+operation: fused_add_rmsnorm
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0   # bf16, correctness oracle = torch-fp32
+shapes:
+  minimal: {M: 64, N: 512}
+  primary: {M: 4096, N: 4096}
+  validation:
+    - {M: 2048, N: 2048}
+    - {M: 8192, N: 8192}
+# baseline measured on-box via driver --impl reference == AITER fused_add_rms_norm_cu
+targets:
+  snr_db: 30.0
+  comparison_baseline: aiter_fused_add_rms_norm_cu   # the REAL serving bar

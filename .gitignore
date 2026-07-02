@@ -1,0 +1,22 @@
+# secrets
+.env.local
+.env
+*.key
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+build/
+dist/
+
+# large / generated artifacts (kept out of git; regenerable)
+runs/**/checkpoint-*/
+runs/**/adapter_model*.safetensors
+runs/**/*.bin
+*.log
+
+# vendored external repos (large; cloned separately)
+../repos/

@@ -1,0 +1,19 @@
+task_id: rope_bf16
+operation: rope
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0   # bf16 RoPE, correctness oracle = torch-fp32
+shapes:
+  minimal: {S: 128, B: 1, H: 8, D: 64}
+  primary: {S: 2048, B: 2, H: 32, D: 128}   # Llama-3-8B prefill (head_dim 128)
+  validation:
+    - {S: 8192, B: 1, H: 32, D: 128}        # long prefill
+    - {S: 1, B: 8, H: 32, D: 128}           # decode (seq_q=1, edge S2)
+    - {S: 2048, B: 2, H: 16, D: 64}         # head_dim 64
+# NEOX-style full-head-dim rotary embedding on (S,B,H,D). Correctness oracle =
+# torch-fp32 NEOX rope. Baseline (--impl reference) = AITER rope_fwd (HIP).
+targets:
+  snr_db: 30.0
+  comparison_baseline: aiter_rope_neox   # the REAL serving bar (HIP rope)

@@ -1,0 +1,305 @@
+"""General-capability replay loaders for the anti-catastrophic-forgetting mix.
+
+KORE specializes a reasoning+code base model on AMD kernels. To keep the ~45%
+general-retention backbone (chat / code / math / instruction-following) plus the
+new agentic tool-use skill, Stage-1 SFT mixes real general data back in
+(Tulu-3-style replay). This module is the loader for that half.
+
+``load_general_replay(kind, n, seed)`` returns HF-style chat rows
+``[{"messages": [{"role", "content"}, ...], "_source": kind}]`` for
+``kind in {code, math, chat, instruction_following, tool_use}``.
+
+Sourcing is two-tier:
+  1. REAL named HF sources via ``datasets`` when explicitly enabled (guarded, so
+     the heavy import + network only happen when asked). See ``HF_SOURCES``.
+  2. Bundled tiny sample sets under ``kore/data/replay_samples/<kind>.jsonl`` as
+     an ALWAYS-available offline fallback (used by tests and dry-runs).
+
+Enable real sources with ``use_hf=True`` (or env ``KORE_GENERAL_REPLAY_HF=1``);
+any failure (offline, missing dataset, schema drift) degrades gracefully to the
+bundled samples so the pipeline never hard-fails.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import random
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+# The five general-replay capabilities.
+REPLAY_KINDS = ("code", "math", "chat", "instruction_following", "tool_use")
+
+_SAMPLES_DIR = Path(__file__).resolve().parent / "replay_samples"
+
+
+# --------------------------------------------------------------------------- #
+# Real HF sources (only touched when use_hf is enabled)
+# --------------------------------------------------------------------------- #
+# Each entry: (dataset_path, config, split, row->chat-messages formatter).
+# These are the recommended named sources for the full (non-smoke) build; the
+# formatters normalize each dataset's native schema into chat ``messages``.
+HF_SOURCES: dict[str, dict] = {
+    "code": {
+        # Permissive code corpus; format a file/snippet into an "explain this" row.
+        "path": "bigcode/the-stack-smol",
+        "config": "data/python",
+        "split": "train",
+        "text_keys": ("content", "text"),
+    },
+    "math": {
+        # GSM8K grade-school math word problems with worked solutions.
+        "path": "openai/gsm8k",
+        "config": "main",
+        "split": "train",
+        "qa_keys": ("question", "answer"),
+    },
+    "chat": {
+        # Tulu-3 SFT mixture: already chat-formatted ``messages``.
+        "path": "allenai/tulu-3-sft-mixture",
+        "config": None,
+        "split": "train",
+        "messages_key": "messages",
+    },
+    "instruction_following": {
+        # Same mixture; IF-heavy subset (native ``messages``).
+        "path": "allenai/tulu-3-sft-mixture",
+        "config": None,
+        "split": "train",
+        "messages_key": "messages",
+    },
+    "tool_use": {
+        # Function-calling trajectories (xLAM / ToolACE), reformatted to chat.
+        "path": "Salesforce/xlam-function-calling-60k",
+        "config": None,
+        "split": "train",
+        "qa_keys": ("query", "answers"),
+    },
+}
+
+
+def _truthy(val: Optional[str]) -> bool:
+    return str(val or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# --------------------------------------------------------------------------- #
+# Row hygiene / coercion
+# --------------------------------------------------------------------------- #
+def _valid_messages(messages: Any) -> bool:
+    if not isinstance(messages, list) or not messages:
+        return False
+    for m in messages:
+        if not isinstance(m, dict):
+            return False
+        if "role" not in m or "content" not in m:
+            return False
+        if not isinstance(m.get("content"), str):
+            return False
+    return True
+
+
+def _as_chat_row(obj: Any, kind: str) -> Optional[dict]:
+    """Coerce a loaded object into a tagged chat row, or None if malformed."""
+    if isinstance(obj, dict) and _valid_messages(obj.get("messages")):
+        row = {"messages": [dict(m) for m in obj["messages"]]}
+        row["_source"] = obj.get("_source", kind)
+        return row
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Bundled offline fallback
+# --------------------------------------------------------------------------- #
+def _bundled_path(kind: str) -> Path:
+    return _SAMPLES_DIR / f"{kind}.jsonl"
+
+
+def load_bundled_samples(kind: str) -> list[dict]:
+    """Load the bundled tiny sample set for ``kind`` (offline, always works)."""
+    if kind not in REPLAY_KINDS:
+        raise ValueError(f"unknown replay kind {kind!r}; known: {REPLAY_KINDS}")
+    path = _bundled_path(kind)
+    rows: list[dict] = []
+    if not path.exists():
+        return rows
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        row = _as_chat_row(obj, kind)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+# --------------------------------------------------------------------------- #
+# HF formatters (native schema -> chat messages)
+# --------------------------------------------------------------------------- #
+def _fmt_messages_passthrough(ex: dict, spec: dict, kind: str) -> Optional[dict]:
+    key = spec.get("messages_key", "messages")
+    return _as_chat_row({"messages": ex.get(key)}, kind)
+
+
+def _fmt_qa(ex: dict, spec: dict, kind: str) -> Optional[dict]:
+    qk, ak = spec.get("qa_keys", ("question", "answer"))
+    q, a = ex.get(qk), ex.get(ak)
+    if not isinstance(q, str):
+        return None
+    if not isinstance(a, str):
+        a = json.dumps(a) if a is not None else ""
+    if not q.strip() or not a.strip():
+        return None
+    return {"messages": [
+        {"role": "user", "content": q.strip()},
+        {"role": "assistant", "content": a.strip()},
+    ], "_source": kind}
+
+
+def _fmt_code(ex: dict, spec: dict, kind: str) -> Optional[dict]:
+    text = None
+    for k in spec.get("text_keys", ("content", "text")):
+        if isinstance(ex.get(k), str) and ex[k].strip():
+            text = ex[k]
+            break
+    if text is None:
+        return None
+    text = text.strip()
+    if len(text) > 4000:
+        text = text[:4000]
+    return {"messages": [
+        {"role": "user", "content": "Explain what the following code does:\n\n"
+                                    f"```python\n{text}\n```"},
+        {"role": "assistant", "content": "Here is a walkthrough of the code:\n\n"
+                                         f"```python\n{text}\n```"},
+    ], "_source": kind}
+
+
+def _formatter_for(kind: str, spec: dict) -> Callable[[dict, dict, str], Optional[dict]]:
+    if spec.get("messages_key"):
+        return _fmt_messages_passthrough
+    if kind == "code":
+        return _fmt_code
+    return _fmt_qa
+
+
+def _load_from_hf(kind: str, n: int, seed: int) -> list[dict]:
+    """Attempt to load ``n`` chat rows for ``kind`` from a real HF dataset.
+
+    Heavy import is inside the function. Raises on any failure so the caller can
+    fall back to bundled samples.
+    """
+    from datasets import load_dataset  # guarded heavy import
+
+    spec = HF_SOURCES[kind]
+    # Stream to avoid downloading the full dataset for a replay sample.
+    ds = load_dataset(
+        spec["path"], spec.get("config"), split=spec.get("split", "train"),
+        streaming=True,
+    )
+    try:
+        ds = ds.shuffle(seed=seed, buffer_size=max(1000, n * 4))
+    except Exception:
+        pass  # some streaming datasets don't support shuffle; take head order
+    fmt = _formatter_for(kind, spec)
+    rows: list[dict] = []
+    # Scan a bounded number of examples so a low yield can't loop forever.
+    budget = max(n * 20, 200)
+    for i, ex in enumerate(ds):
+        if len(rows) >= n or i >= budget:
+            break
+        row = fmt(dict(ex), spec, kind)
+        if row is not None:
+            rows.append(row)
+    if not rows:
+        raise RuntimeError(f"HF source for {kind!r} yielded no usable rows")
+    return rows
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic sampling to exactly n rows
+# --------------------------------------------------------------------------- #
+def _resize(rows: list[dict], n: int, seed: int) -> list[dict]:
+    """Return exactly ``n`` rows: subsample without replacement when the pool is
+    large enough, else deterministically oversample (with replacement) to fill.
+    """
+    if n <= 0 or not rows:
+        return []
+    rng = random.Random(seed)
+    if n <= len(rows):
+        idx = rng.sample(range(len(rows)), n)
+        return [rows[i] for i in idx]
+    # Oversample: shuffled full passes, then a shuffled remainder.
+    out: list[dict] = []
+    while len(out) < n:
+        order = list(range(len(rows)))
+        rng.shuffle(order)
+        for i in order:
+            out.append(rows[i])
+            if len(out) >= n:
+                break
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Public API
+# --------------------------------------------------------------------------- #
+def load_general_replay(
+    kind: str,
+    n: int,
+    seed: int = 0,
+    use_hf: Optional[bool] = None,
+) -> list[dict]:
+    """Load ``n`` general-replay chat rows for ``kind``.
+
+    kind in {code, math, chat, instruction_following, tool_use}.
+
+    Returns ``[{"messages": [...], "_source": kind}, ...]`` of length ``n``
+    (deterministic given ``seed``).
+
+    Real HF sources (``HF_SOURCES``) are used only when ``use_hf`` is True or, if
+    ``use_hf is None``, when env ``KORE_GENERAL_REPLAY_HF`` is truthy. On ANY HF
+    failure (offline / missing / schema drift) it falls back to the bundled
+    ``replay_samples/<kind>.jsonl`` so it always runs offline and in tests.
+    """
+    if kind not in REPLAY_KINDS:
+        raise ValueError(f"unknown replay kind {kind!r}; known: {REPLAY_KINDS}")
+    if n <= 0:
+        return []
+
+    if use_hf is None:
+        use_hf = _truthy(os.environ.get("KORE_GENERAL_REPLAY_HF"))
+
+    pool: list[dict] = []
+    if use_hf:
+        try:
+            pool = _load_from_hf(kind, n, seed)
+        except Exception as e:  # noqa: BLE001 — degrade to offline bundle
+            print(f"[general_replay] HF source for {kind!r} unavailable "
+                  f"({type(e).__name__}: {e}); using bundled samples")
+            pool = []
+    if not pool:
+        pool = load_bundled_samples(kind)
+    return _resize(pool, n, seed)
+
+
+def load_all_general_replay(
+    counts: dict[str, int],
+    seed: int = 0,
+    use_hf: Optional[bool] = None,
+) -> dict[str, list[dict]]:
+    """Load several replay kinds at once.
+
+    ``counts`` maps ``kind -> n``. Returns ``{kind: rows}``. Each kind gets a
+    decorrelated but deterministic sub-seed.
+    """
+    out: dict[str, list[dict]] = {}
+    for i, kind in enumerate(k for k in REPLAY_KINDS if k in counts):
+        out[kind] = load_general_replay(
+            kind, counts[kind], seed=seed + 1 + i, use_hf=use_hf
+        )
+    return out

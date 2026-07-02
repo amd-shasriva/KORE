@@ -1,0 +1,20 @@
+task_id: gelu_tanh_bf16
+operation: gelu_tanh
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0   # bf16 tanh-approx GELU, correctness oracle = torch-fp32
+shapes:
+  minimal: {M: 64, N: 512}
+  primary: {M: 4096, N: 14336}      # Llama-3-8B MLP intermediate
+  validation:
+    - {M: 8192, N: 11008}           # Llama-2-style inter dim
+    - {M: 2048, N: 17408}           # Qwen3-14B inter dim
+    - {M: 4096, N: 8191}            # non-pow2 N tail (edge S1, masking)
+# Elementwise tanh-approximation GELU. Correctness oracle = torch-fp32
+# gelu(tanh). Baseline (--impl reference) = F.gelu(approximate='tanh') which on
+# ROCm lowers to a fused elementwise kernel (AITER ships only *gated* GELU).
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_gelu_tanh   # framework production path (rocm)

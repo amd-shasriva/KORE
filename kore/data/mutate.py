@@ -54,24 +54,24 @@ def break_block_size(src: str) -> tuple[str, FailureHint]:
 
 
 def break_accumulator_dtype(src: str) -> tuple[str, FailureHint]:
-    """Downcast the fp32 accumulator to a low-precision dtype.
+    """Downcast the fp32 accumulator to bf16 (a low-precision dtype).
 
     Accumulating a long K-reduction in bf16/fp16 destroys precision, so the
-    kernel still compiles but fails the SNR correctness gate.
+    kernel still compiles but fails the SNR correctness gate (DATASET_SPEC N1).
     """
-    # `tl.zeros((...), dtype=tl.float32)` -> float16 accumulator
+    # `tl.zeros((...), dtype=tl.float32)` -> bf16 accumulator
     out, ok = _first_sub(
         src,
         r"(tl\.zeros\([^)]*dtype\s*=\s*tl\.)float32",
-        lambda m: m.group(1) + "float16",
+        lambda m: m.group(1) + "bfloat16",
     )
     if ok:
         return out, "snr_fail"
     # any explicit fp32 accumulator dtype
-    out, ok = _first_sub(src, r"tl\.float32", "tl.float16")
+    out, ok = _first_sub(src, r"tl\.float32", "tl.bfloat16")
     if ok:
         return out, "snr_fail"
-    out, ok = _first_sub(src, r"dtype\s*=\s*tl\.float32", "dtype=tl.float16")
+    out, ok = _first_sub(src, r"dtype\s*=\s*tl\.float32", "dtype=tl.bfloat16")
     if ok:
         return out, "snr_fail"
     return src + "\n# BROKEN_ACC: accumulate in low precision\n", "snr_fail"
@@ -232,6 +232,131 @@ def break_scale(src: str) -> tuple[str, FailureHint]:
     return src, "snr_fail"
 
 
+def break_missing_mask(src: str) -> tuple[str, FailureHint]:
+    """Drop the tail bounds mask so the last (partial) tile is mishandled.
+
+    DATASET_SPEC S5: when ``dim % BLOCK != 0`` the final tile needs a boundary
+    mask. Widening the guard (``offs < N`` -> ``offs < N + BLOCK``) or removing
+    the ``mask=`` kwarg makes the tail rows/cols read/write past the valid
+    region, corrupting the result (SNR fail) rather than a clean compile error.
+    """
+    # widen the tail guard so out-of-range lanes are (wrongly) included
+    out, ok = _first_sub(
+        src,
+        r"(\bmask\w*\s*=\s*offs\w*\s*<\s*)(N|M|K|n_cols|n_rows)\b",
+        lambda m: m.group(1) + "(" + m.group(2) + " + BLOCK_N)",
+    )
+    if ok:
+        return out, "snr_fail"
+    # otherwise drop a mask kwarg entirely (unmasked tail load/store)
+    out, ok = _first_sub(src, r",\s*mask\s*=\s*\w+", "")
+    if ok:
+        return out, "snr_fail"
+    return src, "snr_fail"
+
+
+def break_fp8_variant(src: str) -> tuple[str, FailureHint]:
+    """Swap the AMD FNUZ fp8 encoding for the OCP ``fn`` variant (N8 / L-trap).
+
+    gfx942 uses ``float8_e4m3fnuz`` (FNUZ). Emitting the OCP ``e4m3fn`` layout
+    silently mismatches what AITER/hipBLASLt expect (``aiter_ref.py``), so the
+    kernel compiles/runs but is numerically wrong vs the production baseline.
+    """
+    for pat, repl in (
+        (r"float8_e4m3fnuz", "float8_e4m3fn"),
+        (r"float8_e5m2fnuz", "float8_e5m2"),
+        (r"\btl\.float8e4b8\b", "tl.float8e4nv"),   # AMD FNUZ -> NVIDIA/OCP
+        (r"\btl\.float8e5b16\b", "tl.float8e5"),
+        (r"e4m3fnuz", "e4m3fn"),
+        (r"e5m2fnuz", "e5m2"),
+        (r"fnuz", "fn"),
+    ):
+        out, ok = _first_sub(src, pat, repl)
+        if ok:
+            return out, "snr_fail"
+    return src, "snr_fail"
+
+
+def break_k_multiple_of_32(src: str) -> tuple[str, FailureHint]:
+    """Make the K tile not a multiple of 32 (illegal for fp8/MX scale groups).
+
+    DATASET_SPEC S6: fp8/MX MFMA requires ``BLOCK_K % 32 == 0`` (scale group).
+    48 is neither a multiple of 32 nor a power of two, so ``tl.arange(0, 48)``
+    fails to build -> compile_fail.
+    """
+    # tuple form: `BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M = 64, 128, 64, 8`
+    out, ok = _first_sub(
+        src,
+        r"(BLOCK_M\s*,\s*BLOCK_N\s*,\s*BLOCK_K[^\n=]*=\s*\d+\s*,\s*\d+\s*,\s*)\d+",
+        lambda m: m.group(1) + "48",
+    )
+    if ok:
+        return out, "compile_fail"
+    for pat in (r"(BLOCK_K\s*:\s*tl\.constexpr\s*=\s*)\d+", r"(BLOCK_K\s*=\s*)\d+"):
+        out, ok = _first_sub(src, pat, lambda m: m.group(1) + "48")
+        if ok:
+            return out, "compile_fail"
+    return src, "compile_fail"
+
+
+def break_transpose_operand(src: str) -> tuple[str, FailureHint]:
+    """Transpose/permute an operand by swapping its two stride multipliers (L1).
+
+    Swapping ``stride_am``<->``stride_ak`` (or B's) in a pointer expression
+    reads the operand transposed: it still compiles and runs but the contraction
+    is wrong (SNR fail). Falls back to swapping the broadcast axes.
+    """
+    for a, b in (
+        ("stride_am", "stride_ak"),
+        ("stride_bn", "stride_bk"),
+        ("stride_xm", "stride_xn"),
+    ):
+        pat = re.escape(a) + r"(.*?)" + re.escape(b)
+        out, ok = _first_sub(src, pat, lambda m, a=a, b=b: b + m.group(1) + a)
+        if ok:
+            return out, "snr_fail"
+    # generic: swap the broadcast axes on the first 2D pointer index
+    out, ok = _first_sub(src, r"\[:,\s*None\]", "[None, :]")
+    if ok:
+        return out, "snr_fail"
+    return src, "snr_fail"
+
+
+def break_missing_barrier(src: str) -> tuple[str, FailureHint]:
+    """Remove a synchronization barrier -> cross-wavefront race (C1).
+
+    Dropping a ``tl.debug_barrier()`` between a shared-memory write and the
+    dependent read lets wavefronts read stale/partial data: a nondeterministic
+    correctness failure (SNR fail, may only show up at scale).
+    """
+    for pat in (
+        r"\n[ \t]*tl\.debug_barrier\(\)[ \t]*",
+        r"\n[ \t]*tl\.barrier\(\)[ \t]*",
+        r"\n[ \t]*__syncthreads\(\)[ \t]*",
+    ):
+        out, ok = _first_sub(src, pat, "")
+        if ok:
+            return out, "snr_fail"
+    return src, "snr_fail"
+
+
+def break_block_m_to_64(src: str) -> tuple[str, FailureHint]:
+    """Shrink BLOCK_M from 128 to 64 (sparse-attn cross-WG corruption, C1).
+
+    Skill ``sparse_block_m_128_guard``: BLOCK_M=64 causes *silent* cross-
+    workgroup corruption in block-sparse/split-K kernels; 128 is required.
+    """
+    out, ok = _first_sub(src, r"(BLOCK_M\s*=\s*)128\b", lambda m: m.group(1) + "64")
+    if ok:
+        return out, "snr_fail"
+    out, ok = _first_sub(
+        src, r"(BLOCK_M\s*,[^\n=]*=\s*)128\b", lambda m: m.group(1) + "64"
+    )
+    if ok:
+        return out, "snr_fail"
+    return src, "snr_fail"
+
+
 # Map each op family to the mutators that plausibly break its kernels. "generic"
 # holds mutators that apply to essentially any Triton kernel.
 OP_FAMILY_MUTATORS: dict[str, list] = {
@@ -240,38 +365,61 @@ OP_FAMILY_MUTATORS: dict[str, list] = {
         break_accumulator_dtype,
         break_index_offset,
         break_dtype_cast,
-        break_scale,
+        break_transpose_operand,
+        break_missing_mask,
         break_mask,
+        break_fp8_variant,
+        break_k_multiple_of_32,
+        break_block_m_to_64,
+        break_scale,
     ],
     "norm": [
         break_reduction_axis,
         break_eps,
         break_dtype_cast,
+        break_missing_mask,
         break_mask,
         break_block_size,
         break_index_offset,
     ],
     "activation": [
+        break_missing_mask,
         break_mask,
         break_dtype_cast,
         break_scale,
         break_index_offset,
+        break_block_size,
     ],
     "attention": [
         break_scale,
         break_reduction_axis,
+        break_missing_mask,
         break_mask,
         break_dtype_cast,
         break_index_offset,
+        break_missing_barrier,
+        break_block_m_to_64,
     ],
     "moe": [
         break_scale,
+        break_missing_mask,
         break_mask,
         break_dtype_cast,
         break_index_offset,
         break_block_size,
+        break_block_m_to_64,
+        break_transpose_operand,
+    ],
+    "quant": [
+        break_fp8_variant,
+        break_k_multiple_of_32,
+        break_accumulator_dtype,
+        break_dtype_cast,
+        break_scale,
+        break_missing_mask,
     ],
     "generic": [
+        break_missing_mask,
         break_mask,
         break_dtype_cast,
         break_index_offset,
@@ -291,6 +439,7 @@ def infer_family(operation_or_task_id: str) -> str:
         ("attention", ("attention", "attn", "mha", "mla", "mqa", "flash", "sdpa")),
         ("moe", ("moe", "expert")),
         ("activation", ("silu", "gelu", "relu", "swiglu", "geglu", "glu", "act")),
+        ("quant", ("quant", "dequant", "w8a8", "scaled_mm", "fp8_scale")),
     )
     for family, keys in families:
         if any(k in s for k in keys):
@@ -299,17 +448,39 @@ def infer_family(operation_or_task_id: str) -> str:
 
 
 def apply_random_breakage(
-    src: str, rng: random.Random | None = None, family: str = "generic"
+    src: str,
+    family_or_rng: "str | random.Random | None" = None,
+    rng_or_family: "str | random.Random | None" = None,
+    *,
+    family: str | None = None,
+    rng: random.Random | None = None,
 ) -> tuple[str, FailureHint, str]:
     """Apply one randomly-chosen, family-appropriate breakage.
+
+    Signature is deliberately flexible so both the documented order
+    ``apply_random_breakage(src, family, rng)`` and the legacy order
+    ``apply_random_breakage(src, rng, family=...)`` (used by ``gen_repair`` and
+    the existing test suite) work: the two positional slots are resolved by
+    type (a ``random.Random`` is the rng, a ``str`` is the family).
 
     Picks from ``family``'s mutator list (always keeping the generic mutators as
     a fallback), trying candidates in random order until one *actually* changes
     the source. Guaranteed to return a changed source.
 
-    Returns ``(broken_src, failure_class_hint, mutator_name)``.
+    Returns ``(broken_src, failure_class, mutator_name)`` — the first two are the
+    ``(broken_src, failure_class)`` pair from the spec; the third names the
+    mutator used, kept for provenance/back-compat with ``gen_repair``.
     """
+    for a in (family_or_rng, rng_or_family):
+        if isinstance(a, random.Random):
+            if rng is None:
+                rng = a
+        elif isinstance(a, str):
+            if family is None:
+                family = a
     rng = rng or random.Random()
+    family = family or "generic"
+
     mutators = list(OP_FAMILY_MUTATORS.get(family) or OP_FAMILY_MUTATORS["generic"])
     for fn in OP_FAMILY_MUTATORS["generic"]:
         if fn not in mutators:

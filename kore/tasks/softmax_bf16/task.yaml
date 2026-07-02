@@ -1,0 +1,20 @@
+task_id: softmax_bf16
+operation: softmax
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0   # bf16 row softmax, correctness oracle = torch-fp32
+shapes:
+  minimal: {M: 64, N: 512}
+  primary: {M: 4096, N: 4096}
+  validation:
+    - {M: 8192, N: 2048}
+    - {M: 1024, N: 32768}    # very wide N (edge S3, big row reduction)
+    - {M: 4096, N: 8191}     # non-pow2 N tail (edge S1, masking)
+# Numerically-stable row softmax over the last dim. Correctness oracle =
+# torch-fp32 softmax. Baseline (--impl reference) = torch.softmax which on ROCm
+# lowers to a fused MIOpen/rocm softmax (AITER has no standalone row-softmax).
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_softmax_lastdim   # framework production path (rocm)

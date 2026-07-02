@@ -91,3 +91,88 @@ def aiter_gemm_a8w8(
     import aiter
 
     return aiter.gemm_a8w8(xq, wq, x_scale, w_scale, dtype=out_dtype)
+
+
+# --- Dense bf16 GEMM ------------------------------------------------------
+def hipblaslt_gemm_bf16(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Production dense bf16 GEMM baseline: ``torch.matmul(A, B)``.
+
+    On ROCm, ``torch.matmul`` for bf16 dense matmul dispatches straight to
+    **hipBLASLt** (the vendor tuned GEMM library that the serving stack uses),
+    so this *is* the real production bar — not an unfused torch loop. A[M,K] @
+    B[K,N] -> [M,N], fp32 accumulate, bf16 output.
+    """
+    return torch.matmul(a, b)
+
+
+# --- LayerNorm ------------------------------------------------------------
+def aiter_layer_norm(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float
+) -> torch.Tensor:
+    """AITER CK LayerNorm: ``aiter.layer_norm(input, weight, bias, epsilon)``.
+
+    2D row LayerNorm over the last dim (mean + variance subtraction), affine
+    with weight+bias. Returns a tensor of the same shape/dtype.
+    """
+    import aiter
+
+    return aiter.layer_norm(x, weight, bias, eps)
+
+
+# --- Softmax --------------------------------------------------------------
+def torch_softmax_lastdim(x: torch.Tensor) -> torch.Tensor:
+    """Production row-softmax baseline: ``torch.softmax(x, dim=-1)``.
+
+    AITER exposes no standalone dense row-softmax (only ``topk_softmax`` for MoE
+    routing), so the honest production op is the framework path: on ROCm
+    ``torch.softmax`` lowers to a fused MIOpen/rocm softmax kernel. Documented as
+    the framework production baseline per the KORE ABI.
+    """
+    return torch.softmax(x, dim=-1)
+
+
+# --- GELU (tanh approximation) -------------------------------------------
+def torch_gelu_tanh(x: torch.Tensor) -> torch.Tensor:
+    """Production tanh-approx GELU baseline: ``F.gelu(x, approximate='tanh')``.
+
+    AITER only ships *gated* GELU (``gelu_and_mul`` / ``gelu_tanh_and_mul``), not
+    a standalone elementwise GELU activation, so the honest production op is the
+    framework path: ``torch.nn.functional.gelu`` lowers to a fused rocm
+    elementwise kernel. Documented as the framework production baseline.
+    """
+    import torch.nn.functional as F
+
+    return F.gelu(x, approximate="tanh")
+
+
+# --- RoPE (rotary position embedding) ------------------------------------
+def aiter_rope_neox(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    """AITER RoPE: ``aiter.rope_fwd`` (NEOX-style, full head-dim rotation).
+
+    ``x`` is (S, B, H, D); ``freqs`` is (S, 1, 1, D//2) of rotation *angles*
+    (the op computes cos/sin internally). Call convention:
+    ``rope_fwd(input, freqs, rotate_style=0 (NEOX), reuse_freqs_front_part=True,
+    nope_first=False)`` -> rotated tensor (S, B, H, D). This is the vendor HIP
+    rope kernel used by the serving stack.
+    """
+    import aiter
+
+    return aiter.rope_fwd(x, freqs, 0, True, False, False)
+
+
+# --- Dynamic per-token fp8 quantization ----------------------------------
+def aiter_dynamic_per_token_quant(x: torch.Tensor):
+    """AITER dynamic per-token (rowwise) fp8 quant to e4m3fnuz.
+
+    ``aiter.dynamic_per_token_scaled_quant(out, input, scales)`` writes the fp8
+    codes into ``out`` [M,N] and the per-row fp32 scales into ``scales`` [M,1]
+    in place (returns None). ``x ≈ out.float() * scales``. This is the vendor
+    quant kernel the serving stack calls for W8A8 / fp8 activation quant.
+    """
+    import aiter
+
+    M, N = x.shape
+    out = torch.empty((M, N), dtype=FP8_DTYPE, device=x.device)
+    scales = torch.empty((M, 1), dtype=torch.float32, device=x.device)
+    aiter.dynamic_per_token_scaled_quant(out, x, scales)
+    return out, scales

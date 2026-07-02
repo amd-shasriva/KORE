@@ -1,0 +1,20 @@
+task_id: flash_attn_decode_bf16
+operation: flash_attn_decode
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+# bf16 GQA decode (seq_q=1) vs fp32 SDPA oracle. Single-query online-softmax over
+# a long KV window lands ~40-45 dB; gate at 25 dB (KORE low-precision attention
+# bar) rejects a missing max-subtraction / wrong-rescale kernel with margin.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 8, KV: 2, Skv: 1024, D: 128}
+  primary: {B: 8, H: 32, KV: 8, Skv: 4096, D: 128}   # Llama-3.1-8B GQA decode
+  validation:
+    - {B: 1, H: 32, KV: 8, Skv: 8192, D: 128}         # long KV
+    - {B: 64, H: 32, KV: 8, Skv: 1024, D: 128}        # large batch decode
+    - {B: 1, H: 32, KV: 8, Skv: 1023, D: 128}         # non-multiple-of-BLOCK KV edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn   # AITER CK/ASM FMHA, seq_q=1 decode

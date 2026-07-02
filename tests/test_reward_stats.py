@@ -71,7 +71,20 @@ def test_reward_correct_timed_worst_shape_speedup():
     rr = compute_reward(obs, "x=1", dtype="bf16")
     assert rr.correct is True and rr.tier == "correct_timed"
     assert abs(rr.speedup - 1.5) < 1e-9
-    assert abs(rr.reward - (CONFIG.correctness_weight + math.log(1.5))) < 1e-9
+    # Kevin linear reward: correctness_weight + worst-shape speedup.
+    assert abs(rr.reward - (CONFIG.correctness_weight + 1.5)) < 1e-9
+
+
+def test_correct_but_slow_still_beats_incorrect():
+    """P0 regression: a correct kernel slower than baseline must NEVER score
+    below an incorrect kernel (0.0), or GRPO advantages invert."""
+    slow = Observation(compiled=True, validation_passed=True, snr_by_shape={"s": 99.0},
+                       wall_by_shape={"s": 4.0}, baseline_by_shape={"s": 1.0})  # 0.25x
+    incorrect = Observation(compiled=True, validation_passed=True, snr_by_shape={"s": 5.0})
+    r_slow = compute_reward(slow, "x=1", dtype="bf16")
+    r_bad = compute_reward(incorrect, "x=1", dtype="bf16")
+    assert r_slow.correct is True and r_slow.reward > r_bad.reward
+    assert r_slow.reward > 0.0 >= r_bad.reward
 
 
 def test_reward_hack_beats_nothing():
@@ -87,4 +100,4 @@ def test_excessive_speedup_flagged_and_capped():
                       wall_by_shape={"s": 0.01}, baseline_by_shape={"s": 1.0})  # 100x
     rr = compute_reward(obs, "x=1", dtype="bf16")
     assert "excessive_speedup" in rr.flags
-    assert abs(rr.reward - (CONFIG.correctness_weight + math.log(CONFIG.excessive_speedup_flag))) < 1e-9
+    assert abs(rr.reward - (CONFIG.correctness_weight + CONFIG.excessive_speedup_flag)) < 1e-9

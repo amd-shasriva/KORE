@@ -1,0 +1,125 @@
+"""Compose the raw datagen outputs into the actual training corpora.
+
+Two products:
+  * the Stage-1 multi-capability SFT mixture (kernel repair/opt + kernel QA +
+    agentic tool-use trajectories + ~45% general replay), via mixing.py; and
+  * the Stage-2 DPO set with >=8% labeled reward-hack hard negatives folded in.
+
+Everything degrades gracefully: missing datagen dirs simply contribute nothing,
+and general replay always falls back to bundled samples, so this runs offline
+(and in tests) with a StubTeacher.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Optional
+
+from kore.data import build_datasets as bd
+from kore.data.general_replay import load_general_replay
+from kore.data.gen_qa import generate_kernel_qa
+from kore.data.hard_negatives import (
+    build_hard_negative_group,
+    meets_hard_negative_target,
+)
+from kore.data.mixing import build_multicap_sft, mixture_report
+from kore.data.schemas import read_jsonl
+
+
+def _read_dir(data_root: Path, sub: str, typed: bool = True) -> list:
+    d = data_root / sub
+    recs: list = []
+    if d.exists():
+        for p in sorted(d.glob("*.jsonl")):
+            recs += read_jsonl(p, typed=typed)
+    return recs
+
+
+def _agentic_rows(data_root: Path) -> list[dict]:
+    """Agentic trajectory records -> SFT chat rows (their ``messages``)."""
+    rows: list[dict] = []
+    d = data_root / "agentic"
+    if not d.exists():
+        return rows
+    for p in sorted(d.glob("*.jsonl")):
+        for rec in read_jsonl(p, typed=False):
+            msgs = rec.get("messages") if isinstance(rec, dict) else None
+            if msgs:
+                rows.append({"messages": msgs})
+    return rows
+
+
+def assemble_multicap_sources(
+    data_root, tasks, teacher, config, total: int, *, seed: int = 0,
+    use_hf: bool = False,
+) -> dict[str, list]:
+    """Build the ``{source_key: [chat rows]}`` dict for build_multicap_sft.
+
+    Kernel repair/opt comes from generated repair+wins records; agentic from
+    generated trajectories; kernel QA is synthesized from task seeds via the
+    teacher; the ~45% general half comes from general_replay.
+    """
+    data_root = Path(data_root)
+    tasks = list(tasks)
+
+    krecs = _read_dir(data_root, "repair") + _read_dir(data_root, "wins")
+    kernel_repair_opt = bd.build_sft(krecs) if krecs else []
+
+    agentic_rows = _agentic_rows(data_root)
+
+    qa_n = max(1, int(round(config.frac_kernel_qa * total)))
+    qa_rows = generate_kernel_qa(tasks, teacher, n=qa_n, seed=seed) if teacher and tasks else []
+
+    gc = load_general_replay("code", max(1, int(round(config.frac_general_code * total))), seed + 10, use_hf)
+    gm = load_general_replay("math", max(1, int(round(config.frac_math_reasoning * total))), seed + 20, use_hf)
+    gch = load_general_replay("chat", max(1, int(round(config.frac_general_chat * total))), seed + 30, use_hf)
+
+    return {
+        "kernel_repair_opt": kernel_repair_opt,
+        "kernel_qa": qa_rows,
+        "agentic_tooluse": agentic_rows,
+        "general_code": gc,
+        "math_reasoning": gm,
+        "general_chat": gch,
+    }
+
+
+def build_multicap_dataset(
+    data_root, tasks, teacher, config, total: int, *, seed: int = 0,
+    use_hf: bool = False, verbose: bool = True,
+) -> list[dict]:
+    """Assemble + mix the Stage-1 multi-capability SFT dataset."""
+    sources = assemble_multicap_sources(data_root, tasks, teacher, config, total,
+                                        seed=seed, use_hf=use_hf)
+    return build_multicap_sft(sources, config, total, seed=seed, verbose=verbose)
+
+
+def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None) -> dict:
+    """Stage-2 DPO rows = ranked-group prefs + labeled reward-hack hard negatives.
+
+    ``correct_source_fn(task)->str`` supplies the trusted 'chosen' kernel for the
+    hard-negative group (defaults to the task's verified seed). Returns
+    ``{rows, n_hard, n_total, meets_target}`` where meets_target checks the >=8%
+    hard-negative floor.
+    """
+    data_root = Path(data_root)
+    tasks = list(tasks)
+    correct_source_fn = correct_source_fn or (lambda t: t.seed_source)
+
+    group_records = _read_dir(data_root, "groups")
+    base_rows = bd.build_dpo(group_records) if group_records else []
+
+    hard_groups = [build_hard_negative_group(correct_source_fn(t), t) for t in tasks]
+    hard_rows = bd.build_dpo(hard_groups)
+
+    rows = base_rows + hard_rows
+    return {
+        "rows": rows,
+        "n_hard": len(hard_rows),
+        "n_total": len(rows),
+        "meets_target": meets_hard_negative_target(len(hard_rows), len(rows)),
+    }
+
+
+def summarize_multicap(rows: list[dict]) -> dict:
+    return mixture_report(rows)

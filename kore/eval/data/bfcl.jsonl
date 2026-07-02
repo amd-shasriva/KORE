@@ -1,0 +1,7 @@
+# SMOKE SUBSET — BFCL-style function/tool-calling cases (single-turn). NOT the full bench.
+# TODO: load the full Berkeley Function-Calling Leaderboard set (gorilla-llm/BFCL) for a real run.
+# The model must emit a JSON object {"name": <tool>, "arguments": {...}}. Scoring checks the tool name and args match.
+{"id": "bfcl-0", "question": "What is the current weather in Paris? Report the temperature in celsius.", "tools": [{"name": "get_weather", "parameters": ["location", "unit"]}], "answer": {"name": "get_weather", "arguments": {"location": "Paris", "unit": "celsius"}}}
+{"id": "bfcl-1", "question": "Please add the numbers 2 and 3 together.", "tools": [{"name": "add", "parameters": ["a", "b"]}], "answer": {"name": "add", "arguments": {"a": 2, "b": 3}}}
+{"id": "bfcl-2", "question": "Send an email to bob@example.com with the body: hi", "tools": [{"name": "send_email", "parameters": ["to", "body"]}], "answer": {"name": "send_email", "arguments": {"to": "bob@example.com", "body": "hi"}}}
+{"id": "bfcl-3", "question": "Convert 100 US dollars to euros.", "tools": [{"name": "convert_currency", "parameters": ["amount", "from_currency", "to_currency"]}], "answer": {"name": "convert_currency", "arguments": {"amount": 100, "from_currency": "USD", "to_currency": "EUR"}}}

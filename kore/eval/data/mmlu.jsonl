@@ -1,0 +1,14 @@
+# SMOKE SUBSET — canonical MMLU-style multiple-choice items. NOT the full bench.
+# TODO: load the full MMLU / MMLU-Pro test split (HF: cais/mmlu, TIGER-Lab/MMLU-Pro) for a real run.
+{"id": "mmlu-0", "subject": "elementary_mathematics", "question": "What is 7 multiplied by 8?", "choices": ["54", "56", "63", "48"], "answer": "B"}
+{"id": "mmlu-1", "subject": "geography", "question": "What is the capital city of Japan?", "choices": ["Seoul", "Beijing", "Tokyo", "Bangkok"], "answer": "C"}
+{"id": "mmlu-2", "subject": "astronomy", "question": "Which planet in our solar system is closest to the Sun?", "choices": ["Venus", "Earth", "Mars", "Mercury"], "answer": "D"}
+{"id": "mmlu-3", "subject": "chemistry", "question": "What is the chemical symbol for the element gold?", "choices": ["Au", "Ag", "Gd", "Go"], "answer": "A"}
+{"id": "mmlu-4", "subject": "biology", "question": "In humans, which organ is primarily responsible for pumping blood through the body?", "choices": ["Liver", "Heart", "Lung", "Kidney"], "answer": "B"}
+{"id": "mmlu-5", "subject": "computer_science", "question": "What is the time complexity of binary search on a sorted array of n elements?", "choices": ["O(n)", "O(n log n)", "O(log n)", "O(1)"], "answer": "C"}
+{"id": "mmlu-6", "subject": "physics", "question": "Which of the following is the SI unit of electric current?", "choices": ["Volt", "Ampere", "Ohm", "Watt"], "answer": "B"}
+{"id": "mmlu-7", "subject": "world_history", "question": "In which year did the Second World War end?", "choices": ["1918", "1939", "1945", "1963"], "answer": "C"}
+{"id": "mmlu-8", "subject": "mathematics", "question": "What is the value of the mathematical constant pi rounded to two decimal places?", "choices": ["3.14", "3.41", "2.72", "1.62"], "answer": "A"}
+{"id": "mmlu-9", "subject": "computer_science", "question": "In Python, which built-in data structure stores unique, unordered elements?", "choices": ["list", "tuple", "set", "dict"], "answer": "C"}
+{"id": "mmlu-10", "subject": "chemistry", "question": "How many protons are in an atom of carbon-12?", "choices": ["12", "6", "14", "8"], "answer": "B"}
+{"id": "mmlu-11", "subject": "geography", "question": "Which is the longest river in the world by most measures?", "choices": ["Amazon", "Yangtze", "Mississippi", "Nile"], "answer": "D"}

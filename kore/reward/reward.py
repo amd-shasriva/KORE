@@ -41,11 +41,16 @@ class Observation:
 
 # Patterns that indicate the "kernel" is cheating rather than computing.
 _HACK_PATTERNS = [
-    (r"\bimport\s+aiter\b", "imports aiter (production baseline) instead of computing"),
+    (r"\b(?:import|from)\s+aiter\b", "imports aiter (production baseline) instead of computing"),
     (r"\baiter\.", "calls aiter op instead of computing"),
-    (r"\bimport\s+rocblas\b|\bhipblaslt\b|\brocblas\b", "calls a vendor BLAS instead of computing"),
-    (r"torch\.(matmul|mm|bmm|nn\.functional|softmax|rms_norm|layer_norm)\s*\(", "delegates to torch instead of a kernel"),
-    (r"F\.(scaled_dot_product_attention|linear|softmax|rms_norm|layer_norm)\s*\(", "delegates to torch.nn.functional"),
+    (r"\bimport\s+rocblas\b|\bhipblaslt\b|\brocblas\b|\bmiopen\b|\brocsolver\b|\bhipblas\b",
+     "calls a vendor library instead of computing"),
+    (r"torch\.(matmul|mm|bmm|addmm|einsum|softmax|rms_norm|layer_norm|scaled_dot_product_attention)\s*\(",
+     "delegates to a torch op instead of a kernel"),
+    (r"torch\.nn\.functional\.\w+\s*\(", "delegates to torch.nn.functional"),
+    (r"\bF\.(scaled_dot_product_attention|linear|softmax|rms_norm|layer_norm|gelu|silu|conv\w*)\s*\(",
+     "delegates to torch.nn.functional"),
+    (r"\.(flash_attn\w*|fused_moe|paged_attention)\s*\(", "calls a fused vendor kernel instead of computing"),
 ]
 _SILENT_FALLBACK = re.compile(r"except\s*[\w. ,()]*:\s*(?:\n\s*)*(?:return|pass|out\s*=)", re.MULTILINE)
 

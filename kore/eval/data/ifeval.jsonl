@@ -1,0 +1,8 @@
+# SMOKE SUBSET — IFEval-style instruction-following prompts with programmatically checkable constraints. NOT the full bench.
+# TODO: load the full IFEval set (HF: google/IFEval) and its official instruction registry for a real run.
+# Fields: prompt (shown to model), instructions (list of {type, ...args}). Supported types are in retention.py IFEVAL_CHECKS.
+{"id": "if-0", "prompt": "Write a one-line note about GPU kernels. Respond in all lowercase letters and make sure to include the word kernel.", "instructions": [{"type": "all_lowercase"}, {"type": "keyword_include", "keyword": "kernel"}]}
+{"id": "if-1", "prompt": "List exactly three short bullet points about matrix multiplication. Use '* ' at the start of each bullet.", "instructions": [{"type": "num_bullets", "n": 3}]}
+{"id": "if-2", "prompt": "Reply with a single valid JSON object that contains a key named answer. Output nothing else.", "instructions": [{"type": "json_format"}, {"type": "keyword_include", "keyword": "answer"}]}
+{"id": "if-3", "prompt": "Describe Triton in one short sentence and finish your response with the exact word DONE.", "instructions": [{"type": "ends_with", "suffix": "DONE"}, {"type": "word_count_max", "n": 30}]}
+{"id": "if-4", "prompt": "Write a heading in all capital letters, with no commas anywhere in the response.", "instructions": [{"type": "all_uppercase"}, {"type": "no_commas"}]}

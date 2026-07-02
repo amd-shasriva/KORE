@@ -45,6 +45,107 @@ def clip_higher_ratio(ratio: float, advantage: float, lo: float = 0.2, hi: float
 
 
 # --------------------------------------------------------------------------- #
+# Kevin multi-turn credit (best-kernel trajectory scoring)
+# --------------------------------------------------------------------------- #
+def kevin_trajectory_score(turn_rewards: list[float], correct_flags: list[bool]) -> float:
+    """Trajectory value = the BEST *correct* kernel's reward; 0 if none correct.
+
+    This is the Kevin-32B rule: performance is only credited when correctness is
+    achieved, and the trajectory is judged by its best kernel (not its last).
+    """
+    correct = [r for r, c in zip(turn_rewards, correct_flags) if c]
+    return max(correct) if correct else 0.0
+
+
+def kevin_turn_returns(turn_rewards: list[float], correct_flags: list[bool],
+                       gamma: float = 0.4) -> list[float]:
+    """Per-turn discounted returns with performance gated on correctness.
+
+    Each turn's immediate reward is zeroed unless that turn is correct, then the
+    discounted-sum look-ahead (gamma) propagates later success back to the turns
+    that set it up. Used as the per-turn-as-sample signal for GRPO.
+    """
+    gated = [r if c else 0.0 for r, c in zip(turn_rewards, correct_flags)]
+    return discounted_returns(gated, gamma)
+
+
+# --------------------------------------------------------------------------- #
+# StarPO-S: Echo-Trap mitigation (variance filtering of rollout groups)
+# --------------------------------------------------------------------------- #
+def group_reward_std(rewards: list[float]) -> float:
+    n = len(rewards)
+    if n < 2:
+        return 0.0
+    mean = sum(rewards) / n
+    return math.sqrt(sum((r - mean) ** 2 for r in rewards) / n)
+
+
+def starpo_keep_group(rewards: list[float], min_std: float = 1e-3) -> bool:
+    """Drop a collapsed group (all-equal reward -> zero learning signal)."""
+    return group_reward_std(rewards) > min_std
+
+
+def starpo_select_high_variance(groups: list[list[float]], keep_frac: float = 0.75,
+                                min_std: float = 1e-3) -> list[int]:
+    """Return indices of the highest-reward-variance groups to train on.
+
+    First drops fully-collapsed groups (std<=min_std), then keeps the top
+    ``keep_frac`` by std. This is the StarPO-S stability lever: train on the
+    groups that carry signal, not the ones stuck in a reward-variance collapse.
+    """
+    scored = [(i, group_reward_std(g)) for i, g in enumerate(groups)]
+    live = [(i, s) for i, s in scored if s > min_std]
+    if not live:
+        return []
+    live.sort(key=lambda x: x[1], reverse=True)
+    k = max(1, int(round(keep_frac * len(live))))
+    return sorted(i for i, _ in live[:k])
+
+
+# --------------------------------------------------------------------------- #
+# KL-to-reference (retention anchor) — k3 estimator
+# --------------------------------------------------------------------------- #
+def kl_k3(logp: float, ref_logp: float) -> float:
+    """Unbiased low-variance KL estimate (Schulman k3): E[exp(d) - d - 1], d=ref-logp.
+
+    Anchoring RL to the post-SFT reference with a small coef preserves the chat/
+    code/orchestration behavior learned in SFT while the policy specializes.
+    """
+    d = ref_logp - logp
+    return math.exp(d) - d - 1.0
+
+
+# --------------------------------------------------------------------------- #
+# Measurement efficiency: value-model bench prefilter
+# --------------------------------------------------------------------------- #
+def value_prefilter(candidates: list, scorer, k: int) -> list[int]:
+    """Return indices of the top-``k`` candidates by predicted utility.
+
+    ``scorer(candidate)->float`` is the value model's expected-log-speedup (×
+    pass prob) head. Only these k are actually compiled+benched on the GPU,
+    which is the whole measurement-efficiency lever (≈4× fewer benches-to-best).
+    """
+    if k >= len(candidates):
+        return list(range(len(candidates)))
+    scored = sorted(range(len(candidates)), key=lambda i: scorer(candidates[i]), reverse=True)
+    return sorted(scored[:k])
+
+
+# --------------------------------------------------------------------------- #
+# ToolRL reward compositing (agentic orchestration)
+# --------------------------------------------------------------------------- #
+def composite_agentic_reward(kernel_reward: float, tool_reward: float = 0.0,
+                             tool_weight: float = 0.2) -> float:
+    """Fold ToolRL-style tool-use shaping into the verifiable kernel reward.
+
+    The kernel (correctness×speedup) term dominates; the tool term rewards
+    well-formed tool calls / valid params / correct keep-revert decisions so the
+    orchestration behavior is trainable without overwhelming the ground truth.
+    """
+    return kernel_reward + tool_weight * tool_reward
+
+
+# --------------------------------------------------------------------------- #
 # training entrypoint
 # --------------------------------------------------------------------------- #
 def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "auto"):
@@ -108,6 +209,9 @@ def _train_grpo_fallback(config, tasks):
                              parse_response, build_turn_feedback, compute_reward)
             rewards.append(r)
             logps.append(lp)
+        if config.starpo_s and not starpo_keep_group(rewards, config.starpo_min_std):
+            print(f"[grpo] step {step} task={task.task_id} collapsed group (std<={config.starpo_min_std}); skip")
+            continue
         advs = group_advantages(rewards)
         if config.sc_grpo_allfail:
             advs = [a + b for a, b in zip(advs, ac.sc_grpo_allfail_bonus(rewards))]

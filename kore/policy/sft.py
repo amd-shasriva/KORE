@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from kore.obs import get_logger, gpu_mem_snapshot
-from kore.policy.configs import SFTConfig
+from kore.policy.configs import LoRAConfig, SFTConfig, build_fsdp_kwargs, fsdp_enabled
 
 log = get_logger("policy.sft")
 
@@ -89,15 +89,26 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
     from trl import SFTConfig as TRLSFTConfig
     from trl import SFTTrainer
 
+    # Distributed full-FT (FSDP) vs the legacy single-process / LoRA path.
+    # Under FSDP, device_map is INCOMPATIBLE (accelerate/FSDP owns placement), so
+    # we must load the model plain and let the Trainer wrap it. Only full-FT
+    # (use_lora=False) launched distributed takes this path; everything else
+    # (LoRA, single-GPU, CPU tests) keeps device_map="auto" exactly as before.
+    use_fsdp = fsdp_enabled(config)
+    fsdp_kwargs = build_fsdp_kwargs(config)
+
     tok = AutoTokenizer.from_pretrained(config.model_id)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        config.model_id, torch_dtype=torch.bfloat16, device_map="auto")
+    model_kwargs = {"torch_dtype": torch.bfloat16}
+    if not use_fsdp:
+        model_kwargs["device_map"] = "auto"
+    model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
 
     ds = load_sft_dataset(dataset_path, repair_weight=config.repair_loss_weight)
     log.info("sft: dataset loaded", dataset=str(dataset_path), model=config.model_id,
              use_lora=bool(config.use_lora), epochs=config.num_train_epochs,
+             distributed=bool(config.distributed), fsdp=bool(fsdp_kwargs),
              repair_weight=config.repair_loss_weight, **_token_stats(ds, tok))
 
     # Honor the recipe: full-FT (use_lora=False) or LoRA adapter.
@@ -108,6 +119,12 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
             lora_dropout=config.lora.lora_dropout,
             target_modules=list(config.lora.target_modules), task_type="CAUSAL_LM")
 
+    # Under FSDP full_shard, activation checkpointing is routed through
+    # fsdp_config (see build_fsdp_kwargs) — enabling TrainingArguments'
+    # gradient_checkpointing on top adds a redundant AllGather (HF warns), so we
+    # disable it here and let FSDP own it.
+    grad_ckpt = config.gradient_checkpointing and not use_fsdp
+
     args = TRLSFTConfig(
         output_dir=config.output_dir,
         num_train_epochs=config.num_train_epochs,
@@ -117,11 +134,12 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
         lr_scheduler_type=config.lr_scheduler_type,
         warmup_ratio=config.warmup_ratio,
         max_length=config.max_seq_length,
-        bf16=True,
-        gradient_checkpointing=config.gradient_checkpointing,
+        bf16=config.bf16,
+        gradient_checkpointing=grad_ckpt,
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         report_to=[],
+        **fsdp_kwargs,
     )
     # Lightweight per-log-step observability callback (guarded transformers import).
     from transformers import TrainerCallback
@@ -154,3 +172,50 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
     log.metric("sft_done", out=config.output_dir, merged_lora=bool(config.use_lora),
                **gpu_mem_snapshot())
     return config.output_dir
+
+
+# --------------------------------------------------------------------------- #
+# Distributed entry: `python -m kore.policy.sft <config.json>`
+#
+# Used by scripts/launch_distributed.sh under `accelerate launch`. Pure-stdlib
+# JSON parsing (no torch at import time); the heavy trainer is only touched when
+# train_sft() actually runs. The JSON is a flat map of SFTConfig fields, with an
+# optional nested "lora" object and an optional "dataset_path".
+# --------------------------------------------------------------------------- #
+def sft_config_from_dict(d: dict) -> tuple[SFTConfig, str]:
+    """Build an ``(SFTConfig, dataset_path)`` pair from a plain dict.
+
+    ``dataset_path`` falls back to ``config.dataset_path`` when not given at the
+    top level. A nested ``lora`` mapping is turned into a :class:`LoRAConfig`.
+    """
+    d = dict(d)
+    lora = d.pop("lora", None)
+    # dataset_path is a real SFTConfig field, so keep it on the config too.
+    cfg = SFTConfig(**d)
+    if lora is not None:
+        cfg.lora = LoRAConfig(**lora)
+    return cfg, cfg.dataset_path
+
+
+def _main(argv: Optional[list[str]] = None) -> int:
+    import sys
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        print("usage: python -m kore.policy.sft <config.json>", file=sys.stderr)
+        return 2
+    raw = json.loads(Path(argv[0]).read_text())
+    # Launched via accelerate/FSDP -> default to the distributed full-FT path
+    # unless the config explicitly opts out.
+    raw.setdefault("distributed", True)
+    cfg, dataset_path = sft_config_from_dict(raw)
+    if not dataset_path:
+        print("error: no dataset_path in config", file=sys.stderr)
+        return 2
+    out = train_sft(cfg, Path(dataset_path))
+    print(f"[sft] -> {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

@@ -24,7 +24,7 @@ import json
 from typing import Any
 
 from kore.obs import get_logger, gpu_mem_snapshot
-from kore.policy.configs import DPOConfig
+from kore.policy.configs import DPOConfig, LoRAConfig, build_fsdp_kwargs, fsdp_enabled
 
 log = get_logger("policy.dpo")
 
@@ -95,12 +95,20 @@ def train(config: DPOConfig) -> dict:
     if not rows:
         raise ValueError(f"no usable preference pairs in {config.dataset_path!r}")
 
+    # Distributed full-FT (FSDP) vs the legacy single-process / LoRA path. FSDP is
+    # only for full-FT (use_lora=False) launched distributed; LoRA and single
+    # process keep the current path. DPO never set device_map, so nothing to strip
+    # there — under FSDP the model is loaded plain and the Trainer wraps it.
+    use_fsdp = fsdp_enabled(config)
+    fsdp_kwargs = build_fsdp_kwargs(config)
+
     tokenizer = AutoTokenizer.from_pretrained(config.model_id)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     log.info("dpo: dataset loaded", dataset=config.dataset_path, model=config.model_id,
              use_lora=bool(config.use_lora), beta=config.beta, epochs=config.num_train_epochs,
+             distributed=bool(config.distributed), fsdp=bool(fsdp_kwargs),
              **_pair_token_stats(rows, tokenizer))
 
     dataset = Dataset.from_list(rows)
@@ -116,6 +124,11 @@ def train(config: DPOConfig) -> dict:
 
     peft_config = _peft_config(config) if config.use_lora else None
 
+    # Under FSDP full_shard, route activation checkpointing through fsdp_config
+    # (see build_fsdp_kwargs) instead of TrainingArguments.gradient_checkpointing
+    # to avoid the redundant-AllGather warning.
+    grad_ckpt = config.gradient_checkpointing and not use_fsdp
+
     trl_args = TRLDPOConfig(
         output_dir=config.output_dir,
         beta=config.beta,
@@ -128,11 +141,12 @@ def train(config: DPOConfig) -> dict:
         max_length=config.max_length,
         max_prompt_length=config.max_prompt_length,
         bf16=config.bf16,
-        gradient_checkpointing=config.gradient_checkpointing,
+        gradient_checkpointing=grad_ckpt,
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         seed=config.seed,
         report_to=config.report_to,
+        **fsdp_kwargs,
     )
 
     # Lightweight per-log-step observability callback (guarded transformers import).
@@ -188,3 +202,44 @@ def _peft_config(config: Any):
         task_type=lc.task_type,
         target_modules=lc.target_modules,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Distributed entry: `python -m kore.policy.dpo <config.json>`
+#
+# Used by scripts/launch_distributed.sh under `accelerate launch`. Pure-stdlib
+# JSON parsing (no torch at import time). The JSON is a flat map of DPOConfig
+# fields (including "dataset_path"), with an optional nested "lora" object.
+# --------------------------------------------------------------------------- #
+def dpo_config_from_dict(d: dict) -> DPOConfig:
+    """Build a :class:`DPOConfig` from a plain dict (nested ``lora`` supported)."""
+    d = dict(d)
+    lora = d.pop("lora", None)
+    cfg = DPOConfig(**d)
+    if lora is not None:
+        cfg.lora = LoRAConfig(**lora)
+    return cfg
+
+
+def _main(argv: list | None = None) -> int:
+    import sys
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        print("usage: python -m kore.policy.dpo <config.json>", file=sys.stderr)
+        return 2
+    raw = json.loads(open(argv[0]).read())
+    # Launched via accelerate/FSDP -> default to the distributed full-FT path
+    # unless the config explicitly opts out.
+    raw.setdefault("distributed", True)
+    cfg = dpo_config_from_dict(raw)
+    if not cfg.dataset_path:
+        print("error: no dataset_path in config", file=sys.stderr)
+        return 2
+    result = train(cfg)
+    print(f"[dpo] -> {result}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

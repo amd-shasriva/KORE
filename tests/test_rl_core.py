@@ -294,3 +294,151 @@ def test_microbatch_grad_matches_accumulated_mean_loss():
     assert n_terms == 5
     assert torch.allclose(grad_ref, grad_mb, atol=1e-6)
     assert abs(loss_val - float(loss.detach())) < 1e-6
+
+
+# --------------------------------------------------------------------------- #
+# backend routing (verl vs in-process) — no verl / torch import required
+# --------------------------------------------------------------------------- #
+def test_inprocess_backend_alias_is_the_fallback():
+    # first-class in-process name aliases the tested fallback loop (behavior kept).
+    assert grpo._train_grpo_inprocess is grpo._train_grpo_fallback
+
+
+def test_train_grpo_rejects_unknown_backend():
+    import pytest
+
+    with pytest.raises(ValueError):
+        grpo.train_grpo(object(), backend="bogus")
+
+
+def _route_recorder(calls):
+    def inproc(cfg, tasks=None):
+        calls["route"] = "inprocess"
+        return "runs/inprocess"
+
+    def verl(cfg, tasks=None):
+        calls["route"] = "verl"
+        return "runs/verl"
+
+    return inproc, verl
+
+
+def test_auto_backend_routes_to_inprocess_when_verl_missing(monkeypatch):
+    # backend="auto" must NEVER crash on a missing verl — it uses the in-process
+    # backend and logs. We stub verl-availability False and capture the route.
+    calls = {}
+    inproc, verl = _route_recorder(calls)
+    monkeypatch.setattr(grpo, "_verl_available", lambda: False)
+    monkeypatch.setattr(grpo, "_train_grpo_inprocess", inproc)
+    monkeypatch.setattr(grpo, "_train_grpo_verl", verl)
+    out = grpo.train_grpo(object(), tasks=["t"], backend="auto")
+    assert out == "runs/inprocess"
+    assert calls["route"] == "inprocess"
+
+
+def test_auto_backend_routes_to_verl_when_available(monkeypatch):
+    calls = {}
+    inproc, verl = _route_recorder(calls)
+    monkeypatch.setattr(grpo, "_verl_available", lambda: True)
+    monkeypatch.setattr(grpo, "_train_grpo_verl", verl)
+    monkeypatch.setattr(grpo, "_train_grpo_inprocess", inproc)
+    out = grpo.train_grpo(object(), tasks=["t"], backend="auto")
+    assert out == "runs/verl"
+    assert calls["route"] == "verl"
+
+
+def test_verl_backend_raises_actionable_error_when_missing(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(grpo, "_verl_available", lambda: False)
+    with pytest.raises(RuntimeError) as ei:
+        grpo.train_grpo(object(), backend="verl")
+    msg = str(ei.value)
+    # the error must be actionable: name the launcher + the doc + the install path.
+    assert "scripts/launch_verl.sh" in msg
+    assert "docs/rl_server.md" in msg
+    assert "import verl" in msg
+
+
+def test_fallback_backend_calls_inprocess(monkeypatch):
+    seen = {}
+
+    def inproc(cfg, tasks=None):
+        seen["ok"] = True
+        return "runs/fb"
+
+    monkeypatch.setattr(grpo, "_train_grpo_inprocess", inproc)
+    assert grpo.train_grpo(object(), backend="fallback") == "runs/fb"
+    assert seen["ok"] is True
+
+
+# --------------------------------------------------------------------------- #
+# verl config builder (PURE — no verl import) maps GRPOConfig -> verl config
+# --------------------------------------------------------------------------- #
+def test_build_verl_grpo_config_maps_the_kevin_recipe():
+    from kore.policy.configs import GRPOConfig
+
+    cfg = GRPOConfig(model_id="Qwen/Qwen3-32B", output_dir="runs/grpo32",
+                     num_trajectories=16, num_turns=4, tasks_per_step=8,
+                     tensor_parallel_size=4, gamma=0.4, clip_ratio_low=0.2,
+                     clip_ratio_high=0.28, ref_anchor_coef=1e-3, temperature=1.0,
+                     top_p=1.0, use_lora=False)
+    v = grpo.build_verl_grpo_config(cfg, tasks=["rmsnorm_aiter", "gemm_bf16"])
+
+    # GRPO group-normalized advantages + discounted multi-turn credit.
+    assert v["algorithm"]["adv_estimator"] == "grpo"
+    assert v["algorithm"]["gamma"] == 0.4
+
+    ar = v["actor_rollout_ref"]
+    # SGLang rollout, group size = num_trajectories, TP, multi-turn refinement.
+    assert ar["rollout"]["name"] == "sglang"
+    assert ar["rollout"]["n"] == 16
+    assert ar["rollout"]["tensor_model_parallel_size"] == 4
+    assert ar["rollout"]["multi_turn"]["enable"] is True
+    assert ar["rollout"]["multi_turn"]["max_assistant_turns"] == 4
+    assert ar["rollout"]["temperature"] == 1.0
+
+    # retention KL anchor (k3 low-var) + Clip-Higher + DAPO token-mean.
+    assert ar["actor"]["use_kl_loss"] is True
+    assert ar["actor"]["kl_loss_coef"] == 1e-3
+    assert ar["actor"]["kl_loss_type"] == "low_var_kl"
+    assert ar["actor"]["clip_ratio_low"] == 0.2
+    assert ar["actor"]["clip_ratio_high"] == 0.28
+    assert ar["actor"]["loss_agg_mode"] == "token-mean"
+
+    # full-FT -> lora_rank 0; verified reward fn wired as the custom reward.
+    assert ar["model"]["lora_rank"] == 0
+    assert v["custom_reward_function"]["name"] == "kore_verl_reward"
+    assert v["custom_reward_function"]["path"].endswith("grpo.py")
+    assert v["reward_model"]["enable"] is False
+
+    # trainer wiring from the config.
+    assert v["trainer"]["default_local_dir"] == "runs/grpo32"
+    assert v["trainer"]["n_gpus_per_node"] == 4
+    assert v["data"]["kore_tasks"] == ["rmsnorm_aiter", "gemm_bf16"]
+
+
+def test_build_verl_grpo_config_lora_and_no_kl():
+    from kore.policy.configs import GRPOConfig
+
+    cfg = GRPOConfig(use_lora=True, ref_anchor_coef=0.0)
+    v = grpo.build_verl_grpo_config(cfg, tasks=["t"])
+    ar = v["actor_rollout_ref"]
+    # LoRA -> non-zero rank/alpha + explicit target modules.
+    assert ar["model"]["lora_rank"] == cfg.lora.r
+    assert ar["model"]["lora_alpha"] == cfg.lora.lora_alpha
+    assert ar["model"]["target_modules"] == list(cfg.lora.target_modules)
+    # ref_anchor_coef == 0 -> KL loss disabled.
+    assert ar["actor"]["use_kl_loss"] is False
+
+
+def test_verl_hydra_overrides_flatten_and_render():
+    ov = grpo._verl_hydra_overrides({
+        "a": {"b": 1, "c": True},
+        "d": None,
+        "e": [1, 2, 3],
+    })
+    assert "a.b=1" in ov
+    assert "a.c=true" in ov
+    assert "d=null" in ov
+    assert "e=[1,2,3]" in ov

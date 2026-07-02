@@ -511,7 +511,7 @@ def _stage_midtrain(ctx):
     The trained checkpoint is threaded in as the base for Stage-1 SFT via
     ``ctx["midtrain_ckpt"]`` (see ``_stage_sft``). Honors --lora/--full-ft; the
     locked full-FT recipe of a 14B needs a sharded multi-GPU launch (the trainer
-    defers to the distributed launcher — see docs/rl_server.md).
+    defers to the distributed launcher — see docs/DISTRIBUTED.md).
     """
     if ctx["dry"]:
         _log("midtrain", "would build the ROCm/HIP/Triton corpus (build_midtrain_corpus: "
@@ -560,7 +560,7 @@ def _stage_sft(ctx):
     if ctx.get("midtrain_ckpt"):
         _log("sft", f"starting from mid-train checkpoint {sft_base}")
     # Fix 8: --lora keeps the 14B validation run single-GPU-feasible (full-FT of a
-    # 14B needs an FSDP/DeepSpeed multi-GPU launch — see docs/rl_server.md).
+    # 14B needs an FSDP/DeepSpeed multi-GPU launch — see docs/DISTRIBUTED.md).
     cfg = MultiCapSFTConfig(model_id=sft_base, output_dir=ctx["args"].sft_out,
                             use_lora=ctx["args"].lora)
     ctx["sft_ckpt"] = train_sft(cfg, ctx["data_root"] / "sft" / "multicap.jsonl")
@@ -782,7 +782,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="re-run requested stages even if the manifest marks them done")
     # Fix 8: LoRA is the default for the 14B validation run so SFT/DPO/GRPO fit on
     # a single node without FSDP/DeepSpeed. Pass --full-ft for the locked full-FT
-    # recipe, which REQUIRES a sharded multi-GPU launch (see docs/rl_server.md).
+    # recipe, which REQUIRES a sharded multi-GPU launch (see docs/DISTRIBUTED.md).
     p.add_argument("--lora", dest="lora", action="store_true", default=True,
                    help="use LoRA on SFT/DPO/GRPO (default; fits the 14B validation run)")
     p.add_argument("--full-ft", dest="lora", action="store_false",

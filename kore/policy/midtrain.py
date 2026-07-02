@@ -16,7 +16,7 @@ Full-FT of a 14B needs a sharded multi-GPU launch (FSDP/DeepSpeed). When
 ``config.distributed`` is set and full-FT is requested, ``train_midtrain``
 defers to the distributed launcher path (:func:`build_launch_command` /
 ``python -m kore.policy.midtrain``); otherwise it runs single-process (LoRA /
-smoke). See docs/rl_server.md for the multi-GPU launch.
+smoke). See docs/DISTRIBUTED.md for the multi-GPU launch.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def build_launch_command(config: MidTrainConfig, corpus_path: str,
 
     Returns an ``accelerate launch`` argv that runs this module's ``__main__``
     entry (``python -m kore.policy.midtrain``) under a distributed launcher. The
-    operator (or docs/rl_server.md tooling) executes it; ``train_midtrain`` only
+    operator (or docs/DISTRIBUTED.md tooling) executes it; ``train_midtrain`` only
     builds + logs it so no heavy training is kicked off implicitly.
     """
     if nproc_per_node is None:
@@ -182,7 +182,7 @@ def train_midtrain(config: MidTrainConfig, corpus_path: Optional[str] = None) ->
     if distributed and not config.use_lora:
         cmd = build_launch_command(config, corpus)
         log.info("midtrain: full-FT requires a sharded multi-GPU launch; deferring "
-                 "to the distributed launcher (see docs/rl_server.md)",
+                 "to the distributed launcher (see docs/DISTRIBUTED.md)",
                  launch=" ".join(cmd), out=config.output_dir)
         return config.output_dir
     return _train_single_process(config, corpus)

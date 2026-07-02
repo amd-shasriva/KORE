@@ -5,7 +5,7 @@ GRPO rollout to sample trajectories fast. vLLM is imported lazily so this module
 loads on a CPU box without vLLM installed.
 
 ROCm / gfx942 environment notes (set these before constructing the engine):
-  - ``RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1`` — when vLLM/verl run under
+  - ``RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1`` — when vLLM runs under
     Ray with tensor parallelism, Ray otherwise rewrites ``HIP_VISIBLE_DEVICES``
     per worker and the ROCm runtime loses the intended device mask. Setting this
     keeps the process-level device visibility that vLLM expects.

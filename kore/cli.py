@@ -207,7 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--model", default="Qwen/Qwen3-32B")
     g.add_argument("--out", default="runs/grpo")
     g.add_argument("--steps", type=int, default=0)
-    g.add_argument("--backend", default="auto", choices=["auto", "verl", "fallback"])
+    g.add_argument("--backend", default="inprocess", choices=["inprocess", "fallback"])
     g.set_defaults(func=cmd_grpo)
 
     v = sub.add_parser("value-train")

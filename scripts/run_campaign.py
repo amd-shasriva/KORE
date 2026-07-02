@@ -467,7 +467,10 @@ def _stage_sft(ctx):
     from kore.policy.configs import MultiCapSFTConfig
     from kore.policy.sft import train_sft
 
-    cfg = MultiCapSFTConfig(model_id=ctx["base"], output_dir=ctx["args"].sft_out)
+    # Fix 8: --lora keeps the 14B validation run single-GPU-feasible (full-FT of a
+    # 14B needs an FSDP/DeepSpeed multi-GPU launch — see docs/rl_server.md).
+    cfg = MultiCapSFTConfig(model_id=ctx["base"], output_dir=ctx["args"].sft_out,
+                            use_lora=ctx["args"].lora)
     ctx["sft_ckpt"] = train_sft(cfg, ctx["data_root"] / "sft" / "multicap.jsonl")
     _log("sft", f"-> {ctx['sft_ckpt']}")
     _retention_gate(ctx, stage="sft", candidate=ctx["sft_ckpt"], base=ctx["base"])
@@ -482,7 +485,7 @@ def _stage_dpo(ctx):
 
     sft = ctx.get("sft_ckpt") or ctx["base"]
     cfg = DPOConfig(model_id=sft, dataset_path=str(ctx["data_root"] / "dpo" / "pairs.jsonl"),
-                    output_dir=ctx["args"].dpo_out)
+                    output_dir=ctx["args"].dpo_out, use_lora=ctx["args"].lora)
     result = train(cfg)
     ctx["dpo_ckpt"] = (result.get("output_dir") if isinstance(result, dict) else None) or ctx["args"].dpo_out
     _log("dpo", f"-> {ctx['dpo_ckpt']}")
@@ -498,9 +501,31 @@ def _stage_grpo(ctx):
 
     sft = ctx.get("sft_ckpt") or ctx["base"]
     init = ctx.get("dpo_ckpt") or sft
-    cfg = GRPOConfig(model_id=init, output_dir=ctx["args"].grpo_out,
-                     agentic=True, starpo_s=True, ref_checkpoint=sft)
-    ctx["grpo_ckpt"] = train_grpo(cfg, tasks=[t.task_id for t in ctx["tasks"]], backend=ctx["args"].grpo_backend)
+
+    # Fix 4: GRPO must train ONLY on the TRAIN-split tasks. The eval-only ids
+    # (the forced-holdout op family + any gfx950, from ``_stage_build``) are the
+    # held-out generalization set; training on them would invalidate the eval.
+    eval_ids = set(ctx.get("eval_task_ids") or [])
+    train_task_ids = [t.task_id for t in ctx["tasks"] if t.task_id not in eval_ids]
+    if not train_task_ids:
+        _log("grpo", f"WARNING: every task is held out for eval ({sorted(eval_ids)}); "
+                     "falling back to training on all tasks (no leakage split available)")
+        train_task_ids = [t.task_id for t in ctx["tasks"]]
+    else:
+        _log("grpo", f"training on TRAIN-split tasks={train_task_ids} "
+                     f"(held-out eval-only={sorted(eval_ids)})")
+
+    # Fix 8: --lora fits the 14B validation run without an FSDP/DeepSpeed launch.
+    # For LoRA bring-up use feasibly small rollout shapes; with the O(1-sample)
+    # micro-batched backward these bound activation memory regardless, but smaller
+    # groups also cut rollout wall-clock for the validation run.
+    use_lora = ctx["args"].lora
+    grpo_kw = dict(model_id=init, output_dir=ctx["args"].grpo_out,
+                   agentic=True, starpo_s=True, ref_checkpoint=sft, use_lora=use_lora)
+    if use_lora:
+        grpo_kw.update(num_trajectories=8, tasks_per_step=2, num_turns=3)
+    cfg = GRPOConfig(**grpo_kw)
+    ctx["grpo_ckpt"] = train_grpo(cfg, tasks=train_task_ids, backend=ctx["args"].grpo_backend)
     _log("grpo", f"-> {ctx['grpo_ckpt']}")
     _retention_gate(ctx, stage="grpo", candidate=ctx["grpo_ckpt"], base=sft)
 
@@ -536,15 +561,29 @@ def _stage_soup(ctx):
 
     base_model = AutoModelForCausalLM.from_pretrained(base, torch_dtype=torch.bfloat16)
     kore_model = AutoModelForCausalLM.from_pretrained(kore_ckpt, torch_dtype=torch.bfloat16)
-    base_sd = base_model.state_dict()
-    kore_sd = kore_model.state_dict()
+    # Fix 3: snapshot IMMUTABLE copies of the endpoint weights. ``state_dict()``
+    # returns tensors that ALIAS the live params; the eval_fn below materializes
+    # each interpolation via ``scratch.load_state_dict(...)`` (an in-place write),
+    # which would otherwise mutate ``kore_sd``/``base_sd`` and make every alpha
+    # after the first interpolate from ALREADY-interpolated weights -> wrong
+    # best_alpha. Cloning detaches the sweep endpoints from any live model.
+    base_sd = {k: v.detach().clone() for k, v in base_model.state_dict().items()}
+    kore_sd = {k: v.detach().clone() for k, v in kore_model.state_dict().items()}
     tok = AutoTokenizer.from_pretrained(kore_ckpt)
+    # Dedicated scratch model for materialization so load_state_dict never touches
+    # the immutable sweep endpoints; base_model is no longer needed.
+    scratch = kore_model
+    del base_model
 
     def eval_fn(state_dict) -> dict:
-        """Score an interpolated state dict: kernel fast_p + general retention."""
+        """Score an interpolated state dict: kernel fast_p + general retention.
+
+        Writes into the scratch model only; the immutable ``base_sd``/``kore_sd``
+        endpoints are never mutated, so the sweep is order-independent.
+        """
         with tempfile.TemporaryDirectory() as td:
-            kore_model.load_state_dict(state_dict)
-            kore_model.save_pretrained(td)
+            scratch.load_state_dict(state_dict)
+            scratch.save_pretrained(td)
             tok.save_pretrained(td)
             gen = load_generate(td)
             scores = dict(run_retention_suite(gen)["scores"])
@@ -613,12 +652,18 @@ def _retention_gate(ctx, *, stage, candidate, base):
                     f"provisioned (kore.policy.serve.load_generate unavailable: {e})")
         _emit_event(ctx, stage, "gate_not_enforced", 0.0, None)
         return
+    # Fix 5: the ONLY tolerated failure is the serving backend not being
+    # provisioned — i.e. an ImportError raised when load_generate tries to import
+    # vLLM/torch on a box without them. A CUDA OOM (RuntimeError /
+    # torch.cuda.OutOfMemoryError) or a corrupt-checkpoint load error (OSError)
+    # is a REAL failure and MUST propagate to fail the run — never swallow it, or
+    # the hard-stop retention gate silently disables itself.
     try:
         base_gen = load_generate(base)
         cand_gen = load_generate(candidate)
-    except (EnvironmentError, RuntimeError, OSError) as e:
-        _log(stage, f"WARNING: retention gate NOT enforced — environment not "
-                    f"provisioned ({e})")
+    except ImportError as e:
+        _log(stage, f"WARNING: retention gate NOT enforced — serving backend not "
+                    f"provisioned (torch/vLLM unavailable: {e})")
         _emit_event(ctx, stage, "gate_not_enforced", 0.0, None)
         return
 
@@ -641,6 +686,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", dest="dry_run")
     p.add_argument("--force", action="store_true",
                    help="re-run requested stages even if the manifest marks them done")
+    # Fix 8: LoRA is the default for the 14B validation run so SFT/DPO/GRPO fit on
+    # a single node without FSDP/DeepSpeed. Pass --full-ft for the locked full-FT
+    # recipe, which REQUIRES a sharded multi-GPU launch (see docs/rl_server.md).
+    p.add_argument("--lora", dest="lora", action="store_true", default=True,
+                   help="use LoRA on SFT/DPO/GRPO (default; fits the 14B validation run)")
+    p.add_argument("--full-ft", dest="lora", action="store_false",
+                   help="full fine-tune instead of LoRA (needs an FSDP/DeepSpeed launch)")
     p.add_argument("--data-root", default="data", dest="data_root")
     p.add_argument("--teacher", default="claude")
     p.add_argument("--model-teacher", default=None, dest="model_teacher")

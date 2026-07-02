@@ -12,12 +12,17 @@ CPU-only and testable without a GPU.
 
 from __future__ import annotations
 
+import time
+from collections import Counter
 from typing import Any, Optional
 
 from kore.agent.format import episode_to_chat
 from kore.agent.harness import AgentEpisode, AgentHarness
 from kore.agent.schema import AgenticTrajectoryRecord
 from kore.agent.tools import tool_use_reward
+from kore.obs import get_logger
+
+log = get_logger("data.gen_agentic")
 
 
 def _category(episode: AgentEpisode) -> str:
@@ -79,12 +84,33 @@ def generate_agentic_trajectories(
     trajectories are retained (attempts that never reached correctness are
     dropped) — the SFT-quality subset.
     """
-    records: list[AgenticTrajectoryRecord] = []
-    for _ in range(max(0, n)):
-        harness = AgentHarness(task, teacher, env, max_turns=max_turns)
-        episode = harness.run()
-        rec = episode_to_record(episode, task, teacher=teacher, thinking=thinking)
-        if keep_only_useful and rec.provenance.get("category") == "attempt":
-            continue
-        records.append(rec)
-    return records
+    total = max(0, n)
+    with log.stage("generate_agentic_trajectories", task=getattr(task, "task_id", None),
+                   n=total, max_turns=max_turns, keep_only_useful=keep_only_useful):
+        records: list[AgenticTrajectoryRecord] = []
+        t_start = time.time()
+        categories: Counter = Counter()
+        for idx in range(total):
+            harness = AgentHarness(task, teacher, env, max_turns=max_turns)
+            episode = harness.run()
+            rec = episode_to_record(episode, task, teacher=teacher, thinking=thinking)
+            tool_calls = [t.get("name") for t in episode.tool_trace]
+            category = rec.provenance.get("category")
+            categories[category] += 1
+            log.event(
+                "agentic_episode", task=getattr(task, "task_id", None), idx=idx,
+                turns_used=episode.turns_used, success=episode.success,
+                best_reward=episode.best_reward, turns_to_best=episode.turns_to_best,
+                category=category, n_tool_calls=len(tool_calls),
+                tool_calls=tool_calls,
+            )
+            dropped = keep_only_useful and category == "attempt"
+            if not dropped:
+                records.append(rec)
+            log.progress(idx + 1, total, "agentic", t_start=t_start,
+                         kept=len(records))
+        log.metric(
+            "agentic_summary", task=getattr(task, "task_id", None),
+            episodes=total, kept=len(records), by_category=dict(categories),
+        )
+        return records

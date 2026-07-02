@@ -17,6 +17,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
+from kore.obs import get_logger
+
+log = get_logger("data.teacher")
+
 
 # Bounded exponential-backoff retry defaults for the network-backed teachers.
 _MAX_RETRIES = 4          # total attempts = _MAX_RETRIES
@@ -25,23 +29,46 @@ _BACKOFF_CAP = 30.0       # seconds; never wait longer than this
 _REQUEST_TIMEOUT = 120.0  # per-request wall timeout (seconds)
 
 
-def _retry_call(fn: Callable[[], Any], *, what: str):
+def _retry_call(fn: Callable[[], Any], *, what: str, stats: Optional[dict] = None):
     """Call ``fn`` with bounded exponential backoff on transient failures.
 
     Retries up to ``_MAX_RETRIES`` times, sleeping ``_BACKOFF_BASE * 2**attempt``
     (capped at ``_BACKOFF_CAP``) between attempts. Re-raises the last exception
     if every attempt fails so the caller can decide to skip the sample.
+
+    ``stats`` (optional) is populated with ``attempt`` (1-based count of the call
+    that succeeded / the total made) and ``retries`` (number of failed attempts)
+    for observability; it never affects control flow.
     """
     last_exc: Optional[BaseException] = None
     for attempt in range(_MAX_RETRIES):
         try:
-            return fn()
+            result = fn()
+            if stats is not None:
+                stats["attempt"] = attempt + 1
+                stats["retries"] = attempt
+            return result
         except Exception as e:  # noqa: BLE001 - transient network/server errors
             last_exc = e
             if attempt == _MAX_RETRIES - 1:
                 break
             delay = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
+            log.warn(
+                f"{what} transient failure; backing off",
+                what=what, attempt=attempt + 1, max_retries=_MAX_RETRIES,
+                next_delay_s=round(delay, 3),
+                exc_type=type(e).__name__, exc=str(e)[:200],
+            )
             time.sleep(delay)
+    if stats is not None:
+        stats["attempt"] = _MAX_RETRIES
+        stats["retries"] = _MAX_RETRIES - 1
+    log.error(
+        f"{what} failed after {_MAX_RETRIES} attempts",
+        what=what, attempts=_MAX_RETRIES,
+        exc_type=type(last_exc).__name__ if last_exc is not None else None,
+        exc=str(last_exc)[:200] if last_exc is not None else None,
+    )
     raise RuntimeError(f"{what} failed after {_MAX_RETRIES} attempts") from last_exc
 
 
@@ -86,7 +113,17 @@ class StubTeacher:
 
     def generate(self, messages: list[dict]) -> str:
         self.calls.append(list(messages))
-        return self._fn(messages) if self._fn else _CANNED
+        t0 = time.time()
+        out = self._fn(messages) if self._fn else _CANNED
+        log.debug(
+            "stub teacher_call",
+            backend="stub", model="stub", n_messages=len(messages),
+            prompt_chars=sum(len(str(m.get("content", ""))) for m in messages),
+            latency_ms=round((time.time() - t0) * 1000.0, 3),
+            resp_chars=len(out) if isinstance(out, str) else 0,
+            call_idx=len(self.calls),
+        )
+        return out
 
 
 class VLLMTeacher:
@@ -103,6 +140,7 @@ class VLLMTeacher:
 
     def generate(self, messages: list[dict]) -> str:
         msgs = _ensure_system(messages, self.system)
+        prompt_chars = sum(len(str(m.get("content", ""))) for m in msgs)
 
         def _call():
             return self.client.chat.completions.create(
@@ -111,15 +149,40 @@ class VLLMTeacher:
                 timeout=_REQUEST_TIMEOUT,
             )
 
-        r = _retry_call(_call, what="VLLMTeacher.generate")
+        stats: dict = {}
+        t0 = time.time()
+        r = _retry_call(_call, what="VLLMTeacher.generate", stats=stats)
+        latency_ms = round((time.time() - t0) * 1000.0, 1)
+
+        finish_reason = None
+        truncated = False
         if not r.choices:
-            return ""
-        choice = r.choices[0]
-        # Truncation guard: a cut-off completion is an incomplete kernel; drop it
-        # rather than let a half-written kernel enter the corpus.
-        if getattr(choice, "finish_reason", None) == "length":
-            return ""
-        return choice.message.content or ""
+            result = ""
+        else:
+            choice = r.choices[0]
+            finish_reason = getattr(choice, "finish_reason", None)
+            # Truncation guard: a cut-off completion is an incomplete kernel; drop
+            # it rather than let a half-written kernel enter the corpus.
+            if finish_reason == "length":
+                truncated = True
+                result = ""
+            else:
+                result = choice.message.content or ""
+
+        if truncated:
+            log.warn(
+                "teacher completion truncated (finish_reason=length); dropping",
+                backend="vllm", model=self.model, finish_reason=finish_reason,
+                max_tokens=self.max_tokens,
+            )
+        log.event(
+            "teacher_call", backend="vllm", model=self.model,
+            n_messages=len(msgs), prompt_chars=prompt_chars,
+            latency_ms=latency_ms, resp_chars=len(result),
+            finish_reason=finish_reason, truncated=truncated,
+            attempt=stats.get("attempt"), retries=stats.get("retries"),
+        )
+        return result
 
 
 class HFTeacher:
@@ -131,17 +194,37 @@ class HFTeacher:
         self.tok = AutoTokenizer.from_pretrained(model_id)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id, torch_dtype=torch.bfloat16, device_map="auto")
+        self.model_id = model_id
         self.temperature = temperature
         self.max_new_tokens = max_new_tokens
         self.system = system
 
     def generate(self, messages: list[dict]) -> str:
         msgs = _ensure_system(messages, self.system)
+        prompt_chars = sum(len(str(m.get("content", ""))) for m in msgs)
         inputs = self.tok.apply_chat_template(msgs, add_generation_prompt=True,
                                               return_tensors="pt").to(self.model.device)
+        gen_tokens = int(inputs.shape[1])
+        t0 = time.time()
         out = self.model.generate(inputs, max_new_tokens=self.max_new_tokens,
                                   do_sample=self.temperature > 0, temperature=self.temperature)
-        return self.tok.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
+        latency_ms = round((time.time() - t0) * 1000.0, 1)
+        result = self.tok.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
+        new_tokens = int(out.shape[-1]) - gen_tokens
+        truncated = new_tokens >= self.max_new_tokens
+        if truncated:
+            log.warn(
+                "teacher generation hit max_new_tokens (possible truncation)",
+                backend="hf", model=self.model_id, max_new_tokens=self.max_new_tokens,
+            )
+        log.event(
+            "teacher_call", backend="hf", model=self.model_id,
+            n_messages=len(msgs), prompt_chars=prompt_chars,
+            latency_ms=latency_ms, resp_chars=len(result),
+            finish_reason="length" if truncated else "stop", truncated=truncated,
+            attempt=1, retries=0, new_tokens=new_tokens,
+        )
+        return result
 
 
 class ClaudeTeacher:
@@ -222,17 +305,43 @@ class ClaudeTeacher:
         if system:
             kw["system"] = system
 
+        prompt_chars = sum(len(str(m.get("content", ""))) for m in merged)
+        if system:
+            prompt_chars += len(str(system))
+        stats: dict = {}
+        t0 = time.time()
         r = _retry_call(lambda: self.client.messages.create(**kw),
-                        what="ClaudeTeacher.generate")
+                        what="ClaudeTeacher.generate", stats=stats)
+        latency_ms = round((time.time() - t0) * 1000.0, 1)
+
+        stop_reason = getattr(r, "stop_reason", None)
         # Truncation guard: if Anthropic stopped because it hit max_tokens, the
         # kernel is cut off mid-source. Treat it as truncated and skip it so a
         # half-written kernel never enters the corpus.
-        if getattr(r, "stop_reason", None) == "max_tokens":
-            return ""
-        content = getattr(r, "content", None)
-        if not content:
-            return ""
-        return "".join(b.text for b in content if getattr(b, "type", "") == "text")
+        truncated = stop_reason == "max_tokens"
+        if truncated:
+            result = ""
+        else:
+            content = getattr(r, "content", None)
+            if not content:
+                result = ""
+            else:
+                result = "".join(b.text for b in content if getattr(b, "type", "") == "text")
+
+        if truncated:
+            log.warn(
+                "teacher completion truncated (stop_reason=max_tokens); dropping",
+                backend="claude", model=self.model, stop_reason=stop_reason,
+                max_tokens=self.max_tokens,
+            )
+        log.event(
+            "teacher_call", backend="claude", model=self.model,
+            n_messages=len(merged), prompt_chars=prompt_chars,
+            latency_ms=latency_ms, resp_chars=len(result),
+            finish_reason=stop_reason, truncated=truncated,
+            attempt=stats.get("attempt"), retries=stats.get("retries"),
+        )
+        return result
 
 
 def make_teacher(kind: str = "stub", **kwargs) -> TeacherClient:

@@ -12,6 +12,10 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+from kore.obs import get_logger
+
+log = get_logger("policy.soup")
+
 
 def interpolate_state_dicts(base_sd: dict, kore_sd: dict, alpha: float) -> dict:
     """Elementwise (1-alpha)*base + alpha*kore over shared float tensors.
@@ -39,6 +43,8 @@ def soup_sweep(base_sd: dict, kore_sd: dict, alphas, eval_fn: Callable[[dict], d
     ``general_keys`` metric drops > epsilon below ``base_scores``; among accepted,
     maximize ``kernel_key``. Falls back to the highest-kernel alpha if none pass.
     """
+    log.info("soup: alpha sweep starting", alphas=list(alphas), kernel_key=kernel_key,
+             general_keys=list(general_keys), epsilon=epsilon)
     results = []
     for a in alphas:
         sd = interpolate_state_dicts(base_sd, kore_sd, a)
@@ -46,9 +52,13 @@ def soup_sweep(base_sd: dict, kore_sd: dict, alphas, eval_fn: Callable[[dict], d
         regressed = any(scores.get(g, 0.0) < base_scores.get(g, 0.0) - epsilon for g in general_keys)
         results.append({"alpha": a, "scores": scores, "passed": not regressed,
                         "kernel": scores.get(kernel_key, 0.0)})
+        log.event("soup_alpha", alpha=a, kernel=scores.get(kernel_key, 0.0),
+                  general={g: scores.get(g) for g in general_keys}, passed=not regressed)
     passed = [r for r in results if r["passed"]]
     pool = passed or results
     best = max(pool, key=lambda r: r["kernel"])
+    log.metric("soup_best", best_alpha=best["alpha"], gate_satisfied=bool(passed),
+               kernel=best["kernel"])
     return {"best_alpha": best["alpha"], "best": best, "sweep": results,
             "gate_satisfied": bool(passed)}
 
@@ -89,6 +99,8 @@ def build_soup(base_model_id: str, kore_checkpoint: str, alpha: float, output_di
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    log.info("soup: materializing", alpha=alpha, base=base_model_id,
+             kore=kore_checkpoint, out=output_dir)
     dtype = torch.bfloat16
     base = AutoModelForCausalLM.from_pretrained(base_model_id, torch_dtype=dtype)
     kore = _load_kore_model(base_model_id, kore_checkpoint, dtype)
@@ -98,4 +110,5 @@ def build_soup(base_model_id: str, kore_checkpoint: str, alpha: float, output_di
 
     tok_src = base_model_id if _is_lora_adapter_dir(kore_checkpoint) else kore_checkpoint
     AutoTokenizer.from_pretrained(tok_src).save_pretrained(output_dir)
+    log.info("soup: materialized best-alpha model", alpha=alpha, out=output_dir)
     return output_dir

@@ -23,7 +23,38 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from kore.obs import get_logger, gpu_mem_snapshot
 from kore.policy.configs import DPOConfig
+
+log = get_logger("policy.dpo")
+
+
+def _pair_token_stats(rows: list[dict], tokenizer, sample: int = 512) -> dict:
+    """Best-effort chosen/rejected chat-token length stats (logging; read-only)."""
+    try:
+        def _n(msgs):
+            return len(tokenizer.apply_chat_template(msgs, tokenize=True,
+                                                     add_generation_prompt=False))
+
+        ch, rj = [], []
+        for r in rows[:sample]:
+            try:
+                ch.append(_n(r["prompt"] + r["chosen"]) if isinstance(r["chosen"], list)
+                          else len(tokenizer(str(r["chosen"])).get("input_ids", [])))
+                rj.append(_n(r["prompt"] + r["rejected"]) if isinstance(r["rejected"], list)
+                          else len(tokenizer(str(r["rejected"])).get("input_ids", [])))
+            except Exception:  # noqa: BLE001 - skip a row that won't render
+                continue
+        out = {"n_pairs": len(rows), "tok_sampled": len(ch)}
+        if ch:
+            out["chosen_tok_mean"] = round(sum(ch) / len(ch), 1)
+            out["chosen_tok_max"] = max(ch)
+        if rj:
+            out["rejected_tok_mean"] = round(sum(rj) / len(rj), 1)
+            out["rejected_tok_max"] = max(rj)
+        return out
+    except Exception as e:  # noqa: BLE001 - advisory only
+        return {"n_pairs": len(rows), "tok_stats_error": repr(e)}
 
 
 def load_preference_jsonl(path: str) -> list[dict]:
@@ -68,6 +99,10 @@ def train(config: DPOConfig) -> dict:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    log.info("dpo: dataset loaded", dataset=config.dataset_path, model=config.model_id,
+             use_lora=bool(config.use_lora), beta=config.beta, epochs=config.num_train_epochs,
+             **_pair_token_stats(rows, tokenizer))
+
     dataset = Dataset.from_list(rows)
 
     dtype = torch.bfloat16 if config.bf16 else torch.float32
@@ -100,6 +135,21 @@ def train(config: DPOConfig) -> dict:
         report_to=config.report_to,
     )
 
+    # Lightweight per-log-step observability callback (guarded transformers import).
+    from transformers import TrainerCallback
+
+    class _ObsCallback(TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            logs = logs or {}
+            if "loss" not in logs:  # skip eval/summary logs — train-step only
+                return
+            log.event("dpo_step", step=int(state.global_step), loss=logs.get("loss"),
+                      lr=logs.get("learning_rate"),
+                      epoch=round(float(state.epoch), 4) if state.epoch is not None else None,
+                      grad_norm=logs.get("grad_norm"),
+                      rewards_margin=logs.get("rewards/margins"),
+                      rewards_acc=logs.get("rewards/accuracies"), **gpu_mem_snapshot())
+
     trainer = DPOTrainer(
         model=model,
         ref_model=ref_model,
@@ -107,17 +157,22 @@ def train(config: DPOConfig) -> dict:
         train_dataset=dataset,
         processing_class=tokenizer,
         peft_config=peft_config,
+        callbacks=[_ObsCallback()],
     )
     trainer.train()
 
     # Merge the LoRA adapter into the base before saving so downstream stages
     # (GRPO, soup) load a plain full model; full-FT saves weights directly.
     if config.use_lora:
+        log.info("dpo: merging LoRA adapter into base", out=config.output_dir)
         merged = trainer.model.merge_and_unload()
         merged.save_pretrained(config.output_dir)
     else:
+        log.info("dpo: saving full-FT model", out=config.output_dir)
         trainer.save_model(config.output_dir)
     tokenizer.save_pretrained(config.output_dir)
+    log.metric("dpo_done", out=config.output_dir, n_pairs=len(rows),
+               merged_lora=bool(config.use_lora), **gpu_mem_snapshot())
     return {"stage": "dpo", "output_dir": config.output_dir, "n_pairs": len(rows)}
 
 

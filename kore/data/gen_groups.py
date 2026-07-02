@@ -14,6 +14,7 @@ operate on lightweight result dicts, not on the GPU.
 from __future__ import annotations
 
 import random
+import time
 from typing import Optional
 
 from kore.config import CONFIG
@@ -21,7 +22,10 @@ from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, extract_kernel
 from kore.data.schemas import RankedGroupRecord
 from kore.data.teacher import TeacherClient
 from kore.env.replay import kernel_hash
+from kore.obs import get_logger
 from kore.reward.reward import compute_reward
+
+log = get_logger("data.gen_groups")
 
 
 def _quality_key(c: dict) -> tuple:
@@ -98,54 +102,79 @@ def generate_groups(
     cfg=CONFIG,
 ) -> list[RankedGroupRecord]:
     """Produce ranked groups: ``n_parents`` groups of ``k`` candidates each."""
-    rng = random.Random(seed)
-    modes = ["exploit", "explore", "repair"]
-    records: list[RankedGroupRecord] = []
-    parent_src = task.seed_source
+    with log.stage("generate_groups", task=task.task_id, n_parents=n_parents, k=k):
+        rng = random.Random(seed)
+        modes = ["exploit", "explore", "repair"]
+        records: list[RankedGroupRecord] = []
+        parent_src = task.seed_source
+        t_start = time.time()
+        tot_candidates = 0
+        tot_correct = 0
+        tot_pairs = 0
 
-    for _ in range(n_parents):
-        results: list[dict] = []
-        for c in range(k):
-            mode = modes[c % len(modes)] if k >= 3 else rng.choice(modes)
-            prompt = build_turn_prompt(parent_source=parent_src, mode=mode)
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
+        for p in range(n_parents):
+            results: list[dict] = []
+            for c in range(k):
+                mode = modes[c % len(modes)] if k >= 3 else rng.choice(modes)
+                prompt = build_turn_prompt(parent_source=parent_src, mode=mode)
+                messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ]
+                response = teacher.generate(messages)
+                cand_src = extract_kernel(response)
+                if not cand_src:
+                    # Extraction failed: skip this candidate rather than injecting the
+                    # parent as a fake candidate (which would pollute the ranking with
+                    # a duplicate and manufacture spurious preference pairs).
+                    log.debug("group candidate had no kernel; skipping",
+                              task=task.task_id, parent=p, cand=c, mode=mode)
+                    continue
+                res = _evaluate(env, task, cand_src, cfg)
+                log.event(
+                    "group_candidate", task=task.task_id, parent=p, cand=c,
+                    mode=mode, compiled=res["compiled"], correct=res["correct"],
+                    snr_db=res["snr_db"], speedup=res["speedup"],
+                    wall_us=res["wall_us"],
+                )
+                results.append(res)
+
+            order = rank_candidates(results)
+            rank_of = {idx: pos for pos, idx in enumerate(order)}
+            candidates = [
+                {
+                    "source": r["source"],
+                    "wall_us": r["wall_us"],
+                    "snr_db": r["snr_db"],
+                    "rank": rank_of[i],
+                }
+                for i, r in enumerate(results)
             ]
-            response = teacher.generate(messages)
-            cand_src = extract_kernel(response)
-            if not cand_src:
-                # Extraction failed: skip this candidate rather than injecting the
-                # parent as a fake candidate (which would pollute the ranking with
-                # a duplicate and manufacture spurious preference pairs).
-                continue
-            results.append(_evaluate(env, task, cand_src, cfg))
-
-        order = rank_candidates(results)
-        rank_of = {idx: pos for pos, idx in enumerate(order)}
-        candidates = [
-            {
-                "source": r["source"],
-                "wall_us": r["wall_us"],
-                "snr_db": r["snr_db"],
-                "rank": rank_of[i],
-            }
-            for i, r in enumerate(results)
-        ]
-        prefs = build_preferences(results)
-        records.append(
-            RankedGroupRecord(
-                task_id=task.task_id,
-                parent_id=kernel_hash(parent_src),
-                candidates=candidates,
-                preferences=prefs,
-                gpu=task.gpu_target,
-                operation=getattr(task, "operation", None),
-                arch=getattr(task, "gpu_target", None),
+            prefs = build_preferences(results)
+            records.append(
+                RankedGroupRecord(
+                    task_id=task.task_id,
+                    parent_id=kernel_hash(parent_src),
+                    candidates=candidates,
+                    preferences=prefs,
+                    gpu=task.gpu_target,
+                    operation=getattr(task, "operation", None),
+                    arch=getattr(task, "gpu_target", None),
+                )
             )
+            tot_candidates += len(results)
+            n_correct = sum(1 for r in results if r.get("correct"))
+            tot_correct += n_correct
+            tot_pairs += len(prefs)
+            log.progress(p + 1, n_parents, "groups", t_start=t_start,
+                         candidates=len(results), correct=n_correct, pairs=len(prefs))
+            # advance the parent to the best correct candidate, if any, for diversity
+            best_idx = order[0] if order else None
+            if best_idx is not None and results[best_idx].get("correct"):
+                parent_src = results[best_idx]["source"]
+
+        log.metric(
+            "groups_summary", task=task.task_id, parents=len(records),
+            candidates=tot_candidates, correct=tot_correct, pairs=tot_pairs,
         )
-        # advance the parent to the best correct candidate, if any, for diversity
-        best_idx = order[0] if order else None
-        if best_idx is not None and results[best_idx].get("correct"):
-            parent_src = results[best_idx]["source"]
-    return records
+        return records

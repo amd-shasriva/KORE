@@ -16,11 +16,39 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from kore.obs import get_logger, gpu_mem_snapshot
 from kore.policy.configs import SFTConfig
+
+log = get_logger("policy.sft")
 
 # ``_source`` markers (see kore/data/build_datasets.py) that denote a repair
 # (broken -> fixed) transition, which the plan up-weights during SFT.
 REPAIR_SOURCES = ("kernel_repair_opt", "repair")
+
+
+def _token_stats(ds, tok, sample: int = 512) -> dict:
+    """Best-effort chat-token length stats over up to ``sample`` rows (logging).
+
+    Read-only: renders each sampled row through the chat template to count
+    tokens. Never raises — returns ``{}`` if the tokenizer/template can't render.
+    """
+    try:
+        n = len(ds)
+        idxs = range(min(n, sample))
+        lengths = []
+        for i in idxs:
+            msgs = ds[i]["messages"]
+            ids = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=False)
+            lengths.append(len(ids))
+        if not lengths:
+            return {"n_rows": n}
+        lengths.sort()
+        p95 = lengths[min(len(lengths) - 1, int(0.95 * len(lengths)))]
+        return {"n_rows": n, "tok_sampled": len(lengths),
+                "tok_min": lengths[0], "tok_max": lengths[-1],
+                "tok_mean": round(sum(lengths) / len(lengths), 1), "tok_p95": p95}
+    except Exception as e:  # noqa: BLE001 - stats are advisory, never fatal
+        return {"n_rows": len(ds), "tok_stats_error": repr(e)}
 
 
 def load_sft_dataset(path: Path, repair_weight: float = 1.0,
@@ -68,6 +96,9 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
         config.model_id, torch_dtype=torch.bfloat16, device_map="auto")
 
     ds = load_sft_dataset(dataset_path, repair_weight=config.repair_loss_weight)
+    log.info("sft: dataset loaded", dataset=str(dataset_path), model=config.model_id,
+             use_lora=bool(config.use_lora), epochs=config.num_train_epochs,
+             repair_weight=config.repair_loss_weight, **_token_stats(ds, tok))
 
     # Honor the recipe: full-FT (use_lora=False) or LoRA adapter.
     peft_cfg = None
@@ -92,16 +123,34 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
         save_steps=config.save_steps,
         report_to=[],
     )
+    # Lightweight per-log-step observability callback (guarded transformers import).
+    from transformers import TrainerCallback
+
+    class _ObsCallback(TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            logs = logs or {}
+            if "loss" not in logs:  # skip eval/summary logs — train-step only
+                return
+            log.event("sft_step", step=int(state.global_step), loss=logs.get("loss"),
+                      lr=logs.get("learning_rate"),
+                      epoch=round(float(state.epoch), 4) if state.epoch is not None else None,
+                      grad_norm=logs.get("grad_norm"), **gpu_mem_snapshot())
+
     trainer = SFTTrainer(model=model, args=args, train_dataset=ds,
-                         peft_config=peft_cfg, processing_class=tok)
+                         peft_config=peft_cfg, processing_class=tok,
+                         callbacks=[_ObsCallback()])
     trainer.train()
 
     # Merge LoRA into the base before saving so downstream stages load a full
     # model; full-FT just saves the trained weights directly.
     if config.use_lora:
+        log.info("sft: merging LoRA adapter into base", out=config.output_dir)
         merged = trainer.model.merge_and_unload()
         merged.save_pretrained(config.output_dir)
     else:
+        log.info("sft: saving full-FT model", out=config.output_dir)
         trainer.save_model(config.output_dir)
     tok.save_pretrained(config.output_dir)
+    log.metric("sft_done", out=config.output_dir, merged_lora=bool(config.use_lora),
+               **gpu_mem_snapshot())
     return config.output_dir

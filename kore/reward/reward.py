@@ -18,6 +18,31 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from kore.config import CONFIG
+from kore.obs import get_logger
+
+_LOG = get_logger("reward")
+
+
+def _log_decision(rr: "RewardResult") -> None:
+    """Emit the reward *decision* as a structured event (JSONL always).
+
+    Per-candidate detail rides at DEBUG so it never spams INFO; a flagged hack
+    is surfaced at INFO (event) + WARN (reason) so cheating is impossible to
+    miss. This is additive — it never touches the value being returned. NB: we
+    deliberately do NOT log inside ``scan_for_hacks`` (the hot regex path);
+    only the final decision is recorded here.
+    """
+    level = "INFO" if rr.tier == "hack" else "DEBUG"
+    _LOG._emit(level, "reward", {
+        "tier": rr.tier,
+        "reward": round(rr.reward, 4),
+        "correct": rr.correct,
+        "speedup": (round(rr.speedup, 4) if rr.speedup is not None else None),
+        "flags": list(rr.flags),
+        "detail": rr.detail,
+    }, kind="event")
+    if rr.tier == "hack":
+        _LOG.warn("reward-hack flagged", reason=rr.detail, flags=list(rr.flags))
 
 
 @dataclass
@@ -170,27 +195,35 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     # kernel's fault; caller must NOT cache it and should resample.
     if obs.infra_error:
         flags.append("infra")
-        return RewardResult(cfg.reward_incorrect, False, None, "infra", flags,
-                            obs.error_text or "infrastructure error")
+        rr = RewardResult(cfg.reward_incorrect, False, None, "infra", flags,
+                          obs.error_text or "infrastructure error")
+        _log_decision(rr)
+        return rr
 
     # Tier 0: anti-hack scan (a hack that "passes" must never be rewarded).
     hack = obs.hack_reason or (scan_for_hacks(source) if source else None)
     if hack:
         flags.append("hack")
-        return RewardResult(cfg.reward_compile_fail, False, None, "hack", flags, str(hack))
+        rr = RewardResult(cfg.reward_compile_fail, False, None, "hack", flags, str(hack))
+        _log_decision(rr)
+        return rr
 
     # Tier 1: compile
     if not obs.compiled:
         flags.append("compile_fail")
-        return RewardResult(cfg.reward_compile_fail, False, None, "compile_fail", flags,
-                            obs.error_text or "did not compile")
+        rr = RewardResult(cfg.reward_compile_fail, False, None, "compile_fail", flags,
+                          obs.error_text or "did not compile")
+        _log_decision(rr)
+        return rr
 
     # Tier 2: correctness (validation + SNR gate on all shapes)
     correct = obs.validation_passed and _all_shapes_pass(obs, dtype, cfg, snr_threshold)
     if not correct:
         flags.append("incorrect")
-        return RewardResult(cfg.reward_incorrect, False, None, "incorrect", flags,
-                            obs.error_text or "failed correctness/SNR")
+        rr = RewardResult(cfg.reward_incorrect, False, None, "incorrect", flags,
+                          obs.error_text or "failed correctness/SNR")
+        _log_decision(rr)
+        return rr
 
     # Tier 3: speed (only once correct). Kevin reward: base + linear speedup,
     # capped to bound measurement-error outliers. base>0 guarantees every correct
@@ -198,7 +231,9 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     base = cfg.correctness_weight
     su = _worst_speedup(obs)
     if su is None:
-        return RewardResult(base, True, None, "correct_no_bench", flags, "correct; no timing")
+        rr = RewardResult(base, True, None, "correct_no_bench", flags, "correct; no timing")
+        _log_decision(rr)
+        return rr
 
     su_scored = su
     if su >= cfg.excessive_speedup_flag:
@@ -208,5 +243,7 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
         flags.append("high_variance")  # noisy timing; keep correctness credit, damp speed
         su_scored = min(su_scored, 1.0)
     reward = base + max(su_scored, 0.0)
-    return RewardResult(reward, True, su, "correct_timed", flags,
-                        f"worst-shape speedup {su:.3f}x vs baseline")
+    rr = RewardResult(reward, True, su, "correct_timed", flags,
+                      f"worst-shape speedup {su:.3f}x vs baseline")
+    _log_decision(rr)
+    return rr

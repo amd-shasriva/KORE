@@ -20,6 +20,7 @@ that returns a reward :class:`Observation`. Hardening (see audits):
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import resource
@@ -28,15 +29,35 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
 from kore.config import CONFIG
 from kore.env.replay import ReplayCache
+from kore.obs import get_logger
 from kore.reward.reward import Observation, scan_for_hacks
+from kore.reward.reward import _worst_speedup as _worst_speedup
 from kore.reward.stats import cv_pct as _cv_pct
 from kore.reward.stats import median as _median
 from kore.tasks.base import Shape, Task
+
+_LOG = get_logger("env")
+
+
+def _ev(level: str, name: str, **fields) -> None:
+    """Emit a structured event at an explicit level (JSONL always).
+
+    ``KoreLogger.event`` hard-codes INFO; per-shape verifier detail must ride at
+    DEBUG so it never spams INFO while a run is going, so we route through the
+    logger's emit with the level we want but keep ``kind="event"`` for
+    machine-readable JSONL. This is additive-only — pure observability.
+    """
+    _LOG._emit(level, name, fields, kind="event")
+
+
+def _sha12(source: str) -> str:
+    return hashlib.sha256(source.encode("utf-8", "ignore")).hexdigest()[:12]
 
 _SNR = re.compile(r"SNR:\s*([-\d.eE]+)")
 _ALLCLOSE = re.compile(r"allclose:\s*(True|False)", re.IGNORECASE)
@@ -107,14 +128,23 @@ class KoreEnv:
     # ------------------------------------------------------------------ #
     def evaluate(self, task: Task, source: str, shapes: Optional[list[Shape]] = None,
                  do_bench: bool = True) -> Observation:
+        source_sha = _sha12(source)
+        n_shapes = len(shapes or task.shapes or [Shape("default", {})])
+        _ev("INFO", "eval_start", task=task.task_id, n_shapes=n_shapes,
+            source_sha=source_sha, do_bench=do_bench)
+
         hack = scan_for_hacks(source)
         if hack:
+            _ev("WARN", "eval_hack", task=task.task_id, reason=hack, source_sha=source_sha)
             return Observation(compiled=False, dtype=task.dtype, flagged_hack=True,
                                hack_reason=hack, error_text=f"reward-hack: {hack}")
 
         if self.use_replay and self._cache_obj is not None:
             cached = self._cache_obj.get(task.task_id, source)
             if cached is not None:
+                _LOG.debug("cache hit", task=task.task_id, source_sha=source_sha,
+                           compiled=cached.compiled, correct=cached.validation_passed)
+                self._log_eval_done(task, cached, cached=True)
                 return cached
 
         shapes = shapes or task.shapes or [Shape("default", {})]
@@ -128,7 +158,15 @@ class KoreEnv:
         cacheable = (obs.compiled or obs.error_text) and not obs.infra_error
         if self.use_replay and self._cache_obj is not None and cacheable:
             self._cache_obj.put(task.task_id, source, obs)
+        self._log_eval_done(task, obs, cached=False)
         return obs
+
+    def _log_eval_done(self, task: Task, obs: Observation, cached: bool) -> None:
+        """Final per-candidate verdict at INFO (structured), covering every path."""
+        _ev("INFO", "eval_done", task=task.task_id, compiled=obs.compiled,
+            correct=obs.validation_passed, snr_min=obs.snr_db,
+            worst_speedup=_worst_speedup(obs), cv_pct=obs.cv_pct,
+            infra_error=obs.infra_error, cached=cached)
 
     # ------------------------------------------------------------------ #
     def _env(self) -> dict:
@@ -192,10 +230,20 @@ class KoreEnv:
         validation_passed = True
         last_err: Optional[str] = None
 
-        for sh in shapes:
-            rc, out, timed = self._exec([sys.executable, str(driver), *sh.as_args()],
-                                        workdir, env, self.correctness_timeout)
+        for i, sh in enumerate(shapes):
+            t_sh = time.perf_counter()
+            # First shape pays the Triton JIT compile cost; .timer records it.
+            with _LOG.timer("verify_exec", task=task.task_id, shape=sh.name, first=(i == 0)):
+                rc, out, timed = self._exec([sys.executable, str(driver), *sh.as_args()],
+                                            workdir, env, self.correctness_timeout)
+            took_s = round(time.perf_counter() - t_sh, 3)
             kind, msg = self._classify(out, rc, timed)
+            _snr_m = _last(_SNR, out)
+            _ac_m = _last(_ALLCLOSE, out)
+            _ev("DEBUG", "verify_shape", task=task.task_id, shape=sh.name, kind=kind,
+                snr_db=(float(_snr_m.group(1)) if _snr_m else None),
+                allclose=(_ac_m.group(1).lower() == "true" if _ac_m else None),
+                rc=rc, took_s=took_s)
             if kind == "infra":
                 return Observation(compiled=True, dtype=task.dtype, validation_passed=False,
                                    infra_error=True, error_text=f"infra: {msg}")
@@ -253,7 +301,9 @@ class KoreEnv:
         n_min = max(1, self.cfg.min_variance_runs)
         n_max = max(n_min, self.cfg.max_variance_runs)
         for i in range(n_max):
-            rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
+            with _LOG.timer("bench_exec", task=self.task.task_id, shape=sh.name,
+                            impl=impl, run=i):
+                rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
             if timed or rc != 0:
                 break
             m = _last(_MEDIAN, out)
@@ -262,8 +312,13 @@ class KoreEnv:
             if i + 1 >= n_min and len(samples) >= n_min and _cv_pct(samples) <= self.cfg.cv_threshold_pct:
                 break
         if not samples:
+            _ev("DEBUG", "bench_shape", task=self.task.task_id, shape=sh.name, impl=impl,
+                median_ms=None, cv_pct=None, runs=0)
             return None, float("inf")
-        return _median(samples), _cv_pct(samples)
+        med, cv = _median(samples), _cv_pct(samples)
+        _ev("DEBUG", "bench_shape", task=self.task.task_id, shape=sh.name, impl=impl,
+            median_ms=round(med, 4), cv_pct=round(cv, 3), runs=len(samples))
+        return med, cv
 
 
 def _tail(s: str, n: int = 800) -> str:

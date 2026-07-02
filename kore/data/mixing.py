@@ -32,6 +32,9 @@ from collections import Counter
 from typing import Any, Iterable, Optional
 
 from kore.env.replay import kernel_hash
+from kore.obs import get_logger
+
+log = get_logger("data.mixing")
 
 # The canonical mixture source keys mapped to their ``MultiCapSFTConfig`` field.
 SOURCE_FRACTION_FIELDS: dict[str, str] = {
@@ -224,37 +227,61 @@ def build_multicap_sft(
     Returns the mixed chat-row list. Prints a realized-vs-target report when
     ``verbose`` (use :func:`mixture_report` for the programmatic version).
     """
-    targets = target_fractions(config)
+    with log.stage("build_multicap_sft", total=total, seed=seed):
+        targets = target_fractions(config)
 
-    # Dedup + tag each source pool up front so counts reflect usable rows.
-    pools: dict[str, list] = {}
-    for key, rows in sources.items():
-        if key not in targets:
-            continue  # ignore keys with no configured fraction
-        tagged = [_tag(r, key) for r in rows]
-        pools[key] = dedup_rows(tagged)
+        # Dedup + tag each source pool up front so counts reflect usable rows.
+        pools: dict[str, list] = {}
+        for key, rows in sources.items():
+            if key not in targets:
+                log.debug("ignoring source with no configured fraction", source=key,
+                          rows=len(rows) if hasattr(rows, "__len__") else None)
+                continue  # ignore keys with no configured fraction
+            tagged = [_tag(r, key) for r in rows]
+            deduped = dedup_rows(tagged)
+            pools[key] = deduped
+            log.event("mix_source_pool", source=key, raw=len(tagged),
+                      usable=len(deduped), dedup_dropped=len(tagged) - len(deduped))
 
-    available = {k: len(v) for k, v in pools.items()}
-    counts = allocate_counts(available, {k: targets[k] for k in available}, total)
+        available = {k: len(v) for k, v in pools.items()}
+        counts = allocate_counts(available, {k: targets[k] for k in available}, total)
 
-    mixed: list[dict] = []
-    for key in sorted(pools):
-        n_k = counts.get(key, 0)
-        if n_k <= 0:
-            continue
-        pool = pools[key]
-        rng = random.Random(f"{seed}:{key}")
-        idx = rng.sample(range(len(pool)), min(n_k, len(pool)))
-        mixed.extend(pool[i] for i in idx)
+        mixed: list[dict] = []
+        for key in sorted(pools):
+            n_k = counts.get(key, 0)
+            if n_k <= 0:
+                continue
+            pool = pools[key]
+            rng = random.Random(f"{seed}:{key}")
+            idx = rng.sample(range(len(pool)), min(n_k, len(pool)))
+            mixed.extend(pool[i] for i in idx)
 
-    mixed = dedup_rows(mixed)
-    random.Random(seed).shuffle(mixed)
+        n_pre_dedup = len(mixed)
+        mixed = dedup_rows(mixed)
+        random.Random(seed).shuffle(mixed)
 
-    if verbose:
         realized = mixture_report(mixed)
-        print(_format_realized_report(realized["counts"], targets, realized["total"]))
+        tnorm = normalized_fractions(
+            {k: targets[k] for k in realized["counts"] if k in targets})
+        log.metric(
+            "mixture_realized", total=realized["total"],
+            requested_total=total, allocated=n_pre_dedup,
+            cross_source_dedup_dropped=n_pre_dedup - len(mixed),
+            counts=realized["counts"], realized_fractions=realized["fractions"],
+            target_fractions=tnorm,
+        )
+        for k in sorted(realized["counts"]):
+            log.event(
+                "mix_source", source=k, n=realized["counts"][k],
+                realized=realized["fractions"].get(k, 0.0),
+                target=tnorm.get(k, 0.0),
+                delta=realized["fractions"].get(k, 0.0) - tnorm.get(k, 0.0),
+            )
 
-    return mixed
+        if verbose:
+            print(_format_realized_report(realized["counts"], targets, realized["total"]))
+
+        return mixed
 
 
 # --------------------------------------------------------------------------- #
@@ -285,10 +312,10 @@ def build_midtrain_corpus(
     deterministically by ``seed``. Returns the mixed doc list.
     """
     frac = float(getattr(config, "general_replay_frac", 0.15))
-    kernel = [_norm_doc(d, KERNEL_CORPUS_TAG) for d in kernel_docs]
-    kernel = dedup_rows(kernel)
-    shards = [_norm_doc(d, GENERAL_SHARD_TAG) for d in general_shards]
-    shards = dedup_rows(shards)
+    kernel_tagged = [_norm_doc(d, KERNEL_CORPUS_TAG) for d in kernel_docs]
+    kernel = dedup_rows(kernel_tagged)
+    shards_tagged = [_norm_doc(d, GENERAL_SHARD_TAG) for d in general_shards]
+    shards = dedup_rows(shards_tagged)
 
     n_kernel = len(kernel)
     if frac <= 0.0 or n_kernel == 0:
@@ -307,12 +334,18 @@ def build_midtrain_corpus(
     mixed = kernel + chosen_general
     random.Random(seed).shuffle(mixed)
 
+    total = len(mixed)
+    realized_frac = len(chosen_general) / total if total else 0.0
+    log.metric(
+        "midtrain_corpus", kernel=n_kernel, general=len(chosen_general),
+        total=total, realized_general_frac=realized_frac, target_frac=frac,
+        kernel_dedup_dropped=len(kernel_tagged) - len(kernel),
+        shard_dedup_dropped=len(shards_tagged) - len(shards),
+    )
     if verbose:
-        total = len(mixed)
-        realized = len(chosen_general) / total if total else 0.0
         print(
             f"[midtrain] kernel={n_kernel} general={len(chosen_general)} "
-            f"total={total} realized_general_frac={realized:.3f} "
+            f"total={total} realized_general_frac={realized_frac:.3f} "
             f"target={frac:.3f}"
         )
     return mixed

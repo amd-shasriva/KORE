@@ -22,6 +22,19 @@ from kore.agent.format import (
     render_tool_result,
 )
 from kore.agent.tools import TOOL_SCHEMAS, ToolExecutor, validate_tool_call
+from kore.obs import get_logger
+
+log = get_logger("agent.harness")
+
+
+def _summarize_tool_result(result) -> str:
+    """Compact one-line summary of a tool result dict (for DEBUG turn logs)."""
+    if not isinstance(result, dict):
+        return str(result)[:80]
+    keys = ("tool", "ok", "compiled", "correct", "tier", "speedup", "reward",
+            "kept", "improved", "reverted", "was_regression", "error")
+    parts = [f"{k}={result[k]}" for k in keys if k in result]
+    return " ".join(parts)[:200]
 
 
 @dataclass
@@ -124,9 +137,18 @@ class AgentHarness:
                     "result": result,
                 })
                 messages.append(render_tool_result(name, result))
+                _br = self.executor.best_reward
+                log.debug("agent_turn", task=task_id, turn=turn, tool=name,
+                          valid=bool(v["valid_name"] and v["valid_params"]),
+                          malformed=bool(call.get("malformed")),
+                          result_summary=_summarize_tool_result(result),
+                          best_reward=(_br if _br != float("-inf") else None))
 
         ex = self.executor
         best_reward = ex.best_reward if ex.best_reward != float("-inf") else None
+        success = ex.best_src is not None
+        log.event("agent_episode_done", task=task_id, turns=turns_used, success=success,
+                  best_reward=best_reward, turns_to_best=ex.best_turn)
         return AgentEpisode(
             task_id=task_id,
             messages=messages,
@@ -137,7 +159,7 @@ class AgentHarness:
             turns_to_best=ex.best_turn,
             turns_used=turns_used,
             committed_kernel=ex.committed_src,
-            success=ex.best_src is not None,
+            success=success,
         )
 
 

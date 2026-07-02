@@ -9,9 +9,14 @@ transformers+PEFT loop that rolls out against the verified :class:`KoreEnv`.
 from __future__ import annotations
 
 import math
+import time
 from typing import Optional
 
+from kore.obs import configure, get_logger, gpu_mem_snapshot
+
 _EPS = 1e-6
+
+log = get_logger("policy.grpo")
 
 
 # --------------------------------------------------------------------------- #
@@ -309,6 +314,32 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
     return loss_value, n_terms
 
 
+def _grpo_step_adv_stats(kept_groups, config):
+    """Read-only recompute of mean|advantage| + KL-anchored sample count (logging).
+
+    Mirrors pass-1 of :func:`_accumulate_grpo_grads` exactly (group-normalized
+    advantages, optional SC-GRPO all-fail bonus) so the logged ``adv_absmean`` is
+    faithful, without touching the training path or its return. Pure/CPU-cheap.
+    """
+    from kore.policy import anticollapse as ac
+
+    total = 0.0
+    n = 0
+    n_kl = 0
+    for samples in kept_groups:
+        returns = [s[0] for s in samples]
+        advs = group_advantages(returns)
+        if getattr(config, "sc_grpo_allfail", False):
+            advs = [a + b for a, b in
+                    zip(advs, ac.sc_grpo_allfail_bonus(returns, config.sc_grpo_alpha))]
+        for a, s in zip(advs, samples):
+            total += abs(a)
+            n += 1
+            if len(s) > 2 and s[2] is not None:
+                n_kl += 1
+    return (total / n if n else 0.0), n_kl
+
+
 def _train_grpo_fallback(config, tasks):
     """Compact in-process GRPO loop implementing the locked KORE recipe.
 
@@ -334,6 +365,15 @@ def _train_grpo_fallback(config, tasks):
     from kore.tasks.registry import get_task, task_ids
 
     tasks = tasks or task_ids()
+    configure(run_dir=getattr(config, "output_dir", None))
+    t_start = time.time()
+    last_mean_r = None
+    log.info("grpo fallback: starting", model=config.model_id, total_steps=config.total_steps,
+             agentic=bool(config.agentic), use_lora=bool(config.use_lora), n_tasks=len(tasks),
+             tasks_per_step=max(1, getattr(config, "tasks_per_step", 1)),
+             num_trajectories=config.num_trajectories, num_turns=config.num_turns,
+             starpo_s=bool(config.starpo_s), ref_anchor_coef=config.ref_anchor_coef,
+             **gpu_mem_snapshot())
     tok = AutoTokenizer.from_pretrained(config.model_id)
     model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=torch.bfloat16,
                                                  device_map="auto")
@@ -362,12 +402,18 @@ def _train_grpo_fallback(config, tasks):
     ref_model = None
     if not want_ref:
         print("[grpo] ref_anchor_coef<=0: skipping frozen ref-model load (no KL anchor).")
+        log.info("ref-model: skipped", reason="ref_anchor_coef<=0", kl_anchor="inactive")
     elif config.agentic:
         print("[grpo] agentic mode: KL-anchor is INACTIVE (no per-turn ref log-prob "
               "through the tool harness); NOT loading the frozen ref to save memory. "
               "General-capability retention is handled by the Stage-4 base-ward soup.")
+        log.info("ref-model: skipped", reason="agentic mode (no per-turn ref log-prob)",
+                 kl_anchor="inactive")
     else:
         ref_model = _load_ref_model(config)  # frozen KL anchor (or None if unavailable)
+        log.info("ref-model: loaded" if ref_model is not None else "ref-model: unavailable",
+                 kl_anchor="active" if ref_model is not None else "inactive",
+                 ref_checkpoint=config.ref_checkpoint or config.model_id)
 
     tasks_per_step = max(1, getattr(config, "tasks_per_step", 1))
     task_cursor = 0
@@ -380,6 +426,7 @@ def _train_grpo_fallback(config, tasks):
         group_rewards: list[list[float]] = []   # trajectory-level reward per group (variance gate)
         group_samples: list[list[tuple]] = []   # per group: (return, gen_inputs, ref_logp) samples
         group_tasks: list = []
+        step_infra = 0                           # infra-error turns dropped this step (logging)
         for _ in range(tasks_per_step):
             task = get_task(tasks[task_cursor % len(tasks)])
             task_cursor += 1
@@ -395,6 +442,8 @@ def _train_grpo_fallback(config, tasks):
                     r, gen_inputs = _rollout_agentic(model, tok, env, task, config)
                     traj_scores.append(r)
                     samples.append((r, gen_inputs, None))
+                    log.debug("rollout", task=task.task_id, traj=g, turns=len(gen_inputs),
+                              best_reward=r, correct_turns=None)
             else:
                 traj_rewards: list[list[float]] = []
                 traj_correct: list[list[bool]] = []
@@ -413,6 +462,9 @@ def _train_grpo_fallback(config, tasks):
                     traj_scores.append(
                         kevin_trajectory_score(rewards, corrects)
                         if config.kevin_best_kernel_scoring else (max(rewards) if rewards else 0.0))
+                    log.debug("rollout", task=task.task_id, traj=g, turns=len(rewards),
+                              best_reward=traj_scores[-1], correct_turns=sum(1 for c in corrects if c))
+                step_infra += sum(1 for inf in traj_infra for x in inf if x)
                 # per-turn Kevin-credit samples flattened across m*n; infra turns
                 # are dropped from the batch (Fix 6) via ``traj_infra``.
                 returns, index = build_kevin_samples(
@@ -430,9 +482,15 @@ def _train_grpo_fallback(config, tasks):
                 group_rewards, config.starpo_keep_frac, config.starpo_min_std))
             if not keep:
                 print(f"[grpo] step {step}: all {tasks_per_step} groups collapsed; skip")
+                log.info("grpo step: all groups collapsed — skipping", step=step,
+                         n_groups=len(group_rewards), reason="zero reward-variance (StarPO-S)",
+                         keep_frac=config.starpo_keep_frac, min_std=config.starpo_min_std)
+                log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
                 continue
         else:
             keep = list(range(len(group_rewards)))
+        log.debug("starpo_keep", step=step, kept=len(keep), of=len(group_rewards),
+                  keep_frac=config.starpo_keep_frac, indices=keep)
 
         # ---- 3. MICRO-BATCHED policy-gradient loss over kept groups (Fix 1) ---- #
         # One backward() per sample (recomputing that sample's log-prob), grads
@@ -452,21 +510,48 @@ def _train_grpo_fallback(config, tasks):
             sc_grpo_allfail=config.sc_grpo_allfail, sc_grpo_alpha=config.sc_grpo_alpha)
         if n_terms == 0:
             print(f"[grpo] step {step}: no learnable samples; skip")
+            log.info("grpo step: no learnable samples — skipping", step=step,
+                     n_kept_groups=len(keep), reason="all kept samples had empty gen_inputs")
+            log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
             continue
-        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
         opt.step()
         mean_r = sum(sum(g) / len(g) for g in group_rewards if g) / max(len(group_rewards), 1)
         print(f"[grpo] step {step} kept={len(keep)}/{tasks_per_step} "
               f"meanR={mean_r:.3f} loss={loss_value:.4f}")
 
+        # ---- observability: per-step metrics (INFO; few steps) ---- #
+        reward_flat = [s for g in group_rewards for s in g]
+        reward_mean = sum(reward_flat) / len(reward_flat) if reward_flat else 0.0
+        reward_std = group_reward_std(reward_flat)
+        adv_absmean, n_kl_samples = _grpo_step_adv_stats(kept_groups, config)
+        try:
+            grad_norm_val = float(grad_norm)
+        except Exception:  # noqa: BLE001 - some torch builds return a 0-dim tensor
+            grad_norm_val = None
+        lr_val = opt.param_groups[0]["lr"] if opt.param_groups else config.learning_rate
+        last_mean_r = reward_mean
+        log.event("grpo_step", step=step,
+                  task=",".join(sorted({t.task_id for t in group_tasks})),
+                  n_groups=len(group_rewards), n_kept_groups=len(keep),
+                  n_samples=sum(len(s) for s in group_samples), n_infra_dropped=step_infra,
+                  reward_mean=reward_mean, reward_std=reward_std, adv_absmean=adv_absmean,
+                  kl=None, kl_coef=config.ref_anchor_coef, n_kl_samples=n_kl_samples,
+                  loss=loss_value, grad_norm=grad_norm_val, lr=lr_val, **gpu_mem_snapshot())
+        log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
+
     # Merge LoRA into the base before saving so soup/serve load a full model.
     out = config.output_dir
     if config.use_lora:
+        log.info("saving: merging LoRA adapter into base", out=out)
         merged = model.merge_and_unload()
         merged.save_pretrained(out)
     else:
+        log.info("saving: full-FT weights", out=out)
         model.save_pretrained(out)
     tok.save_pretrained(out)
+    log.metric("grpo_done", steps=config.total_steps, mean_reward_last=last_mean_r, out=out,
+               **gpu_mem_snapshot())
     return out
 
 
@@ -490,6 +575,8 @@ def _load_ref_model(config):
         return ref
     except Exception as e:  # noqa: BLE001
         print(f"[grpo] KL-anchor ref '{ref_id}' unavailable ({e}); training without KL anchor")
+        log.warn("KL-anchor ref unavailable — training without KL anchor",
+                 ref_id=ref_id, error=repr(e))
         return None
 
 

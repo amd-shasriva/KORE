@@ -17,10 +17,15 @@ the reasoning-base + on/off-thinking policy.
 from __future__ import annotations
 
 import random
+import time
+from collections import Counter
 from typing import Any, Callable, Iterable, Optional
 
 from kore.data.prompts import SYSTEM_PROMPT
 from kore.data.teacher import TeacherClient
+from kore.obs import get_logger
+
+log = get_logger("data.gen_qa")
 
 QA_SOURCE_TAG = "kernel_qa"
 
@@ -220,38 +225,49 @@ def generate_kernel_qa(
     """
     if n <= 0:
         return []
-    views = [_view(t) for t in tasks]
-    if not views:
-        raise ValueError("generate_kernel_qa requires at least one task")
+    with log.stage("generate_kernel_qa", n=n, seed=seed):
+        views = [_view(t) for t in tasks]
+        if not views:
+            raise ValueError("generate_kernel_qa requires at least one task")
 
-    types = list(qa_types) if qa_types else list(KERNEL_QA_TYPES)
-    for t in types:
-        if t not in _QA_BUILDERS:
-            raise ValueError(f"unknown qa_type {t!r}; known: {tuple(_QA_BUILDERS)}")
+        types = list(qa_types) if qa_types else list(KERNEL_QA_TYPES)
+        for t in types:
+            if t not in _QA_BUILDERS:
+                raise ValueError(f"unknown qa_type {t!r}; known: {tuple(_QA_BUILDERS)}")
 
-    # Deterministic (task, type) plan, shuffled then cycled to length n.
-    plan = [(vi, ty) for vi in range(len(views)) for ty in types]
-    rng = random.Random(seed)
-    rng.shuffle(plan)
+        # Deterministic (task, type) plan, shuffled then cycled to length n.
+        plan = [(vi, ty) for vi in range(len(views)) for ty in types]
+        rng = random.Random(seed)
+        rng.shuffle(plan)
 
-    rows: list[dict] = []
-    i = 0
-    while len(rows) < n:
-        vi, qa_type = plan[i % len(plan)]
-        i += 1
-        view = views[vi]
-        # Per-row RNG keeps counter choice etc. deterministic and decorrelated.
-        row_rng = random.Random(f"{seed}:{i}:{qa_type}")
-        messages, style = build_qa_messages(view, qa_type, row_rng)
-        answer = teacher.generate(messages)
-        if not isinstance(answer, str) or not answer.strip():
-            continue
-        row = {
-            "messages": messages + [{"role": "assistant", "content": answer}],
-            "_source": QA_SOURCE_TAG,
-            "_style": style,
-            "_qa_type": qa_type,
-            "_task_id": view["task_id"],
-        }
-        rows.append(row)
-    return rows
+        by_type: Counter = Counter()
+        by_style: Counter = Counter()
+        rows: list[dict] = []
+        i = 0
+        t_start = time.time()
+        while len(rows) < n:
+            vi, qa_type = plan[i % len(plan)]
+            i += 1
+            view = views[vi]
+            # Per-row RNG keeps counter choice etc. deterministic and decorrelated.
+            row_rng = random.Random(f"{seed}:{i}:{qa_type}")
+            messages, style = build_qa_messages(view, qa_type, row_rng)
+            answer = teacher.generate(messages)
+            if not isinstance(answer, str) or not answer.strip():
+                log.debug("empty QA answer; skipping", qa_type=qa_type,
+                          task=view["task_id"])
+                continue
+            row = {
+                "messages": messages + [{"role": "assistant", "content": answer}],
+                "_source": QA_SOURCE_TAG,
+                "_style": style,
+                "_qa_type": qa_type,
+                "_task_id": view["task_id"],
+            }
+            rows.append(row)
+            by_type[qa_type] += 1
+            by_style[style] += 1
+            log.progress(len(rows), n, "kernel_qa", t_start=t_start)
+        log.metric("qa_summary", n=len(rows), by_type=dict(by_type),
+                   by_style=dict(by_style))
+        return rows

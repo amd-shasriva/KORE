@@ -34,8 +34,11 @@ import argparse
 import importlib
 import inspect
 import json
+import threading
 import time
 from pathlib import Path
+
+from kore.obs import configure, get_logger, gpu_mem_snapshot
 
 ALL_STAGES = ["datagen", "agentic", "build", "midtrain", "sft", "dpo", "grpo", "soup", "eval"]
 DEFAULT_STAGES = ["datagen", "agentic", "build", "sft", "dpo", "grpo", "soup", "eval"]
@@ -43,9 +46,35 @@ DEFAULT_STAGES = ["datagen", "agentic", "build", "sft", "dpo", "grpo", "soup", "
 # Kernel metric key used to drive the soup alpha sweep (fast_p at p=1.0).
 _SOUP_KERNEL_KEY = "kernel_fast1"
 
+# Central structured logger; run_dir is bound in run() via configure(). Every
+# _log() line, stage, progress and heartbeat lands in <data_root>/events.jsonl
+# (complementing the campaign_manifest.json + campaign_events.jsonl behavior).
+LOG = get_logger("campaign")
+
 
 def _log(stage: str, msg: str) -> None:
-    print(f"[campaign:{stage}] {msg}", flush=True)
+    # Route through the central logger (console + events.jsonl) instead of a bare
+    # print so every campaign line is timestamped, stage-tagged and captured.
+    LOG.info(msg, phase=stage)
+
+
+def _start_heartbeat(ctx):
+    """Daemon thread logging a GPU-mem heartbeat every ~30s (never silent).
+
+    Returns the ``threading.Event`` used to stop it (``None`` in dry-run, where
+    the run must stay fast/offline with no background thread).
+    """
+    if ctx.get("dry"):
+        return None
+    stop = threading.Event()
+
+    def _beat():
+        while not stop.wait(30.0):
+            LOG.heartbeat("campaign", stage=ctx.get("current_stage", "-"),
+                          **gpu_mem_snapshot())
+
+    threading.Thread(target=_beat, name="campaign-heartbeat", daemon=True).start()
+    return stop
 
 
 def _write_rows(path: Path, rows: list) -> None:
@@ -238,8 +267,13 @@ def run(args) -> int:
         "data_root": data_root, "tasks": tasks, "dry": dry, "args": args,
         "base": args.model, "sft_ckpt": None, "dpo_ckpt": None,
         "grpo_ckpt": None, "final": None, "metrics": {},
-        "done_stages": set(), "eval_task_ids": None,
+        "done_stages": set(), "eval_task_ids": None, "current_stage": "-",
     }
+
+    # Bind the central logger's events.jsonl to the run dir (real runs only; a
+    # dry-run stays side-effect-free/offline and logs to the console only).
+    if not dry:
+        configure(run_dir=data_root)
 
     if dry:
         _dry_import_check()
@@ -258,28 +292,36 @@ def run(args) -> int:
         "midtrain": _stage_midtrain, "sft": _stage_sft, "dpo": _stage_dpo,
         "grpo": _stage_grpo, "soup": _stage_soup, "eval": _stage_eval,
     }
-    for st in stages:
-        if st not in dispatch:
-            _log("plan", f"unknown stage '{st}', skipping")
-            continue
-        if (not dry) and st in ctx["done_stages"] and _artifact_ok(ctx, st):
-            _log(st, "already complete (artifact present) — skipping [resume]")
-            _emit_event(ctx, st, "skipped", 0.0, _artifact_of(ctx, st))
-            continue
+    hb_stop = _start_heartbeat(ctx)
+    try:
+        for st in stages:
+            if st not in dispatch:
+                _log("plan", f"unknown stage '{st}', skipping")
+                continue
+            if (not dry) and st in ctx["done_stages"] and _artifact_ok(ctx, st):
+                _log(st, "already complete (artifact present) — skipping [resume]")
+                _emit_event(ctx, st, "skipped", 0.0, _artifact_of(ctx, st))
+                continue
 
-        start = time.perf_counter()
-        _emit_event(ctx, st, "start", 0.0, None)
-        try:
-            dispatch[st](ctx)
-        except BaseException as e:  # noqa: BLE001 - record the failure then re-raise
-            _emit_event(ctx, st, "error", time.perf_counter() - start, repr(e))
-            raise
-        elapsed = time.perf_counter() - start
-        ctx["done_stages"].add(st)
-        _save_manifest(ctx)
-        _emit_event(ctx, st, "done", elapsed, _artifact_of(ctx, st))
-        if not dry:
-            _log(st, f"completed in {elapsed:.2f}s")
+            ctx["current_stage"] = st
+            start = time.perf_counter()
+            _emit_event(ctx, st, "start", 0.0, None)
+            try:
+                with LOG.stage(st):
+                    dispatch[st](ctx)
+            except BaseException as e:  # noqa: BLE001 - record the failure then re-raise
+                _emit_event(ctx, st, "error", time.perf_counter() - start, repr(e))
+                raise
+            elapsed = time.perf_counter() - start
+            ctx["done_stages"].add(st)
+            _save_manifest(ctx)
+            _emit_event(ctx, st, "done", elapsed, _artifact_of(ctx, st))
+            if not dry:
+                _log(st, f"completed in {elapsed:.2f}s")
+    finally:
+        ctx["current_stage"] = "-"
+        if hb_stop is not None:
+            hb_stop.set()  # stop the heartbeat daemon at the end of the run
 
     _log("done", "campaign complete")
     return 0
@@ -319,7 +361,9 @@ def _stage_datagen(ctx):
     from kore.env.kore_env import KoreEnv
 
     t = _teacher(ctx["args"])
-    for task in ctx["tasks"]:
+    n_tasks = len(ctx["tasks"])
+    dg_t0 = time.time()
+    for i, task in enumerate(ctx["tasks"]):
         env = KoreEnv(task)
         for kind, recs in (("repair", generate_repairs(task, t, env, n=ctx["args"].n_repair)),
                            ("groups", generate_groups(task, t, env, n_parents=ctx["args"].n_parents, k=ctx["args"].k)),
@@ -328,6 +372,8 @@ def _stage_datagen(ctx):
             out.parent.mkdir(parents=True, exist_ok=True)
             write_jsonl(out, recs)
             _log("datagen", f"{task.task_id}:{kind} -> {len(recs)} records")
+            LOG.event("datagen_records", task=task.task_id, kind=kind, n=len(recs))
+        LOG.progress(i + 1, n_tasks, "datagen", t_start=dg_t0, task=task.task_id)
 
 
 def _stage_agentic(ctx):
@@ -339,7 +385,9 @@ def _stage_agentic(ctx):
     from kore.env.kore_env import KoreEnv
 
     t = _teacher(ctx["args"])
-    for task in ctx["tasks"]:
+    n_tasks = len(ctx["tasks"])
+    ag_t0 = time.time()
+    for i, task in enumerate(ctx["tasks"]):
         env = KoreEnv(task)
         recs = generate_agentic_trajectories(task, t, env, n=ctx["args"].n_agentic,
                                              max_turns=ctx["args"].max_tool_turns, keep_only_useful=True)
@@ -347,6 +395,8 @@ def _stage_agentic(ctx):
         out.parent.mkdir(parents=True, exist_ok=True)
         write_jsonl(out, [r.to_dict() for r in recs])
         _log("agentic", f"{task.task_id} -> {len(recs)} trajectories")
+        LOG.event("agentic_records", task=task.task_id, n=len(recs))
+        LOG.progress(i + 1, n_tasks, "agentic", t_start=ag_t0, task=task.task_id)
 
 
 # --- leakage-split helpers (Fix 5) ---

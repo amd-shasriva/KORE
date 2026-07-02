@@ -26,6 +26,9 @@ from kore.data.schemas import (
     record_from_dict,
 )
 from kore.env.replay import kernel_hash
+from kore.obs import get_logger
+
+log = get_logger("data.build_datasets")
 
 
 # --- coercion helpers ---
@@ -59,14 +62,19 @@ def _generic_prompt(task_id: str, gpu: str = "gfx942") -> list[dict]:
 def build_sft(records: Iterable[Any]) -> list[dict]:
     """Chat-SFT rows from repair turns and winning trajectories."""
     out: list[dict] = []
+    n_repair = 0
+    n_win = 0
     for raw in records:
         rec = _as_record(raw)
         if isinstance(rec, RepairRecord):
             if rec.messages:
                 out.append({"messages": list(rec.messages)})
+                n_repair += 1
         elif isinstance(rec, WinRecord):
             if rec.trajectory:
                 out.append({"messages": list(rec.trajectory)})
+                n_win += 1
+    log.metric("build_sft", rows=len(out), from_repair=n_repair, from_wins=n_win)
     return out
 
 
@@ -86,10 +94,14 @@ def build_dpo(records: Iterable[Any]) -> list[dict]:
     Degenerate pairs where the chosen and rejected sources are identical are
     skipped (no learnable preference signal)."""
     out: list[dict] = []
+    n_groups = 0
+    n_prefs = 0
+    n_degenerate = 0
     for raw in records:
         rec = _as_record(raw)
         if not isinstance(rec, RankedGroupRecord):
             continue
+        n_groups += 1
         cands = rec.candidates
         prompt = _generic_prompt(rec.task_id, rec.gpu)
         for pair in rec.preferences:
@@ -98,9 +110,11 @@ def build_dpo(records: Iterable[Any]) -> list[dict]:
             ci, ri = pair
             if not (0 <= ci < len(cands) and 0 <= ri < len(cands)):
                 continue
+            n_prefs += 1
             chosen_src = cands[ci].get("source", "")
             rejected_src = cands[ri].get("source", "")
             if chosen_src == rejected_src:
+                n_degenerate += 1
                 continue  # degenerate: identical sources carry no preference
             out.append(
                 {
@@ -113,6 +127,8 @@ def build_dpo(records: Iterable[Any]) -> list[dict]:
                     ],
                 }
             )
+    log.metric("build_dpo", groups=n_groups, pairs_considered=n_prefs,
+               degenerate_dropped=n_degenerate, pairs=len(out))
     return out
 
 
@@ -120,9 +136,12 @@ def build_dpo(records: Iterable[Any]) -> list[dict]:
 def build_rft(records: Iterable[Any]) -> list[dict]:
     """Chat-SFT rows on the single best candidate per group + win trajectories."""
     out: list[dict] = []
+    n_group = 0
+    n_win = 0
     for raw in records:
         rec = _as_record(raw)
         if isinstance(rec, RankedGroupRecord):
+            n_group += 1
             best = None
             for c in rec.candidates:
                 if c.get("rank") == 0:
@@ -145,6 +164,8 @@ def build_rft(records: Iterable[Any]) -> list[dict]:
         elif isinstance(rec, WinRecord):
             if rec.trajectory:
                 out.append({"messages": list(rec.trajectory)})
+                n_win += 1
+    log.metric("build_rft", rows=len(out), from_groups=n_group, from_wins=n_win)
     return out
 
 
@@ -170,12 +191,16 @@ def dedup_by_source_hash(records: Iterable[Any]) -> list:
     """Keep the first record for each distinct representative-source hash."""
     seen: set[str] = set()
     out: list = []
+    n_in = 0
     for rec in records:
+        n_in += 1
         h = kernel_hash(_record_source(rec))
         if h in seen:
             continue
         seen.add(h)
         out.append(rec)
+    log.metric("dedup_by_source_hash", n_in=n_in, kept=len(out),
+               dropped=n_in - len(out))
     return out
 
 
@@ -241,4 +266,11 @@ def leakage_split(
             out.extend(groups[k])
         return out
 
-    return collect(train_keys), collect(val_keys), collect(test_keys)
+    train, val, test = collect(train_keys), collect(val_keys), collect(test_keys)
+    log.metric(
+        "leakage_split", by=list(by), n_records=len(records), n_groups=n,
+        train_groups=len(train_keys), val_groups=len(val_keys),
+        test_groups=len(test_keys),
+        train=len(train), val=len(val), test=len(test),
+    )
+    return train, val, test

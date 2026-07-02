@@ -24,6 +24,9 @@ from kore.data.hard_negatives import (
 )
 from kore.data.mixing import build_multicap_sft, mixture_report
 from kore.data.schemas import read_jsonl
+from kore.obs import get_logger
+
+log = get_logger("data.assemble")
 
 
 def _read_dir(data_root: Path, sub: str, typed: bool = True) -> list:
@@ -81,7 +84,7 @@ def assemble_multicap_sources(
     gm = load_general_replay("math", max(1, int(round(config.frac_math_reasoning * total))), seed + 20, use_hf)
     gch = load_general_replay("chat", max(1, int(round(config.frac_general_chat * total))), seed + 30, use_hf)
 
-    return {
+    out = {
         "kernel_repair_opt": kernel_repair_opt,
         "kernel_qa": qa_rows,
         "agentic_tooluse": agentic_rows,
@@ -89,6 +92,12 @@ def assemble_multicap_sources(
         "math_reasoning": gm,
         "general_chat": gch,
     }
+    log.metric(
+        "assemble_sources", total=total,
+        kernel_records=len(krecs),
+        source_counts={k: len(v) for k, v in out.items()},
+    )
+    return out
 
 
 def build_multicap_dataset(
@@ -100,10 +109,13 @@ def build_multicap_dataset(
     ``kernel_records``, when given, supplies the kernel repair/opt records
     directly (a leakage-split TRAIN partition) instead of scanning ``data_root``.
     """
-    sources = assemble_multicap_sources(data_root, tasks, teacher, config, total,
-                                        seed=seed, use_hf=use_hf,
-                                        kernel_records=kernel_records)
-    return build_multicap_sft(sources, config, total, seed=seed, verbose=verbose)
+    with log.stage("build_multicap_dataset", total=total, seed=seed):
+        sources = assemble_multicap_sources(data_root, tasks, teacher, config, total,
+                                            seed=seed, use_hf=use_hf,
+                                            kernel_records=kernel_records)
+        rows = build_multicap_sft(sources, config, total, seed=seed, verbose=verbose)
+        log.metric("multicap_dataset_built", total=total, rows=len(rows))
+        return rows
 
 
 def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
@@ -119,22 +131,30 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
     """
     data_root = Path(data_root)
     tasks = list(tasks)
-    correct_source_fn = correct_source_fn or (lambda t: t.seed_source)
+    with log.stage("build_dpo_with_hard_negatives", n_tasks=len(tasks)):
+        correct_source_fn = correct_source_fn or (lambda t: t.seed_source)
 
-    if group_records is None:
-        group_records = _read_dir(data_root, "groups")
-    base_rows = bd.build_dpo(group_records) if group_records else []
+        if group_records is None:
+            group_records = _read_dir(data_root, "groups")
+        base_rows = bd.build_dpo(group_records) if group_records else []
 
-    hard_groups = [build_hard_negative_group(correct_source_fn(t), t) for t in tasks]
-    hard_rows = bd.build_dpo(hard_groups)
+        hard_groups = [build_hard_negative_group(correct_source_fn(t), t) for t in tasks]
+        hard_rows = bd.build_dpo(hard_groups)
 
-    rows = base_rows + hard_rows
-    return {
-        "rows": rows,
-        "n_hard": len(hard_rows),
-        "n_total": len(rows),
-        "meets_target": meets_hard_negative_target(len(hard_rows), len(rows)),
-    }
+        rows = base_rows + hard_rows
+        meets = meets_hard_negative_target(len(hard_rows), len(rows))
+        hard_frac = (len(hard_rows) / len(rows)) if rows else 0.0
+        log.metric(
+            "dpo_hard_negatives", n_group_records=len(group_records),
+            n_base_pairs=len(base_rows), n_hard=len(hard_rows),
+            n_total=len(rows), hard_fraction=hard_frac, meets_target=meets,
+        )
+        return {
+            "rows": rows,
+            "n_hard": len(hard_rows),
+            "n_total": len(rows),
+            "meets_target": meets,
+        }
 
 
 def summarize_multicap(rows: list[dict]) -> dict:

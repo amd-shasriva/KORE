@@ -71,6 +71,23 @@ def cmd_datagen(args) -> int:
     elif args.what == "wins":
         from kore.data.gen_wins import generate_wins
         recs = generate_wins(task, teacher, env, gens=args.gens)
+    elif args.what == "evolve":
+        # Evolutionary datagen: manufacture verified wins + ranked groups via the
+        # D-MAB / MAP-Elites island loop. Writes BOTH products (wins + groups).
+        from kore.data.evolve import EvolveConfig, evolve_task
+        result = evolve_task(task, teacher, env, generations=args.gens,
+                             cfg=EvolveConfig(seed=args.seed))
+        win_out = Path(args.out or f"data/wins/{args.task}.evolve.jsonl")
+        grp_out = win_out.with_name(win_out.stem + ".groups.jsonl") if args.out \
+            else Path(f"data/groups/{args.task}.evolve.jsonl")
+        win_out.parent.mkdir(parents=True, exist_ok=True)
+        grp_out.parent.mkdir(parents=True, exist_ok=True)
+        write_jsonl(win_out, result.wins)
+        write_jsonl(grp_out, result.groups)
+        print(f"[datagen:evolve] {len(result.wins)} wins -> {win_out}; "
+              f"{len(result.groups)} groups -> {grp_out} "
+              f"(best_speedup={result.stats.get('best_speedup')})")
+        return 0
     else:
         print(f"unknown datagen target: {args.what}", file=sys.stderr)
         return 2
@@ -124,7 +141,8 @@ def cmd_grpo(args) -> int:
     from kore.policy.configs import GRPOConfig
     from kore.policy.grpo import train_grpo
 
-    cfg = GRPOConfig(model_id=args.model, output_dir=args.out)
+    cfg = GRPOConfig(model_id=args.model, output_dir=args.out,
+                     reward_phase=args.reward_phase)
     if args.steps:
         cfg.total_steps = args.steps
     tasks = args.tasks.split(",") if args.tasks else None
@@ -170,7 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("tasks").set_defaults(func=cmd_tasks)
 
     dg = sub.add_parser("datagen")
-    dg.add_argument("what", choices=["repair", "groups", "wins"])
+    dg.add_argument("what", choices=["repair", "groups", "wins", "evolve"])
     dg.add_argument("--task", required=True)
     dg.add_argument("--n", type=int, default=50)
     dg.add_argument("--n-parents", type=int, default=20, dest="n_parents")
@@ -208,6 +226,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--out", default="runs/grpo")
     g.add_argument("--steps", type=int, default=0)
     g.add_argument("--backend", default="inprocess", choices=["inprocess", "fallback"])
+    g.add_argument("--reward-phase", default="all", dest="reward_phase",
+                   choices=["correctness", "latency", "full", "all"],
+                   help="correctness->latency curriculum phase (masks the speed term when 'correctness')")
     g.set_defaults(func=cmd_grpo)
 
     v = sub.add_parser("value-train")

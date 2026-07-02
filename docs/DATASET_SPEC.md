@@ -314,3 +314,112 @@ For each task, sample **5** candidate (CoT, kernel) pairs from the teacher. Keep
 - (c) needed to balance single-op vs fusion paradigm ratio (ConCuR part c).
 
 Strip chain-of-thought from prior turns in multi-turn contexts (summarize) to prevent context explosion (Kevin recipe). Store `cot_tokens` and `speedup` on every ReasoningTrace for later re-curation.
+
+---
+
+## 4. Quality, verification, and hygiene
+
+### 4.1 Verification rigor (the gate that makes labels trustworthy)
+
+Every correctness/perf label MUST be produced by this pipeline (extends `verifier/test.py`, `verifier/bench.py`, and each `driver.py`):
+
+1. **Multi-shape correctness.** Score the **worst** shape, not the average (KORE.pdf §4: "score the worst shape"). Run `minimal + primary + all validation` shapes; a kernel passes only if the *minimum* SNR over shapes ≥ threshold. KORE `driver.run_correctness` already computes `worst = min(...)` over seeds — extend to iterate shapes too.
+2. **Randomized-input fuzzing.** ≥5 random seeds per shape (KORE uses seeds `[0]` normally, `[0..4]` in `stability`/`determinism` mode — make ≥5 the default for corpus generation). Include the numerical stress seeds from Section 2.1 (×1e2, ×1e-4, zero-rows).
+3. **Held-out verification shapes.** Verify on at least one shape **never shown to the model** (defeats hardcoding, H6). KORE.pdf §4 explicitly includes held-out shapes in the SNR check.
+4. **SNR gate + allclose.** SNR ≥ 30 dB (bf16/fp16), ≥ 25 dB (fp8/MX), with `atol=rtol=1e-2` allclose as secondary (KernelBench convention). fp8 GEMM driver uses `atol=5e-1,rtol=5e-2` with SNR as the real gate.
+5. **Determinism reruns.** Re-run the winning kernel ≥3× (fresh process). If SNR/wall variance exceeds tolerance (nondeterminism, C2), **flag and quarantine** — do not admit to corpus.
+6. **Independent re-verification.** Re-verify accepted wins in a *separate process / separate harness invocation* (KORE.pdf §4: "re-verify independently"). Candidate is loaded and run **before** the reference (defeats output-recycling hack H4).
+7. **Timing hygiene.** Warmup (≥10 iters) + median of ≥30 timed iters + CUDA-event timing + `torch.cuda.synchronize()` + **variance gate CV < 3%** (KORE.pdf §4). Reject measurements with CV ≥ 3%.
+8. **Reward is lexicographic.** `r = 1[correct] · log(T_base / T_cand)`. Speed counts only if correct; a fast-but-wrong kernel scores 0. No dense/intermediate compile-or-run reward (KORE.pdf §4; prevents over-optimization cheating).
+9. **Baseline = production op, measured on-box.** `--impl reference` calls AITER/hipBLASLt/rocBLAS/CK for `T_base`; never a torch fallback.
+
+### 4.2 Anti-cheat AST/static gate (pre-execution)
+
+Before a candidate is even benchmarked, run a static scan (cheap, deterministic). Reject + label as reward-hack (Section 2.6) if it: imports/calls `torch.nn.functional`, `torch.matmul`, `aiter`, `rocblas`, `hipblaslt`; references the `reference`/`matmul_ref` symbols; wraps the kernel entry in `try/except` with a non-kernel fallback; or the extracted source hash equals the parent's (no-op turn). This is GEAK's "call accuracy" idea plus Kevin's rule-based checks, run as a data filter.
+
+### 4.3 Dedup / near-dup detection
+
+- **Exact dedup:** `dedup_by_source_hash` (exists in `build_datasets.py`) on the representative source per record.
+- **Near-dup:** add a normalized-AST hash (strip comments/whitespace/rename locals) + MinHash/Jaccard over token-shingles; drop pairs with Jaccard > 0.9 within the same op-cell. Prevents the corpus from being dominated by trivially-perturbed clones (a real risk with mutator-generated repairs).
+- **Trajectory dedup:** two WinRecords whose `final_source` near-match collapse to one; keep the higher speedup.
+
+### 4.4 Leakage control (held-out ops / shapes / arch)
+
+Use `leakage_split(by=("operation","shape"))` (exists) so **no op×shape group crosses train/val/test**. Additionally hold out:
+- **≥1 whole operator family** end-to-end (KORE.pdf §5 evaluates on "one held-out operator family"). Recommend holding out **grouped-GEMM MoE** or **MLA prefill** as the never-trained eval family.
+- **Held-out shapes within trained ops** (Section 4.1 #3).
+- **Held-out arch:** train shape/config on gfx942; keep a small gfx950-labeled slice (MX ops) as an OOD generalization probe — never train the model to assume gfx950 LDS (160 KB) tiles on a gfx942 target.
+- **Provenance-based holdout:** hold out entire source repos (e.g. all kernels from one GitHub repo in KernelBook) from train to prevent memorization.
+
+### 4.5 Labeling & provenance (schema additions)
+
+Extend each record with a metadata block (all cheap to compute, critical for curation and audits):
+
+```
+meta = {
+  "operator_family": "gemm|attention|moe|norm|activation|rope|kvcache|quant|sampling|comms|elementwise",
+  "dtype": "bf16|fp16|fp8_e4m3fnuz|fp8_e5m2fnuz|int8|mxfp4|mxfp8|fp32",
+  "regime": "decode|prefill|chunked|small_batch|peak",
+  "roofline_class": "memory|compute|latency",
+  "difficulty": "easy|medium|hard",         # or cot_tokens bucket
+  "backend": "triton|hip|ck|flydsl",
+  "arch": "gfx942|gfx950",
+  "shape_key": "M4096_N4096_K4096",
+  "provenance": {"source": "teacher|self|synthetic|kernelbook", "model": "...", "commit": "...", "license": "..."},
+  "verify": {"snr_db_worst": 41.2, "shapes_tested": 5, "seeds": 5, "cv": 0.021,
+             "reverified": true, "baseline": "aiter_gemm_a8w8", "baseline_wall_us": 812.0},
+  "hard_negative": null | "reward_hack:copy_reference"
+}
+```
+
+### 4.6 Keeping only trustworthy measured outcomes (admission policy)
+
+A record is admitted to the training corpus iff: verified on ≥ N_shapes (≥3) and ≥5 seeds; passed the worst-shape SNR gate; timing CV < 3%; independently re-verified; passed the anti-cheat static gate; not a near-dup; carries full provenance. **Speedup labels missing a measured `baseline_wall_us` are dropped** (no teacher-claimed speedups). Quarantine (don't delete) rejects for later analysis and as hard negatives.
+
+---
+
+## 5. Existing datasets to reuse/adapt — and their gaps for AMD
+
+| Dataset | Local path / URL | What it gives KORE | Gap for gfx942/AMD | Action |
+|---|---|---|---|---|
+| **KernelBench** (L1 100, L2 100, L3 50, L4 20) | `repos/KernelBench/KernelBench/level{1..4}` | 270 PyTorch reference modules; the *task specifications* (op + reference) and the `fast_p` metric | CUDA-oriented; baseline is **torch eager**, not AITER; no Triton/HIP AMD kernels; no fp8/MoE/MLA depth | Reuse the **reference modules as task specs**; re-target baseline to AITER on-box; port to KORE `task.yaml` + `driver.py`. Use L1 (basic ops) + L2 (fusion) for breadth; adopt `fast_p@1.2` as the win metric (KORE.pdf §5). |
+| **GEAK-eval TritonBench-revised** (184) | `repos/GEAK-eval/geak_eval/data/TritonBench/data/TritonBench_G_v1/*` (185 files) | 184 real Triton kernels with harnesses; attention/GLA/retention/linear-attn breadth | Some kernels needed AMD fixes (GEAK: 37/184 failed on AMD — shared-mem errors, invalid HIP args); harnesses assume NVIDIA idioms | Reuse as **held-out eval + SFT breadth**; run through the AMD-fix pass GEAK did; do NOT leak into train (it's an eval bench). |
+| **GEAK-eval ROCm bench** (30–31) | `repos/GEAK-eval/geak_eval/data/ROCm/data/ROCm_v1/*` (31 files) | Real AMD ROCm kernels: `gemm.py`, `layernorm.py`, `moe_gemm.py`, `rmsnorm_fwd/bwd.py`, `test_flashattention_fwd.py`, `test_chained_dot_fp8.py`, `test_matmul_MXFP.py` | Only 31 kernels; the *most* AMD-authentic set available but tiny | **Highest-value seed set.** Use as gold seeds for repair-mutation and as the primary held-out AMD eval. `test_chained_dot_fp8` and `test_matmul_MXFP` directly inform fp8/MX coverage. |
+| **KernelBook** (18,162 torch↔Triton) | https://huggingface.co/datasets/GPUMODE/KernelBook (+ local `data/synthetic.py` regenerates via Inductor) | Massive breadth of correct-by-construction torch→Triton pairs; idiomatic Triton | Inductor targets NVIDIA; **not** MFMA/gfx942-tuned; no fp8/MoE/MLA; no perf-vs-AITER labels | Use for **Stage-1 breadth only** (25% of SFT). Regenerate on gfx942 with `torch.compile` to capture AMD-flavored Triton where possible. Never use for perf labels. |
+| **ConCuR** (4,892 CoT+CUDA) | https://arxiv.org/abs/2510.07356 | The *curation method* (short-CoT×high-speedup) and evidence that concise CoT → better kernels | CUDA, not Triton/HIP; torch-eager baseline | Reuse the **curation pipeline** (Section 3.6), not the data. Regenerate Triton/HIP CoT traces with the Opus teacher on KORE tasks. |
+| **KernelForge task suite** | `repos/KernelForge-main/tasks/*.yaml` | 9 production-grade AMD task specs with real shapes, constraints, phase gates, and measured results (MLA, MoE-MXFP4, MXFP8 grouped GEMM, flash-attn, sparse attn, SLA bwd, gemm fp16) | gfx950-targeted for MX ops; not a "dataset" but a spec source | **Directly port to KORE `task.yaml`** — these are the P1/P2 coverage cells with real dims + the unbalanced MoE trace. |
+| **KernelForge knowledge_base/skills** (37 skills) | `repos/KernelForge-main/knowledge_base/skills/*.json` | Distilled AMD optimization + pitfall knowledge (VGPR/LDS/MFMA/MoE/MLA/sparse) | — | Mine as **tuning_hints** for prompts and as the source list for edge cases in Section 2 (each skill ⇒ a repair transition). |
+
+### 5.1 Net-new data KORE must create (nobody else has it)
+
+1. **AMD-baseline perf labels** — speedup vs AITER/hipBLASLt/rocBLAS/CK measured on gfx942. This is the moat; no public dataset has it.
+2. **fp8-FNUZ correctness data** at scale (per-tensor/per-token/block-scale) — the FNUZ-vs-OCP trap (Section 2.1 N8, `aiter_ref.py`).
+3. **MLA decode/prefill + paged-KV + MoE-fused** repair/win data with DeepSeek-V3 constants.
+4. **Labeled reward-hack negatives** (Section 2.6) — deliberately manufactured, absent from all public sets.
+5. **Multi-turn AMD evolve trajectories** with per-turn verifier feedback (the Stage-3 substrate).
+
+---
+
+## 6. Master edge-case checklist (implementation acceptance test)
+
+The corpus is "done" only when every row below has ≥1 verification shape AND ≥1 repair transition:
+
+- [ ] N1–N8 numerical (fp32-accum, large-K overflow, fp8 amax extremes, denormal, NaN/all-masked-row, softmax overflow, variance cancellation, fp8-FNUZ-vs-OCP)
+- [ ] S1–S10 shape (non-pow2, tiny, huge, ragged/varlen, tail-mask, K%32≠0 fp8/MX, misaligned ptr, head-dim 64/192/256, 0-token+giant expert, batch extremes)
+- [ ] L1–L7 layout (transposed, non-contiguous, permuted fp8 MFMA operand, weight [N,K]/trans_b, N-first scale layout, paged-KV indirection, LDS swizzle pitfall)
+- [ ] C1–C4 concurrency (BLOCK_M=64 sparse corruption, atomic nondeterminism, race-only-at-scale, LSE reduction order)
+- [ ] R1–R5 resource (VGPR spill >256, LDS overflow >64 KB, occupancy cliff, scratch spill, num_warps/stages)
+- [ ] H1–H9 reward-hack negatives, labeled, ≥8% of DPO pairs
+- [ ] Every P0 op has data in every meaningful dtype×regime×backend cell (Section 1.5)
+- [ ] ≥1 whole operator family held out end-to-end for eval
+- [ ] fp8 tasks gate at 25 dB, bf16/fp16 at 30 dB; all baselines are on-box production ops
+
+## 7. Direct implementation order (maps to existing code)
+
+1. Port KernelForge `tasks/*.yaml` + GEAK-eval ROCm seeds → KORE `tasks/<id>/{task.yaml, reference.py, driver.py, seed_triton.py}` (follow `gemm_fp8_a8w8` layout). Fill the Section 1.5 P0/P1 cells first.
+2. Extend `data/mutate.py` with mutators for N8 (`break_fp8_variant`), C1 (`break_block_m_to_64`), L-family (stride/layout), R2 (`break_lds_overflow`); wire families in `OP_FAMILY_MUTATORS`.
+3. Add the anti-cheat static gate (Section 4.2) into `verifier/` and the metadata block (Section 4.5) into `schemas.py`.
+4. Make multi-shape × ≥5-seed × held-out-shape × CV<3% the default in `driver.py`/`verifier/test.py`/`bench.py`.
+5. Generate corpus at the Section 3.1 volumes with the Section 3.2 stage ratios; enforce Section 4.6 admission; split with `leakage_split`.
+6. Curate reasoning traces via Section 3.6; label difficulty by CoT length.
+7. Assemble Stage-1/2/3 mixes; verify against the Section 6 checklist before each stage.

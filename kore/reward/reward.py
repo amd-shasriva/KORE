@@ -66,23 +66,12 @@ def scan_for_hacks(source: str) -> Optional[str]:
 
 
 def _strip_comments_and_docstrings(src: str) -> str:
-    import io
-    import tokenize
-
-    try:
-        toks = tokenize.generate_tokens(io.StringIO(src).readline)
-        out, prev = [], tokenize.INDENT
-        for tok in toks:
-            if tok.type == tokenize.COMMENT:
-                continue
-            if tok.type == tokenize.STRING and prev in (tokenize.INDENT, tokenize.NEWLINE, tokenize.NL, tokenize.DEDENT, tokenize.ENCODING):
-                continue  # docstring
-            out.append(tok.string)
-            if tok.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
-                prev = tok.type
-        return " ".join(out)
-    except Exception:
-        return src
+    """Remove triple-quoted strings and ``#`` comments while preserving code
+    spacing (so patterns like ``torch.matmul`` stay intact for scanning)."""
+    src = re.sub(r'"""[\s\S]*?"""', " ", src)
+    src = re.sub(r"'''[\s\S]*?'''", " ", src)
+    src = re.sub(r"#.*", "", src)
+    return src
 
 
 def _worst_speedup(obs: Observation) -> Optional[float]:

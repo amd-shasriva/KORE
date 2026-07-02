@@ -1,22 +1,33 @@
 """KORE end-to-end campaign orchestrator (the full agentic recipe).
 
 Stages (each gated on the previous via retention + kernel metrics):
-    datagen  : teacher -> repair + ranked-groups + wins per task
+    datagen  : teacher -> repair + ranked-groups + wins per TRAIN task
+    evolve   : (optional) evolutionary datagen (D-MAB + MAP-Elites islands +
+               value-prefilter) manufacturing verified wins/ranked-groups per
+               TRAIN task, written as extra wins/groups shards
     agentic  : teacher-driven build/test/bench/pmc tool-use trajectories
-    build    : leakage-split the raw records, hold out an op family (+gfx950) as
-               eval-only, then assemble a multi-capability SFT mix (kernel + QA +
-               agentic + ~45% general) and a DPO set with >=8% hard negatives from
-               the TRAIN split only
+    build    : take the AUTHORITATIVE registry train/held-out split (a whole
+               operator family + any arch-specific task is reserved eval-only),
+               then assemble a multi-capability SFT mix (kernel + QA + agentic +
+               ~45% general) and a DPO set with >=8% hard negatives from the
+               TRAIN split only
     midtrain : Stage-0 full-FT continued pretrain on the ROCm/Triton corpus
     sft      : Stage-1 multi-capability SFT (retains chat/code/orchestration)
-    dpo      : Stage-2 preference tuning
-    grpo     : Stage-3 multi-turn AGENTIC GRPO (Kevin credit + StarPO-S + KL anchor)
+    dpo      : Stage-2 preference tuning; with --dpo-rounds>1 this becomes the
+               ITERATIVE on-policy DPO + DAgger loop (relabel on-policy from the
+               current ckpt -> aggregate -> build_dpo -> IPO train -> refresh ref)
+    grpo     : Stage-3 multi-turn AGENTIC GRPO (Kevin credit + StarPO-S + KL
+               anchor); with --grpo-curriculum runs a correctness phase then a
+               latency phase (reward_phase flip; phase-1 ckpt -> phase-2 init)
     soup     : Stage-4 base-ward model soup (retention-gated alpha SWEEP)
-    eval     : matched-budget fast_p bake-off (seed vs the TRAINED model) + retention
+    eval     : matched-budget fast_p bake-off (seed vs the TRAINED model) +
+               retention, on the HELD-OUT generalization split
 
-Every training stage is retention-gated (hard-stop on general regression). The run
-is resumable: a JSON manifest at ``<data_root>/campaign_manifest.json`` records the
-real checkpoints + which stages finished, and per-stage JSONL events are appended to
+Every training stage runs on the TRAIN split only; eval runs on the held-out
+split (``kore.tasks.registry.split_tasks``). Every training stage is retention-
+gated (hard-stop on general regression). The run is resumable: a JSON manifest at
+``<data_root>/campaign_manifest.json`` records the real checkpoints + which stages
+finished + the train/eval task ids, and per-stage JSONL events are appended to
 ``<data_root>/campaign_events.jsonl`` for observability.
 
 --dry-run validates the WHOLE wiring with no GPU/teacher (it import-checks every
@@ -40,9 +51,12 @@ from pathlib import Path
 
 from kore.obs import configure, get_logger, gpu_mem_snapshot
 
-ALL_STAGES = ["datagen", "agentic", "build", "midtrain", "sft", "dpo", "grpo", "soup", "eval"]
+ALL_STAGES = ["datagen", "evolve", "agentic", "build", "midtrain", "sft", "dpo",
+              "grpo", "soup", "eval"]
 # Stage-0 mid-train (continued pretraining) runs FIRST so its checkpoint becomes
-# the base for Stage-1 SFT (see ctx["midtrain_ckpt"] -> _stage_sft).
+# the base for Stage-1 SFT (see ctx["midtrain_ckpt"] -> _stage_sft). ``evolve`` is
+# not in the defaults (it is expensive); pass --evolve to splice it in after
+# datagen, or name it explicitly in --stages.
 DEFAULT_STAGES = ["midtrain", "datagen", "agentic", "build", "sft", "dpo", "grpo", "soup", "eval"]
 
 # Kernel metric key used to drive the soup alpha sweep (fast_p at p=1.0).
@@ -94,10 +108,27 @@ def _write_rows(path: Path, rows: list) -> None:
 _IMPORT_CHECKS = [
     ("kore.tasks.registry", "get_task", True, []),
     ("kore.tasks.registry", "all_tasks", True, []),
+    # Authoritative train/held-out generalization split (item 1).
+    ("kore.tasks.registry", "split_tasks", True, ["seed"]),
+    ("kore.tasks.registry", "train_tasks", True, []),
+    ("kore.tasks.registry", "heldout_tasks", True, []),
+    ("kore.tasks.registry", "operator_family", True, []),
     ("kore.env.kore_env", "KoreEnv", True, []),
-    ("kore.data.assemble", "build_multicap_dataset", True, ["kernel_records"]),
-    ("kore.data.assemble", "build_dpo_with_hard_negatives", True, ["group_records"]),
+    ("kore.data.assemble", "build_multicap_dataset", True, ["kernel_records", "extra_records"]),
+    ("kore.data.assemble", "build_dpo_with_hard_negatives", True,
+        ["group_records", "extra_group_records"]),
     ("kore.data.assemble", "summarize_multicap", True, []),
+    # Iterative on-policy DPO + DAgger (item 2).
+    ("kore.data.onpolicy", "iterative_dpo", True,
+        ["rounds", "policy_factory", "tasks", "env_factory", "train_fn", "aggregate"]),
+    ("kore.data.onpolicy", "dagger_repairs", True, ["teacher_frac", "diagnostic"]),
+    ("kore.data.onpolicy", "dagger_teacher_frac", True, ["round_idx", "rounds"]),
+    ("kore.data.onpolicy", "relabel_groups_on_policy", True, ["policy"]),
+    # Evolutionary datagen (item 3).
+    ("kore.data.evolve", "evolve_task", True, ["task", "generator", "env", "generations", "cfg"]),
+    ("kore.data.evolve", "EvolveConfig", True, []),
+    # Correctness->latency GRPO curriculum (item 4).
+    ("kore.policy.grpo", "apply_reward_phase", True, []),
     ("kore.data.build_datasets", "leakage_split", True, ["records", "by"]),
     ("kore.data.build_datasets", "dedup_by_source_hash", True, []),
     ("kore.data.schemas", "read_jsonl", True, []),
@@ -184,6 +215,8 @@ def _load_manifest_into_ctx(ctx) -> None:
     ctx["done_stages"] = set(m.get("done_stages") or [])
     if m.get("eval_tasks"):
         ctx["eval_task_ids"] = list(m["eval_tasks"])
+    if m.get("train_tasks"):
+        ctx["train_task_ids"] = list(m["train_tasks"])
     _log("resume", f"manifest loaded: done={sorted(ctx['done_stages'])} "
                    f"midtrain={ctx['midtrain_ckpt']} sft={ctx['sft_ckpt']} "
                    f"dpo={ctx['dpo_ckpt']} grpo={ctx['grpo_ckpt']} final={ctx['final']}")
@@ -202,6 +235,7 @@ def _save_manifest(ctx) -> None:
         "grpo_ckpt": ctx.get("grpo_ckpt"),
         "final": ctx.get("final"),
         "done_stages": sorted(ctx["done_stages"]),
+        "train_tasks": ctx.get("train_task_ids"),
         "eval_tasks": ctx.get("eval_task_ids"),
         "updated": time.time(),
     }
@@ -265,7 +299,13 @@ def run(args) -> int:
     from kore.tasks.registry import all_tasks, get_task
 
     tasks = [get_task(t) for t in args.tasks.split(",")] if args.tasks else all_tasks()
-    stages = args.stages.split(",") if args.stages else DEFAULT_STAGES
+    if args.stages:
+        stages = args.stages.split(",")
+    else:
+        stages = list(DEFAULT_STAGES)
+        # Splice the (optional) evolutionary datagen stage in right after datagen.
+        if args.evolve and "evolve" not in stages:
+            stages.insert(stages.index("datagen") + 1, "evolve")
     data_root = Path(args.data_root)
     dry = args.dry_run
 
@@ -273,8 +313,16 @@ def run(args) -> int:
         "data_root": data_root, "tasks": tasks, "dry": dry, "args": args,
         "base": args.model, "midtrain_ckpt": None, "sft_ckpt": None,
         "dpo_ckpt": None, "grpo_ckpt": None, "final": None, "metrics": {},
-        "done_stages": set(), "eval_task_ids": None, "current_stage": "-",
+        "done_stages": set(), "eval_task_ids": None, "train_task_ids": None,
+        "current_stage": "-",
     }
+
+    # Authoritative train / held-out generalization split (item 1). Training
+    # stages run on ctx["train_tasks"]; eval runs on ctx["eval_tasks"]. This
+    # SUBSUMES the ad-hoc record-level _force_holdout: the reserved operator
+    # family (+ any arch-specific task) is fixed by the registry, so training
+    # data-gen can never leak into the eval set.
+    _apply_split(ctx)
 
     # Bind the central logger's events.jsonl to the run dir (real runs only; a
     # dry-run stays side-effect-free/offline and logs to the console only).
@@ -292,11 +340,13 @@ def run(args) -> int:
 
     _log("plan", f"model={args.model} tasks={[t.task_id for t in tasks]} "
                  f"stages={stages} dry_run={dry}")
+    _log("plan", f"authoritative split: train={ctx['train_task_ids']} "
+                 f"held-out(eval)={ctx['eval_task_ids']}")
 
     dispatch = {
-        "datagen": _stage_datagen, "agentic": _stage_agentic, "build": _stage_build,
-        "midtrain": _stage_midtrain, "sft": _stage_sft, "dpo": _stage_dpo,
-        "grpo": _stage_grpo, "soup": _stage_soup, "eval": _stage_eval,
+        "datagen": _stage_datagen, "evolve": _stage_evolve, "agentic": _stage_agentic,
+        "build": _stage_build, "midtrain": _stage_midtrain, "sft": _stage_sft,
+        "dpo": _stage_dpo, "grpo": _stage_grpo, "soup": _stage_soup, "eval": _stage_eval,
     }
     hb_stop = _start_heartbeat(ctx)
     try:
@@ -341,8 +391,54 @@ def _teacher(args):
     return make_teacher(args.teacher, **kw)
 
 
+def _apply_split(ctx) -> None:
+    """Compute the AUTHORITATIVE registry train/held-out split for this run.
+
+    Uses ``kore.tasks.registry.split_tasks(seed)`` (item 1). The held-out set is a
+    fixed function of operator family + arch, so it is independent of ``seed`` (the
+    seed only reorders within each split). From the campaign's selected task set:
+
+      * ``train_tasks`` = selected tasks that are NOT held out — every training
+        stage (datagen/evolve/agentic/build/sft/dpo/grpo) runs on these ONLY;
+      * ``eval_tasks``  = the held-out generalization tasks — eval runs on these.
+        We prefer any selected held-out tasks; if none of the selected tasks are
+        held out (the common bring-up case, e.g. ``--tasks rmsnorm_aiter,gemm_bf16``)
+        we fall back to the registry's full held-out set so eval still measures
+        generalization to an unseen operator family.
+
+    Populates ``ctx['train_tasks']``/``['eval_tasks']`` (Task objects) and the
+    id lists threaded through the manifest.
+    """
+    from kore.tasks.registry import is_heldout, split_tasks
+
+    seed = getattr(ctx["args"], "split_seed", 0)
+    split = split_tasks(seed)
+    selected = ctx["tasks"]
+
+    train = [t for t in selected if not is_heldout(t)]
+    held_selected = [t for t in selected if is_heldout(t)]
+    eval_tasks = held_selected or list(split["heldout"])
+
+    if not train:  # degenerate: every selected task is held out — train on them
+        _log("plan", "WARNING: every selected task is held out; training on the "
+                     "full selection (no train/eval split available)")
+        train = list(selected)
+
+    ctx["train_tasks"] = train
+    ctx["eval_tasks"] = eval_tasks
+    ctx["train_task_ids"] = [t.task_id for t in train]
+    ctx["eval_task_ids"] = [t.task_id for t in eval_tasks]
+
+
+def _train_tasks(ctx) -> list:
+    """The TRAIN-split tasks every training stage operates on (item 1)."""
+    return ctx.get("train_tasks") or ctx["tasks"]
+
+
 def _eval_tasks(ctx) -> list:
-    """The held-out (eval-only) tasks from the leakage split, else all tasks."""
+    """The held-out (eval-only) generalization tasks; else the selected tasks."""
+    if ctx.get("eval_tasks"):
+        return ctx["eval_tasks"]
     ids = ctx.get("eval_task_ids")
     if not ids:
         return ctx["tasks"]
@@ -367,9 +463,10 @@ def _stage_datagen(ctx):
     from kore.env.kore_env import KoreEnv
 
     t = _teacher(ctx["args"])
-    n_tasks = len(ctx["tasks"])
+    train = _train_tasks(ctx)
+    n_tasks = len(train)
     dg_t0 = time.time()
-    for i, task in enumerate(ctx["tasks"]):
+    for i, task in enumerate(train):
         env = KoreEnv(task)
         for kind, recs in (("repair", generate_repairs(task, t, env, n=ctx["args"].n_repair)),
                            ("groups", generate_groups(task, t, env, n_parents=ctx["args"].n_parents, k=ctx["args"].k)),
@@ -391,9 +488,10 @@ def _stage_agentic(ctx):
     from kore.env.kore_env import KoreEnv
 
     t = _teacher(ctx["args"])
-    n_tasks = len(ctx["tasks"])
+    train = _train_tasks(ctx)
+    n_tasks = len(train)
     ag_t0 = time.time()
-    for i, task in enumerate(ctx["tasks"]):
+    for i, task in enumerate(train):
         env = KoreEnv(task)
         recs = generate_agentic_trajectories(task, t, env, n=ctx["args"].n_agentic,
                                              max_turns=ctx["args"].max_tool_turns, keep_only_useful=True)
@@ -403,6 +501,44 @@ def _stage_agentic(ctx):
         _log("agentic", f"{task.task_id} -> {len(recs)} trajectories")
         LOG.event("agentic_records", task=task.task_id, n=len(recs))
         LOG.progress(i + 1, n_tasks, "agentic", t_start=ag_t0, task=task.task_id)
+
+
+def _stage_evolve(ctx):
+    """Optional Stage: evolutionary datagen (item 3).
+
+    Runs :func:`kore.data.evolve.evolve_task` per TRAIN task — a D-MAB (UCB1 +
+    Page-Hinkley) bandit over mutation operators, MAP-Elites islands with ring
+    migration, and a value-model bench prefilter — to MANUFACTURE verified wins
+    and ranked preference groups. They are written as EXTRA ``wins``/``groups``
+    shards so the build stage folds them in via its existing glob (dedup handles
+    any overlap with the teacher-generated datagen).
+    """
+    if ctx["dry"]:
+        _log("evolve", "would run evolve_task per TRAIN task (D-MAB bandit + MAP-Elites "
+                       "islands + value-prefilter) -> verified wins + ranked-group shards")
+        return
+    from kore.data.evolve import EvolveConfig, evolve_task
+    from kore.data.schemas import write_jsonl
+    from kore.env.kore_env import KoreEnv
+
+    t = _teacher(ctx["args"])
+    train = _train_tasks(ctx)
+    n_tasks = len(train)
+    gens = ctx["args"].evolve_generations
+    ev_t0 = time.time()
+    for i, task in enumerate(train):
+        env = KoreEnv(task)
+        cfg = EvolveConfig(seed=i)
+        result = evolve_task(task, t, env, generations=gens, cfg=cfg)
+        if result.wins:
+            write_jsonl(ctx["data_root"] / "wins" / f"{task.task_id}.evolve.jsonl", result.wins)
+        if result.groups:
+            write_jsonl(ctx["data_root"] / "groups" / f"{task.task_id}.evolve.jsonl", result.groups)
+        _log("evolve", f"{task.task_id} -> {len(result.wins)} wins, {len(result.groups)} "
+                       f"groups (best_speedup={result.stats.get('best_speedup')})")
+        LOG.event("evolve_records", task=task.task_id, wins=len(result.wins),
+                  groups=len(result.groups))
+        LOG.progress(i + 1, n_tasks, "evolve", t_start=ev_t0, task=task.task_id)
 
 
 # --- leakage-split helpers (Fix 5) ---
@@ -427,34 +563,39 @@ def _rec_arch(rec):
     return _rec_dict(rec).get("arch")
 
 
-def _force_holdout(train: list, test: list) -> tuple[list, list]:
-    """Force at least one operator family (and any arch=='gfx950') eval-only.
+def _rec_is_heldout(rec, heldout_ids: set) -> bool:
+    """True iff a record belongs to the AUTHORITATIVE held-out split (item 1).
 
-    Moves every arch=='gfx950' record and one whole operator family out of TRAIN
-    into TEST, guarding against emptying TRAIN when only one family exists.
+    Uses the registry's split logic — a record is held out if its ``task_id`` is
+    reserved, its arch is not the train arch, or its operator family is one of the
+    reserved held-out families. This SUBSUMES the ad-hoc ``_force_holdout`` (which
+    hard-coded gfx950 + "first op family") with the registry as the single
+    authority, so a stray held-out-family record can never leak into TRAIN.
     """
-    # 1. arch gfx950 -> eval-only (if present at all).
-    gfx = [r for r in train if _rec_arch(r) == "gfx950"]
-    if gfx:
-        train = [r for r in train if _rec_arch(r) != "gfx950"]
-        test = test + gfx
+    from types import SimpleNamespace
 
-    # 2. hold out one whole operator family (only if >=2 families remain in TRAIN).
-    train_ops = sorted({_rec_op(r) for r in train if _rec_op(r)})
-    if len(train_ops) >= 2:
-        chosen = train_ops[0]
-        moved = [r for r in train if _rec_op(r) == chosen]
-        train = [r for r in train if _rec_op(r) != chosen]
-        test = test + moved
-    return train, test
+    from kore.tasks.registry import HELDOUT_FAMILIES, TRAIN_ARCH, operator_family
+
+    d = _rec_dict(rec)
+    tid = d.get("task_id")
+    if tid and tid in heldout_ids:
+        return True
+    arch = _rec_arch(rec)
+    if arch not in (None, TRAIN_ARCH):
+        return True
+    op = _rec_op(rec)
+    if op and operator_family(SimpleNamespace(operation=op, task_id=tid or "")) in HELDOUT_FAMILIES:
+        return True
+    return False
 
 
 def _stage_build(ctx):
     from kore.policy.configs import MultiCapSFTConfig
 
     if ctx["dry"]:
-        _log("build", "would leakage-split records (by operation+arch), hold out an op "
-                      "family (+gfx950), then assemble train-only SFT mix + DPO(+>=8% hard negs)")
+        _log("build", "would take the registry train/held-out split (reserved op family "
+                      "+ arch-specific eval-only), then assemble train-only SFT mix + "
+                      "DPO(+>=8% hard negs)")
         return
     from kore.data.assemble import (build_dpo_with_hard_negatives, build_multicap_dataset,
                                     summarize_multicap)
@@ -462,7 +603,7 @@ def _stage_build(ctx):
     from kore.data.schemas import read_jsonl
     from kore.data.teacher import make_teacher
 
-    # 1. gather + dedup all raw generated records that carry leakage provenance.
+    # 1. gather + dedup all raw generated records (datagen + evolve shards).
     raw: list = []
     for sub in ("repair", "wins", "groups"):
         d = ctx["data_root"] / sub
@@ -472,33 +613,41 @@ def _stage_build(ctx):
     raw = dedup_by_source_hash(raw)
     _log("build", f"gathered {len(raw)} deduped raw records")
 
-    # 2. leakage-aware split by (operation, arch); force an op family + gfx950 eval-only.
+    # 2. leakage-aware split by (operation, arch), then enforce the AUTHORITATIVE
+    #    registry held-out split at the record level (item 1). ``ctx['eval_task_ids']``
+    #    is fixed by registry.split_tasks (see _apply_split) — the held-out family +
+    #    arch-specific tasks — so any record whose family/arch/id is reserved is
+    #    moved out of TRAIN, guaranteeing training never sees the eval distribution.
     train, val, test = leakage_split(raw, by=("operation", "arch"))
-    train, test = _force_holdout(train, test)
-    ctx["eval_task_ids"] = sorted({_rec_dict(r).get("task_id") for r in test
-                                   if _rec_dict(r).get("task_id")})
+    heldout_ids = set(ctx.get("eval_task_ids") or [])
+    leaked = [r for r in train if _rec_is_heldout(r, heldout_ids)]
+    train = [r for r in train if not _rec_is_heldout(r, heldout_ids)]
+    test = test + leaked
+    leaked_ids = sorted({_rec_dict(r).get("task_id") for r in test if _rec_dict(r).get("task_id")})
     _log("build", f"leakage split: train={len(train)} val={len(val)} test={len(test)}; "
-                  f"eval-only tasks={ctx['eval_task_ids']}")
+                  f"registry held-out(eval) tasks={sorted(heldout_ids)} "
+                  f"(records with reserved family/arch moved out: {leaked_ids})")
 
-    # 3. build SFT/DPO from the TRAIN partition only.
+    # 3. build SFT/DPO from the TRAIN partition only, over the TRAIN-split tasks.
     try:
         teacher = _teacher(ctx["args"])
     except Exception as e:  # noqa: BLE001 - QA gen is optional if the teacher is down
         _log("build", f"teacher unavailable for QA ({e}); using stub")
         teacher = make_teacher("stub")
 
+    train_tasks = _train_tasks(ctx)
     kernel_records = [r for r in train if _rec_type(r) in ("repair", "win")]
     group_records = [r for r in train if _rec_type(r) == "ranked_group"]
 
     cfg = MultiCapSFTConfig()
-    rows = build_multicap_dataset(ctx["data_root"], ctx["tasks"], teacher, cfg,
+    rows = build_multicap_dataset(ctx["data_root"], train_tasks, teacher, cfg,
                                   total=ctx["args"].sft_total, use_hf=ctx["args"].use_hf,
                                   kernel_records=kernel_records)
     _write_rows(ctx["data_root"] / "sft" / "multicap.jsonl", rows)
     _log("build", f"multicap SFT (train-only): {len(rows)} rows; "
                   f"mix={summarize_multicap(rows)['fractions']}")
 
-    dpo = build_dpo_with_hard_negatives(ctx["data_root"], ctx["tasks"],
+    dpo = build_dpo_with_hard_negatives(ctx["data_root"], train_tasks,
                                         group_records=group_records)
     _write_rows(ctx["data_root"] / "dpo" / "pairs.jsonl", dpo["rows"])
     _log("build", f"DPO (train-only): {dpo['n_total']} pairs ({dpo['n_hard']} hard, "
@@ -568,25 +717,144 @@ def _stage_sft(ctx):
     _retention_gate(ctx, stage="sft", candidate=ctx["sft_ckpt"], base=ctx["base"])
 
 
+def _dagger_fold_into_sft(ctx, policy, teacher, round_idx: int, rounds: int) -> int:
+    """DAgger: mine the CURRENT policy's OWN failures, get verified expert fixes,
+    and FOLD them into the multi-capability SFT corpus (item 2 / item 5).
+
+    Runs :func:`kore.data.onpolicy.dagger_repairs` on the TRAIN-split tasks only
+    (never the held-out set), with the teacher-mixing beta decaying 30%->0% across
+    rounds (:func:`kore.data.onpolicy.dagger_teacher_frac`). The verified repairs
+    are written to a ``dagger`` shard AND their SFT chat rows are appended to
+    ``sft/multicap.jsonl`` so the multi-cap mix includes the DAgger repairs.
+    Returns the number of repairs folded in.
+    """
+    from kore.data.build_datasets import build_sft
+    from kore.data.onpolicy import dagger_repairs, dagger_teacher_frac
+    from kore.data.schemas import write_jsonl
+    from kore.env.kore_env import KoreEnv
+
+    frac = dagger_teacher_frac(round_idx, rounds)
+    reps: list = []
+    for task in _train_tasks(ctx):
+        env = KoreEnv(task)
+        reps += dagger_repairs(task, policy, teacher, env, n=ctx["args"].dagger_n,
+                               seed=round_idx * 1000 + 7, teacher_frac=frac, diagnostic=True)
+    if not reps:
+        _log("dpo", f"round {round_idx}: DAgger found no repairable policy failures")
+        return 0
+    write_jsonl(ctx["data_root"] / "dagger" / f"round{round_idx}.jsonl", reps)
+    rows = build_sft(reps)
+    sft_path = ctx["data_root"] / "sft" / "multicap.jsonl"
+    sft_path.parent.mkdir(parents=True, exist_ok=True)
+    with sft_path.open("a") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    _log("dpo", f"round {round_idx}: folded {len(reps)} DAgger repairs "
+                f"(teacher_frac={frac:.3f}) into the SFT corpus (+{len(rows)} rows)")
+    return len(reps)
+
+
 def _stage_dpo(ctx):
+    """Stage-2 preference tuning.
+
+    ``--dpo-rounds <= 1`` runs a single DPO pass on the pre-built ranked-group +
+    hard-negative pairs. ``--dpo-rounds > 1`` runs the ITERATIVE on-policy DPO +
+    DAgger loop (item 2): each round relabels preference groups ON-POLICY from the
+    current checkpoint, aggregates the union with all prior rounds (DAgger no-
+    regret), builds DPO pairs, trains with the IPO loss against a REFRESHED frozen
+    reference (the previous round's checkpoint), and folds the policy's own mined
+    DAgger repairs back into the SFT corpus (round>0). Train-split tasks only.
+    """
+    rounds = int(getattr(ctx["args"], "dpo_rounds", 1) or 1)
     if ctx["dry"]:
-        _log("dpo", "would DPO on ranked-groups + hard-negative pairs")
+        if rounds > 1:
+            _log("dpo", f"would run {rounds} rounds of ITERATIVE on-policy DPO "
+                        "(iterative_dpo): relabel on-policy from the current ckpt -> "
+                        "aggregate -> build_dpo -> dpo.train(loss_type='ipo', refreshed "
+                        "ref_model_id) -> next round; folding DAgger repairs into SFT")
+        else:
+            _log("dpo", "would DPO on ranked-groups + hard-negative pairs")
         return
-    from kore.policy.configs import DPOConfig
-    from kore.policy.dpo import train
 
     sft = ctx.get("sft_ckpt") or ctx["base"]
-    cfg = DPOConfig(model_id=sft, dataset_path=str(ctx["data_root"] / "dpo" / "pairs.jsonl"),
-                    output_dir=ctx["args"].dpo_out, use_lora=ctx["args"].lora)
-    result = train(cfg)
-    ctx["dpo_ckpt"] = (result.get("output_dir") if isinstance(result, dict) else None) or ctx["args"].dpo_out
+    if rounds > 1:
+        ctx["dpo_ckpt"] = _stage_dpo_iterative(ctx, sft, rounds)
+    else:
+        ctx["dpo_ckpt"] = _stage_dpo_single(ctx, sft)
     _log("dpo", f"-> {ctx['dpo_ckpt']}")
     _retention_gate(ctx, stage="dpo", candidate=ctx["dpo_ckpt"], base=sft)
 
 
+def _stage_dpo_single(ctx, sft) -> str:
+    from kore.policy.configs import DPOConfig
+    from kore.policy.dpo import train
+
+    cfg = DPOConfig(model_id=sft, dataset_path=str(ctx["data_root"] / "dpo" / "pairs.jsonl"),
+                    output_dir=ctx["args"].dpo_out, use_lora=ctx["args"].lora)
+    result = train(cfg)
+    return (result.get("output_dir") if isinstance(result, dict) else None) or ctx["args"].dpo_out
+
+
+def _stage_dpo_iterative(ctx, sft, rounds: int) -> str:
+    """Iterative on-policy DPO + DAgger (item 2), following the on-policy recipe.
+
+    ``policy_factory(round_idx, prev_ckpt)`` loads a duck-typed ``.generate`` policy
+    (``kore.policy.serve.load_generate``) from the current checkpoint (the SFT ckpt
+    on round 0, else the previous round's trained ckpt = REFERENCE REFRESH), and
+    for round>0 first folds that policy's DAgger repairs into the SFT corpus.
+    ``train_fn`` writes the aggregated DPO pairs and runs ``dpo.train`` with
+    ``loss_type='ipo'`` against the refreshed frozen ``ref_model_id``.
+    """
+    from kore.config import CONFIG
+    from kore.data.onpolicy import iterative_dpo
+    from kore.env.kore_env import KoreEnv
+    from kore.policy.configs import DPOConfig
+    from kore.policy.dpo import train
+    from kore.policy.serve import load_generate
+
+    teacher = _teacher(ctx["args"])
+    train_tasks = _train_tasks(ctx)
+
+    def policy_factory(round_idx, prev_ckpt):
+        ckpt = prev_ckpt or sft
+        _log("dpo", f"round {round_idx}: loading on-policy generator from {ckpt}")
+        policy = load_generate(ckpt)
+        if round_idx > 0:
+            _dagger_fold_into_sft(ctx, policy, teacher, round_idx, rounds)
+        return policy
+
+    def train_fn(rd):
+        base_ckpt = rd.ref_model_id or sft            # policy relabeled from this ckpt
+        ds_path = ctx["data_root"] / "dpo" / f"round{rd.round}" / "pairs.jsonl"
+        _write_rows(ds_path, rd.dpo_pairs)
+        out_dir = str(Path(ctx["args"].dpo_out) / f"round{rd.round}")
+        cfg = DPOConfig(model_id=base_ckpt, dataset_path=str(ds_path),
+                        output_dir=out_dir, use_lora=ctx["args"].lora)
+        cfg.loss_type = "ipo"                          # bounded IPO objective for on-policy prefs
+        cfg.ref_model_id = base_ckpt                   # refreshed frozen reference = current policy
+        _log("dpo", f"round {rd.round}: IPO DPO on {rd.n_pairs} aggregated pairs "
+                    f"(model={base_ckpt}, ref={base_ckpt}) -> {out_dir}")
+        result = train(cfg)
+        return (result.get("output_dir") if isinstance(result, dict) else None) or out_dir
+
+    results = iterative_dpo(
+        rounds, policy_factory, train_tasks, lambda t: KoreEnv(t),
+        n_parents=ctx["args"].n_parents, k=ctx["args"].k, seed=0, cfg=CONFIG,
+        train_fn=train_fn, aggregate=True,
+    )
+    return results[-1].policy_ckpt or ctx["args"].dpo_out
+
+
 def _stage_grpo(ctx):
+    curriculum = bool(getattr(ctx["args"], "grpo_curriculum", False))
     if ctx["dry"]:
-        _log("grpo", "would run multi-turn AGENTIC GRPO (Kevin credit + StarPO-S + KL-anchor to SFT ckpt)")
+        if curriculum:
+            _log("grpo", "would run the correctness->latency GRPO CURRICULUM: phase-1 "
+                         "correctness-only GRPO (reward_phase='correctness'), then phase-2 "
+                         "latency GRPO (reward_phase='latency') initialized from the phase-1 "
+                         "ckpt; multi-turn AGENTIC (Kevin credit + StarPO-S + KL-anchor)")
+        else:
+            _log("grpo", "would run multi-turn AGENTIC GRPO (Kevin credit + StarPO-S + KL-anchor to SFT ckpt)")
         return
     from kore.policy.configs import GRPOConfig
     from kore.policy.grpo import train_grpo
@@ -594,14 +862,14 @@ def _stage_grpo(ctx):
     sft = ctx.get("sft_ckpt") or ctx["base"]
     init = ctx.get("dpo_ckpt") or sft
 
-    # Fix 4: GRPO must train ONLY on the TRAIN-split tasks. The eval-only ids
-    # (the forced-holdout op family + any gfx950, from ``_stage_build``) are the
-    # held-out generalization set; training on them would invalidate the eval.
+    # item 1: GRPO must train ONLY on the TRAIN-split tasks. The held-out eval ids
+    # (reserved operator family + arch-specific tasks) are the generalization set;
+    # training on them would invalidate the eval.
     eval_ids = set(ctx.get("eval_task_ids") or [])
-    train_task_ids = [t.task_id for t in ctx["tasks"] if t.task_id not in eval_ids]
+    train_task_ids = [t.task_id for t in _train_tasks(ctx) if t.task_id not in eval_ids]
     if not train_task_ids:
         _log("grpo", f"WARNING: every task is held out for eval ({sorted(eval_ids)}); "
-                     "falling back to training on all tasks (no leakage split available)")
+                     "falling back to training on the selected tasks (no split available)")
         train_task_ids = [t.task_id for t in ctx["tasks"]]
     else:
         _log("grpo", f"training on TRAIN-split tasks={train_task_ids} "
@@ -612,14 +880,35 @@ def _stage_grpo(ctx):
     # micro-batched backward these bound activation memory regardless, but smaller
     # groups also cut rollout wall-clock for the validation run.
     use_lora = ctx["args"].lora
-    grpo_kw = dict(model_id=init, output_dir=ctx["args"].grpo_out,
-                   agentic=True, starpo_s=True, ref_checkpoint=sft, use_lora=use_lora)
-    if use_lora:
-        grpo_kw.update(num_trajectories=8, tasks_per_step=2, num_turns=3)
-    if ctx["args"].grpo_steps:
-        grpo_kw["total_steps"] = ctx["args"].grpo_steps
-    cfg = GRPOConfig(**grpo_kw)
-    ctx["grpo_ckpt"] = train_grpo(cfg, tasks=train_task_ids, backend=ctx["args"].grpo_backend)
+
+    def _grpo_kw(*, model_id, output_dir, reward_phase="all"):
+        kw = dict(model_id=model_id, output_dir=output_dir, agentic=True,
+                  starpo_s=True, ref_checkpoint=sft, use_lora=use_lora,
+                  reward_phase=reward_phase)
+        if use_lora:
+            kw.update(num_trajectories=8, tasks_per_step=2, num_turns=3)
+        if ctx["args"].grpo_steps:
+            kw["total_steps"] = ctx["args"].grpo_steps
+        return kw
+
+    if curriculum:
+        # Phase 1: correctness-only GRPO (mask the speed term) — learn to be correct.
+        p1_out = str(Path(ctx["args"].grpo_out) / "phase1_correctness")
+        _log("grpo", f"curriculum phase-1 (correctness) init={init} -> {p1_out}")
+        cfg1 = GRPOConfig(**_grpo_kw(model_id=init, output_dir=p1_out,
+                                     reward_phase="correctness"))
+        phase1_ckpt = train_grpo(cfg1, tasks=train_task_ids, backend=ctx["args"].grpo_backend)
+        _log("grpo", f"curriculum phase-1 -> {phase1_ckpt}")
+
+        # Phase 2: latency GRPO (full correctness+speed) initialized FROM phase-1.
+        p2_out = ctx["args"].grpo_out
+        _log("grpo", f"curriculum phase-2 (latency) init={phase1_ckpt} -> {p2_out}")
+        cfg2 = GRPOConfig(**_grpo_kw(model_id=phase1_ckpt, output_dir=p2_out,
+                                     reward_phase="latency"))
+        ctx["grpo_ckpt"] = train_grpo(cfg2, tasks=train_task_ids, backend=ctx["args"].grpo_backend)
+    else:
+        cfg = GRPOConfig(**_grpo_kw(model_id=init, output_dir=ctx["args"].grpo_out))
+        ctx["grpo_ckpt"] = train_grpo(cfg, tasks=train_task_ids, backend=ctx["args"].grpo_backend)
     _log("grpo", f"-> {ctx['grpo_ckpt']}")
     _retention_gate(ctx, stage="grpo", candidate=ctx["grpo_ckpt"], base=sft)
 
@@ -804,6 +1093,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--grpo-out", default="runs/grpo", dest="grpo_out")
     p.add_argument("--grpo-backend", default="fallback", dest="grpo_backend")
     p.add_argument("--grpo-steps", type=int, default=None, dest="grpo_steps")
+    # item 4: correctness->latency GRPO curriculum (two GRPO phases). Default ON
+    # for the full best-in-world run; --no-grpo-curriculum for a single-phase GRPO.
+    p.add_argument("--grpo-curriculum", dest="grpo_curriculum",
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="run a correctness phase then a latency phase of GRPO (default on)")
+    # item 1: seed for the authoritative registry train/held-out split ordering.
+    p.add_argument("--split-seed", type=int, default=0, dest="split_seed")
+    # item 2: iterative on-policy DPO + DAgger. >1 turns Stage-2 into the loop.
+    p.add_argument("--dpo-rounds", type=int, default=2, dest="dpo_rounds",
+                   help="rounds of iterative on-policy DPO (>1 enables the DAgger loop)")
+    p.add_argument("--dagger-n", type=int, default=16, dest="dagger_n",
+                   help="policy failures to mine + repair per task per DAgger round")
+    # item 3: evolutionary datagen stage (spliced after datagen when --evolve is set).
+    p.add_argument("--evolve", action="store_true",
+                   help="run the evolutionary datagen stage (D-MAB + MAP-Elites) after datagen")
+    p.add_argument("--evolve-generations", type=int, default=4, dest="evolve_generations")
     p.add_argument("--soup-out", default="runs/soup", dest="soup_out")
     p.add_argument("--eval-budget", type=int, default=5, dest="eval_budget")
     return p

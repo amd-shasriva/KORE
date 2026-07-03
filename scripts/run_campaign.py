@@ -157,14 +157,13 @@ def _full_ft(ctx) -> bool:
 def _stage_supports_launcher(stage: str) -> bool:
     """True iff ``python -m kore.policy.<stage> <config.json>`` reads a JSON config.
 
-    ``sft``/``dpo``/``grpo`` ship that JSON ``__main__`` (detected via their
-    ``<stage>_config_from_dict`` builder), so ``--full-ft`` shells each out to the
-    FSDP launcher for real full-parameter sharded training. ``midtrain`` is owned
-    by a sibling track and does NOT yet accept a JSON config positional (its
-    ``-m`` entry parses ``--flags``), so full-FT midtrain falls back to in-process
-    with a LOUD warning. Detecting via the builder means a stage flips ON
+    All four training stages — ``midtrain``/``sft``/``dpo``/``grpo`` — ship that
+    JSON ``__main__`` (detected via their ``<stage>_config_from_dict`` builder), so
+    ``--full-ft`` shells each out to the FSDP launcher for real full-parameter
+    sharded training. Detecting via the builder means a stage flips ON
     automatically — and the campaign starts shelling it out — the moment its entry
-    ships (no campaign change needed).
+    ships (no campaign change needed), and never silently degrades if one is
+    absent.
     """
     try:
         mod = importlib.import_module(f"kore.policy.{stage}")
@@ -202,22 +201,20 @@ def _launch_distributed(ctx, stage: str, overrides: dict, *, run_name: str | Non
 def _warn_inprocess_fullft(stage: str) -> None:
     """LOUD warning: full-FT for a stage whose FSDP JSON entry isn't shipped yet.
 
-    ``midtrain`` is owned by a sibling track and does not yet expose a
-    ``-m kore.policy.midtrain <config.json>`` JSON entry (its ``-m`` entry parses
-    ``--flags``), so the campaign cannot shell it out to the FSDP launcher. It
-    runs IN-PROCESS instead — which cannot truly full-FT a 14B (single-process
-    ``device_map`` / mid-train's own deferral) — and says so, rather than silently
-    degrading. This resolves automatically once the sibling ships the JSON entry
-    (see docs/DISTRIBUTED.md). ``sft``/``dpo``/``grpo`` already ship the entry, so
-    they never hit this path.
+    Safety net only: all four training stages (``midtrain``/``sft``/``dpo``/``grpo``)
+    ship a ``-m kore.policy.<stage> <config.json>`` JSON entry today, so the
+    campaign shells each out to the FSDP launcher and this path is not reached. It
+    exists so that if an entry were ever removed the campaign says so LOUDLY and
+    runs in-process (which cannot truly full-FT a 14B) rather than silently
+    degrading. See docs/DISTRIBUTED.md#full-ft-per-stage-status.
     """
     _log(stage, f"WARNING: --full-ft for '{stage}' is NOT orchestrated via the campaign's "
-                f"one-command FSDP launcher yet: kore.policy.{stage} has no "
-                f"`-m kore.policy.{stage} <config.json>` JSON entrypoint (owned by a sibling "
-                f"track). Running IN-PROCESS with distributed=True set on the config — this "
+                f"one-command FSDP launcher: kore.policy.{stage} has no "
+                f"`-m kore.policy.{stage} <config.json>` JSON entrypoint. "
+                f"Running IN-PROCESS with distributed=True set on the config — this "
                 f"will NOT shard and cannot full-FT a 14B. See "
                 f"docs/DISTRIBUTED.md#full-ft-per-stage-status for the exact status + the "
-                f"manual sharded launch until the entry lands.")
+                f"manual sharded launch.")
 
 
 # --------------------------------------------------------------------------- #
@@ -814,9 +811,9 @@ def _stage_midtrain(ctx):
     """Stage-0: build the ROCm/HIP/Triton corpus (if missing) then continued-pretrain.
 
     The trained checkpoint is threaded in as the base for Stage-1 SFT via
-    ``ctx["midtrain_ckpt"]`` (see ``_stage_sft``). Honors --lora/--full-ft; the
-    locked full-FT recipe of a 14B needs a sharded multi-GPU launch (the trainer
-    defers to the distributed launcher — see docs/DISTRIBUTED.md).
+    ctx["midtrain_ckpt"] (see ``_stage_sft``). Honors --lora/--full-ft; the locked
+    full-FT recipe of a 14B is shelled out to the FSDP launcher under the hood
+    (one command), exactly like sft/dpo/grpo (see docs/DISTRIBUTED.md).
     """
     if ctx["dry"]:
         _log("midtrain", "would build the ROCm/HIP/Triton corpus (build_midtrain_corpus: "

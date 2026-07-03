@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from kore.obs import get_logger, gpu_mem_snapshot
-from kore.policy.configs import MidTrainConfig
+from kore.policy.configs import MidTrainConfig, build_fsdp_kwargs, fsdp_enabled
 
 log = get_logger("policy.midtrain")
 
@@ -89,21 +89,36 @@ def build_launch_command(config: MidTrainConfig, corpus_path: str,
 
 
 def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
-    """Single-process continued pretraining (LoRA or single-GPU full-FT smoke)."""
+    """Continued pretraining in the current process.
+
+    Handles three regimes with one code path (mirrors ``sft.train_sft``):
+      * **FSDP full-FT** — reached under ``accelerate launch`` (the campaign shells
+        out here for ``--full-ft``). ``device_map`` is INCOMPATIBLE with FSDP
+        (accelerate owns placement), so the model is loaded plain and the Trainer
+        wraps it via ``fsdp``/``fsdp_config``.
+      * **LoRA** / **single-GPU full-FT smoke** — keep the legacy
+        ``device_map="auto"`` path unchanged.
+    """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
     from trl import SFTConfig as TRLSFTConfig
     from trl import SFTTrainer
 
+    use_fsdp = fsdp_enabled(config)
+    fsdp_kwargs = build_fsdp_kwargs(config)
+
     tok = AutoTokenizer.from_pretrained(config.model_id)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        config.model_id, torch_dtype=torch.bfloat16, device_map="auto")
+    model_kwargs = {"torch_dtype": torch.bfloat16}
+    if not use_fsdp:
+        model_kwargs["device_map"] = "auto"
+    model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
 
     ds = load_midtrain_dataset(Path(corpus_path))
     log.info("midtrain: corpus loaded", corpus=str(corpus_path), model=config.model_id,
              use_lora=bool(config.use_lora), epochs=config.num_train_epochs,
+             distributed=bool(getattr(config, "distributed", False)), fsdp=bool(fsdp_kwargs),
              n_docs=len(ds), max_seq_length=config.max_seq_length)
 
     # Honor the recipe: full-FT (use_lora=False) or a LoRA adapter for smoke.
@@ -114,6 +129,12 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
             r=32, lora_alpha=64, lora_dropout=0.05, task_type="CAUSAL_LM",
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                             "gate_proj", "up_proj", "down_proj"])
+
+    # Under FSDP full_shard, activation checkpointing is routed through
+    # fsdp_config (see build_fsdp_kwargs); enabling TrainingArguments'
+    # gradient_checkpointing on top adds a redundant AllGather (HF warns), so we
+    # let FSDP own it there and only set it on the non-FSDP path.
+    grad_ckpt = config.gradient_checkpointing and not use_fsdp
 
     # Plain-text completion mode: SFTTrainer trains the LM objective over the
     # ``text`` field (no chat template / no completion-only masking).
@@ -127,12 +148,13 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
         warmup_ratio=config.warmup_ratio,
         max_length=config.max_seq_length,
         bf16=bool(config.bf16),
-        gradient_checkpointing=config.gradient_checkpointing,
+        gradient_checkpointing=grad_ckpt,
         dataset_text_field="text",
         packing=True,
         logging_steps=10,
         save_steps=200,
         report_to=[],
+        **fsdp_kwargs,
     )
 
     class _ObsCallback(TrainerCallback):
@@ -168,24 +190,39 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
 def train_midtrain(config: MidTrainConfig, corpus_path: Optional[str] = None) -> str:
     """Continued-pretrain the base on the ROCm/HIP/Triton corpus.
 
-    Full-FT (the locked recipe) with ``config.distributed`` set defers to the
-    sharded multi-GPU launcher (returns ``output_dir`` after logging the launch
-    command); LoRA or a single-GPU full-FT smoke runs in-process. Returns the
-    output checkpoint dir, which the campaign threads in as the SFT base.
+    Full-parameter FSDP sharding for a 14B is driven by the campaign, which shells
+    out to ``scripts/launch_distributed.sh midtrain <config.json>`` (→
+    ``accelerate launch -m kore.policy.midtrain <config.json>``). Under that
+    launcher this function runs :func:`_train_single_process`, which takes the
+    FSDP path (``device_map`` disabled, ``fsdp``/``fsdp_config`` set) whenever
+    :func:`fsdp_enabled` holds. LoRA / single-GPU smoke runs in-process the same
+    way. Returns the output checkpoint dir, which the campaign threads in as the
+    SFT base.
     """
     corpus = str(corpus_path or config.corpus_path)
     if not Path(corpus).exists():
         raise FileNotFoundError(f"midtrain corpus not found: {corpus} "
                                 "(build it with build_midtrain_corpus first)")
-
-    distributed = bool(getattr(config, "distributed", False))
-    if distributed and not config.use_lora:
-        cmd = build_launch_command(config, corpus)
-        log.info("midtrain: full-FT requires a sharded multi-GPU launch; deferring "
-                 "to the distributed launcher (see docs/DISTRIBUTED.md)",
-                 launch=" ".join(cmd), out=config.output_dir)
-        return config.output_dir
     return _train_single_process(config, corpus)
+
+
+# --------------------------------------------------------------------------- #
+# Distributed entry: `python -m kore.policy.midtrain <config.json>`
+#
+# Used by scripts/launch_distributed.sh under `accelerate launch` (the campaign
+# shells out here for --full-ft, exactly like sft/dpo/grpo). Pure-stdlib JSON
+# parsing (no torch at import time); the heavy trainer is only touched when
+# _train_single_process() runs. The JSON is a flat map of MidTrainConfig fields
+# (incl. the DistributedMixin FSDP knobs). A legacy `--model-id ...` flag form is
+# still accepted for the hand-rolled launch documented in docs/DISTRIBUTED.md.
+# --------------------------------------------------------------------------- #
+def midtrain_config_from_dict(d: dict) -> MidTrainConfig:
+    """Build a :class:`MidTrainConfig` from a plain JSON dict.
+
+    Presence of this builder is what the campaign's ``_stage_supports_launcher``
+    detects to route ``--full-ft`` midtrain through the FSDP launcher.
+    """
+    return MidTrainConfig(**dict(d))
 
 
 def _build_argparser():
@@ -203,16 +240,39 @@ def _build_argparser():
 
 
 def main(argv: Optional[list[str]] = None) -> str:
-    """Distributed-launcher entry: ``python -m kore.policy.midtrain --model-id ...``."""
+    """Legacy flag entry: ``python -m kore.policy.midtrain --model-id ...``.
+
+    Full-FT under this path defaults ``distributed=True`` so it takes the FSDP
+    branch of :func:`_train_single_process` when run under ``accelerate launch``.
+    """
     args = _build_argparser().parse_args(argv)
     cfg = MidTrainConfig(
         model_id=args.model_id, corpus_path=args.corpus_path,
         output_dir=args.output_dir, learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs, max_seq_length=args.max_seq_length,
-        use_lora=args.use_lora)
-    # Reached under an active distributed launcher, so run in-process here.
+        use_lora=args.use_lora, distributed=not args.use_lora)
     return _train_single_process(cfg, cfg.corpus_path)
 
 
+def _main(argv: Optional[list[str]] = None) -> int:
+    import sys
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # JSON-config form (what scripts/launch_distributed.sh / the campaign invoke):
+    # a single positional pointing at a `.json` file.
+    if len(argv) == 1 and argv[0].endswith(".json"):
+        raw = json.loads(Path(argv[0]).read_text())
+        # Launched via accelerate/FSDP -> default to distributed full-FT unless
+        # the config explicitly opts out.
+        raw.setdefault("distributed", True)
+        cfg = midtrain_config_from_dict(raw)
+        out = _train_single_process(cfg, cfg.corpus_path)
+        print(f"[midtrain] -> {out}")
+        return 0
+    # Legacy flag form.
+    print(main(argv))
+    return 0
+
+
 if __name__ == "__main__":
-    print(main())
+    raise SystemExit(_main())

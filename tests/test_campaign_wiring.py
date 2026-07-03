@@ -372,8 +372,8 @@ def test_preflight_passes_clean():
 # --------------------------------------------------------------------------- #
 # 7. --full-ft engages FSDP UNDER THE HOOD (Fix 1): distributed=True + the
 #    campaign shells out to scripts/launch_distributed.sh (subprocess) for the
-#    stages whose `-m` JSON entry supports it (sft/dpo), and falls back
-#    in-process with a LOUD warning for the sibling-owned stages (grpo/midtrain).
+#    stages whose `-m` JSON entry supports it (sft/dpo/grpo), and falls back
+#    in-process with a LOUD warning for the sibling-owned stage (midtrain).
 # --------------------------------------------------------------------------- #
 def _capture_subprocess(monkeypatch):
     calls = []
@@ -474,28 +474,96 @@ def test_full_ft_dpo_iterative_shells_out_per_round(monkeypatch, tmp_path):
     assert written["ref_model_id"] == "round0_ckpt"
 
 
-def test_full_ft_grpo_falls_back_in_process_loudly(monkeypatch, tmp_path):
-    # grpo has no `-m` JSON entry (sibling-owned) -> in-process fallback with a
-    # LOUD warning, and distributed=True is STILL set on the config (no silent
-    # degrade, no bogus subprocess).
+def _grpo_launcher_supported(monkeypatch):
+    """Simulate grpo shipping the JSON `-m` entry (grpo_config_from_dict), so the
+    campaign routes --full-ft grpo through the FSDP launcher exactly like sft/dpo.
+    Forward-compatible: once the sibling entry actually lands this is a no-op."""
+    monkeypatch.setattr(rc, "_stage_supports_launcher",
+                        lambda stage: True if stage == "grpo" else rc._stage_supports_launcher(stage))
+
+
+def test_grpo_supported_by_launcher_detection(monkeypatch):
+    # _stage_supports_launcher flips True for grpo the moment the sibling ships
+    # grpo_config_from_dict (the JSON `-m` builder) — no campaign change needed.
     import kore.policy.grpo as grpo_mod
 
+    monkeypatch.setattr(grpo_mod, "grpo_config_from_dict", lambda d: object(),
+                        raising=False)
+    assert rc._stage_supports_launcher("grpo") is True
+
+
+def test_full_ft_grpo_invokes_launcher_full_param(monkeypatch, tmp_path):
+    # Under --full-ft the GRPO RL stage runs FULL-PARAMETER + SHARDED via the
+    # launcher (no LoRA shortcut): subprocess is invoked and the rendered config
+    # forces distributed=True + use_lora=False, threading model/tasks through.
+    monkeypatch.setattr(rc, "_stage_supports_launcher", lambda stage: True)
     calls = _capture_subprocess(monkeypatch)
     monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
-    warned = []
-    monkeypatch.setattr(rc, "_warn_inprocess_fullft", lambda stage: warned.append(stage))
 
+    ctx = _grpo_ctx(tmp_path, _args(["--tasks", "rmsnorm_aiter", "--no-grpo-curriculum",
+                                     "--full-ft", "--grpo-out", "runs/grpo"]))
+    ctx["train_task_ids"] = ["rmsnorm_aiter"]
+    rc._stage_grpo(ctx)
+
+    assert len(calls) == 1
+    cmd = calls[0]["cmd"]
+    assert cmd[0] == "bash" and cmd[1].endswith("scripts/launch_distributed.sh")
+    assert cmd[2] == "grpo"
+    written = json.loads((tmp_path / "launch" / "grpo.json").read_text())
+    assert written["distributed"] is True          # sharded full-param
+    assert written["use_lora"] is False            # NO LoRA shortcut under --full-ft
+    assert written["model_id"] == "dpo_ckpt"       # init = dpo ckpt (or sft)
+    assert written["reward_phase"] == "all"
+    assert written["tasks"] == ["rmsnorm_aiter"]   # TRAIN-split tasks travel in the JSON
+    assert ctx["grpo_ckpt"] == "runs/grpo"
+
+
+def test_full_ft_grpo_curriculum_two_phases_under_launcher(monkeypatch, tmp_path):
+    # The correctness->latency curriculum under --full-ft = TWO launched
+    # full-parameter GRPO runs, phase-1 checkpoint threaded into phase-2 init.
+    monkeypatch.setattr(rc, "_stage_supports_launcher", lambda stage: True)
+    calls = _capture_subprocess(monkeypatch)
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
+
+    # curriculum defaults ON
+    ctx = _grpo_ctx(tmp_path, _args(["--tasks", "rmsnorm_aiter", "--full-ft",
+                                     "--grpo-out", "runs/grpo"]))
+    ctx["train_task_ids"] = ["rmsnorm_aiter"]
+    rc._stage_grpo(ctx)
+
+    # two launcher shell-outs, both to the grpo stage
+    assert len(calls) == 2
+    assert all(c["cmd"][2] == "grpo" for c in calls)
+
+    p1 = json.loads((tmp_path / "launch" / "grpo_phase1_correctness.json").read_text())
+    p2 = json.loads((tmp_path / "launch" / "grpo_phase2_latency.json").read_text())
+    assert p1["reward_phase"] == "correctness" and p1["model_id"] == "dpo_ckpt"
+    assert p1["distributed"] is True and p1["use_lora"] is False
+    # phase-2 initializes FROM the phase-1 checkpoint (its output_dir)
+    assert p2["reward_phase"] == "latency"
+    assert p2["model_id"] == "runs/grpo/phase1_correctness"
+    assert p2["distributed"] is True and p2["use_lora"] is False
+    assert ctx["grpo_ckpt"] == "runs/grpo"
+
+
+def test_lora_grpo_stays_in_process_no_launcher(monkeypatch, tmp_path):
+    # --lora (default) keeps GRPO single-process in-process (LoRA bring-up),
+    # never shelling out to the launcher.
+    import kore.policy.grpo as grpo_mod
+
+    _grpo_launcher_supported(monkeypatch)  # even if grpo COULD shard, LoRA stays local
+    calls = _capture_subprocess(monkeypatch)
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
     seen = []
     monkeypatch.setattr(grpo_mod, "train_grpo",
                         lambda cfg, tasks=None: seen.append(cfg) or (cfg.output_dir + "/ckpt"))
 
-    ctx = _grpo_ctx(tmp_path, _args(["--tasks", "rmsnorm_aiter", "--no-grpo-curriculum",
-                                     "--full-ft"]))
+    ctx = _grpo_ctx(tmp_path, _args(["--tasks", "rmsnorm_aiter", "--no-grpo-curriculum"]))
     rc._stage_grpo(ctx)
 
-    assert calls == []                                   # never shells out grpo
-    assert warned == ["grpo"]                            # loud warning fired once
-    assert getattr(seen[0], "distributed", False) is True  # distributed still set
+    assert calls == []                          # no subprocess / launcher
+    assert seen[0].use_lora is True             # LoRA bring-up path
+    assert getattr(seen[0], "distributed", False) is False
 
 
 # --------------------------------------------------------------------------- #

@@ -26,7 +26,12 @@ from pathlib import Path
 from typing import Optional
 
 from kore.obs import get_logger, gpu_mem_snapshot
-from kore.policy.configs import MidTrainConfig, build_fsdp_kwargs, fsdp_enabled
+from kore.policy.configs import (
+    MidTrainConfig,
+    build_fsdp_kwargs,
+    fsdp_enabled,
+    preferred_attn_impl,
+)
 
 log = get_logger("policy.midtrain")
 
@@ -110,10 +115,17 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
     tok = AutoTokenizer.from_pretrained(config.model_id)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model_kwargs = {"torch_dtype": torch.bfloat16}
+    model_kwargs = {"torch_dtype": torch.bfloat16,
+                    "attn_implementation": preferred_attn_impl()}
     if not use_fsdp:
         model_kwargs["device_map"] = "auto"
     model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
+    # Activation checkpointing (routed through fsdp_config) is INCOMPATIBLE with
+    # the KV cache: the cache changes the tensor count between forward and
+    # recompute -> torch.utils.checkpoint CheckpointError. HF's Trainer only
+    # auto-disables use_cache when TrainingArguments.gradient_checkpointing is set,
+    # which we turn OFF under FSDP (FSDP owns checkpointing), so disable it here.
+    model.config.use_cache = False
 
     ds = load_midtrain_dataset(Path(corpus_path))
     log.info("midtrain: corpus loaded", corpus=str(corpus_path), model=config.model_id,
@@ -130,11 +142,10 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                             "gate_proj", "up_proj", "down_proj"])
 
-    # Under FSDP full_shard, activation checkpointing is routed through
-    # fsdp_config (see build_fsdp_kwargs); enabling TrainingArguments'
-    # gradient_checkpointing on top adds a redundant AllGather (HF warns), so we
-    # let FSDP own it there and only set it on the non-FSDP path.
-    grad_ckpt = config.gradient_checkpointing and not use_fsdp
+    # Activation checkpointing via HF's layer-internal, NON-REENTRANT path (the
+    # FSDP-safe one). It is NOT routed through fsdp_config (that external wrapper
+    # mismatches saved-tensor counts on an FSDP1/use_orig_params unit).
+    grad_ckpt = bool(config.gradient_checkpointing)
 
     # Plain-text completion mode: SFTTrainer trains the LM objective over the
     # ``text`` field (no chat template / no completion-only masking).
@@ -149,6 +160,7 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
         max_length=config.max_seq_length,
         bf16=bool(config.bf16),
         gradient_checkpointing=grad_ckpt,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         dataset_text_field="text",
         packing=True,
         logging_steps=10,

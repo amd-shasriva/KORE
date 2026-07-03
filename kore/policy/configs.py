@@ -375,9 +375,12 @@ def build_fsdp_kwargs(config) -> dict:
         {"fsdp": "<sharding string>", "fsdp_config": { ... }}
 
     Notes:
-      * Activation (gradient) checkpointing is routed through ``fsdp_config``
-        rather than ``TrainingArguments.gradient_checkpointing`` — under
-        ``full_shard`` the latter adds a redundant AllGather (HF warns about it).
+      * Activation (gradient) checkpointing is enabled by the Trainer stage via
+        HF's ``TrainingArguments.gradient_checkpointing`` +
+        ``gradient_checkpointing_kwargs={"use_reentrant": False}`` (layer-internal,
+        FSDP-safe) — NOT via ``fsdp_config``. The FSDP-plugin (external
+        checkpoint_wrapper) path mismatches saved-tensor counts on an
+        FSDP1/``use_orig_params`` unit and raises ``CheckpointError``.
       * ``cpu_ram_efficient_loading`` + ``sync_module_states`` let rank-0 stream
         the checkpoint and broadcast, which is what makes 32B/70B fit.
     """
@@ -391,18 +394,52 @@ def build_fsdp_kwargs(config) -> dict:
         fsdp_str = f"{fsdp_str} offload"
     fsdp_config = {
         "transformer_layer_cls_to_wrap": [layer_cls],
-        "activation_checkpointing": bool(getattr(config, "gradient_checkpointing", False)),
+        # NOTE: activation checkpointing is intentionally NOT set here. Driving it
+        # from the FSDP plugin (accelerate's external checkpoint_wrapper) on an
+        # FSDP1 + use_orig_params unit mismatches the saved-tensor count between
+        # forward and recompute (torch.utils.checkpoint CheckpointError "different
+        # number of tensors ..."). Instead each Trainer stage enables HF's own
+        # layer-internal gradient checkpointing (use_reentrant=False), which wraps
+        # the decoder block's forward and is FSDP-safe. See build_fsdp_kwargs docs.
         "backward_prefetch": "backward_pre",
         "forward_prefetch": False,
         "use_orig_params": True,
         "sync_module_states": True,
         "cpu_ram_efficient_loading": True,
         "limit_all_gathers": True,
-        "state_dict_type": "SHARDED_STATE_DICT",
+        # FULL_STATE_DICT so ``trainer.save_model()`` consolidates a plain HF
+        # checkpoint that the NEXT stage loads with ``from_pretrained``
+        # (midtrain->sft->dpo->grpo->soup handoff) and that serving can load —
+        # matching GRPO's own save path. A sharded state dict is only reloadable
+        # under an identical FSDP mesh, which the cross-stage handoff is not. At
+        # 14B the rank-0 gather is cheap; for 32B/70B keep it consolidated too
+        # (cpu_ram_efficient_loading streams it) so the handoff never breaks.
+        "state_dict_type": "FULL_STATE_DICT",
     }
     if getattr(config, "fsdp_cpu_offload", False):
         fsdp_config["offload_params"] = True
     return {"fsdp": fsdp_str, "fsdp_config": fsdp_config}
+
+
+def preferred_attn_impl() -> str:
+    """Attention backend for training model loads (``from_pretrained``).
+
+    Prefer FlashAttention-2 when the ROCm ``flash_attn`` wheel is importable. This
+    is not just a speed/memory win: SDPA transparently switches between fused
+    kernels (flash / mem-efficient / math) depending on shape and free memory, and
+    that choice can differ between the checkpointed forward and its recomputation
+    (and across ranks), so the NON-REENTRANT activation checkpoint sees a DIFFERENT
+    saved-tensor count and raises ``CheckpointError`` (observed intermittently on
+    the 8-GPU FSDP full-FT path). FlashAttention-2 saves a FIXED tensor set on
+    every forward/recompute and on every rank, which makes gradient checkpointing
+    deterministic. Falls back to ``"sdpa"`` when the wheel is absent (e.g. CPU
+    tests never reach a real model load anyway).
+    """
+    try:
+        import flash_attn  # noqa: F401
+        return "flash_attention_2"
+    except Exception:  # noqa: BLE001 - any import problem -> safe SDPA fallback
+        return "sdpa"
 
 
 # --------------------------------------------------------------------------- #

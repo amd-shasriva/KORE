@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import Optional
 
 from kore.obs import get_logger, gpu_mem_snapshot
-from kore.policy.configs import LoRAConfig, SFTConfig, build_fsdp_kwargs, fsdp_enabled
+from kore.policy.configs import (
+    LoRAConfig,
+    SFTConfig,
+    build_fsdp_kwargs,
+    fsdp_enabled,
+    preferred_attn_impl,
+)
 
 log = get_logger("policy.sft")
 
@@ -100,10 +106,17 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
     tok = AutoTokenizer.from_pretrained(config.model_id)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model_kwargs = {"torch_dtype": torch.bfloat16}
+    model_kwargs = {"torch_dtype": torch.bfloat16,
+                    "attn_implementation": preferred_attn_impl()}
     if not use_fsdp:
         model_kwargs["device_map"] = "auto"
     model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
+    # Activation checkpointing (routed through fsdp_config) is INCOMPATIBLE with
+    # the KV cache: the cache changes the tensor count between forward and
+    # recompute -> torch.utils.checkpoint CheckpointError. HF's Trainer only
+    # auto-disables use_cache when TrainingArguments.gradient_checkpointing is set,
+    # which we turn OFF under FSDP (FSDP owns checkpointing), so disable it here.
+    model.config.use_cache = False
 
     ds = load_sft_dataset(dataset_path, repair_weight=config.repair_loss_weight)
     log.info("sft: dataset loaded", dataset=str(dataset_path), model=config.model_id,
@@ -119,11 +132,10 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
             lora_dropout=config.lora.lora_dropout,
             target_modules=list(config.lora.target_modules), task_type="CAUSAL_LM")
 
-    # Under FSDP full_shard, activation checkpointing is routed through
-    # fsdp_config (see build_fsdp_kwargs) — enabling TrainingArguments'
-    # gradient_checkpointing on top adds a redundant AllGather (HF warns), so we
-    # disable it here and let FSDP own it.
-    grad_ckpt = config.gradient_checkpointing and not use_fsdp
+    # Activation checkpointing via HF's layer-internal, NON-REENTRANT path (the
+    # FSDP-safe one). It is NOT routed through fsdp_config (that external wrapper
+    # mismatches saved-tensor counts on an FSDP1/use_orig_params unit).
+    grad_ckpt = bool(config.gradient_checkpointing)
 
     args = TRLSFTConfig(
         output_dir=config.output_dir,
@@ -136,6 +148,7 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
         max_length=config.max_seq_length,
         bf16=config.bf16,
         gradient_checkpointing=grad_ckpt,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         report_to=[],

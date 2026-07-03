@@ -733,12 +733,17 @@ def _train_grpo_fallback(config, tasks):
     # BEFORE any rollout, so the value prefilter actually reranks with the model.
     _activate_value_ranker(config)
     tok = AutoTokenizer.from_pretrained(config.model_id)
-    model_kwargs = {"torch_dtype": _model_dtype(config)}  # Fix 3: honor bf16
+    from kore.policy.configs import preferred_attn_impl
+    model_kwargs = {"torch_dtype": _model_dtype(config),  # Fix 3: honor bf16
+                    "attn_implementation": preferred_attn_impl()}
     if not use_fsdp:
         model_kwargs["device_map"] = "auto"
     model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
+    model.config.use_cache = False
     if getattr(config, "gradient_checkpointing", True):
-        model.gradient_checkpointing_enable()
+        # NON-REENTRANT layer-internal checkpointing (FSDP-safe; avoids the
+        # external-wrapper saved-tensor-count mismatch on FSDP1/use_orig_params).
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         model.enable_input_require_grads()  # critical for PEFT + grad-ckpt
 
     if config.use_lora:
@@ -1114,7 +1119,11 @@ def build_fsdp_plugin(config):
         auto_wrap_policy="transformer_based_wrap",
         transformer_cls_names_to_wrap=[layer_cls],
         cpu_offload=bool(getattr(config, "cpu_offload", False)),
-        activation_checkpointing=bool(getattr(config, "gradient_checkpointing", True)),
+        # Activation checkpointing is enabled on the MODEL (HF gradient_checkpointing,
+        # use_reentrant=False) BEFORE accelerator.prepare — NOT here. The FSDP
+        # plugin's external checkpoint_wrapper mismatches saved-tensor counts on an
+        # FSDP1/use_orig_params unit (torch.utils.checkpoint CheckpointError).
+        activation_checkpointing=False,
         use_orig_params=True,
         sync_module_states=True,
         cpu_ram_efficient_loading=True,
@@ -1349,9 +1358,15 @@ def _train_grpo_distributed(config, tasks):
     _activate_value_ranker(config)
     tok = AutoTokenizer.from_pretrained(config.model_id)
 
-    model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=_model_dtype(config))
+    from kore.policy.configs import preferred_attn_impl
+    model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=_model_dtype(config),
+                                                 attn_implementation=preferred_attn_impl())
+    model.config.use_cache = False
     if getattr(config, "gradient_checkpointing", True):
-        model.gradient_checkpointing_enable()
+        # NON-REENTRANT, layer-internal (FSDP-safe). NOT the FSDP-plugin's external
+        # checkpoint_wrapper, which mismatches saved-tensor counts on an
+        # FSDP1/use_orig_params unit (see build_grpo_fsdp_plugin / configs).
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         model.enable_input_require_grads()
     model.train()
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
@@ -1506,12 +1521,13 @@ def _load_ref_model(config):
     """
     from transformers import AutoModelForCausalLM
 
-    from kore.policy.configs import fsdp_enabled
+    from kore.policy.configs import fsdp_enabled, preferred_attn_impl
 
     ref_id = config.ref_checkpoint or config.model_id
     try:
         # Fix 3/4: honor bf16 and skip device_map under distributed FSDP.
-        ref_kwargs = {"torch_dtype": _model_dtype(config)}
+        ref_kwargs = {"torch_dtype": _model_dtype(config),
+                      "attn_implementation": preferred_attn_impl()}
         if not fsdp_enabled(config):
             ref_kwargs["device_map"] = "auto"
         ref = AutoModelForCausalLM.from_pretrained(ref_id, **ref_kwargs)

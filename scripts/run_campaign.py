@@ -1266,6 +1266,11 @@ def _retention_gate(ctx, *, stage, candidate, base):
     if ctx["dry"]:
         _log(stage, "would run retention gate (no general-bench regression vs base)")
         return
+    if not getattr(ctx["args"], "retention_gate", True):
+        _log(stage, "retention gate SKIPPED (--no-retention-gate) — for fast "
+                    "smoke/debug only; a real run MUST enforce it")
+        _emit_event(ctx, stage, "gate_skipped", 0.0, None)
+        return
 
     from kore.eval.gates import format_gate_report, retention_gate
     from kore.eval.retention import run_retention_suite
@@ -1319,6 +1324,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="use LoRA on SFT/DPO/GRPO (default; fits the 14B validation run)")
     p.add_argument("--full-ft", dest="lora", action="store_false",
                    help="full fine-tune instead of LoRA (needs an FSDP/DeepSpeed launch)")
+    p.add_argument("--no-retention-gate", dest="retention_gate", action="store_false",
+                   default=True,
+                   help="skip the per-stage retention gates (faster smoke/debug ONLY; "
+                        "a real run MUST enforce them to catch general-ability regressions)")
     p.add_argument("--data-root", default="data", dest="data_root")
     p.add_argument("--teacher", default="claude")
     p.add_argument("--model-teacher", default=None, dest="model_teacher")

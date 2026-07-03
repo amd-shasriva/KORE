@@ -52,24 +52,23 @@ the moment the entry ships — no campaign change needed):
 
 | Stage | JSON `-m` entry | `--full-ft` behavior |
 |-------|-----------------|----------------------|
-| `midtrain` | ⏳ (sibling-owned) | Runs **in-process with a LOUD warning** — `kore.policy.midtrain`'s `-m` entry parses `--flags`, not a JSON config, and its full-FT path currently defers, so no sharded checkpoint is produced. `distributed=true` is still set. Becomes one-command full-param sharded automatically once its JSON entry lands. |
+| `midtrain` | ✅ `kore.policy.midtrain` | Shells out to the FSDP launcher — **real full-parameter sharded** (ZeRO-3/FSDP) continued-pretrain. The base model / corpus / output_dir travel in the JSON. |
 | `sft`  | ✅ `kore.policy.sft`  | Shells out to the FSDP launcher — **real full-parameter sharded** (ZeRO-3/FSDP). |
 | `dpo`  | ✅ `kore.policy.dpo`  | Shells out per pass/round to the FSDP launcher — **full-parameter sharded** (IPO + refreshed ref travel in the JSON). |
 | `grpo` | ✅ `kore.policy.grpo` | Shells out to the FSDP launcher — **full-parameter sharded** GRPO. The correctness→latency curriculum runs as **two launched full-parameter GRPO runs** (phase-1 checkpoint → phase-2 init); the train-split task ids + Kevin/anti-collapse levers travel in the JSON. **There is no LoRA shortcut for the RL stage under `--full-ft`.** |
 
 So under `--full-ft` **all four training stages — `midtrain` / `sft` / `dpo` /
-`grpo` — are full-parameter sharded via the one command** (`midtrain` lands the
-moment its sibling JSON entry ships; the other three are live today).
+`grpo` — are full-parameter sharded via the one command**, live today.
 
-This is deliberate: the campaign **never silently degrades**. For any stage whose
-JSON `-m` entry is not yet present it prints a loud warning naming the missing
-entry and pointing here, rather than pretending to shard — and it **never** falls
-back to LoRA for a `--full-ft` RL run. `--lora` remains the single-process LoRA
-bring-up path (including GRPO LoRA), which needs no launcher.
+This is deliberate: the campaign **never silently degrades**. Each training
+stage's JSON `-m` entry is detected via its `<stage>_config_from_dict` builder, so
+the campaign shells out to the FSDP launcher automatically; if an entry were ever
+missing it would print a loud warning naming it (rather than pretending to shard)
+and it **never** falls back to LoRA for a `--full-ft` run. `--lora` remains the
+single-process LoRA bring-up path (including GRPO LoRA), which needs no launcher.
 
-To full-FT `midtrain` manually until its JSON entry lands, run the sharded
-launcher directly with the shipped config (this is the exact command the campaign
-will issue once the entry lands):
+To full-FT `midtrain` by hand (the exact command the campaign issues under the
+hood), run the sharded launcher directly with the shipped config:
 
 ```bash
 scripts/launch_distributed.sh midtrain configs/midtrain_14b_full.json

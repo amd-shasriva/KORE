@@ -632,21 +632,12 @@ def test_grpo_backend_flag_removed():
 
 
 # --------------------------------------------------------------------------- #
-# 10. Full-FT midtrain: distributed set, in-process fallback (no launcher entry)
+# 10. Full-FT midtrain: shells out to the FSDP launcher (JSON `-m` entry now
+#     ships via midtrain_config_from_dict) — real full-parameter sharded.
 # --------------------------------------------------------------------------- #
-def test_full_ft_midtrain_sets_distributed_in_process(monkeypatch, tmp_path):
-    import kore.policy.midtrain as mt
-
+def test_full_ft_midtrain_invokes_launcher_full_param(monkeypatch, tmp_path):
     calls = _capture_subprocess(monkeypatch)
     monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
-    seen = {}
-
-    def fake_train(cfg, corpus_path=None):
-        seen["distributed"] = getattr(cfg, "distributed", False)
-        seen["use_lora"] = cfg.use_lora
-        return "midtrain_ckpt"
-
-    monkeypatch.setattr(mt, "train_midtrain", fake_train)
 
     # pre-create the corpus so the (heavy) corpus build is skipped.
     corpus = tmp_path / "midtrain" / "corpus.jsonl"
@@ -658,7 +649,44 @@ def test_full_ft_midtrain_sets_distributed_in_process(monkeypatch, tmp_path):
            "tasks": [get_task("rmsnorm_aiter")], "train_tasks": [get_task("rmsnorm_aiter")]}
     rc._stage_midtrain(ctx)
 
-    assert seen["distributed"] is True     # contract: distributed on the config
-    assert seen["use_lora"] is False       # full-FT
-    assert calls == []                     # midtrain has no launcher entry -> in-process
+    # the launcher was invoked via subprocess, NOT the in-process trainer.
+    assert len(calls) == 1
+    cmd = calls[0]["cmd"]
+    assert cmd[0] == "bash" and cmd[1].endswith("scripts/launch_distributed.sh")
+    assert cmd[2] == "midtrain"
+    assert calls[0]["check"] is True
+    # the rendered config forces distributed=True + use_lora=False and threads the
+    # run's dynamic paths (base model, corpus, output_dir).
+    written = json.loads((tmp_path / "launch" / "midtrain.json").read_text())
+    assert written["distributed"] is True
+    assert written["use_lora"] is False
+    assert written["model_id"] == "base_model"
+    assert written["corpus_path"].endswith("midtrain/corpus.jsonl")
+    assert ctx["midtrain_ckpt"] == "runs/midtrain"
+
+
+def test_lora_midtrain_stays_in_process_no_launcher(monkeypatch, tmp_path):
+    # the DEFAULT (LoRA) path never shells out — pure single-process one command.
+    import kore.policy.midtrain as mt
+
+    calls = _capture_subprocess(monkeypatch)
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
+    seen = {}
+
+    def fake_train(cfg, corpus_path=None):
+        seen["use_lora"] = cfg.use_lora
+        return "midtrain_ckpt"
+
+    monkeypatch.setattr(mt, "train_midtrain", fake_train)
+    corpus = tmp_path / "midtrain" / "corpus.jsonl"
+    corpus.parent.mkdir(parents=True)
+    corpus.write_text('{"text": "x"}\n')
+
+    args = _args(["--tasks", "rmsnorm_aiter", "--midtrain-out", "runs/midtrain"])  # LoRA default
+    ctx = {"data_root": tmp_path, "args": args, "dry": False, "base": "base_model",
+           "tasks": [get_task("rmsnorm_aiter")], "train_tasks": [get_task("rmsnorm_aiter")]}
+    rc._stage_midtrain(ctx)
+
+    assert seen["use_lora"] is True
+    assert calls == []                     # LoRA -> in-process, no launcher
     assert ctx["midtrain_ckpt"] == "midtrain_ckpt"

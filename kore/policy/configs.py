@@ -278,8 +278,14 @@ class GRPOConfig(DistributedMixin):
 
 
 @dataclass
-class MidTrainConfig:
-    """Stage-0 continued pretraining on the ROCm/HIP/Triton corpus."""
+class MidTrainConfig(DistributedMixin):
+    """Stage-0 continued pretraining on the ROCm/HIP/Triton corpus.
+
+    Inherits the FSDP/distributed full-FT knobs (:class:`DistributedMixin`) so the
+    locked full-FT recipe shards across GPUs exactly like SFT/DPO/GRPO when the
+    campaign shells it out under ``accelerate launch`` (``distributed=True`` +
+    ``use_lora=False``). LoRA / single-GPU smoke runs ignore them.
+    """
 
     model_id: str = MODEL_14B
     corpus_path: str = "data/midtrain/corpus.jsonl"

@@ -82,8 +82,10 @@ def build_trl_dpo_kwargs(config) -> dict:
     field) still works — set them as attributes (per round, alongside a refreshed
     ``ref_model_id``) for iterative DPO. FSDP kwargs are merged for the
     distributed full-FT path; activation checkpointing uses HF's layer-internal
-    NON-REENTRANT path (FSDP-safe), NOT ``fsdp_config`` (the external wrapper
-    mismatches saved-tensor counts on an FSDP1/use_orig_params unit)."""
+    REENTRANT path (robust to the intermittent flash_attention_2 -> SDPA per-worker
+    downgrade; reentrant skips the saved-tensor-count check that NON-REENTRANT does
+    and that raises CheckpointError when SDPA swaps kernels), NOT ``fsdp_config``
+    (the external wrapper is the other source of the mismatch on FSDP1)."""
     use_fsdp = fsdp_enabled(config)
     kwargs = dict(
         output_dir=config.output_dir,
@@ -98,7 +100,7 @@ def build_trl_dpo_kwargs(config) -> dict:
         max_prompt_length=config.max_prompt_length,
         bf16=config.bf16,
         gradient_checkpointing=bool(config.gradient_checkpointing),
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing_kwargs={"use_reentrant": True},
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         seed=config.seed,

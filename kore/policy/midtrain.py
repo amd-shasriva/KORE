@@ -142,9 +142,15 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                             "gate_proj", "up_proj", "down_proj"])
 
-    # Activation checkpointing via HF's layer-internal, NON-REENTRANT path (the
-    # FSDP-safe one). It is NOT routed through fsdp_config (that external wrapper
-    # mismatches saved-tensor counts on an FSDP1/use_orig_params unit).
+    # Activation checkpointing via HF's layer-internal path with REENTRANT
+    # checkpointing. Rationale: `attn_implementation="flash_attention_2"` can
+    # intermittently downgrade to SDPA per-worker (a ROCm flash-availability race
+    # across the 8 FSDP ranks), and SDPA switches fused kernels between the
+    # checkpointed forward and its recomputation -> the NON-REENTRANT checkpoint's
+    # saved-tensor-count check raises CheckpointError and kills the whole job.
+    # Reentrant checkpointing does NOT perform that count check, so it is robust to
+    # the backend swap. It is NOT routed through fsdp_config (that external wrapper
+    # is the other source of the mismatch on FSDP1/use_orig_params).
     grad_ckpt = bool(config.gradient_checkpointing)
 
     # Plain-text completion mode: SFTTrainer trains the LM objective over the
@@ -160,7 +166,7 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
         max_length=config.max_seq_length,
         bf16=bool(config.bf16),
         gradient_checkpointing=grad_ckpt,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing_kwargs={"use_reentrant": True},
         dataset_text_field="text",
         packing=True,
         logging_steps=10,

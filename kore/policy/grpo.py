@@ -741,9 +741,10 @@ def _train_grpo_fallback(config, tasks):
     model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
     model.config.use_cache = False
     if getattr(config, "gradient_checkpointing", True):
-        # NON-REENTRANT layer-internal checkpointing (FSDP-safe; avoids the
-        # external-wrapper saved-tensor-count mismatch on FSDP1/use_orig_params).
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        # REENTRANT layer-internal checkpointing: robust to the intermittent
+        # flash_attention_2 -> SDPA per-worker downgrade (reentrant skips the
+        # saved-tensor-count check that raises CheckpointError under kernel swaps).
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
         model.enable_input_require_grads()  # critical for PEFT + grad-ckpt
 
     if config.use_lora:
@@ -1363,10 +1364,12 @@ def _train_grpo_distributed(config, tasks):
                                                  attn_implementation=preferred_attn_impl())
     model.config.use_cache = False
     if getattr(config, "gradient_checkpointing", True):
-        # NON-REENTRANT, layer-internal (FSDP-safe). NOT the FSDP-plugin's external
-        # checkpoint_wrapper, which mismatches saved-tensor counts on an
-        # FSDP1/use_orig_params unit (see build_grpo_fsdp_plugin / configs).
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        # REENTRANT, layer-internal. Robust to the intermittent flash_attention_2 ->
+        # SDPA per-worker downgrade (reentrant skips the saved-tensor-count check
+        # that NON-REENTRANT does and that raises CheckpointError when SDPA swaps
+        # fused kernels between forward/recompute). NOT the FSDP-plugin's external
+        # checkpoint_wrapper (see build_grpo_fsdp_plugin / configs).
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
         model.enable_input_require_grads()
     model.train()
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],

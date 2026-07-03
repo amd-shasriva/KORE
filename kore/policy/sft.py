@@ -132,9 +132,12 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
             lora_dropout=config.lora.lora_dropout,
             target_modules=list(config.lora.target_modules), task_type="CAUSAL_LM")
 
-    # Activation checkpointing via HF's layer-internal, NON-REENTRANT path (the
-    # FSDP-safe one). It is NOT routed through fsdp_config (that external wrapper
-    # mismatches saved-tensor counts on an FSDP1/use_orig_params unit).
+    # Activation checkpointing via HF's layer-internal path with REENTRANT
+    # checkpointing (robust to the intermittent flash_attention_2 -> SDPA per-worker
+    # downgrade: reentrant skips the saved-tensor-count check that NON-REENTRANT
+    # does, which otherwise raises CheckpointError when SDPA swaps fused kernels
+    # between forward and recompute). NOT routed through fsdp_config (the external
+    # wrapper is the other source of the mismatch on FSDP1/use_orig_params).
     grad_ckpt = bool(config.gradient_checkpointing)
 
     args = TRLSFTConfig(
@@ -148,7 +151,7 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
         max_length=config.max_seq_length,
         bf16=config.bf16,
         gradient_checkpointing=grad_ckpt,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing_kwargs={"use_reentrant": True},
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         report_to=[],

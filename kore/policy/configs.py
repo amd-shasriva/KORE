@@ -44,7 +44,7 @@ class LoRAConfig:
 
 @dataclass
 class DistributedMixin:
-    """FSDP / distributed full-FT knobs shared by SFT & DPO.
+    """FSDP / distributed full-FT knobs shared by SFT, DPO & GRPO.
 
     These only take effect for **full fine-tuning** (``use_lora=False``) that was
     launched as a multi-process job (via ``scripts/launch_distributed.sh`` /
@@ -130,8 +130,16 @@ class DPOConfig(DistributedMixin):
 
 
 @dataclass
-class GRPOConfig:
-    """Stage-3 multi-turn GRPO (Kevin recipe) with anti-collapse ladder."""
+class GRPOConfig(DistributedMixin):
+    """Stage-3 multi-turn GRPO (Kevin recipe) with anti-collapse ladder.
+
+    Inherits :class:`DistributedMixin` (``distributed`` / ``fsdp`` /
+    ``fsdp_transformer_layer_cls`` / ``fsdp_cpu_offload``) so a campaign can
+    request full-FT GRPO under the FSDP launcher, exactly like SFT/DPO. The
+    native single-process loop honors ``distributed`` by skipping
+    ``device_map="auto"`` (accelerate/FSDP owns placement); LoRA / single-GPU /
+    CPU runs keep the legacy ``device_map`` path untouched.
+    """
 
     model_id: str = MODEL_32B              # GRPO primary
     output_dir: str = "runs/grpo"
@@ -148,7 +156,10 @@ class GRPOConfig:
     per_turn_as_sample: bool = True
 
     # --- GRPO objective (DAPO clip-higher + importance ratio + multi-epoch) ---
-    kl_coef: float = 0.0                   # Kevin: KL = 0
+    # NB: ``kl_coef`` was REMOVED — the only KL/anchor the native loop applies is
+    # the k3 retention anchor ``ref_anchor_coef`` (see below); there was never a
+    # second, separate KL coefficient, and the step log used to mislabel the
+    # anchor as ``kl_coef``. Kevin's "KL = 0" is expressed by ``ref_anchor_coef``.
     clip_ratio_low: float = 0.2            # Clip-Higher lower bound (1 - 0.2)
     clip_ratio_high: float = 0.28          # Clip-Higher upper bound (1 + 0.28)
     adv_eps: float = 1e-6                  # group-normalization epsilon
@@ -156,24 +167,29 @@ class GRPOConfig:
 
     # --- Optimization (Kevin recipe) ---
     learning_rate: float = 2e-6            # Kevin: 2e-6
-    lr_scheduler_type: str = "constant"
-    warmup_ratio: float = 0.0
+    lr_scheduler_type: str = "constant"    # WIRED: torch LambdaLR (constant|linear|cosine)
+    warmup_ratio: float = 0.0              # WIRED: linear LR warmup over warmup_ratio*total_steps
     max_grad_norm: float = 0.5             # Kevin: grad-norm clip 0.5
-    per_device_train_batch_size: int = 1
-    gradient_accumulation_steps: int = 8
+    # NB: ``per_device_train_batch_size`` / ``gradient_accumulation_steps`` were
+    # REMOVED — the native loop uses an O(1-sample) MICRO-BATCHED backward that
+    # accumulates one grad term per rollout sample and steps once per PPO epoch,
+    # so a per-device batch size + a separate accumulation count are meaningless
+    # (accumulation is inherent, and the effective batch is the kept rollout set).
     total_steps: int = 500
-    max_prompt_length: int = 16384
+    max_prompt_length: int = 16384         # WIRED: left-truncate the rendered prompt to this many tokens
     max_response_length: int = 16384       # Kevin: 16384
-    bf16: bool = True
+    bf16: bool = True                      # WIRED: bf16 vs fp32 model dtype (was hardcoded)
     gradient_checkpointing: bool = True
 
     # --- Rollout sampling (Kevin recipe) ---
     temperature: float = 0.9               # Kevin: 0.9
-    top_p: float = 1.0
+    top_p: float = 1.0                     # WIRED: passed to model.generate
 
-    # --- Serving / parallelism ---
-    tensor_parallel_size: int = 4
-    rollout_backend: str = "vllm"          # "vllm" | "hf"
+    # NB: ``rollout_backend`` / ``tensor_parallel_size`` were REMOVED — KORE runs
+    # ONE self-contained in-process transformers+PEFT loop on local AMD GPUs.
+    # There is no vLLM rollout server and no tensor-parallel/distributed rollout
+    # path in this loop, so those flags implied capabilities that don't exist.
+    # (Distributed FULL-FT is handled by the FSDP fields from DistributedMixin.)
 
     use_lora: bool = True
     lora: LoRAConfig = field(default_factory=LoRAConfig)
@@ -232,8 +248,8 @@ class GRPOConfig:
     max_tool_turns: int = 8
 
     seed: int = 0
-    logging_steps: int = 1
-    save_steps: int = 50
+    logging_steps: int = 1                  # WIRED: emit the per-step metrics event every N steps
+    save_steps: int = 50                    # WIRED: write a periodic checkpoint every N steps
     report_to: str = "none"
 
 

@@ -440,3 +440,321 @@ def test_no_verl_symbols_remain():
     for sym in ("_train_grpo_verl", "build_verl_grpo_config", "_verl_available",
                 "kore_verl_reward", "_verl_hydra_overrides"):
         assert not hasattr(grpo, sym), f"{sym} should be removed"
+
+
+# --------------------------------------------------------------------------- #
+# Fix 1: value-model activation logs TRAINED vs heuristic ranker
+# --------------------------------------------------------------------------- #
+def test_activate_value_ranker_trained_vs_heuristic(monkeypatch, capsys):
+    import kore.value.rerank as rr
+
+    # A set path that loads -> the TRAINED model is installed & announced.
+    sentinel = object()
+    monkeypatch.setattr(rr, "load_default_model", lambda p: sentinel)
+    from kore.policy.configs import GRPOConfig
+
+    cfg = GRPOConfig(value_prefilter=True, value_model_path="runs/value/vm.pkl")
+    out = grpo._activate_value_ranker(cfg)
+    assert out is sentinel
+    assert "TRAINED value model loaded" in capsys.readouterr().out
+
+    # Unset path -> heuristic cold-start fallback (logged clearly, not silent).
+    cfg2 = GRPOConfig(value_prefilter=True, value_model_path=None)
+    assert grpo._activate_value_ranker(cfg2) is None
+    assert "heuristic cold-start fallback" in capsys.readouterr().out
+
+    # A set path that FAILS to load -> heuristic fallback (still logged).
+    monkeypatch.setattr(rr, "load_default_model", lambda p: None)
+    cfg3 = GRPOConfig(value_prefilter=True, value_model_path="missing.pkl")
+    assert grpo._activate_value_ranker(cfg3) is None
+    assert "heuristic cold-start fallback" in capsys.readouterr().out
+
+    # prefilter OFF -> no-op (never touches the ranker).
+    assert grpo._activate_value_ranker(GRPOConfig(value_prefilter=False)) is None
+
+
+# --------------------------------------------------------------------------- #
+# Fix 3: LR warmup+scheduler and max_prompt_length truncation are wired
+# --------------------------------------------------------------------------- #
+def test_lr_scheduler_warmup_then_decay():
+    import torch
+
+    from kore.policy.configs import GRPOConfig
+
+    p = torch.nn.Parameter(torch.zeros(1))
+    opt = torch.optim.SGD([p], lr=1.0)
+    cfg = GRPOConfig(total_steps=10, warmup_ratio=0.2, lr_scheduler_type="cosine")
+    sched = grpo._build_lr_scheduler(opt, cfg)
+    lrs = [opt.param_groups[0]["lr"]]
+    for _ in range(9):
+        opt.step()  # mirror the loop's optimizer-then-scheduler order
+        sched.step()
+        lrs.append(opt.param_groups[0]["lr"])
+    # warmup = round(0.2*10) = 2 steps: lr ramps UP over the first steps...
+    assert lrs[0] < lrs[1] < lrs[2]
+    # ...then cosine-decays toward 0 by the end.
+    assert lrs[-1] < lrs[2]
+    assert lrs[-1] < 0.05
+
+    # "constant" keeps a flat LR after warmup.
+    opt2 = torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=1.0)
+    csched = grpo._build_lr_scheduler(opt2, GRPOConfig(total_steps=5, warmup_ratio=0.0,
+                                                       lr_scheduler_type="constant"))
+    flat = []
+    for _ in range(5):
+        flat.append(opt2.param_groups[0]["lr"])
+        opt2.step()
+        csched.step()
+    assert all(abs(x - 1.0) < 1e-9 for x in flat)
+
+
+def test_truncate_prompt_ids_left_truncates():
+    import torch
+
+    from kore.policy.configs import GRPOConfig
+
+    ids = torch.arange(20).unsqueeze(0)  # [1, 20]
+    trunc = grpo._truncate_prompt_ids(ids, GRPOConfig(max_prompt_length=8))
+    assert trunc.shape[1] == 8
+    # keeps the MOST RECENT (rightmost) tokens incl. the generation prompt.
+    assert trunc[0, -1].item() == 19
+    # no truncation when already within budget.
+    short = torch.arange(4).unsqueeze(0)
+    assert grpo._truncate_prompt_ids(short, GRPOConfig(max_prompt_length=8)).shape[1] == 4
+
+
+# --------------------------------------------------------------------------- #
+# Fix 5: end-to-end — actually RUN _train_grpo_inprocess for 1+ steps on a TINY
+# CPU model + a fake KoreEnv, driving the REAL loop (dynamic sampling, StarPO-S,
+# AVSPO, KL anchor, micro-batched clip-higher backward, save). GPU-only pieces
+# (the 14B forward) are replaced by a tiny nn.Module; everything else is real.
+# --------------------------------------------------------------------------- #
+from types import SimpleNamespace  # noqa: E402
+
+
+def _build_tiny_stack(decode_text, vocab=32):
+    """A tiny HF-like (model, tokenizer, env, task) quadruple that runs on CPU."""
+    import os
+
+    import torch
+
+    from kore.reward.reward import Observation
+
+    class TinyLM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.vocab = vocab
+            self.emb = torch.nn.Embedding(vocab, 8)
+            self.head = torch.nn.Linear(8, vocab)
+            self.device = torch.device("cpu")
+            self._init = self.head.weight.detach().clone()
+
+        def forward(self, input_ids):
+            return SimpleNamespace(logits=self.head(self.emb(input_ids)))
+
+        def generate(self, input_ids, max_new_tokens=4, **kw):
+            n = max(1, min(int(max_new_tokens), 3))
+            gen = torch.randint(0, self.vocab, (1, n))
+            return SimpleNamespace(sequences=torch.cat([input_ids, gen], dim=1))
+
+        def gradient_checkpointing_enable(self):
+            pass
+
+        def enable_input_require_grads(self):
+            pass
+
+        def save_pretrained(self, path):
+            os.makedirs(path, exist_ok=True)
+            open(os.path.join(path, "model.marker"), "w").close()
+
+        def param_changed(self):
+            return not torch.allclose(self.head.weight.detach(), self._init)
+
+    class TinyTok:
+        def _encode(self, text):
+            return [(ord(c) % 29) + 1 for c in (text or "x")[:12]] or [1]
+
+        def apply_chat_template(self, messages, add_generation_prompt=True,
+                                return_tensors="pt", **kw):
+            text = " ".join(str(m.get("content", "")) for m in messages)
+            return torch.tensor([self._encode(text)])
+
+        def __call__(self, text, return_tensors="pt", **kw):
+            return SimpleNamespace(input_ids=torch.tensor([self._encode(text)]))
+
+        def decode(self, seq, skip_special_tokens=True):
+            return decode_text
+
+        def save_pretrained(self, path):
+            os.makedirs(path, exist_ok=True)
+            open(os.path.join(path, "tok.marker"), "w").close()
+
+    def _correct():
+        return Observation(compiled=True, dtype="bf16", validation_passed=True,
+                           snr_by_shape={"primary": 100.0}, snr_db=100.0,
+                           wall_by_shape={"primary": 1.0},
+                           baseline_by_shape={"primary": 2.0},
+                           wall_ms=1.0, baseline_ms=2.0)
+
+    def _incorrect():
+        return Observation(compiled=True, dtype="bf16", validation_passed=False,
+                           snr_by_shape={"primary": 3.0}, snr_db=3.0,
+                           error_text="worst SNR 3.0 < gate")
+
+    class FakeEnv:
+        """First step()/trajectory is correct+fast, the rest incorrect -> the
+        group carries real per-trajectory reward variance (StarPO-S keeps it, and
+        SC-GRPO sees a partial-solve group)."""
+
+        def __init__(self, task, n_correct=1):
+            self.task = task
+            self.n = 0
+            self.n_correct = n_correct
+
+        def step(self, source, full_validation=True, multi_shape=True):
+            i = self.n
+            self.n += 1
+            return _correct() if i < self.n_correct else _incorrect()
+
+    class FakeTask:
+        task_id = "fake_gemm_bf16"
+        operation = "gemm"
+        dtype = "bf16"
+        gpu_target = "gfx942"
+        backend = "triton"
+        comparison_baseline = "aiter"
+        seed_source = "def seed():\n    return 0"
+        shapes = []
+        snr_threshold = None
+
+    return TinyLM, TinyTok(), FakeEnv, FakeTask
+
+
+def _install_stubs(monkeypatch, TinyLM, tok, FakeEnv, FakeTask):
+    """Redirect the loop's heavy deps to the tiny CPU stack; return created models."""
+    import transformers
+
+    import kore.env.kore_env as ke
+    import kore.tasks.registry as reg
+
+    created = []
+
+    def load_model(model_id, **kw):
+        m = TinyLM()
+        created.append(m)
+        return m
+
+    monkeypatch.setattr(transformers, "AutoModelForCausalLM",
+                        SimpleNamespace(from_pretrained=load_model))
+    monkeypatch.setattr(transformers, "AutoTokenizer",
+                        SimpleNamespace(from_pretrained=lambda mid, **kw: tok))
+    monkeypatch.setattr(ke, "KoreEnv", FakeEnv)
+    monkeypatch.setattr(reg, "get_task", lambda tid: FakeTask())
+    monkeypatch.setattr(reg, "task_ids", lambda: ["fake_gemm_bf16"])
+    return created
+
+
+_SERIAL_DECODE = (
+    "ANALYSIS:\ntile too small\n\nPROPOSED_CHANGE:\nbump BLOCK_M\n\n"
+    "FULL_KERNEL:\n```python\ndef k():\n    return 0\n```"
+)
+_AGENTIC_DECODE = (
+    '<tool_call>\n{"name": "test", "arguments": {"kernel_src": '
+    '"def k():\\n    return 0"}}\n</tool_call>'
+)
+
+
+def test_e2e_train_grpo_serial_steps_and_exercises_scgrpo_prefilter_curriculum(
+        monkeypatch, tmp_path):
+    """Drive the REAL ``_train_grpo_inprocess`` for 2 steps on a tiny CPU model +
+    fake KoreEnv with value_prefilter + SC-GRPO + GTPO + the correctness phase all
+    ON, asserting it completes, takes a real gradient step, writes a periodic
+    checkpoint, and exercises the prefilter / SC-GRPO / curriculum code paths."""
+    import pytest
+
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from kore.policy.configs import GRPOConfig
+
+    TinyLM, tok, FakeEnv, FakeTask = _build_tiny_stack(_SERIAL_DECODE)
+    created = _install_stubs(monkeypatch, TinyLM, tok, FakeEnv, FakeTask)
+
+    # Spies that COUNT calls but call through to the real code paths.
+    calls = {"prefilter": 0, "scgrpo": 0, "phase": 0}
+    real_pf, real_sc, real_ph = (grpo._prefilter_bench_indices, grpo._scgrpo_weight,
+                                 grpo.apply_reward_phase)
+    monkeypatch.setattr(grpo, "_prefilter_bench_indices",
+                        lambda *a, **k: calls.__setitem__("prefilter", calls["prefilter"] + 1)
+                        or real_pf(*a, **k))
+    monkeypatch.setattr(grpo, "_scgrpo_weight",
+                        lambda *a, **k: calls.__setitem__("scgrpo", calls["scgrpo"] + 1)
+                        or real_sc(*a, **k))
+    monkeypatch.setattr(grpo, "apply_reward_phase",
+                        lambda *a, **k: calls.__setitem__("phase", calls["phase"] + 1)
+                        or real_ph(*a, **k))
+
+    cfg = GRPOConfig(
+        model_id="tiny", output_dir=str(tmp_path),
+        num_trajectories=2, num_turns=1, tasks_per_step=1, total_steps=2,
+        use_lora=False, gradient_checkpointing=False, bf16=False,
+        learning_rate=0.1, warmup_ratio=0.0, lr_scheduler_type="constant",
+        max_response_length=4, max_prompt_length=16, temperature=0.9, top_p=0.95,
+        value_prefilter=True, num_candidates_per_turn=2, value_prefilter_k=1,
+        sc_grpo=True, gtpo_codesim=True, reward_phase="correctness",
+        ref_anchor_coef=1e-3, starpo_s=True, dynamic_sampling=True,
+        save_steps=1, logging_steps=1, agentic=False,
+    )
+
+    out = grpo._train_grpo_inprocess(cfg, tasks=["fake_gemm_bf16"])
+
+    assert out == str(tmp_path)
+    assert (tmp_path / "model.marker").exists()      # final full-FT save happened
+    assert (tmp_path / "checkpoint-1").is_dir()      # periodic save (save_steps=1)
+    assert created and created[0].param_changed()    # a real gradient step landed
+    assert calls["prefilter"] > 0, "value prefilter path not exercised"
+    assert calls["scgrpo"] > 0, "SC-GRPO KL-weighting path not exercised"
+    assert calls["phase"] > 0, "correctness->latency curriculum mask not exercised"
+
+
+def test_e2e_train_grpo_agentic_steps(monkeypatch, tmp_path):
+    """Drive the REAL loop in AGENTIC mode: the tiny model emits a Hermes tool
+    call, the real AgentHarness runs it against the fake env, and the loop applies
+    per-turn Kevin credit + takes a gradient step. Confirms the agentic rollout
+    path (not the serial one) is exercised end-to-end."""
+    import pytest
+
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from kore.policy.configs import GRPOConfig
+
+    TinyLM, tok, FakeEnv, FakeTask = _build_tiny_stack(_AGENTIC_DECODE)
+    created = _install_stubs(monkeypatch, TinyLM, tok, FakeEnv, FakeTask)
+
+    seen = {"agentic": 0, "serial": 0}
+    real_ag, real_se = grpo._rollout_agentic, grpo._rollout
+    monkeypatch.setattr(grpo, "_rollout_agentic",
+                        lambda *a, **k: seen.__setitem__("agentic", seen["agentic"] + 1)
+                        or real_ag(*a, **k))
+    monkeypatch.setattr(grpo, "_rollout",
+                        lambda *a, **k: seen.__setitem__("serial", seen["serial"] + 1)
+                        or real_se(*a, **k))
+
+    cfg = GRPOConfig(
+        model_id="tiny", output_dir=str(tmp_path),
+        num_trajectories=2, num_turns=1, tasks_per_step=1, total_steps=1,
+        use_lora=False, gradient_checkpointing=False, bf16=False,
+        learning_rate=0.1, warmup_ratio=0.0, lr_scheduler_type="constant",
+        max_response_length=4, max_prompt_length=16, temperature=0.9, top_p=1.0,
+        agentic=True, max_tool_turns=1, ref_anchor_coef=1e-3,
+        starpo_s=True, dynamic_sampling=True, save_steps=0, logging_steps=1,
+    )
+
+    out = grpo._train_grpo_inprocess(cfg, tasks=["fake_gemm_bf16"])
+
+    assert out == str(tmp_path)
+    assert (tmp_path / "model.marker").exists()
+    assert created and created[0].param_changed()    # a real gradient step landed
+    assert seen["agentic"] > 0, "agentic rollout path not exercised"
+    assert seen["serial"] == 0, "serial rollout must not run in agentic mode"

@@ -7,7 +7,7 @@
     kore build-datasets  --kind sft --in data/repair/*.jsonl --out data/sft/train.jsonl
     kore sft   --data data/sft/train.jsonl --model Qwen/Qwen3-14B --out runs/sft
     kore dpo   --data data/dpo/pairs.jsonl --out runs/dpo
-    kore grpo  --tasks T1,T2 --backend fallback --out runs/grpo
+    kore grpo  --tasks T1,T2 --out runs/grpo
     kore value-train --table data/value/table.jsonl --out runs/value/model.json
     kore eval  --tasks T1,T2 --budget 5           # matched-budget bake-off
 
@@ -146,7 +146,10 @@ def cmd_grpo(args) -> int:
     if args.steps:
         cfg.total_steps = args.steps
     tasks = args.tasks.split(",") if args.tasks else None
-    print(train_grpo(cfg, tasks=tasks, backend=args.backend))
+    # KORE has ONE self-contained in-process transformers+PEFT GRPO backend that
+    # runs natively on AMD (the verl/server era is gone), so there is no backend
+    # switch to expose.
+    print(train_grpo(cfg, tasks=tasks))
     return 0
 
 
@@ -225,7 +228,6 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--model", default="Qwen/Qwen3-32B")
     g.add_argument("--out", default="runs/grpo")
     g.add_argument("--steps", type=int, default=0)
-    g.add_argument("--backend", default="inprocess", choices=["inprocess", "fallback"])
     g.add_argument("--reward-phase", default="all", dest="reward_phase",
                    choices=["correctness", "latency", "full", "all"],
                    help="correctness->latency curriculum phase (masks the speed term when 'correctness')")

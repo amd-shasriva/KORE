@@ -2,24 +2,36 @@
 # KORE distributed full fine-tuning launcher (FSDP full-shard / ZeRO-3).
 #
 # Usage:
-#   scripts/launch_distributed.sh <stage: sft|dpo> <config.json> [--nproc N] [--dry-run]
+#   scripts/launch_distributed.sh <stage: midtrain|sft|dpo|grpo> <config.json> [--nproc N] [--dry-run]
 #
 # Examples:
+#   scripts/launch_distributed.sh midtrain configs/midtrain_14b_full.json
 #   scripts/launch_distributed.sh sft configs/sft_14b_full.json
 #   scripts/launch_distributed.sh dpo configs/dpo_14b_full.json --nproc 8
+#   scripts/launch_distributed.sh grpo configs/grpo_14b_full.json
 #   scripts/launch_distributed.sh sft configs/sft_14b_full.json --dry-run   # print cmd only
 #
-# The <config.json> is a flat map of SFTConfig/DPOConfig fields (see
-# docs/DISTRIBUTED.md). It should have `use_lora: false` for real full-FT; the
-# launcher defaults `distributed: true` inside the entrypoint so FSDP kicks in.
-# LoRA runs do NOT need this launcher — the single-process path handles them.
+# The campaign (scripts/run_campaign.py) shells out to this launcher UNDER THE
+# HOOD when the user passes --full-ft, so a full-FT run stays ONE command.
+#
+# The <config.json> is a flat map of the stage's Config fields (see
+# docs/DISTRIBUTED.md). It should have `use_lora: false` for real full-FT; each
+# stage entrypoint defaults `distributed: true` so FSDP kicks in. LoRA runs do
+# NOT need this launcher — the single-process path handles them.
+#
+# Each stage runs `python -m kore.policy.<stage> <config.json>`, which must read
+# a JSON config positional. sft/dpo ship that entrypoint today; grpo/midtrain are
+# owned by a sibling track and gain it when their `-m` JSON entry lands (until
+# then the campaign runs those stages in-process with a LOUD warning — see
+# docs/DISTRIBUTED.md#full-ft-per-stage-status). The launcher accepts all four so
+# the plumbing is ready the moment those entrypoints ship.
 #
 # --dry-run (or DRY_RUN=1) prints the accelerate command WITHOUT executing it,
 # which is what CI / the test-suite syntax check uses.
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") <stage: sft|dpo> <config.json> [--nproc N] [--dry-run]" >&2
+  echo "usage: $(basename "$0") <stage: midtrain|sft|dpo|grpo> <config.json> [--nproc N] [--dry-run]" >&2
   exit 2
 }
 
@@ -30,8 +42,8 @@ CONFIG="${2:-}"
 shift 2 || usage
 
 case "$STAGE" in
-  sft|dpo) ;;
-  *) echo "error: stage must be 'sft' or 'dpo' (got '$STAGE')" >&2; usage ;;
+  midtrain|sft|dpo|grpo) ;;
+  *) echo "error: stage must be one of midtrain|sft|dpo|grpo (got '$STAGE')" >&2; usage ;;
 esac
 
 NPROC=""

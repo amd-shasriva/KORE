@@ -567,8 +567,110 @@ def _scgrpo_weight(model, tok, gen_inputs, demo_text, config):
     teacher_lp = _token_logp_dist(model, teacher_prompt, gen_ids, config.temperature)
     pt = teacher_lp.exp()
     token_kls = (pt * (teacher_lp - student_lp)).sum(dim=-1)  # per-token KL(teacher||student)
-    return ac.scgrpo_weight_from_kl([float(x) for x in token_kls], scale=1.0,
+    # The SC-GRPO weight is a DETACHED scalar multiplier on the PG term, so read
+    # the KLs off the graph (also silences a requires_grad->scalar warning).
+    return ac.scgrpo_weight_from_kl([float(x) for x in token_kls.detach()], scale=1.0,
                                     w_min=config.sc_grpo_w_min, w_max=config.sc_grpo_w_max)
+
+
+def _activate_value_ranker(config):
+    """Fix 1: install the TRAINED value model for the bench prefilter (or heuristic).
+
+    ``config.value_model_path`` was a dead flag: :func:`_value_rank_order` calls
+    ``rank_candidates(codes, task=task)`` with NO model, so the prefilter always
+    fell back to the heuristic cold-start ranker. Here, at the start of the loop,
+    when ``value_prefilter`` is on and a ``value_model_path`` is set, we
+    ``load_default_model(path)`` (which ``set_default_model(...)`` installs) so
+    ``rank_candidates`` routes through the TRAINED model. A missing/unset path
+    degrades gracefully to the heuristic ranker — logged clearly, never silently.
+    Returns the installed model (or ``None`` for the heuristic fallback).
+    """
+    if not getattr(config, "value_prefilter", False):
+        return None
+    try:
+        from kore.value.rerank import load_default_model
+    except Exception as e:  # noqa: BLE001 - value module unavailable
+        print("[grpo] value-prefilter: heuristic cold-start fallback (value module unavailable)")
+        log.warn("value-prefilter ranker: value module unavailable — heuristic fallback",
+                 error=repr(e), ranker="heuristic")
+        return None
+    vpath = getattr(config, "value_model_path", None)
+    model = load_default_model(vpath) if vpath else None
+    if model is not None:
+        print(f"[grpo] value-prefilter: TRAINED value model loaded from {vpath}")
+        log.info("value-prefilter ranker: TRAINED value model active",
+                 value_model_path=vpath, ranker="trained")
+    else:
+        reason = "value_model_path unset" if not vpath else f"load failed for {vpath!r}"
+        print(f"[grpo] value-prefilter: heuristic cold-start fallback ({reason})")
+        log.info("value-prefilter ranker: heuristic cold-start fallback",
+                 value_model_path=vpath, ranker="heuristic", reason=reason)
+    return model
+
+
+def _model_dtype(config):
+    """Fix 3 (bf16): honor ``config.bf16`` for the model dtype (was hardcoded)."""
+    import torch
+
+    return torch.bfloat16 if getattr(config, "bf16", True) else torch.float32
+
+
+def _build_lr_scheduler(opt, config):
+    """Fix 3 (scheduler): torch LR warmup + decay honoring the config flags.
+
+    Wires the previously-dead ``lr_scheduler_type`` / ``warmup_ratio``: a linear
+    warmup over ``warmup_ratio*total_steps`` steps, then ``constant`` (default),
+    ``linear``, or ``cosine`` decay to 0 over the remaining steps. Pure torch —
+    the native loop has no HF ``Trainer`` to own a scheduler. Stepped ONCE per
+    optimizer step (i.e. per training step that actually updated).
+    """
+    import math
+
+    import torch
+
+    total = max(1, int(getattr(config, "total_steps", 1)))
+    warmup = max(0, int(round(float(getattr(config, "warmup_ratio", 0.0)) * total)))
+    sched = (getattr(config, "lr_scheduler_type", "constant") or "constant").lower()
+
+    def lr_lambda(step):
+        if warmup > 0 and step < warmup:
+            return float(step + 1) / float(warmup + 1)  # linear warmup
+        progress = (step - warmup) / max(1, total - warmup)
+        progress = min(max(progress, 0.0), 1.0)
+        if sched == "cosine":
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+        if sched in ("linear", "linear_decay"):
+            return 1.0 - progress
+        return 1.0  # "constant" (and any unknown type) -> flat LR after warmup
+
+    return torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+
+
+def _truncate_prompt_ids(ids, config):
+    """Fix 3 (max_prompt_length): left-truncate a rendered prompt to the budget.
+
+    Wires the previously-dead ``max_prompt_length``: keeps the most recent
+    (rightmost) tokens — including the trailing generation prompt — so a long
+    multi-turn context can't exceed the model's prompt budget. No-op when unset.
+    """
+    max_len = int(getattr(config, "max_prompt_length", 0) or 0)
+    if max_len > 0 and ids.shape[1] > max_len:
+        return ids[:, -max_len:]
+    return ids
+
+
+def _save_grpo_checkpoint(model, tok, config, step):
+    """Fix 3 (save_steps): write a periodic checkpoint (never fatal on failure)."""
+    import os
+
+    ckpt = os.path.join(getattr(config, "output_dir", "runs/grpo"), f"checkpoint-{step}")
+    try:
+        model.save_pretrained(ckpt)
+        tok.save_pretrained(ckpt)
+        log.info("grpo periodic checkpoint saved", step=step, path=ckpt)
+    except Exception as e:  # noqa: BLE001 - a checkpoint failure must not kill training
+        log.warn("grpo periodic checkpoint failed", step=step, error=repr(e))
+    return ckpt
 
 
 def _train_grpo_fallback(config, tasks):
@@ -598,21 +700,32 @@ def _train_grpo_fallback(config, tasks):
 
     from kore.env.kore_env import KoreEnv
     from kore.policy import anticollapse as ac
+    from kore.policy.configs import fsdp_enabled
     from kore.tasks.registry import get_task, task_ids
 
     tasks = tasks or task_ids()
     configure(run_dir=getattr(config, "output_dir", None))
     t_start = time.time()
     last_mean_r = None
+    # Fix 4: full-FT GRPO launched distributed (distributed=True, use_lora=False)
+    # must NOT use device_map="auto" — accelerate/FSDP owns placement (same as
+    # sft.py). LoRA / single-GPU / CPU runs keep the legacy device_map path.
+    use_fsdp = fsdp_enabled(config)
     log.info("grpo fallback: starting", model=config.model_id, total_steps=config.total_steps,
              agentic=bool(config.agentic), use_lora=bool(config.use_lora), n_tasks=len(tasks),
              tasks_per_step=max(1, getattr(config, "tasks_per_step", 1)),
              num_trajectories=config.num_trajectories, num_turns=config.num_turns,
              starpo_s=bool(config.starpo_s), ref_anchor_coef=config.ref_anchor_coef,
-             **gpu_mem_snapshot())
+             distributed=bool(getattr(config, "distributed", False)), fsdp=bool(use_fsdp),
+             bf16=bool(getattr(config, "bf16", True)), **gpu_mem_snapshot())
+    # Fix 1: install the TRAINED value model (or the logged heuristic fallback)
+    # BEFORE any rollout, so the value prefilter actually reranks with the model.
+    _activate_value_ranker(config)
     tok = AutoTokenizer.from_pretrained(config.model_id)
-    model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=torch.bfloat16,
-                                                 device_map="auto")
+    model_kwargs = {"torch_dtype": _model_dtype(config)}  # Fix 3: honor bf16
+    if not use_fsdp:
+        model_kwargs["device_map"] = "auto"
+    model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
     if getattr(config, "gradient_checkpointing", True):
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()  # critical for PEFT + grad-ckpt
@@ -626,6 +739,7 @@ def _train_grpo_fallback(config, tasks):
     model.train()
     trainable = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable, lr=config.learning_rate)
+    sched = _build_lr_scheduler(opt, config)  # Fix 3: real LR warmup + scheduler
 
     # ---- ref-model (KL anchor) gating: only pay the ~ref-model memory when a KL
     #      anchor is actually applied. The per-turn KL anchor is now ACTIVE on the
@@ -806,30 +920,40 @@ def _train_grpo_fallback(config, tasks):
                      n_kept_groups=len(keep), reason="all kept samples had empty gen_inputs")
             log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
             continue
+        sched.step()  # Fix 3: advance the LR schedule once per real training step
         mean_r = sum(sum(g) / len(g) for g in group_rewards if g) / max(len(group_rewards), 1)
+        last_mean_r = mean_r
         print(f"[grpo] step {step} kept={len(keep)}/{len(groups)} attempts={attempts} "
               f"epochs={ppo_epochs} meanR={mean_r:.3f} loss={loss_value:.4f}")
 
-        # ---- observability: per-step metrics (INFO; few steps) ---- #
-        reward_flat = [s for g in group_rewards for s in g]
-        reward_mean = sum(reward_flat) / len(reward_flat) if reward_flat else 0.0
-        reward_std = group_reward_std(reward_flat)
-        adv_absmean, n_kl_samples = _grpo_step_adv_stats(kept_groups, config)
-        kl_val = _grpo_step_kl_stat(kept_groups)  # mean k3 KL(policy||ref) diagnostic
-        try:
-            grad_norm_val = float(grad_norm) if grad_norm is not None else None
-        except Exception:  # noqa: BLE001 - some torch builds return a 0-dim tensor
-            grad_norm_val = None
-        lr_val = opt.param_groups[0]["lr"] if opt.param_groups else config.learning_rate
-        last_mean_r = reward_mean
-        log.event("grpo_step", step=step,
-                  task=",".join(sorted({t.task_id for t in group_tasks})),
-                  n_groups=len(group_rewards), n_kept_groups=len(keep), n_attempts=attempts,
-                  ppo_epochs=ppo_epochs,
-                  n_samples=sum(len(s) for s in group_samples), n_infra_dropped=step_infra,
-                  reward_mean=reward_mean, reward_std=reward_std, adv_absmean=adv_absmean,
-                  kl=kl_val, kl_coef=config.ref_anchor_coef, n_kl_samples=n_kl_samples,
-                  loss=loss_value, grad_norm=grad_norm_val, lr=lr_val, **gpu_mem_snapshot())
+        # ---- observability: per-step metrics, emitted every logging_steps (Fix 3) ---- #
+        log_every = max(1, int(getattr(config, "logging_steps", 1) or 1))
+        if step % log_every == 0 or step == config.total_steps - 1:
+            reward_flat = [s for g in group_rewards for s in g]
+            reward_mean = sum(reward_flat) / len(reward_flat) if reward_flat else 0.0
+            reward_std = group_reward_std(reward_flat)
+            adv_absmean, n_kl_samples = _grpo_step_adv_stats(kept_groups, config)
+            kl_val = _grpo_step_kl_stat(kept_groups)  # mean k3 KL(policy||ref) diagnostic
+            try:
+                grad_norm_val = float(grad_norm) if grad_norm is not None else None
+            except Exception:  # noqa: BLE001 - some torch builds return a 0-dim tensor
+                grad_norm_val = None
+            lr_val = opt.param_groups[0]["lr"] if opt.param_groups else config.learning_rate
+            log.event("grpo_step", step=step,
+                      task=",".join(sorted({t.task_id for t in group_tasks})),
+                      n_groups=len(group_rewards), n_kept_groups=len(keep), n_attempts=attempts,
+                      ppo_epochs=ppo_epochs,
+                      n_samples=sum(len(s) for s in group_samples), n_infra_dropped=step_infra,
+                      reward_mean=reward_mean, reward_std=reward_std, adv_absmean=adv_absmean,
+                      # Fix 3: the active anchor is ref_anchor_coef — the log used to
+                      # mislabel it as ``kl_coef`` (a flag that never existed here).
+                      kl=kl_val, ref_anchor_coef=config.ref_anchor_coef, n_kl_samples=n_kl_samples,
+                      loss=loss_value, grad_norm=grad_norm_val, lr=lr_val, **gpu_mem_snapshot())
+        # Fix 3: periodic checkpoint every save_steps (skips the final step — the
+        # full model is saved below on loop exit).
+        save_every = int(getattr(config, "save_steps", 0) or 0)
+        if save_every > 0 and (step + 1) % save_every == 0 and step != config.total_steps - 1:
+            _save_grpo_checkpoint(model, tok, config, step + 1)
         log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
 
     # Merge LoRA into the base before saving so soup/serve load a full model.
@@ -859,13 +983,17 @@ def _load_ref_model(config):
     behavior. Returns ``None`` (and logs) if the ref cannot be loaded so training
     degrades gracefully to no-KL rather than crashing.
     """
-    import torch
     from transformers import AutoModelForCausalLM
+
+    from kore.policy.configs import fsdp_enabled
 
     ref_id = config.ref_checkpoint or config.model_id
     try:
-        ref = AutoModelForCausalLM.from_pretrained(ref_id, torch_dtype=torch.bfloat16,
-                                                   device_map="auto")
+        # Fix 3/4: honor bf16 and skip device_map under distributed FSDP.
+        ref_kwargs = {"torch_dtype": _model_dtype(config)}
+        if not fsdp_enabled(config):
+            ref_kwargs["device_map"] = "auto"
+        ref = AutoModelForCausalLM.from_pretrained(ref_id, **ref_kwargs)
         ref.eval()
         for p in ref.parameters():
             p.requires_grad_(False)
@@ -917,13 +1045,16 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         ctx_turns = mask_cot_turns(turns) if config.cot_masking else turns
         msgs = build_transcript(prompt, ctx_turns)
         ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(model.device)
+        ids = _truncate_prompt_ids(ids, config)  # Fix 3: honor max_prompt_length
 
         # Generate candidate(s) for this turn (no graph retained).
         cands: list[tuple] = []  # (seq_detached, text, code)
         for _c in range(n_cand):
             with torch.no_grad():
+                # Fix 2: pass top_p (+temperature) so sampling matches the config.
                 gen = model.generate(ids, max_new_tokens=config.max_response_length,
                                      do_sample=True, temperature=config.temperature,
+                                     top_p=config.top_p,
                                      return_dict_in_generate=True, output_scores=True)
             seq = gen.sequences[0][ids.shape[1]:].detach()
             text = tok.decode(seq, skip_special_tokens=True)
@@ -1077,10 +1208,13 @@ class _HFChatPolicy:
 
         ids = self.tok.apply_chat_template(
             messages, add_generation_prompt=True, return_tensors="pt").to(self.model.device)
+        ids = _truncate_prompt_ids(ids, self.config)  # Fix 3: honor max_prompt_length
         with torch.no_grad():
+            # Fix 2: pass top_p (+temperature) so sampling matches the config.
             gen = self.model.generate(
                 ids, max_new_tokens=self.config.max_response_length, do_sample=True,
-                temperature=self.config.temperature, return_dict_in_generate=True, output_scores=True)
+                temperature=self.config.temperature, top_p=self.config.top_p,
+                return_dict_in_generate=True, output_scores=True)
         seq = gen.sequences[0][ids.shape[1]:]
         self.turn_inputs.append((ids.detach(), seq.detach()))
         return self.tok.decode(seq, skip_special_tokens=True)

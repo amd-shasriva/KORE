@@ -1,0 +1,20 @@
+{
+  "model_id": "Qwen/Qwen3-14B",
+  "output_dir": "runs/grpo_14b_full",
+  "use_lora": false,
+  "distributed": true,
+  "agentic": true,
+  "starpo_s": true,
+  "dynamic_sampling": true,
+  "rc_grpo": true,
+  "variance_floor": 0.1,
+  "sc_grpo": true,
+  "gtpo_codesim": true,
+  "value_prefilter": true,
+  "reward_phase": "all",
+  "bf16": true,
+  "gradient_checkpointing": true,
+  "fsdp": "full_shard auto_wrap",
+  "fsdp_transformer_layer_cls": null,
+  "fsdp_cpu_offload": false
+}

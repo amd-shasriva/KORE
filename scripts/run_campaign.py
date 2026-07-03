@@ -30,13 +30,30 @@ gated (hard-stop on general regression). The run is resumable: a JSON manifest a
 finished + the train/eval task ids, and per-stage JSONL events are appended to
 ``<data_root>/campaign_events.jsonl`` for observability.
 
---dry-run validates the WHOLE wiring with no GPU/teacher (it import-checks every
-symbol the campaign will call). --stages runs a subset (and reuses prior checkpoints
-from the manifest, so a crash mid-run is recoverable).
+--dry-run validates the WHOLE wiring with no GPU/teacher: it import-checks every
+symbol the campaign will call, INCLUDING the real-run-only symbols each stage
+imports lazily in its body (datagen/agentic generators, JSONL IO, the teacher,
+the DAgger SFT fold, the agentic harness + tool reward, the anti-collapse ladder,
+and the value reranker), so signature drift fails fast offline. --stages runs a
+subset (and reuses prior checkpoints from the manifest, so a crash mid-run is
+recoverable).
 
+The default (LoRA) run is a pure single-process ONE-command path. Passing
+``--full-ft`` keeps it ONE command but engages real FSDP full fine-tuning UNDER
+THE HOOD: the campaign sets ``distributed=True`` on every training config and
+shells out to ``scripts/launch_distributed.sh`` (``accelerate launch`` with the
+shipped ``configs/accelerate_fsdp.yaml``) for the stages whose ``-m`` JSON entry
+supports it — the user never writes a config or runs accelerate.
+
+    # LoRA bring-up (single process, one command):
     PYTHONPATH=. python scripts/run_campaign.py --model Qwen/Qwen3-14B \
         --tasks rmsnorm_aiter,gemm_bf16,flash_attn_decode_bf16 \
         --teacher claude --stages datagen,agentic,build,sft,dpo,grpo,soup,eval
+
+    # Full best-in-world 14B run (still ONE command; campaign spawns FSDP):
+    PYTHONPATH=. python scripts/run_campaign.py --model Qwen/Qwen3-14B \
+        --tasks rmsnorm_aiter,gemm_bf16,flash_attn_decode_bf16 \
+        --teacher claude --full-ft
 """
 
 from __future__ import annotations
@@ -45,6 +62,7 @@ import argparse
 import importlib
 import inspect
 import json
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -96,6 +114,107 @@ def _start_heartbeat(ctx):
 def _write_rows(path: Path, rows: list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+
+# --------------------------------------------------------------------------- #
+# Fix 1: --full-ft engages FSDP UNDER THE HOOD (still ONE user command).
+#
+# For a full fine-tune the campaign sets ``distributed=True`` on every training
+# config and, for stages whose ``-m kore.policy.<stage> <config.json>`` entry can
+# read a JSON config, shells out to ``scripts/launch_distributed.sh`` (which runs
+# ``accelerate launch --config_file configs/accelerate_fsdp.yaml``). The user
+# never writes a config or invokes accelerate — the campaign spawns the sharded
+# processes. LoRA (the default) stays the pure single-process one-command path.
+# --------------------------------------------------------------------------- #
+
+# Anti-collapse lever default for the full best-in-world GRPO run (Fix 2): the
+# AVSPO variance-floor tau. When a rollout group's reward std drops below this,
+# virtual samples are injected into the normalization stats to guarantee a
+# variance floor (fights reward-variance collapse). 0.0 would disable AVSPO.
+_ANTICOLLAPSE_VARIANCE_FLOOR = 0.1
+
+# Shipped internal full-FT config templates per stage (the locked full-FT recipe:
+# use_lora=false + FSDP). The campaign overlays the run's dynamic paths (model,
+# dataset, output_dir) before launching, so these are NOT user-authored.
+_FULL_FT_CONFIGS = {
+    "midtrain": "midtrain_14b_full.json",
+    "sft": "sft_14b_full.json",
+    "dpo": "dpo_14b_full.json",
+    "grpo": "grpo_14b_full.json",
+}
+
+
+def _repo_root() -> Path:
+    """Package root that holds ``scripts/``, ``configs/`` and the ``kore/`` package."""
+    return Path(__file__).resolve().parents[1]
+
+
+def _full_ft(ctx) -> bool:
+    """True iff this run is a full fine-tune (``--full-ft`` -> ``args.lora`` False)."""
+    return not bool(getattr(ctx["args"], "lora", True))
+
+
+def _stage_supports_launcher(stage: str) -> bool:
+    """True iff ``python -m kore.policy.<stage> <config.json>`` reads a JSON config.
+
+    ``sft``/``dpo`` ship that JSON ``_main`` today (detected via their
+    ``<stage>_config_from_dict`` builder). ``grpo``/``midtrain`` are owned by a
+    sibling track and do NOT yet accept a JSON config positional (grpo has no
+    ``__main__``; midtrain's parses ``--flags``), so full-FT for those stages
+    falls back to in-process with a LOUD warning. Detecting via the builder means
+    this flips ON automatically — and the campaign starts shelling those stages
+    out too — the moment the sibling ships the entry (no campaign change needed).
+    """
+    try:
+        mod = importlib.import_module(f"kore.policy.{stage}")
+    except Exception:  # noqa: BLE001 - module import problems surface elsewhere
+        return False
+    return callable(getattr(mod, f"{stage}_config_from_dict", None))
+
+
+def _launch_distributed(ctx, stage: str, overrides: dict, *, run_name: str | None = None) -> str:
+    """Render a resolved full-FT JSON config and shell out to the FSDP launcher.
+
+    Starts from the shipped internal template (``configs/<stage>_14b_full.json``),
+    overlays the run's dynamic fields (``overrides``: model/dataset/output_dir),
+    forces ``distributed=True`` + ``use_lora=False``, writes the resolved config
+    into ``<data_root>/launch/`` and runs
+    ``scripts/launch_distributed.sh <stage> <resolved.json>`` which drives
+    ``accelerate launch`` with the shipped FSDP config. Returns ``output_dir``.
+    """
+    shipped = _repo_root() / "configs" / _FULL_FT_CONFIGS[stage]
+    cfg = json.loads(shipped.read_text()) if shipped.exists() else {}
+    cfg.update(overrides)
+    cfg["distributed"] = True   # contract: --full-ft sets distributed on every training config
+    cfg["use_lora"] = False
+    run_cfg = ctx["data_root"] / "launch" / f"{run_name or stage}.json"
+    run_cfg.parent.mkdir(parents=True, exist_ok=True)
+    run_cfg.write_text(json.dumps(cfg, indent=2))
+    launcher = _repo_root() / "scripts" / "launch_distributed.sh"
+    cmd = ["bash", str(launcher), stage, str(run_cfg)]
+    _log(stage, f"full-FT: engaging FSDP under the hood (ONE command) -> {' '.join(cmd)} "
+                f"(config: model={cfg.get('model_id')} out={cfg.get('output_dir')})")
+    subprocess.run(cmd, check=True)
+    return overrides["output_dir"]
+
+
+def _warn_inprocess_fullft(stage: str) -> None:
+    """LOUD warning: full-FT for a stage whose FSDP JSON entry isn't shipped yet.
+
+    ``grpo``/``midtrain`` are owned by a sibling track and do not yet expose a
+    ``-m kore.policy.<stage> <config.json>`` entry, so the campaign cannot shell
+    them out to the FSDP launcher. It runs them IN-PROCESS instead — which cannot
+    truly full-FT a 14B (single-process ``device_map`` / mid-train's own deferral)
+    — and says so, rather than silently degrading. This resolves automatically
+    once the sibling ships the JSON entry (see docs/DISTRIBUTED.md).
+    """
+    _log(stage, f"WARNING: --full-ft for '{stage}' is NOT orchestrated via the campaign's "
+                f"one-command FSDP launcher yet: kore.policy.{stage} has no "
+                f"`-m kore.policy.{stage} <config.json>` JSON entrypoint (owned by a sibling "
+                f"track). Running IN-PROCESS with distributed=True set on the config — this "
+                f"will NOT shard and cannot full-FT a 14B. See "
+                f"docs/DISTRIBUTED.md#full-ft-per-stage-status for the exact status + the "
+                f"manual sharded launch until the entry lands.")
 
 
 # --------------------------------------------------------------------------- #
@@ -155,6 +274,33 @@ _IMPORT_CHECKS = [
     ("kore.eval.fastp", "fastp", True, []),
     ("kore.eval.policies", "seed_policy", True, []),
     ("kore.eval.policies", "model_policy", True, ["checkpoint"]),
+    # Fix 4 (dry-run fidelity): the REAL-RUN-ONLY symbols the audit found were
+    # imported lazily inside each stage body (so a dry-run never touched them and
+    # drift could slip past the preflight). Import-check them here too — datagen /
+    # agentic generators, JSONL IO, the teacher, the DAgger SFT fold, the agentic
+    # harness + tool reward, the anti-collapse ladder, and the value reranker.
+    ("kore.data.gen_repair", "generate_repairs", True, ["task", "teacher", "env", "n"]),
+    ("kore.data.gen_groups", "generate_groups", True, ["task", "teacher", "env", "n_parents", "k"]),
+    ("kore.data.gen_wins", "generate_wins", True, ["task", "teacher", "env", "gens"]),
+    ("kore.data.gen_agentic", "generate_agentic_trajectories", True,
+        ["task", "teacher", "env", "n", "max_turns", "keep_only_useful"]),
+    ("kore.data.schemas", "write_jsonl", True, ["path", "records"]),
+    ("kore.data.teacher", "make_teacher", True, ["kind"]),
+    ("kore.data.teacher", "load_env_local", True, []),
+    ("kore.data.build_datasets", "build_sft", True, ["records"]),
+    ("kore.agent.harness", "AgentHarness", True, ["task", "env", "max_turns"]),
+    ("kore.agent.tools", "tool_use_reward", True, ["episode"]),
+    # Anti-collapse ladder (Fix 2): every lever the campaign turns ON by default
+    # for the full run resolves through these primitives at grpo RUN time.
+    ("kore.policy.anticollapse", "avspo_advantages", True, ["returns", "tau"]),
+    ("kore.policy.anticollapse", "scgrpo_weight_from_kl", True, ["token_kls"]),
+    ("kore.policy.anticollapse", "gtpo_codesim_shaping", True, ["codes", "references"]),
+    ("kore.policy.anticollapse", "variance_floor", True, ["rewards", "reward_tokens", "means"]),
+    ("kore.policy.anticollapse", "sample_reward_tokens", True, ["G", "p_high"]),
+    ("kore.policy.anticollapse", "prepend_reward_token", True, ["prompt", "token"]),
+    # Value-model bench prefilter reranker (contract b): value_prefilter is ON by
+    # default; the grpo rollout ranks candidates best-first via this before benching.
+    ("kore.value.rerank", "rank_candidates", True, ["items", "task"]),
     # Serving backend (parallel track): needed by the retention gate, model_policy
     # and the soup sweep at RUN time. Absence -> loud warning, not a dry-run failure.
     ("kore.policy.serve", "load_generate", False, []),
@@ -676,6 +822,9 @@ def _stage_midtrain(ctx):
     cfg = MidTrainConfig(model_id=ctx["base"], corpus_path=str(corpus),
                          output_dir=ctx["args"].midtrain_out,
                          use_lora=ctx["args"].lora)
+    if _full_ft(ctx):
+        # Contract: --full-ft sets distributed=True on every training config.
+        setattr(cfg, "distributed", True)
 
     # 1. Build the corpus from local sources if it is not already on disk.
     if not corpus.exists():
@@ -689,8 +838,17 @@ def _stage_midtrain(ctx):
         _log("midtrain", f"reusing existing corpus at {corpus}")
 
     # 2. Continued pretraining (full-FT locked recipe; --lora for single-GPU smoke).
+    #    Full-FT engages FSDP via the launcher UNDER THE HOOD when the stage's
+    #    `-m` JSON entry supports it; otherwise it falls back in-process (LOUD).
     mt_t0 = time.time()
-    ctx["midtrain_ckpt"] = train_midtrain(cfg, corpus_path=str(corpus))
+    if _full_ft(ctx) and _stage_supports_launcher("midtrain"):
+        ctx["midtrain_ckpt"] = _launch_distributed(ctx, "midtrain", {
+            "model_id": ctx["base"], "corpus_path": str(corpus),
+            "output_dir": ctx["args"].midtrain_out})
+    else:
+        if _full_ft(ctx):
+            _warn_inprocess_fullft("midtrain")
+        ctx["midtrain_ckpt"] = train_midtrain(cfg, corpus_path=str(corpus))
     LOG.progress(1, 1, "midtrain", t_start=mt_t0)
     _log("midtrain", f"-> {ctx['midtrain_ckpt']} (this checkpoint becomes the SFT base)")
     _retention_gate(ctx, stage="midtrain", candidate=ctx["midtrain_ckpt"], base=ctx["base"])
@@ -708,11 +866,20 @@ def _stage_sft(ctx):
     sft_base = ctx.get("midtrain_ckpt") or ctx["base"]
     if ctx.get("midtrain_ckpt"):
         _log("sft", f"starting from mid-train checkpoint {sft_base}")
-    # Fix 8: --lora keeps the 14B validation run single-GPU-feasible (full-FT of a
-    # 14B needs an FSDP/DeepSpeed multi-GPU launch — see docs/DISTRIBUTED.md).
-    cfg = MultiCapSFTConfig(model_id=sft_base, output_dir=ctx["args"].sft_out,
-                            use_lora=ctx["args"].lora)
-    ctx["sft_ckpt"] = train_sft(cfg, ctx["data_root"] / "sft" / "multicap.jsonl")
+    dataset = ctx["data_root"] / "sft" / "multicap.jsonl"
+    # Fix 1: --lora keeps the 14B validation run single-GPU-feasible (single
+    # process). --full-ft engages REAL FSDP full fine-tuning via the launcher
+    # (accelerate) UNDER THE HOOD — still ONE user command.
+    if _full_ft(ctx) and _stage_supports_launcher("sft"):
+        ctx["sft_ckpt"] = _launch_distributed(ctx, "sft", {
+            "model_id": sft_base, "dataset_path": str(dataset),
+            "output_dir": ctx["args"].sft_out})
+    else:
+        cfg = MultiCapSFTConfig(model_id=sft_base, output_dir=ctx["args"].sft_out,
+                                use_lora=ctx["args"].lora)
+        if _full_ft(ctx):
+            setattr(cfg, "distributed", True)
+        ctx["sft_ckpt"] = train_sft(cfg, dataset)
     _log("sft", f"-> {ctx['sft_ckpt']}")
     _retention_gate(ctx, stage="sft", candidate=ctx["sft_ckpt"], base=ctx["base"])
 
@@ -786,10 +953,15 @@ def _stage_dpo(ctx):
 
 
 def _stage_dpo_single(ctx, sft) -> str:
+    ds = str(ctx["data_root"] / "dpo" / "pairs.jsonl")
+    # Full-FT: engage FSDP via the launcher (accelerate) under the hood.
+    if _full_ft(ctx) and _stage_supports_launcher("dpo"):
+        return _launch_distributed(ctx, "dpo", {
+            "model_id": sft, "dataset_path": ds, "output_dir": ctx["args"].dpo_out})
     from kore.policy.configs import DPOConfig
     from kore.policy.dpo import train
 
-    cfg = DPOConfig(model_id=sft, dataset_path=str(ctx["data_root"] / "dpo" / "pairs.jsonl"),
+    cfg = DPOConfig(model_id=sft, dataset_path=ds,
                     output_dir=ctx["args"].dpo_out, use_lora=ctx["args"].lora)
     result = train(cfg)
     return (result.get("output_dir") if isinstance(result, dict) else None) or ctx["args"].dpo_out
@@ -828,6 +1000,14 @@ def _stage_dpo_iterative(ctx, sft, rounds: int) -> str:
         ds_path = ctx["data_root"] / "dpo" / f"round{rd.round}" / "pairs.jsonl"
         _write_rows(ds_path, rd.dpo_pairs)
         out_dir = str(Path(ctx["args"].dpo_out) / f"round{rd.round}")
+        # Full-FT: shell out per round to the FSDP launcher (IPO + refreshed ref
+        # travel in the JSON config); LoRA / single-process stays in-process.
+        if _full_ft(ctx) and _stage_supports_launcher("dpo"):
+            _log("dpo", f"round {rd.round}: full-FT IPO DPO on {rd.n_pairs} aggregated pairs "
+                        f"(model={base_ckpt}, ref={base_ckpt}) via FSDP launcher -> {out_dir}")
+            return _launch_distributed(ctx, "dpo", {
+                "model_id": base_ckpt, "dataset_path": str(ds_path), "output_dir": out_dir,
+                "loss_type": "ipo", "ref_model_id": base_ckpt}, run_name=f"dpo_round{rd.round}")
         cfg = DPOConfig(model_id=base_ckpt, dataset_path=str(ds_path),
                         output_dir=out_dir, use_lora=ctx["args"].lora)
         cfg.loss_type = "ipo"                          # bounded IPO objective for on-policy prefs
@@ -875,40 +1055,83 @@ def _stage_grpo(ctx):
         _log("grpo", f"training on TRAIN-split tasks={train_task_ids} "
                      f"(held-out eval-only={sorted(eval_ids)})")
 
-    # Fix 8: --lora fits the 14B validation run without an FSDP/DeepSpeed launch.
-    # For LoRA bring-up use feasibly small rollout shapes; with the O(1-sample)
-    # micro-batched backward these bound activation memory regardless, but smaller
-    # groups also cut rollout wall-clock for the validation run.
-    use_lora = ctx["args"].lora
+    # The GRPO RL stage uses LoRA even under --full-ft. Rationale (honest): FSDP
+    # full-FT is wired for the HF-Trainer stages (midtrain/SFT/DPO); the GRPO loop
+    # is a custom multi-turn rollout loop, and full-parameter 14B RL there would
+    # need accelerate/FSDP integrated INTO the loop (a documented scale-up item in
+    # docs/DISTRIBUTED.md) and is enormously memory-heavy. LoRA RL on top of a
+    # full-FT base is standard, memory-safe (~9GB/GPU, proven), and native
+    # one-command. The O(1-sample) micro-batched backward bounds activation memory.
+    use_lora = True
+    if _full_ft(ctx):
+        _log("grpo", "NOTE: --full-ft uses FSDP for midtrain/SFT/DPO; the GRPO RL stage "
+                     "uses LoRA on top of the full-FT base (memory-safe, standard for RL). "
+                     "Full-parameter GRPO under FSDP is the documented scale-up item.")
+
+    # Fix 2: turn the anti-collapse ladder + measurement-efficiency levers ON by
+    # default for the full best-in-world run. --no-anticollapse / --no-value-
+    # prefilter opt out. Without these a run would default to plain GRPO (the
+    # audit's finding: SC-GRPO / GTPO / AVSPO / value_prefilter all default OFF).
+    anticollapse = bool(getattr(ctx["args"], "anticollapse", True))
+    value_prefilter = bool(getattr(ctx["args"], "value_prefilter", True))
+    value_model_path = getattr(ctx["args"], "value_model_path", None) \
+        or ctx.get("value_model_path")
+    variance_floor = _ANTICOLLAPSE_VARIANCE_FLOOR if anticollapse else 0.0
+    _log("grpo", "levers @ grpo start: agentic=True starpo_s=True dynamic_sampling=on(default) "
+                 f"| anticollapse={anticollapse} "
+                 f"[rc_grpo/variance_floor({variance_floor})/sc_grpo/gtpo_codesim] "
+                 f"| value_prefilter={value_prefilter} value_model_path={value_model_path} "
+                 f"| use_lora={use_lora} full_ft={_full_ft(ctx)}")
 
     def _grpo_kw(*, model_id, output_dir, reward_phase="all"):
         kw = dict(model_id=model_id, output_dir=output_dir, agentic=True,
                   starpo_s=True, ref_checkpoint=sft, use_lora=use_lora,
                   reward_phase=reward_phase)
+        if anticollapse:
+            kw.update(rc_grpo=True, variance_floor=variance_floor,
+                      sc_grpo=True, gtpo_codesim=True)
+        if value_prefilter:
+            kw["value_prefilter"] = True
+            if value_model_path:
+                kw["value_model_path"] = value_model_path
         if use_lora:
             kw.update(num_trajectories=8, tasks_per_step=2, num_turns=3)
         if ctx["args"].grpo_steps:
             kw["total_steps"] = ctx["args"].grpo_steps
         return kw
 
+    # Fix 1: --full-ft sets distributed=True on the GRPO config too. GRPO has no
+    # `-m kore.policy.grpo <config.json>` JSON entry yet (sibling-owned), so it
+    # cannot be shelled out to the FSDP launcher — it runs in-process with a LOUD
+    # warning rather than silently pretending to shard.
+    fullft = _full_ft(ctx)
+    launcher_ok = _stage_supports_launcher("grpo")
+    if fullft and not launcher_ok:
+        _warn_inprocess_fullft("grpo")
+
+    def _run_grpo(*, model_id, output_dir, reward_phase="all"):
+        # Fix 3: the verl-era backend switch is gone — train_grpo has ONE native
+        # in-process AMD backend, so no backend argument is threaded.
+        cfg = GRPOConfig(**_grpo_kw(model_id=model_id, output_dir=output_dir,
+                                    reward_phase=reward_phase))
+        if fullft:
+            setattr(cfg, "distributed", True)
+        return train_grpo(cfg, tasks=train_task_ids)
+
     if curriculum:
         # Phase 1: correctness-only GRPO (mask the speed term) — learn to be correct.
         p1_out = str(Path(ctx["args"].grpo_out) / "phase1_correctness")
         _log("grpo", f"curriculum phase-1 (correctness) init={init} -> {p1_out}")
-        cfg1 = GRPOConfig(**_grpo_kw(model_id=init, output_dir=p1_out,
-                                     reward_phase="correctness"))
-        phase1_ckpt = train_grpo(cfg1, tasks=train_task_ids, backend=ctx["args"].grpo_backend)
+        phase1_ckpt = _run_grpo(model_id=init, output_dir=p1_out, reward_phase="correctness")
         _log("grpo", f"curriculum phase-1 -> {phase1_ckpt}")
 
         # Phase 2: latency GRPO (full correctness+speed) initialized FROM phase-1.
         p2_out = ctx["args"].grpo_out
         _log("grpo", f"curriculum phase-2 (latency) init={phase1_ckpt} -> {p2_out}")
-        cfg2 = GRPOConfig(**_grpo_kw(model_id=phase1_ckpt, output_dir=p2_out,
-                                     reward_phase="latency"))
-        ctx["grpo_ckpt"] = train_grpo(cfg2, tasks=train_task_ids, backend=ctx["args"].grpo_backend)
+        ctx["grpo_ckpt"] = _run_grpo(model_id=phase1_ckpt, output_dir=p2_out,
+                                     reward_phase="latency")
     else:
-        cfg = GRPOConfig(**_grpo_kw(model_id=init, output_dir=ctx["args"].grpo_out))
-        ctx["grpo_ckpt"] = train_grpo(cfg, tasks=train_task_ids, backend=ctx["args"].grpo_backend)
+        ctx["grpo_ckpt"] = _run_grpo(model_id=init, output_dir=ctx["args"].grpo_out)
     _log("grpo", f"-> {ctx['grpo_ckpt']}")
     _retention_gate(ctx, stage="grpo", candidate=ctx["grpo_ckpt"], base=sft)
 
@@ -1091,8 +1314,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sft-out", default="runs/sft", dest="sft_out")
     p.add_argument("--dpo-out", default="runs/dpo", dest="dpo_out")
     p.add_argument("--grpo-out", default="runs/grpo", dest="grpo_out")
-    p.add_argument("--grpo-backend", default="fallback", dest="grpo_backend")
     p.add_argument("--grpo-steps", type=int, default=None, dest="grpo_steps")
+    # Fix 2: anti-collapse ladder (SC-GRPO + GTPO code-sim + AVSPO variance floor +
+    # RC-GRPO) ON by default for the full best-in-world run; --no-anticollapse for
+    # plain GRPO. Measurement-efficiency value-model bench prefilter also ON by
+    # default (--no-value-prefilter to disable); --value-model-path points the
+    # prefilter at a trained value model (else it falls back to generation order).
+    p.add_argument("--anticollapse", dest="anticollapse",
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="enable the SC-GRPO/GTPO/AVSPO/RC-GRPO anti-collapse ladder (default on)")
+    p.add_argument("--value-prefilter", dest="value_prefilter",
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="enable the value-model bench prefilter at GRPO (default on)")
+    p.add_argument("--value-model-path", default=None, dest="value_model_path",
+                   help="trained value model for the GRPO bench prefilter (optional)")
     # item 4: correctness->latency GRPO curriculum (two GRPO phases). Default ON
     # for the full best-in-world run; --no-grpo-curriculum for a single-phase GRPO.
     p.add_argument("--grpo-curriculum", dest="grpo_curriculum",

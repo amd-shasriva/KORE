@@ -18,7 +18,10 @@ together correctly:
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+
+import pytest
 
 import scripts.run_campaign as rc
 from kore.tasks.registry import get_task, heldout_tasks
@@ -340,6 +343,23 @@ def test_preflight_includes_new_symbols():
         ("kore.policy.grpo", "apply_reward_phase"),
         ("kore.data.assemble", "build_multicap_dataset"),
         ("kore.data.assemble", "build_dpo_with_hard_negatives"),
+        # Fix 4: the real-run-only symbols the audit found were previously
+        # imported lazily inside stage bodies and never preflight-checked.
+        ("kore.data.gen_repair", "generate_repairs"),
+        ("kore.data.gen_groups", "generate_groups"),
+        ("kore.data.gen_wins", "generate_wins"),
+        ("kore.data.gen_agentic", "generate_agentic_trajectories"),
+        ("kore.data.schemas", "write_jsonl"),
+        ("kore.data.teacher", "make_teacher"),
+        ("kore.data.teacher", "load_env_local"),
+        ("kore.data.build_datasets", "build_sft"),
+        ("kore.agent.harness", "AgentHarness"),
+        ("kore.agent.tools", "tool_use_reward"),
+        ("kore.policy.anticollapse", "avspo_advantages"),
+        ("kore.policy.anticollapse", "scgrpo_weight_from_kl"),
+        ("kore.policy.anticollapse", "gtpo_codesim_shaping"),
+        ("kore.policy.anticollapse", "variance_floor"),
+        ("kore.value.rerank", "rank_candidates"),
     ]:
         assert sym in names, f"preflight missing {sym}"
 
@@ -347,3 +367,230 @@ def test_preflight_includes_new_symbols():
 def test_preflight_passes_clean():
     # every required symbol imports + has the required params (no drift) -> no raise.
     rc._dry_import_check()
+
+
+# --------------------------------------------------------------------------- #
+# 7. --full-ft engages FSDP UNDER THE HOOD (Fix 1): distributed=True + the
+#    campaign shells out to scripts/launch_distributed.sh (subprocess) for the
+#    stages whose `-m` JSON entry supports it (sft/dpo), and falls back
+#    in-process with a LOUD warning for the sibling-owned stages (grpo/midtrain).
+# --------------------------------------------------------------------------- #
+def _capture_subprocess(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, check=False, **kw):
+        calls.append({"cmd": list(cmd), "check": check})
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(rc.subprocess, "run", fake_run)
+    return calls
+
+
+def test_full_ft_sft_invokes_launcher_and_sets_distributed(monkeypatch, tmp_path):
+    calls = _capture_subprocess(monkeypatch)
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
+
+    args = _args(["--tasks", "rmsnorm_aiter", "--full-ft", "--sft-out", "runs/sft"])
+    ctx = {"data_root": tmp_path, "args": args, "dry": False, "base": "base_model",
+           "tasks": [get_task("rmsnorm_aiter")], "train_tasks": [get_task("rmsnorm_aiter")],
+           "midtrain_ckpt": "midtrain_ckpt"}
+    rc._stage_sft(ctx)
+
+    # the launcher was invoked via subprocess, NOT the in-process trainer.
+    assert len(calls) == 1
+    cmd = calls[0]["cmd"]
+    assert cmd[0] == "bash" and cmd[1].endswith("scripts/launch_distributed.sh")
+    assert cmd[2] == "sft"
+    assert calls[0]["check"] is True
+    # the rendered config forces distributed=True + use_lora=False and threads the
+    # run's dynamic paths (model = the midtrain ckpt, dataset, output_dir).
+    written = json.loads((tmp_path / "launch" / "sft.json").read_text())
+    assert written["distributed"] is True
+    assert written["use_lora"] is False
+    assert written["model_id"] == "midtrain_ckpt"
+    assert written["dataset_path"].endswith("sft/multicap.jsonl")
+    assert ctx["sft_ckpt"] == "runs/sft"
+
+
+def test_lora_sft_stays_in_process_no_launcher(monkeypatch, tmp_path):
+    # the DEFAULT (LoRA) path never shells out — pure single-process one command.
+    calls = _capture_subprocess(monkeypatch)
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
+    import kore.policy.sft as sft_mod
+    seen = {}
+    monkeypatch.setattr(sft_mod, "train_sft",
+                        lambda cfg, ds: seen.update(use_lora=cfg.use_lora) or "runs/sft")
+
+    args = _args(["--tasks", "rmsnorm_aiter", "--sft-out", "runs/sft"])  # LoRA default
+    ctx = {"data_root": tmp_path, "args": args, "dry": False, "base": "base_model",
+           "tasks": [get_task("rmsnorm_aiter")], "train_tasks": [get_task("rmsnorm_aiter")],
+           "midtrain_ckpt": None}
+    rc._stage_sft(ctx)
+    assert calls == []            # no subprocess / launcher
+    assert seen["use_lora"] is True
+    assert ctx["sft_ckpt"] == "runs/sft"
+
+
+def test_full_ft_dpo_single_invokes_launcher(monkeypatch, tmp_path):
+    calls = _capture_subprocess(monkeypatch)
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
+
+    ctx = _dpo_ctx(tmp_path, _args(["--tasks", "rmsnorm_aiter", "--dpo-rounds", "1",
+                                    "--full-ft"]))
+    rc._stage_dpo(ctx)
+
+    assert len(calls) == 1 and calls[0]["cmd"][2] == "dpo"
+    written = json.loads((tmp_path / "launch" / "dpo.json").read_text())
+    assert written["distributed"] is True and written["use_lora"] is False
+    assert written["model_id"] == "sft_ckpt"
+    assert ctx["dpo_ckpt"] == ctx["args"].dpo_out
+
+
+def test_full_ft_dpo_iterative_shells_out_per_round(monkeypatch, tmp_path):
+    import kore.data.onpolicy as onp
+
+    # drive the iterative loop's train_fn once with a fake round, capturing the
+    # per-round launcher shell-out.
+    calls = _capture_subprocess(monkeypatch)
+    monkeypatch.setattr(rc, "_teacher", lambda args: object())
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
+
+    def fake_iter(rounds, policy_factory, tasks, env_factory, **kw):
+        rd = SimpleNamespace(round=1, ref_model_id="round0_ckpt", dpo_pairs=[{"p": 1}],
+                             n_pairs=1)
+        out = kw["train_fn"](rd)
+        return [SimpleNamespace(round=1, policy_ckpt=out)]
+
+    monkeypatch.setattr(onp, "iterative_dpo", fake_iter)
+
+    ctx = _dpo_ctx(tmp_path, _args(["--tasks", "rmsnorm_aiter", "--dpo-rounds", "3",
+                                    "--full-ft"]))
+    rc._stage_dpo(ctx)
+
+    assert len(calls) == 1 and calls[0]["cmd"][2] == "dpo"
+    written = json.loads((tmp_path / "launch" / "dpo_round1.json").read_text())
+    assert written["distributed"] is True and written["use_lora"] is False
+    assert written["loss_type"] == "ipo"
+    assert written["ref_model_id"] == "round0_ckpt"
+
+
+def test_full_ft_grpo_falls_back_in_process_loudly(monkeypatch, tmp_path):
+    # grpo has no `-m` JSON entry (sibling-owned) -> in-process fallback with a
+    # LOUD warning, and distributed=True is STILL set on the config (no silent
+    # degrade, no bogus subprocess).
+    import kore.policy.grpo as grpo_mod
+
+    calls = _capture_subprocess(monkeypatch)
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
+    warned = []
+    monkeypatch.setattr(rc, "_warn_inprocess_fullft", lambda stage: warned.append(stage))
+
+    seen = []
+    monkeypatch.setattr(grpo_mod, "train_grpo",
+                        lambda cfg, tasks=None: seen.append(cfg) or (cfg.output_dir + "/ckpt"))
+
+    ctx = _grpo_ctx(tmp_path, _args(["--tasks", "rmsnorm_aiter", "--no-grpo-curriculum",
+                                     "--full-ft"]))
+    rc._stage_grpo(ctx)
+
+    assert calls == []                                   # never shells out grpo
+    assert warned == ["grpo"]                            # loud warning fired once
+    assert getattr(seen[0], "distributed", False) is True  # distributed still set
+
+
+# --------------------------------------------------------------------------- #
+# 8. Anti-collapse + efficiency levers ON by default (Fix 2)
+# --------------------------------------------------------------------------- #
+def _run_grpo_capture_cfg(monkeypatch, tmp_path, argv):
+    import kore.policy.grpo as grpo_mod
+
+    seen = []
+    # NOTE: no `backend=` kwarg — Fix 3 removed the verl-era backend switch, so the
+    # campaign must call train_grpo(cfg, tasks=...) only. A stray backend arg would
+    # blow up this signature.
+    monkeypatch.setattr(grpo_mod, "train_grpo",
+                        lambda cfg, tasks=None: seen.append(cfg) or (cfg.output_dir + "/ckpt"))
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
+    ctx = _grpo_ctx(tmp_path, _args(argv))
+    rc._stage_grpo(ctx)
+    return seen
+
+
+def test_grpo_levers_on_by_default(monkeypatch, tmp_path):
+    seen = _run_grpo_capture_cfg(
+        monkeypatch, tmp_path, ["--tasks", "rmsnorm_aiter", "--no-grpo-curriculum"])
+    cfg = seen[0]
+    # anti-collapse ladder
+    assert cfg.rc_grpo is True
+    assert cfg.sc_grpo is True
+    assert cfg.gtpo_codesim is True
+    assert cfg.variance_floor > 0.0
+    # measurement efficiency + agentic + StarPO-S
+    assert cfg.value_prefilter is True
+    assert cfg.agentic is True
+    assert cfg.starpo_s is True
+
+
+def test_grpo_levers_can_be_disabled(monkeypatch, tmp_path):
+    seen = _run_grpo_capture_cfg(
+        monkeypatch, tmp_path,
+        ["--tasks", "rmsnorm_aiter", "--no-grpo-curriculum",
+         "--no-anticollapse", "--no-value-prefilter"])
+    cfg = seen[0]
+    assert cfg.rc_grpo is False
+    assert cfg.sc_grpo is False
+    assert cfg.gtpo_codesim is False
+    assert cfg.variance_floor == 0.0
+    assert cfg.value_prefilter is False
+
+
+def test_grpo_value_model_path_threads_through(monkeypatch, tmp_path):
+    seen = _run_grpo_capture_cfg(
+        monkeypatch, tmp_path,
+        ["--tasks", "rmsnorm_aiter", "--no-grpo-curriculum",
+         "--value-model-path", "runs/value/model.json"])
+    assert seen[0].value_prefilter is True
+    assert seen[0].value_model_path == "runs/value/model.json"
+
+
+# --------------------------------------------------------------------------- #
+# 9. Fix 3: the verl-era --grpo-backend flag is gone (no dangling backend switch)
+# --------------------------------------------------------------------------- #
+def test_grpo_backend_flag_removed():
+    args = _args([])
+    assert not hasattr(args, "grpo_backend")
+    with pytest.raises(SystemExit):
+        _args(["--grpo-backend", "fallback"])
+
+
+# --------------------------------------------------------------------------- #
+# 10. Full-FT midtrain: distributed set, in-process fallback (no launcher entry)
+# --------------------------------------------------------------------------- #
+def test_full_ft_midtrain_sets_distributed_in_process(monkeypatch, tmp_path):
+    import kore.policy.midtrain as mt
+
+    calls = _capture_subprocess(monkeypatch)
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
+    seen = {}
+
+    def fake_train(cfg, corpus_path=None):
+        seen["distributed"] = getattr(cfg, "distributed", False)
+        seen["use_lora"] = cfg.use_lora
+        return "midtrain_ckpt"
+
+    monkeypatch.setattr(mt, "train_midtrain", fake_train)
+
+    # pre-create the corpus so the (heavy) corpus build is skipped.
+    corpus = tmp_path / "midtrain" / "corpus.jsonl"
+    corpus.parent.mkdir(parents=True)
+    corpus.write_text('{"text": "x"}\n')
+
+    args = _args(["--tasks", "rmsnorm_aiter", "--full-ft", "--midtrain-out", "runs/midtrain"])
+    ctx = {"data_root": tmp_path, "args": args, "dry": False, "base": "base_model",
+           "tasks": [get_task("rmsnorm_aiter")], "train_tasks": [get_task("rmsnorm_aiter")]}
+    rc._stage_midtrain(ctx)
+
+    assert seen["distributed"] is True     # contract: distributed on the config
+    assert seen["use_lora"] is False       # full-FT
+    assert calls == []                     # midtrain has no launcher entry -> in-process
+    assert ctx["midtrain_ckpt"] == "midtrain_ckpt"

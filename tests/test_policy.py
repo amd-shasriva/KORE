@@ -228,6 +228,34 @@ def test_configs_defaults():
     grpo_cfg = GRPOConfig()
     assert grpo_cfg.model_id == "Qwen/Qwen3-32B"
     assert grpo_cfg.num_trajectories == 16 and grpo_cfg.num_turns == 4
-    assert grpo_cfg.kl_coef == 0.0
     assert abs(grpo_cfg.gamma - 0.4) < 1e-12
     assert abs(grpo_cfg.correctness_weight - 0.3) < 1e-12
+    # The only anchor is ref_anchor_coef (Kevin's "KL=0" == a tiny retention
+    # anchor); the dead/misleading flags were removed (see test_grpo_config_flags).
+    assert abs(grpo_cfg.ref_anchor_coef - 1e-3) < 1e-12
+
+
+def test_grpo_config_flags_wired_or_removed():
+    """Audit fix 3+4: dead/misleading GRPOConfig flags are removed; the wired
+    ones survive; the FSDP/distributed fields mirror SFTConfig."""
+    from kore.policy.configs import GRPOConfig, fsdp_enabled
+
+    cfg = GRPOConfig()
+    # REMOVED (dead/misleading for the native single-process loop).
+    for dead in ("kl_coef", "rollout_backend", "tensor_parallel_size",
+                 "gradient_accumulation_steps", "per_device_train_batch_size"):
+        assert not hasattr(cfg, dead), f"{dead} should be removed from GRPOConfig"
+    # WIRED (kept because the loop now honors them).
+    assert cfg.bf16 is True
+    assert cfg.lr_scheduler_type == "constant" and cfg.warmup_ratio == 0.0
+    assert cfg.max_prompt_length == 16384
+    assert cfg.save_steps == 50 and cfg.logging_steps == 1
+
+    # Fix 4: FSDP/distributed fields (from DistributedMixin) mirror SFTConfig.
+    assert cfg.distributed is False
+    assert cfg.fsdp == "full_shard auto_wrap"
+    assert cfg.fsdp_transformer_layer_cls is None
+    # distributed full-FT GRPO takes the FSDP path; LoRA / single-process do not.
+    assert fsdp_enabled(GRPOConfig(use_lora=False, distributed=True)) is True
+    assert fsdp_enabled(GRPOConfig(use_lora=True, distributed=True)) is False
+    assert fsdp_enabled(GRPOConfig(use_lora=False, distributed=False)) is False

@@ -157,13 +157,14 @@ def _full_ft(ctx) -> bool:
 def _stage_supports_launcher(stage: str) -> bool:
     """True iff ``python -m kore.policy.<stage> <config.json>`` reads a JSON config.
 
-    ``sft``/``dpo`` ship that JSON ``_main`` today (detected via their
-    ``<stage>_config_from_dict`` builder). ``grpo``/``midtrain`` are owned by a
-    sibling track and do NOT yet accept a JSON config positional (grpo has no
-    ``__main__``; midtrain's parses ``--flags``), so full-FT for those stages
-    falls back to in-process with a LOUD warning. Detecting via the builder means
-    this flips ON automatically — and the campaign starts shelling those stages
-    out too — the moment the sibling ships the entry (no campaign change needed).
+    ``sft``/``dpo``/``grpo`` ship that JSON ``__main__`` (detected via their
+    ``<stage>_config_from_dict`` builder), so ``--full-ft`` shells each out to the
+    FSDP launcher for real full-parameter sharded training. ``midtrain`` is owned
+    by a sibling track and does NOT yet accept a JSON config positional (its
+    ``-m`` entry parses ``--flags``), so full-FT midtrain falls back to in-process
+    with a LOUD warning. Detecting via the builder means a stage flips ON
+    automatically — and the campaign starts shelling it out — the moment its entry
+    ships (no campaign change needed).
     """
     try:
         mod = importlib.import_module(f"kore.policy.{stage}")
@@ -201,12 +202,14 @@ def _launch_distributed(ctx, stage: str, overrides: dict, *, run_name: str | Non
 def _warn_inprocess_fullft(stage: str) -> None:
     """LOUD warning: full-FT for a stage whose FSDP JSON entry isn't shipped yet.
 
-    ``grpo``/``midtrain`` are owned by a sibling track and do not yet expose a
-    ``-m kore.policy.<stage> <config.json>`` entry, so the campaign cannot shell
-    them out to the FSDP launcher. It runs them IN-PROCESS instead — which cannot
-    truly full-FT a 14B (single-process ``device_map`` / mid-train's own deferral)
-    — and says so, rather than silently degrading. This resolves automatically
-    once the sibling ships the JSON entry (see docs/DISTRIBUTED.md).
+    ``midtrain`` is owned by a sibling track and does not yet expose a
+    ``-m kore.policy.midtrain <config.json>`` JSON entry (its ``-m`` entry parses
+    ``--flags``), so the campaign cannot shell it out to the FSDP launcher. It
+    runs IN-PROCESS instead — which cannot truly full-FT a 14B (single-process
+    ``device_map`` / mid-train's own deferral) — and says so, rather than silently
+    degrading. This resolves automatically once the sibling ships the JSON entry
+    (see docs/DISTRIBUTED.md). ``sft``/``dpo``/``grpo`` already ship the entry, so
+    they never hit this path.
     """
     _log(stage, f"WARNING: --full-ft for '{stage}' is NOT orchestrated via the campaign's "
                 f"one-command FSDP launcher yet: kore.policy.{stage} has no "
@@ -260,7 +263,13 @@ _IMPORT_CHECKS = [
     ("kore.policy.midtrain", "train_midtrain", True, ["config", "corpus_path"]),
     ("kore.policy.sft", "train_sft", True, []),
     ("kore.policy.dpo", "train", True, []),
-    ("kore.policy.grpo", "train_grpo", True, ["tasks", "backend"]),
+    ("kore.policy.grpo", "train_grpo", True, ["tasks"]),
+    # Full-parameter sharded GRPO one-command entry (Fix 1): the JSON `-m` builder
+    # the campaign detects to route --full-ft grpo through the FSDP launcher. Owned
+    # by a sibling track; absence -> loud warning (grpo full-FT falls back
+    # in-process) rather than a dry-run failure, so this stays green until it lands
+    # and flips grpo to one-command full-parameter sharded automatically.
+    ("kore.policy.grpo", "grpo_config_from_dict", False, []),
     ("kore.policy.soup", "build_soup", True, []),
     ("kore.policy.soup", "soup_sweep", True, ["kernel_key", "general_keys", "base_scores", "epsilon"]),
     ("kore.policy.format", "parse_response", True, []),
@@ -331,7 +340,8 @@ def _dry_import_check() -> None:
             except (TypeError, ValueError):
                 pass  # some builtins/objects have no introspectable signature
     for w in warnings:
-        _log("preflight", f"WARNING: {w} (serving backend not yet provisioned)")
+        _log("preflight", f"WARNING: {w} (optional symbol from a parallel/sibling "
+                          f"track; not yet provisioned)")
     _log("preflight", f"import-check: {len(_IMPORT_CHECKS)} symbols, "
                       f"{len(problems)} problems, {len(warnings)} warnings")
     if problems:
@@ -1055,18 +1065,16 @@ def _stage_grpo(ctx):
         _log("grpo", f"training on TRAIN-split tasks={train_task_ids} "
                      f"(held-out eval-only={sorted(eval_ids)})")
 
-    # The GRPO RL stage uses LoRA even under --full-ft. Rationale (honest): FSDP
-    # full-FT is wired for the HF-Trainer stages (midtrain/SFT/DPO); the GRPO loop
-    # is a custom multi-turn rollout loop, and full-parameter 14B RL there would
-    # need accelerate/FSDP integrated INTO the loop (a documented scale-up item in
-    # docs/DISTRIBUTED.md) and is enormously memory-heavy. LoRA RL on top of a
-    # full-FT base is standard, memory-safe (~9GB/GPU, proven), and native
-    # one-command. The O(1-sample) micro-batched backward bounds activation memory.
-    use_lora = True
-    if _full_ft(ctx):
-        _log("grpo", "NOTE: --full-ft uses FSDP for midtrain/SFT/DPO; the GRPO RL stage "
-                     "uses LoRA on top of the full-FT base (memory-safe, standard for RL). "
-                     "Full-parameter GRPO under FSDP is the documented scale-up item.")
+    # Fix 1: under --full-ft the GRPO RL stage runs FULL-PARAMETER + SHARDED
+    # (ZeRO-3 / FSDP) via the one-command launcher — there is NO LoRA shortcut for
+    # the RL stage under --full-ft. GRPO now ships the JSON `-m` entry
+    # (grpo_config_from_dict + __main__), so --full-ft shells the RL stage out to
+    # scripts/launch_distributed.sh exactly like sft/dpo (each curriculum phase =
+    # one launched full-parameter GRPO run). --lora is the single-process LoRA
+    # bring-up path (GRPO LoRA runs in-process there). The O(1-sample) micro-
+    # batched backward keeps the LoRA path memory-safe on a single GPU.
+    fullft = _full_ft(ctx)
+    use_lora = not fullft
 
     # Fix 2: turn the anti-collapse ladder + measurement-efficiency levers ON by
     # default for the full best-in-world run. --no-anticollapse / --no-value-
@@ -1077,43 +1085,53 @@ def _stage_grpo(ctx):
     value_model_path = getattr(ctx["args"], "value_model_path", None) \
         or ctx.get("value_model_path")
     variance_floor = _ANTICOLLAPSE_VARIANCE_FLOOR if anticollapse else 0.0
+
+    # GRPO ships the JSON `-m` entry, so full-FT shells out to the FSDP launcher
+    # exactly like sft/dpo (detected via `grpo_config_from_dict`, so this flips on
+    # automatically the moment the sibling entry lands). If a full-FT run is asked
+    # for on a build where the entry is not yet present, fall back in-process with
+    # a LOUD warning (distributed=True + use_lora=False still set) — NEVER a silent
+    # LoRA degrade.
+    launcher_ok = _stage_supports_launcher("grpo")
+    if fullft and not launcher_ok:
+        _warn_inprocess_fullft("grpo")
+
     _log("grpo", "levers @ grpo start: agentic=True starpo_s=True dynamic_sampling=on(default) "
                  f"| anticollapse={anticollapse} "
                  f"[rc_grpo/variance_floor({variance_floor})/sc_grpo/gtpo_codesim] "
                  f"| value_prefilter={value_prefilter} value_model_path={value_model_path} "
-                 f"| use_lora={use_lora} full_ft={_full_ft(ctx)}")
+                 f"| use_lora={use_lora} full_ft={fullft} "
+                 f"sharded={fullft and launcher_ok}")
 
     def _grpo_kw(*, model_id, output_dir, reward_phase="all"):
         kw = dict(model_id=model_id, output_dir=output_dir, agentic=True,
                   starpo_s=True, ref_checkpoint=sft, use_lora=use_lora,
                   reward_phase=reward_phase)
-        if anticollapse:
-            kw.update(rc_grpo=True, variance_floor=variance_floor,
-                      sc_grpo=True, gtpo_codesim=True)
-        if value_prefilter:
-            kw["value_prefilter"] = True
-            if value_model_path:
-                kw["value_model_path"] = value_model_path
+        # Set the anti-collapse levers explicitly (both ON and OFF) so a
+        # --no-anticollapse run turns them OFF even when overlaid on the
+        # levers-on shipped full-FT template (configs/grpo_14b_full.json).
+        kw.update(rc_grpo=anticollapse, variance_floor=variance_floor,
+                  sc_grpo=anticollapse, gtpo_codesim=anticollapse,
+                  value_prefilter=value_prefilter)
+        if value_prefilter and value_model_path:
+            kw["value_model_path"] = value_model_path
         if use_lora:
             kw.update(num_trajectories=8, tasks_per_step=2, num_turns=3)
         if ctx["args"].grpo_steps:
             kw["total_steps"] = ctx["args"].grpo_steps
         return kw
 
-    # Fix 1: --full-ft sets distributed=True on the GRPO config too. GRPO has no
-    # `-m kore.policy.grpo <config.json>` JSON entry yet (sibling-owned), so it
-    # cannot be shelled out to the FSDP launcher — it runs in-process with a LOUD
-    # warning rather than silently pretending to shard.
-    fullft = _full_ft(ctx)
-    launcher_ok = _stage_supports_launcher("grpo")
-    if fullft and not launcher_ok:
-        _warn_inprocess_fullft("grpo")
-
-    def _run_grpo(*, model_id, output_dir, reward_phase="all"):
-        # Fix 3: the verl-era backend switch is gone — train_grpo has ONE native
-        # in-process AMD backend, so no backend argument is threaded.
-        cfg = GRPOConfig(**_grpo_kw(model_id=model_id, output_dir=output_dir,
-                                    reward_phase=reward_phase))
+    def _run_grpo(*, model_id, output_dir, reward_phase="all", run_name=None):
+        kw = _grpo_kw(model_id=model_id, output_dir=output_dir, reward_phase=reward_phase)
+        if fullft and launcher_ok:
+            # Full-parameter sharded GRPO: render the resolved JSON (train-split
+            # tasks travel in the config) and shell out to the FSDP launcher.
+            overrides = dict(kw)
+            overrides["tasks"] = list(train_task_ids)
+            return _launch_distributed(ctx, "grpo", overrides, run_name=run_name)
+        # LoRA single-process bring-up (--lora) OR the full-FT in-process fallback
+        # when the `-m` JSON entry is not present yet (distributed still set).
+        cfg = GRPOConfig(**kw)
         if fullft:
             setattr(cfg, "distributed", True)
         return train_grpo(cfg, tasks=train_task_ids)
@@ -1122,16 +1140,21 @@ def _stage_grpo(ctx):
         # Phase 1: correctness-only GRPO (mask the speed term) — learn to be correct.
         p1_out = str(Path(ctx["args"].grpo_out) / "phase1_correctness")
         _log("grpo", f"curriculum phase-1 (correctness) init={init} -> {p1_out}")
-        phase1_ckpt = _run_grpo(model_id=init, output_dir=p1_out, reward_phase="correctness")
+        phase1_ckpt = _run_grpo(model_id=init, output_dir=p1_out,
+                                reward_phase="correctness",
+                                run_name="grpo_phase1_correctness")
         _log("grpo", f"curriculum phase-1 -> {phase1_ckpt}")
 
-        # Phase 2: latency GRPO (full correctness+speed) initialized FROM phase-1.
+        # Phase 2: latency GRPO (full correctness+speed) initialized FROM phase-1
+        # (the phase-1 checkpoint = phase-2 init, threaded through the launcher).
         p2_out = ctx["args"].grpo_out
         _log("grpo", f"curriculum phase-2 (latency) init={phase1_ckpt} -> {p2_out}")
         ctx["grpo_ckpt"] = _run_grpo(model_id=phase1_ckpt, output_dir=p2_out,
-                                     reward_phase="latency")
+                                     reward_phase="latency",
+                                     run_name="grpo_phase2_latency")
     else:
-        ctx["grpo_ckpt"] = _run_grpo(model_id=init, output_dir=ctx["args"].grpo_out)
+        ctx["grpo_ckpt"] = _run_grpo(model_id=init, output_dir=ctx["args"].grpo_out,
+                                     run_name="grpo")
     _log("grpo", f"-> {ctx['grpo_ckpt']}")
     _retention_gate(ctx, stage="grpo", candidate=ctx["grpo_ckpt"], base=sft)
 

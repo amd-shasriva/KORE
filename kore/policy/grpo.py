@@ -694,7 +694,18 @@ def _train_grpo_fallback(config, tasks):
     When LoRA is used the adapter is merged before saving so soup/serve load a
     full model. Gradient checkpointing + PEFT needs ``enable_input_require_grads``
     or ``.backward()`` sees no grad path.
+
+    When ``config.distributed`` full-FT is requested (``use_lora=False`` under an
+    ``accelerate launch`` process group) this dispatches to
+    :func:`_train_grpo_distributed`, which shards the policy + reference across all
+    ranks (ZeRO-3-equivalent) so no full 14B replica ever lives on one GPU. Every
+    single-process / LoRA / CPU path below is left byte-for-byte unchanged.
     """
+    from kore.policy.configs import grpo_distributed_enabled
+
+    if grpo_distributed_enabled(config):
+        return _train_grpo_distributed(config, tasks)
+
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -976,6 +987,516 @@ def _train_grpo_fallback(config, tasks):
 _train_grpo_inprocess = _train_grpo_fallback
 
 
+# --------------------------------------------------------------------------- #
+# FULL-PARAMETER SHARDED GRPO (distributed, ZeRO-3-equivalent)
+#
+# Sharding approach — chosen: torch FSDP FULL_SHARD (ZeRO-3-equivalent), with
+# DeepSpeed ZeRO-3 fully wired and selectable (``sharding_backend="deepspeed"``).
+# Why FSDP is the default for THIS loop (documented, deliberate):
+#   * The KORE objective uses an O(1-sample) MICRO-BATCHED backward — many
+#     per-sample ``backward()`` calls accumulate into ``.grad``, then ONE
+#     ``optimizer.step()`` per PPO epoch (activation memory O(1 sample)). FSDP
+#     reduce-scatters + accumulates grads on each backward and lets us own the
+#     ``step()`` boundary; DeepSpeed's engine instead couples backward/step to a
+#     FIXED ``gradient_accumulation_steps`` counter, which fights a dynamic
+#     per-step sample count. FSDP maps onto the recipe with zero contortion.
+#   * FSDP is torch-native -> guaranteed ROCm/gfx942 support (no compiled ops to
+#     build, unlike DeepSpeed's fused/CPU-Adam kernels).
+#   * It reuses the SAME FULL_SHARD recipe the KORE SFT/DPO stages already run.
+# Generation robustness: both FSDP and ZeRO-3 GATHER each wrapped block's params
+# per-forward and reshard after, so ``model.generate`` works out of the box
+# (every decode step re-gathers). ``synced_gpus=True`` keeps ranks in lockstep on
+# ragged completion lengths. The frozen REFERENCE is prepared as a sharded eval
+# model (never a full replica per GPU). Cross-rank rewards are all-gathered so the
+# group-relative GRPO baseline is over the FULL group (all trajectories/ranks).
+# --------------------------------------------------------------------------- #
+def merge_across_ranks(per_rank: list[list]) -> list:
+    """Flatten a per-rank list-of-lists into one global list (rank-ordered)."""
+    return [x for chunk in per_rank for x in chunk]
+
+
+def distributed_group_advantages(per_rank_returns: list[list[float]],
+                                 variance_floor: float = 0.0,
+                                 avspo_virtual_k: int = 2,
+                                 adv_eps: float = _EPS) -> list[list[float]]:
+    """Global (cross-rank) group-relative advantages, split back per rank.
+
+    ``per_rank_returns[r]`` is rank ``r``'s per-turn Kevin returns for ONE rollout
+    group (the trajectories that rank rolled out). GRPO's baseline MUST be over the
+    FULL group — every trajectory on every rank — so the returns are concatenated
+    (rank order), normalized ONCE via the AVSPO variance-floor advantages
+    (:func:`anticollapse.avspo_advantages`, ``tau=variance_floor``), and the
+    resulting advantages are sliced back to each rank in the SAME order. Each rank
+    therefore trains its own trajectories but with a globally-correct advantage.
+
+    Pure (no torch/dist) so the cross-rank normalization math is unit-testable by
+    simulating each rank's rewards.
+    """
+    from kore.policy import anticollapse as ac
+
+    flat = merge_across_ranks(per_rank_returns)
+    advs = ac.avspo_advantages(flat, variance_floor, avspo_virtual_k, adv_eps)
+    out: list[list[float]] = []
+    i = 0
+    for chunk in per_rank_returns:
+        out.append(advs[i:i + len(chunk)])
+        i += len(chunk)
+    return out
+
+
+def _all_gather_object(obj, accelerator=None) -> list:
+    """All-gather a picklable python object into a rank-ordered list.
+
+    Resolution order (so the SAME call is correct on 1 rank, on the 2-proc gloo
+    smoke, and on a real 8xMI300 ``accelerate launch``):
+      1. the live default ``torch.distributed`` group (real GPU launch + the gloo
+         smoke both init it) -> ``all_gather_object``;
+      2. else, when an Accelerator reporting >1 processes is given, its managed
+         group via ``accelerate.utils.gather_object`` (belt-and-suspenders for
+         backends where the default group isn't the one in use);
+      3. else identity ``[obj]`` (single process / uninitialized / CPU / tests).
+    """
+    try:
+        import torch.distributed as dist
+    except Exception:  # noqa: BLE001 - torch not available (pure CPU tests)
+        dist = None
+    if dist is not None and dist.is_available() and dist.is_initialized() \
+            and dist.get_world_size() > 1:
+        gathered = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered, obj)
+        return list(gathered)
+    if accelerator is not None and getattr(accelerator, "num_processes", 1) > 1:
+        try:
+            from accelerate.utils import gather_object
+
+            gathered = list(gather_object([obj]))  # flat, rank-ordered
+            if len(gathered) == accelerator.num_processes:
+                return gathered
+        except Exception:  # noqa: BLE001 - fall through to the identity return
+            pass
+    return [obj]
+
+
+def _rank_slice(n: int, rank: int, world: int) -> list[int]:
+    """Indices of the ``n`` items this ``rank`` owns under a strided partition.
+
+    Strided (``rank, rank+world, ...``) so, with the Kevin group size ``G`` a
+    multiple of ``world``, every rank rolls out exactly ``G/world`` trajectories
+    of the SAME task-group in parallel — the group is split across ranks and its
+    reward baseline is reconstructed by the cross-rank gather.
+    """
+    return list(range(rank, n, max(1, world)))
+
+
+def build_fsdp_plugin(config):
+    """Build an accelerate ``FullyShardedDataParallelPlugin`` (FULL_SHARD/ZeRO-3-eq).
+
+    Shards params + grads + optimizer state across ranks, wraps one transformer
+    decoder block per FSDP unit (auto-detected from ``model_id`` when
+    ``fsdp_transformer_layer_cls`` is unset), reshards after forward (so
+    ``model.generate`` re-gathers per decode step), and routes activation
+    checkpointing through FSDP. ``cpu_offload`` moves params+optim to host RAM for
+    32B/70B. Heavy import kept local so ``import kore.policy.grpo`` stays torch-free.
+    """
+    from accelerate import FullyShardedDataParallelPlugin
+
+    from kore.policy.configs import detect_transformer_layer_cls
+
+    layer_cls = getattr(config, "fsdp_transformer_layer_cls", None) or detect_transformer_layer_cls(
+        getattr(config, "model_id", ""))
+    version = int(getattr(config, "fsdp_version", 1) or 1)
+    # FSDP1 expects the sharding strategy STRING; FSDP2 takes a bool. Both mean
+    # "reshard params after forward" == FULL_SHARD == ZeRO-3-equivalent.
+    reshard = True if version >= 2 else "FULL_SHARD"
+    return FullyShardedDataParallelPlugin(
+        fsdp_version=version,
+        reshard_after_forward=reshard,              # FULL_SHARD (ZeRO-3 equivalent)
+        auto_wrap_policy="transformer_based_wrap",
+        transformer_cls_names_to_wrap=[layer_cls],
+        cpu_offload=bool(getattr(config, "cpu_offload", False)),
+        activation_checkpointing=bool(getattr(config, "gradient_checkpointing", True)),
+        use_orig_params=True,
+        sync_module_states=True,
+        cpu_ram_efficient_loading=True,
+        limit_all_gathers=True,
+        state_dict_type="FULL_STATE_DICT",          # gather a plain ckpt for soup/serve
+    )
+
+
+def build_deepspeed_plugin(config):
+    """Build an accelerate ``DeepSpeedPlugin`` from the synthesized ZeRO config.
+
+    ZeRO-3 shards params+grads+optim and gathers params per-forward (so rollout
+    ``model.generate`` works on the sharded engine — the online-RL property). The
+    ZeRO config comes from :func:`kore.policy.configs.build_deepspeed_config`
+    (or the user's ``ds_config`` JSON). Heavy import kept local.
+    """
+    from accelerate import DeepSpeedPlugin
+
+    from kore.policy.configs import build_deepspeed_config
+
+    ds_cfg = build_deepspeed_config(config)
+    return DeepSpeedPlugin(
+        hf_ds_config=ds_cfg,
+        zero_stage=int(getattr(config, "zero_stage", 3)),
+        gradient_accumulation_steps=1,
+        gradient_clipping=float(getattr(config, "max_grad_norm", 1.0)),
+        offload_optimizer_device="cpu" if getattr(config, "cpu_offload", False) else None,
+        offload_param_device="cpu" if getattr(config, "cpu_offload", False) else None,
+        zero3_save_16bit_model=True,
+    )
+
+
+def build_grpo_accelerator(config):
+    """Construct the ``accelerate.Accelerator`` for the sharded GRPO run.
+
+    Picks the plugin from :func:`kore.policy.configs.grpo_sharding_backend`
+    (``"fsdp"`` default, ``"deepspeed"`` opt-in) and requests bf16 mixed precision
+    when ``config.bf16``. Heavy import kept local so the module import stays light.
+    """
+    from accelerate import Accelerator
+
+    from kore.policy.configs import grpo_sharding_backend
+
+    backend = grpo_sharding_backend(config)
+    mp = "bf16" if getattr(config, "bf16", True) else "no"
+    if backend == "deepspeed":
+        return Accelerator(mixed_precision=mp, deepspeed_plugin=build_deepspeed_plugin(config))
+    return Accelerator(mixed_precision=mp, fsdp_plugin=build_fsdp_plugin(config))
+
+
+def _dummy_gen_inputs(tok, device):
+    """A trivial ``[(prompt_ids, gen_ids)]`` for a padding (lockstep) forward.
+
+    Used when a rank has FEWER learnable samples than its peers: it still must
+    issue the SAME number of collective forwards (ZeRO-3/FSDP all-gather per
+    forward), so it runs this 1-token forward whose loss is scaled by 0.
+    """
+    import torch
+
+    ids = tok("x", return_tensors="pt").input_ids.to(device)
+    return [(ids, ids[0][:1])]
+
+
+def _accumulate_grpo_grads_distributed(local_terms, logp_fn, *, accelerator,
+                                       global_total_tokens: int, grad_scale: float,
+                                       max_micro_steps: int, ref_anchor_coef: float,
+                                       clip_ratio_low: float, clip_ratio_high: float,
+                                       tok, device):
+    """Sharded O(1-sample) micro-batched backward, kept in LOCKSTEP across ranks.
+
+    ``local_terms`` is this rank's list of ``(advantage, sample)`` pairs (sample =
+    ``[ret, gen_inputs, ref_logp, old_logp, n_tokens, sc_weight]``). Each real
+    sample recomputes its token-mean log-prob against the SHARDED live policy
+    (``logp_fn`` -> a collective forward), forms the DAPO clip-higher surrogate
+    ``-min(r*A, clip(r,1-lo,1+hi)*A)`` (+ k3 KL anchor), scales by
+    ``n_tok / global_total_tokens`` for a GLOBAL token-mean over the whole batch
+    across ALL ranks, and backprops via ``accelerator.backward`` (FSDP/DeepSpeed
+    reduce-scatter accumulates into the sharded grad).
+
+    Two distributed-correctness details:
+      * **Grad scale** (``grad_scale = world_size``): FSDP/ZeRO AVERAGE grads over
+        ranks, but the objective is a global SUM over all per-sample terms divided
+        by the global token count. Multiplying each term by ``world_size`` converts
+        the average back into the intended sum.
+      * **Lockstep padding**: ranks can hold different sample counts (ragged
+        infra-drops), yet every collective forward must fire on every rank the same
+        number of times. Each rank runs exactly ``max_micro_steps`` forwards; the
+        surplus steps are DUMMY forwards whose loss is multiplied by 0 (no grad,
+        but the all-gather still happens), so no rank ever deadlocks.
+
+    Returns ``(loss_value, n_real_terms)``.
+    """
+    import torch
+
+    loss_value = 0.0
+    n_real = 0
+    for i in range(max_micro_steps):
+        if i < len(local_terms):
+            adv, sample = local_terms[i]
+            gen_inputs = sample[1]
+            lp = logp_fn(gen_inputs)
+            if lp is None:
+                # keep lockstep: run a zeroed dummy forward instead of skipping.
+                dlp = logp_fn(_dummy_gen_inputs(tok, device))
+                accelerator.backward(dlp * 0.0)
+                continue
+            n_tok = max(int(_sample_field(sample, 4, 1) or 1), 1)
+            old_lp = _sample_field(sample, 3)
+            if old_lp is not None:
+                ratio = torch.exp(lp - old_lp)
+                pg = -clip_higher_ratio(ratio, adv, clip_ratio_low, clip_ratio_high)
+            else:
+                pg = -adv * lp
+            sc_w = _sample_field(sample, 5)
+            if sc_w is not None:
+                pg = pg * sc_w
+            term = pg
+            ref_lp = _sample_field(sample, 2)
+            if ref_anchor_coef and ref_lp is not None:
+                d = ref_lp - lp
+                term = term + ref_anchor_coef * (torch.exp(d) - d - 1.0)
+            scaled = term * (n_tok / global_total_tokens) * grad_scale
+            accelerator.backward(scaled)
+            loss_value += float(scaled.detach())
+            n_real += 1
+        else:
+            # padding step: dummy collective forward, zero contribution.
+            dlp = logp_fn(_dummy_gen_inputs(tok, device))
+            accelerator.backward(dlp * 0.0)
+    return loss_value, n_real
+
+
+def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world, seed):
+    """This rank's slice of a Kevin group: roll ``G/world`` trajectories.
+
+    Mirrors the serial ``_one_group`` per-trajectory rollout but only for the
+    trajectory indices this rank owns (:func:`_rank_slice`). Returns a dict with
+    LOCAL parallel lists: ``traj_scores`` (per-trajectory best-kernel value, for
+    the cross-rank StarPO-S/dynamic-sampling decision), ``returns`` + ``samples``
+    (per-turn Kevin samples for THIS rank), ``correct_kernels``, and ``infra``.
+
+    Only serial refinement is driven here: its per-trajectory forward COUNT is
+    fixed (``num_turns``), so every rank issues the same number of collective
+    forwards — the invariant ZeRO-3/FSDP requires. (Agentic tool rollouts have
+    ragged per-trajectory turn counts and are not sharded here; see the module
+    docstring / DISTRIBUTED notes.)
+    """
+    from kore.env.kore_env import KoreEnv
+    from kore.policy import anticollapse as ac
+
+    env = KoreEnv(task)
+    G = config.num_trajectories
+    my = _rank_slice(G, rank, world)
+    rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=seed) if config.rc_grpo else [None] * G
+
+    traj_rewards, traj_correct, traj_infra = [], [], []
+    turn_inputs, turn_ref, turn_old, turn_ntok, turn_codes = [], [], [], [], []
+    traj_scores = []
+    for g in my:
+        d = _rollout(model, tok, env, task, config, rtoks[g], ref_model)
+        traj_rewards.append(d["rewards"]); traj_correct.append(d["correct"])
+        traj_infra.append(d["infra"]); turn_inputs.append(d["gen_inputs"])
+        turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
+        turn_ntok.append(d["n_tokens"]); turn_codes.append(d["codes"])
+        traj_scores.append(
+            kevin_trajectory_score(d["rewards"], d["correct"])
+            if config.kevin_best_kernel_scoring else (max(d["rewards"]) if d["rewards"] else 0.0))
+    returns, index = build_kevin_samples(traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra)
+    samples, codes = [], []
+    for (ti, tu), ret in zip(index, returns):
+        samples.append([ret, turn_inputs[ti][tu], turn_ref[ti][tu],
+                        turn_old[ti][tu], turn_ntok[ti][tu], None])
+        codes.append(turn_codes[ti][tu])
+    correct_kernels = [turn_codes[ti][tu]
+                       for ti in range(len(my)) for tu in range(len(traj_correct[ti]))
+                       if traj_correct[ti][tu] and turn_codes[ti][tu]]
+    return {"traj_scores": traj_scores, "returns": [s[0] for s in samples], "samples": samples,
+            "codes": codes, "correct_kernels": correct_kernels,
+            "infra": sum(1 for inf in traj_infra for x in inf if x)}
+
+
+def _train_grpo_distributed(config, tasks):
+    """Sharded FULL-PARAMETER multi-turn GRPO across an ``accelerate`` process group.
+
+    The policy (and frozen KL-anchor reference) are FULL-sharded across all ranks
+    (FSDP FULL_SHARD by default, DeepSpeed ZeRO-3 opt-in) so no full 14B replica
+    ever lives on one GPU. Per step:
+      1. each rank rolls out its strided slice of every Kevin group's ``G``
+         trajectories (serial refinement; ``synced_gpus`` generation);
+      2. per-trajectory rewards + per-turn returns + correct-kernels are
+         ALL-GATHERED so StarPO-S / dynamic-sampling and the group-relative
+         advantage baseline are computed over the FULL group (all ranks);
+      3. GTPO code-sim shaping runs against the gathered correct kernels;
+      4. each rank backprops ITS local samples with the globally-normalized
+         advantage via a lockstep-padded, world-scaled micro-batched
+         ``accelerator.backward`` (activation memory O(1 sample)); one
+         ``optimizer.step()`` per PPO epoch.
+
+    The final model is gathered to a plain checkpoint on the main process. Every
+    single-process / LoRA / CPU path is elsewhere; this function only runs under a
+    real distributed launch (``grpo_distributed_enabled``).
+    """
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from kore.policy.configs import grpo_sharding_backend
+    from kore.tasks.registry import get_task, task_ids
+
+    tasks = tasks or task_ids()
+    backend = grpo_sharding_backend(config)
+    accelerator = build_grpo_accelerator(config)
+    world = accelerator.num_processes
+    rank = accelerator.process_index
+    is_main = accelerator.is_main_process
+    if is_main:
+        configure(run_dir=getattr(config, "output_dir", None))
+
+    # generation must run in lockstep across ranks under sharding.
+    setattr(config, "_grpo_synced_gpus", bool(getattr(config, "synced_gpus", True)))
+    t_start = time.time()
+    log.info("grpo distributed: starting", backend=backend, world=world, rank=rank,
+             model=config.model_id, total_steps=config.total_steps,
+             num_trajectories=config.num_trajectories, num_turns=config.num_turns,
+             use_lora=False, agentic=bool(config.agentic),
+             cpu_offload=bool(getattr(config, "cpu_offload", False)),
+             ref_anchor_coef=config.ref_anchor_coef, bf16=bool(getattr(config, "bf16", True)))
+    if config.agentic:
+        log.warn("grpo distributed: agentic rollouts have ragged per-trajectory turn "
+                 "counts (non-symmetric collective forwards under sharding); running the "
+                 "SERIAL refinement rollout on the sharded path instead", agentic=True)
+
+    _activate_value_ranker(config)
+    tok = AutoTokenizer.from_pretrained(config.model_id)
+
+    model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=_model_dtype(config))
+    if getattr(config, "gradient_checkpointing", True):
+        model.gradient_checkpointing_enable()
+        model.enable_input_require_grads()
+    model.train()
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
+                            lr=config.learning_rate)
+    # Shard params + optimizer state across ranks (ZeRO-3-equivalent).
+    model, opt = accelerator.prepare(model, opt)
+    sched = _build_lr_scheduler(opt, config)
+
+    ref_model = None
+    if getattr(config, "ref_anchor_coef", 0.0) > 0:
+        ref_model = _load_ref_model(config)
+        if ref_model is not None:
+            # frozen reference is also sharded (eval mode) — never a full replica.
+            ref_model = accelerator.prepare_model(ref_model, evaluation_mode=True)
+
+    tasks_per_step = max(1, getattr(config, "tasks_per_step", 1))
+    target_groups = getattr(config, "target_groups", None) or tasks_per_step
+    dyn = bool(getattr(config, "dynamic_sampling", True)) and bool(config.starpo_s)
+    max_attempts = getattr(config, "max_sampling_attempts", None) or (
+        3 * target_groups if dyn else tasks_per_step)
+    ppo_epochs = max(1, getattr(config, "ppo_epochs", 1))
+    task_cursor = 0
+    last_mean_r = None
+
+    def _roll(attempt):
+        nonlocal task_cursor
+        task = get_task(tasks[task_cursor % len(tasks)])
+        task_cursor += 1
+        local = _rollout_slice_distributed(model, tok, task, config, ref_model,
+                                            rank, world, seed=attempt * 100003 + rank)
+        # gather across ranks -> the FULL group (every trajectory on every rank).
+        all_scores = _all_gather_object(local["traj_scores"], accelerator)
+        all_returns = _all_gather_object(local["returns"], accelerator)
+        all_correct = _all_gather_object(local["correct_kernels"], accelerator)
+        full_scores = merge_across_ranks(all_scores)
+        return {"task": task, "local": local, "full_scores": full_scores,
+                "per_rank_returns": all_returns,
+                "correct_kernels": merge_across_ranks(all_correct),
+                "any_correct": bool(merge_across_ranks(all_correct)),
+                "infra": local["infra"]}
+
+    for step in range(config.total_steps):
+        groups, attempts = dynamic_sampling_refill(
+            _roll, target_groups, min_std=config.starpo_min_std,
+            max_attempts=max_attempts, dynamic=dyn,
+            std_key=lambda g: group_reward_std(g["full_scores"]))
+        if not groups:
+            log.info("grpo(dist) step: dynamic-sampling exhausted — skipping", step=step,
+                     attempts=attempts, rank=rank)
+            log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
+            continue
+
+        # GTPO all-fail code-sim shaping against the gathered correct kernels.
+        if config.gtpo_codesim:
+            from kore.policy import anticollapse as ac
+            step_refs = [k for g in groups for k in g["correct_kernels"]]
+            for g in groups:
+                loc = g["local"]
+                if g["any_correct"] or not loc["samples"]:
+                    continue
+                refs = step_refs or ([_safe_seed_code(g["task"])] if _safe_seed_code(g["task"]) else [])
+                partial = ac.gtpo_codesim_shaping(loc["codes"], refs, config.gtpo_codesim_scale)
+                for s, p in zip(loc["samples"], partial):
+                    s[0] = p
+                loc["returns"] = [s[0] for s in loc["samples"]]
+
+        # StarPO-S: identical decision on every rank (uses gathered full scores).
+        group_full_scores = [g["full_scores"] for g in groups]
+        if config.starpo_s:
+            keep = sorted(starpo_select_high_variance(
+                group_full_scores, config.starpo_keep_frac, config.starpo_min_std))
+            if not keep:
+                log.info("grpo(dist) step: all groups collapsed — skipping", step=step, rank=rank)
+                log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
+                continue
+        else:
+            keep = list(range(len(groups)))
+
+        # Global (cross-rank) advantages per kept group -> this rank's slice.
+        local_terms = []
+        local_tokens = 0
+        for gi in keep:
+            g = groups[gi]
+            # re-gather returns AFTER GTPO shaping so advantages see shaped returns.
+            per_rank_returns = _all_gather_object(g["local"]["returns"], accelerator)
+            per_rank_adv = distributed_group_advantages(
+                per_rank_returns, config.variance_floor, config.avspo_virtual_k, config.adv_eps)
+            my_adv = per_rank_adv[rank] if rank < len(per_rank_adv) else []
+            for adv, sample in zip(my_adv, g["local"]["samples"]):
+                if not sample[1]:
+                    continue
+                local_terms.append((adv, sample))
+                local_tokens += max(int(_sample_field(sample, 4, 1) or 1), 1)
+
+        # global token normalizer + lockstep bound, agreed across ranks.
+        all_tokens = _all_gather_object(local_tokens, accelerator)
+        global_total_tokens = sum(all_tokens)
+        all_counts = _all_gather_object(len(local_terms), accelerator)
+        max_micro = max(all_counts) if all_counts else 0
+        if global_total_tokens == 0 or max_micro == 0:
+            log.info("grpo(dist) step: no learnable samples — skipping", step=step, rank=rank)
+            log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
+            continue
+
+        def _logp_fn(gen_inputs):
+            return _recompute_logp(model, tok, gen_inputs, config.temperature) if gen_inputs else None
+
+        loss_value, n_terms = 0.0, 0
+        for _epoch in range(ppo_epochs):
+            opt.zero_grad()
+            loss_value, n_terms = _accumulate_grpo_grads_distributed(
+                local_terms, _logp_fn, accelerator=accelerator,
+                global_total_tokens=global_total_tokens, grad_scale=float(world),
+                max_micro_steps=max_micro, ref_anchor_coef=config.ref_anchor_coef,
+                clip_ratio_low=config.clip_ratio_low, clip_ratio_high=config.clip_ratio_high,
+                tok=tok, device=accelerator.device)
+            accelerator.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+            opt.step()
+        sched.step()
+
+        mean_r = sum(sum(s) / len(s) for s in group_full_scores if s) / max(len(group_full_scores), 1)
+        last_mean_r = mean_r
+        if is_main:
+            print(f"[grpo/dist] step {step} kept={len(keep)}/{len(groups)} world={world} "
+                  f"epochs={ppo_epochs} meanR={mean_r:.3f} loss={loss_value:.4f}")
+            log.event("grpo_step_dist", step=step, backend=backend, world=world,
+                      n_groups=len(groups), n_kept_groups=len(keep), n_attempts=attempts,
+                      reward_mean=mean_r, loss=loss_value, global_tokens=global_total_tokens,
+                      **gpu_mem_snapshot())
+        log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
+
+    # Gather the sharded weights into a plain checkpoint on the main process.
+    accelerator.wait_for_everyone()
+    out = config.output_dir
+    unwrapped = accelerator.unwrap_model(model)
+    unwrapped.save_pretrained(
+        out, is_main_process=is_main, save_function=accelerator.save,
+        state_dict=accelerator.get_state_dict(model))
+    if is_main:
+        tok.save_pretrained(out)
+        log.metric("grpo_done", steps=config.total_steps, mean_reward_last=last_mean_r,
+                   out=out, backend=backend, world=world, **gpu_mem_snapshot())
+    return out
+
+
 def _load_ref_model(config):
     """Load the frozen KL-anchor reference (``ref_checkpoint`` or ``model_id``).
 
@@ -1052,9 +1573,12 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         for _c in range(n_cand):
             with torch.no_grad():
                 # Fix 2: pass top_p (+temperature) so sampling matches the config.
+                # synced_gpus keeps all ranks in lockstep under ZeRO-3/FSDP sharded
+                # generation (default False -> single-process behavior unchanged).
                 gen = model.generate(ids, max_new_tokens=config.max_response_length,
                                      do_sample=True, temperature=config.temperature,
                                      top_p=config.top_p,
+                                     synced_gpus=getattr(config, "_grpo_synced_gpus", False),
                                      return_dict_in_generate=True, output_scores=True)
             seq = gen.sequences[0][ids.shape[1]:].detach()
             text = tok.decode(seq, skip_special_tokens=True)
@@ -1211,9 +1735,11 @@ class _HFChatPolicy:
         ids = _truncate_prompt_ids(ids, self.config)  # Fix 3: honor max_prompt_length
         with torch.no_grad():
             # Fix 2: pass top_p (+temperature) so sampling matches the config.
+            # synced_gpus keeps ranks in lockstep under sharded generation.
             gen = self.model.generate(
                 ids, max_new_tokens=self.config.max_response_length, do_sample=True,
                 temperature=self.config.temperature, top_p=self.config.top_p,
+                synced_gpus=getattr(self.config, "_grpo_synced_gpus", False),
                 return_dict_in_generate=True, output_scores=True)
         seq = gen.sequences[0][ids.shape[1]:]
         self.turn_inputs.append((ids.detach(), seq.detach()))
@@ -1270,3 +1796,61 @@ def _task_prompt(task) -> str:
             f"(backend: {task.backend}). Baseline to beat: {task.comparison_baseline}. "
             f"Return ANALYSIS, PROPOSED_CHANGE, and a complete FULL_KERNEL.\n\n"
             f"Seed kernel:\n```python\n{task.seed_source}\n```")
+
+
+# --------------------------------------------------------------------------- #
+# Distributed entry: `python -m kore.policy.grpo <config.json>`
+#
+# Used by scripts/launch_distributed.sh under `accelerate launch` so
+# ``scripts/launch_distributed.sh grpo <config.json>`` drives FULL-PARAMETER GRPO
+# across the sharded process group. Mirrors the sft.py / dpo.py entry pattern:
+# pure-stdlib JSON parsing (NO torch at import time), heavy training only touched
+# when train_grpo actually runs. The JSON is a flat map of GRPOConfig fields with
+# an optional nested "lora" object.
+# --------------------------------------------------------------------------- #
+def grpo_config_from_dict(d: dict):
+    """Build a :class:`kore.policy.configs.GRPOConfig` from a plain dict.
+
+    A nested ``lora`` mapping is turned into a :class:`LoRAConfig`. Every other key
+    is a GRPOConfig field (``model_id``, ``distributed``, ``use_lora``,
+    ``sharding_backend``, ``zero_stage``, ``cpu_offload``, ``ds_config``, the Kevin
+    rollout/objective knobs, the anti-collapse ladder, ...), so the same JSON the
+    campaign renders can drive ``accelerate launch``-ed full-param GRPO.
+
+    ``tasks`` is NOT a GRPOConfig field — the campaign threads the train-split task
+    ids through the JSON so the sharded run trains on exactly the right tasks — so
+    it is popped here (and surfaced by :func:`_main` to ``train_grpo(tasks=...)``).
+    """
+    from kore.policy.configs import GRPOConfig, LoRAConfig
+
+    d = dict(d)
+    d.pop("tasks", None)          # handled by _main -> train_grpo(tasks=...)
+    lora = d.pop("lora", None)
+    cfg = GRPOConfig(**d)
+    if lora is not None:
+        cfg.lora = LoRAConfig(**lora)
+    return cfg
+
+
+def _main(argv: Optional[list] = None) -> int:
+    import json
+    import sys
+    from pathlib import Path
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        print("usage: python -m kore.policy.grpo <config.json>", file=sys.stderr)
+        return 2
+    raw = json.loads(Path(argv[0]).read_text())
+    # Launched via accelerate -> default to the distributed full-FT path unless the
+    # config explicitly opts out (mirrors sft.py / dpo.py).
+    raw.setdefault("distributed", True)
+    tasks = raw.get("tasks")      # optional train-split task ids threaded by the campaign
+    cfg = grpo_config_from_dict(raw)
+    out = train_grpo(cfg, tasks=tasks)
+    print(f"[grpo] -> {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

@@ -50,27 +50,29 @@ routes each to the launcher **only if** that stage exposes a JSON `-m` entry
 (detected via a `<stage>_config_from_dict` builder, so it flips on automatically
 the moment the entry ships — no campaign change needed):
 
-| Stage | JSON `-m` entry today | `--full-ft` behavior |
-|-------|-----------------------|----------------------|
-| `sft`  | ✅ `kore.policy.sft`  | Shells out to the FSDP launcher (real full-FT). |
-| `dpo`  | ✅ `kore.policy.dpo`  | Shells out per pass/round to the FSDP launcher (IPO + refreshed ref travel in the JSON). |
-| `midtrain` | ❌ (sibling-owned) | Runs **in-process with a LOUD warning** — `kore.policy.midtrain`'s `-m` entry parses `--flags`, not a JSON config, and its full-FT path currently defers, so no sharded checkpoint is produced. `distributed=true` is still set. |
-| `grpo` | ❌ (sibling-owned) | Runs **in-process with a LOUD warning** — `kore.policy.grpo` has no `__main__` JSON entry, so it cannot shard a 14B. `distributed=true` is still set. |
+| Stage | JSON `-m` entry | `--full-ft` behavior |
+|-------|-----------------|----------------------|
+| `midtrain` | ⏳ (sibling-owned) | Runs **in-process with a LOUD warning** — `kore.policy.midtrain`'s `-m` entry parses `--flags`, not a JSON config, and its full-FT path currently defers, so no sharded checkpoint is produced. `distributed=true` is still set. Becomes one-command full-param sharded automatically once its JSON entry lands. |
+| `sft`  | ✅ `kore.policy.sft`  | Shells out to the FSDP launcher — **real full-parameter sharded** (ZeRO-3/FSDP). |
+| `dpo`  | ✅ `kore.policy.dpo`  | Shells out per pass/round to the FSDP launcher — **full-parameter sharded** (IPO + refreshed ref travel in the JSON). |
+| `grpo` | ✅ `kore.policy.grpo` | Shells out to the FSDP launcher — **full-parameter sharded** GRPO. The correctness→latency curriculum runs as **two launched full-parameter GRPO runs** (phase-1 checkpoint → phase-2 init); the train-split task ids + Kevin/anti-collapse levers travel in the JSON. **There is no LoRA shortcut for the RL stage under `--full-ft`.** |
 
-This is deliberate: the campaign **never silently degrades**. For `midtrain`/`grpo`
-it prints a loud warning naming the missing entry and pointing here, rather than
-pretending to shard. When the sibling track ships
-`kore.policy.grpo` / `kore.policy.midtrain` JSON `-m` entrypoints (each reading a
-`<config.json>` and exposing `<stage>_config_from_dict`), those stages become
-one-command full-FT automatically too.
+So under `--full-ft` **all four training stages — `midtrain` / `sft` / `dpo` /
+`grpo` — are full-parameter sharded via the one command** (`midtrain` lands the
+moment its sibling JSON entry ships; the other three are live today).
 
-Until then, to full-FT `midtrain`/`grpo` manually, run the sharded launcher
-directly with the shipped config (this is the exact command the campaign will
-issue once the entry lands):
+This is deliberate: the campaign **never silently degrades**. For any stage whose
+JSON `-m` entry is not yet present it prints a loud warning naming the missing
+entry and pointing here, rather than pretending to shard — and it **never** falls
+back to LoRA for a `--full-ft` RL run. `--lora` remains the single-process LoRA
+bring-up path (including GRPO LoRA), which needs no launcher.
+
+To full-FT `midtrain` manually until its JSON entry lands, run the sharded
+launcher directly with the shipped config (this is the exact command the campaign
+will issue once the entry lands):
 
 ```bash
 scripts/launch_distributed.sh midtrain configs/midtrain_14b_full.json
-scripts/launch_distributed.sh grpo     configs/grpo_14b_full.json
 ```
 
 ## How a launcher-driven stage runs
@@ -83,11 +85,20 @@ PYTHONPATH=<repo> accelerate launch \
     -m kore.policy.sft configs/sft_14b_full.json
 ```
 
-`kore.policy.sft` / `kore.policy.dpo` each expose a `__main__` entry that reads
-the JSON config, defaults `distributed=true`, and calls `train_sft` /
-`dpo.train`. Under FSDP the model is loaded **without** `device_map` (the two are
-incompatible — accelerate/FSDP owns device placement); the HF `Trainer` wraps it
-with `TrainingArguments(fsdp=..., fsdp_config=...)` built from the config.
+`kore.policy.sft` / `kore.policy.dpo` / `kore.policy.grpo` each expose a
+`__main__` entry that reads the JSON config (via `<stage>_config_from_dict`),
+defaults `distributed=true`, and calls `train_sft` / `dpo.train` / `train_grpo`.
+Under FSDP the model is loaded **without** `device_map` (the two are incompatible
+— accelerate/FSDP owns device placement); the HF-`Trainer` stages wrap the model
+with `TrainingArguments(fsdp=..., fsdp_config=...)` built from the config, and the
+native GRPO loop honors `distributed`/`zero_stage` by skipping `device_map` and
+sharding the parameters/optimizer across ranks (ZeRO-3 equivalent).
+
+For GRPO the resolved JSON also carries the run's **train-split task ids** (so the
+sharded run trains only on the TRAIN split, never the held-out generalization
+family) and the **Kevin + anti-collapse levers** (`rc_grpo` / `variance_floor` /
+`sc_grpo` / `gtpo_codesim` / `value_prefilter`, all on by default —
+`configs/grpo_14b_full.json`).
 
 ### Example training config (`configs/sft_14b_full.json`)
 

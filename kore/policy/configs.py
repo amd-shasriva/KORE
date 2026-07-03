@@ -194,6 +194,30 @@ class GRPOConfig(DistributedMixin):
     use_lora: bool = True
     lora: LoRAConfig = field(default_factory=LoRAConfig)
 
+    # --- Sharded FULL-PARAMETER distributed training (best-in-world RL) ---
+    # These take effect ONLY for full-FT (``use_lora=False``) launched as a
+    # multi-process job (``distributed=True`` via ``accelerate launch`` /
+    # ``scripts/launch_distributed.sh grpo``). A single-process run (CPU tests,
+    # single-GPU LoRA) ignores them entirely and keeps the legacy in-process path.
+    #
+    # ``sharding_backend`` selects how the POLICY (and frozen REFERENCE) are
+    # sharded across ranks so no full replica ever lives on a single GPU:
+    #   "fsdp"      -> torch FullyShardedDataParallel FULL_SHARD (ZeRO-3-equivalent);
+    #   "deepspeed" -> DeepSpeed ZeRO-3 engine;
+    #   "auto"      -> FSDP (the O(1-sample) micro-batched backward + ROCm-native
+    #                  robustness make FSDP the default; see grpo.py docstring for
+    #                  the ZeRO-3-vs-FSDP rationale). DeepSpeed ZeRO-3 is fully
+    #                  wired and selectable via "deepspeed".
+    sharding_backend: str = "auto"          # "auto" | "fsdp" | "deepspeed"
+    fsdp_version: int = 1                    # torch FSDP version (1 = full_shard; 2 = FSDP2)
+    zero_stage: int = 3                      # DeepSpeed ZeRO stage (3 = shard params+grads+optim)
+    cpu_offload: bool = False                # offload params+optimizer to CPU (needed at 32B/70B)
+    ds_config: Optional[str] = None          # explicit DeepSpeed JSON config path (overrides builder)
+    # Generate in lockstep across ranks: REQUIRED under ZeRO-3/FSDP so ranks that
+    # finish a rollout early keep issuing (dummy) forwards until every rank is done
+    # — otherwise the collective per-forward all-gather deadlocks on ragged lengths.
+    synced_gpus: bool = True
+
     # --- Anti-collapse ladder (see anticollapse.py) ---
     rc_grpo: bool = False                  # reward-conditioned rollouts (variance floor)
     rc_p_high: float = 0.5                 # fraction of <|high_reward|> tokens
@@ -373,3 +397,102 @@ def build_fsdp_kwargs(config) -> dict:
     if getattr(config, "fsdp_cpu_offload", False):
         fsdp_config["offload_params"] = True
     return {"fsdp": fsdp_str, "fsdp_config": fsdp_config}
+
+
+# --------------------------------------------------------------------------- #
+# Sharded full-parameter GRPO wiring (pure — no torch/accelerate/deepspeed here,
+# so ``kore.policy.configs`` still imports on CPU with NO heavy deps). The heavy
+# accelerate/DeepSpeed plugin objects are built lazily inside ``kore.policy.grpo``.
+# --------------------------------------------------------------------------- #
+def grpo_distributed_enabled(config) -> bool:
+    """True iff GRPO should take the sharded FULL-PARAMETER distributed path.
+
+    Identical gate to :func:`fsdp_enabled`: the sharded path is used ONLY for full
+    fine-tuning (``use_lora=False``) launched as a multi-process job
+    (``distributed=True``). LoRA and single-process runs keep the legacy
+    in-process ``device_map`` loop unchanged, so every CPU/LoRA test is untouched.
+    """
+    return fsdp_enabled(config)
+
+
+def grpo_sharding_backend(config) -> str:
+    """Resolve which sharded backend the distributed GRPO loop uses.
+
+    Returns ``"none"`` when this is NOT a distributed full-FT run (keep the legacy
+    in-process path). Otherwise honors ``config.sharding_backend``:
+      * ``"deepspeed"`` -> DeepSpeed ZeRO-3;
+      * ``"fsdp"``/``"fsdp2"`` -> torch FullyShardedDataParallel FULL_SHARD;
+      * ``"auto"`` -> ``"fsdp"`` (the default). FSDP is chosen because KORE's
+        O(1-sample) micro-batched backward (many per-sample ``backward()`` then one
+        ``optimizer.step()``) maps cleanly onto FSDP's grad reduce-scatter +
+        accumulate, whereas DeepSpeed's engine couples ``backward``/``step`` to a
+        fixed accumulation counter; FSDP is also torch-native (guaranteed ROCm
+        support, no compiled ops). DeepSpeed ZeRO-3 stays fully wired for anyone
+        who sets ``sharding_backend="deepspeed"``.
+
+    Uses ``importlib.util.find_spec`` (no import) so this stays torch/deepspeed
+    free and safe to call on CPU / in tests.
+    """
+    if not grpo_distributed_enabled(config):
+        return "none"
+    want = (getattr(config, "sharding_backend", "auto") or "auto").lower()
+    if want == "deepspeed":
+        return "deepspeed"
+    if want in ("fsdp", "fsdp2", "fsdp1"):
+        return "fsdp"
+    # "auto" (and any unknown value): prefer FSDP for the micro-batched RL loop.
+    return "fsdp"
+
+
+def build_deepspeed_config(config) -> dict:
+    """Build a DeepSpeed ZeRO config dict for the sharded full-FT GRPO RL loop.
+
+    ZeRO-3 shards params + grads + optimizer state across ranks and — critically
+    for the online generate->train loop — GATHERS params per-forward, so
+    ``model.generate`` (rollouts) works out of the box on the sharded engine (the
+    property that makes ZeRO-3 the natural online-RL sharding choice, used by TRL).
+
+    If ``config.ds_config`` points at a JSON file it is loaded and returned
+    verbatim (full user control). Otherwise a ZeRO-``zero_stage`` config is
+    synthesized from the KORE knobs (``bf16``, ``cpu_offload``, ``max_grad_norm``).
+    Pure/JSON only — no torch/deepspeed import — so it is unit-testable on CPU.
+    """
+    import json as _json
+
+    ds_path = getattr(config, "ds_config", None)
+    if ds_path:
+        with open(ds_path) as f:
+            return _json.load(f)
+
+    stage = int(getattr(config, "zero_stage", 3))
+    offload = bool(getattr(config, "cpu_offload", False))
+    bf16 = bool(getattr(config, "bf16", True))
+    zero: dict = {
+        "stage": stage,
+        "overlap_comm": True,
+        "contiguous_gradients": True,
+        "reduce_bucket_size": "auto",
+    }
+    if stage == 3:
+        zero.update({
+            # gather the fp16/bf16 shards into a full state dict at save time so a
+            # plain (un-sharded) checkpoint is written for soup/serve/eval.
+            "stage3_gather_16bit_weights_on_model_save": True,
+            "stage3_param_persistence_threshold": "auto",
+            "stage3_prefetch_bucket_size": "auto",
+            "stage3_max_live_parameters": int(1e9),
+            "stage3_max_reuse_distance": int(1e9),
+        })
+    if offload:
+        zero["offload_param"] = {"device": "cpu", "pin_memory": True}
+        zero["offload_optimizer"] = {"device": "cpu", "pin_memory": True}
+    return {
+        # the native loop owns micro-batching (one backward per rollout sample),
+        # so DeepSpeed sees a micro-batch of 1 and no internal accumulation.
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": 1,
+        "gradient_clipping": float(getattr(config, "max_grad_norm", 1.0)),
+        "bf16": {"enabled": bf16},
+        "fp16": {"enabled": False},
+        "zero_optimization": zero,
+    }

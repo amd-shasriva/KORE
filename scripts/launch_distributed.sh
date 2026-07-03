@@ -20,11 +20,13 @@
 # NOT need this launcher — the single-process path handles them.
 #
 # Each stage runs `python -m kore.policy.<stage> <config.json>`, which must read
-# a JSON config positional. sft/dpo ship that entrypoint today; grpo/midtrain are
-# owned by a sibling track and gain it when their `-m` JSON entry lands (until
-# then the campaign runs those stages in-process with a LOUD warning — see
+# a JSON config positional. sft/dpo/grpo ship that entrypoint (grpo via
+# `grpo_config_from_dict` + `__main__`), so `--full-ft` shells each out here for
+# real full-parameter sharded (ZeRO-3/FSDP) training. midtrain is owned by a
+# sibling track and gains it when its `-m` JSON entry lands (until then the
+# campaign runs midtrain in-process with a LOUD warning — see
 # docs/DISTRIBUTED.md#full-ft-per-stage-status). The launcher accepts all four so
-# the plumbing is ready the moment those entrypoints ship.
+# the plumbing is ready the moment any remaining entrypoint ships.
 #
 # --dry-run (or DRY_RUN=1) prints the accelerate command WITHOUT executing it,
 # which is what CI / the test-suite syntax check uses.

@@ -733,18 +733,19 @@ def _train_grpo_fallback(config, tasks):
     # BEFORE any rollout, so the value prefilter actually reranks with the model.
     _activate_value_ranker(config)
     tok = AutoTokenizer.from_pretrained(config.model_id)
-    from kore.policy.configs import preferred_attn_impl
+    # SDPA (see the distributed path): flash_attention_2 hard-faults on GRPO's
+    # padded generation/logp batches on ROCm; SDPA + reentrant checkpointing is safe.
     model_kwargs = {"torch_dtype": _model_dtype(config),  # Fix 3: honor bf16
-                    "attn_implementation": preferred_attn_impl()}
+                    "attn_implementation": "sdpa"}
     if not use_fsdp:
         model_kwargs["device_map"] = "auto"
     model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
     model.config.use_cache = False
     if getattr(config, "gradient_checkpointing", True):
-        # REENTRANT layer-internal checkpointing: robust to the intermittent
-        # flash_attention_2 -> SDPA per-worker downgrade (reentrant skips the
-        # saved-tensor-count check that raises CheckpointError under kernel swaps).
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+        # NON-REENTRANT so FSDP re-gathers params during the backward recompute
+        # (reentrant leaves them sharded/CPU -> device-mismatch). SDPA is pinned for
+        # GRPO so the backend is stable and the saved-tensor-count check is safe.
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         model.enable_input_require_grads()  # critical for PEFT + grad-ckpt
 
     if config.use_lora:
@@ -1127,7 +1128,12 @@ def build_fsdp_plugin(config):
         activation_checkpointing=False,
         use_orig_params=True,
         sync_module_states=True,
-        cpu_ram_efficient_loading=True,
+        # cpu_ram_efficient_loading streams weights via rank-0 and (with the
+        # summon/reshard cycle in the custom RL loop) can leave the root module's
+        # embed_tokens/lm_head on CPU after resharding -> "index is on cuda:N,
+        # other tensors on cpu" at the training forward. A 14B fits per-rank RAM on
+        # MI300, so keep every rank's params on-device instead.
+        cpu_ram_efficient_loading=False,
         limit_all_gathers=True,
         state_dict_type="FULL_STATE_DICT",          # gather a plain ckpt for soup/serve
     )
@@ -1257,6 +1263,46 @@ def _accumulate_grpo_grads_distributed(local_terms, logp_fn, *, accelerator,
     return loss_value, n_real
 
 
+def _summon_full_params_ctx(*models):
+    """Context that gathers FULL (unsharded) params for FSDP model(s) during rollout.
+
+    Under FSDP ``FULL_SHARD`` the params are flattened/sharded BETWEEN forwards, so
+    ``model.generate()`` sees a 1-D embedding weight and raises ``RuntimeError:
+    'weight' must be 2-D``. Summoning full params makes every rank hold the whole
+    model for the rollout, so each rank generates its own trajectories PURELY
+    LOCALLY — no per-token all-gather (much faster than ``synced_gpus``) and no
+    collective inside the loop (so ragged per-rank trajectory counts can't
+    deadlock; only the symmetric summon enter/exit is collective). Params are
+    resharded on exit for the sharded training backward. Non-FSDP models (LoRA /
+    single-process / DeepSpeed) get a no-op context and keep their existing path.
+    """
+    import contextlib
+
+    try:
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    except Exception:  # noqa: BLE001
+        FSDP = None
+
+    fsdp_models = []
+    if FSDP is not None:
+        for m in models:
+            if m is not None and isinstance(m, FSDP):
+                fsdp_models.append(m)
+
+    if not fsdp_models:
+        return contextlib.nullcontext()
+
+    @contextlib.contextmanager
+    def _ctx():
+        with contextlib.ExitStack() as stack:
+            for m in fsdp_models:
+                stack.enter_context(
+                    FSDP.summon_full_params(m, writeback=False, recurse=True))
+            yield
+
+    return _ctx()
+
+
 def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world, seed):
     """This rank's slice of a Kevin group: roll ``G/world`` trajectories.
 
@@ -1283,15 +1329,19 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
     traj_rewards, traj_correct, traj_infra = [], [], []
     turn_inputs, turn_ref, turn_old, turn_ntok, turn_codes = [], [], [], [], []
     traj_scores = []
-    for g in my:
-        d = _rollout(model, tok, env, task, config, rtoks[g], ref_model)
-        traj_rewards.append(d["rewards"]); traj_correct.append(d["correct"])
-        traj_infra.append(d["infra"]); turn_inputs.append(d["gen_inputs"])
-        turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
-        turn_ntok.append(d["n_tokens"]); turn_codes.append(d["codes"])
-        traj_scores.append(
-            kevin_trajectory_score(d["rewards"], d["correct"])
-            if config.kevin_best_kernel_scoring else (max(d["rewards"]) if d["rewards"] else 0.0))
+    # Gather FULL params for the rollout so generate()/logp forwards run on the
+    # unsharded model on EACH rank (fixes the FSDP "'weight' must be 2-D" embedding
+    # error; also collective-free inside -> ragged per-rank counts can't deadlock).
+    with _summon_full_params_ctx(model, ref_model):
+        for g in my:
+            d = _rollout(model, tok, env, task, config, rtoks[g], ref_model)
+            traj_rewards.append(d["rewards"]); traj_correct.append(d["correct"])
+            traj_infra.append(d["infra"]); turn_inputs.append(d["gen_inputs"])
+            turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
+            turn_ntok.append(d["n_tokens"]); turn_codes.append(d["codes"])
+            traj_scores.append(
+                kevin_trajectory_score(d["rewards"], d["correct"])
+                if config.kevin_best_kernel_scoring else (max(d["rewards"]) if d["rewards"] else 0.0))
     returns, index = build_kevin_samples(traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra)
     samples, codes = [], []
     for (ti, tu), ret in zip(index, returns):
@@ -1342,8 +1392,16 @@ def _train_grpo_distributed(config, tasks):
     if is_main:
         configure(run_dir=getattr(config, "output_dir", None))
 
-    # generation must run in lockstep across ranks under sharding.
-    setattr(config, "_grpo_synced_gpus", bool(getattr(config, "synced_gpus", True)))
+    # Rollout generation strategy per backend:
+    #  * FSDP: we summon FULL params for the rollout (see _summon_full_params_ctx),
+    #    so each rank generates LOCALLY on the whole model -> synced_gpus MUST be
+    #    OFF (lockstep + ragged per-rank trajectory counts would deadlock, and it
+    #    is unnecessary once params are gathered).
+    #  * DeepSpeed ZeRO-3: params stay sharded during generate, so keep the
+    #    lockstep synced_gpus behavior from the config.
+    _is_fsdp = str(backend).lower() == "fsdp"
+    setattr(config, "_grpo_synced_gpus",
+            False if _is_fsdp else bool(getattr(config, "synced_gpus", True)))
     t_start = time.time()
     log.info("grpo distributed: starting", backend=backend, world=world, rank=rank,
              model=config.model_id, total_steps=config.total_steps,
@@ -1359,17 +1417,23 @@ def _train_grpo_distributed(config, tasks):
     _activate_value_ranker(config)
     tok = AutoTokenizer.from_pretrained(config.model_id)
 
-    from kore.policy.configs import preferred_attn_impl
+    # SDPA (not flash_attention_2) for the RL policy: GRPO does generation AND
+    # padded logprob forwards over prompt+response batches, and the ROCm
+    # FlashAttention-2 kernel hard-faults ("GPU coredump" / SIGABRT) on those
+    # padded/variable-length layouts (same failure DPO hit). SDPA handles them; with
+    # reentrant checkpointing it is also immune to the saved-tensor-count check.
     model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=_model_dtype(config),
-                                                 attn_implementation=preferred_attn_impl())
+                                                 attn_implementation="sdpa")
     model.config.use_cache = False
     if getattr(config, "gradient_checkpointing", True):
-        # REENTRANT, layer-internal. Robust to the intermittent flash_attention_2 ->
-        # SDPA per-worker downgrade (reentrant skips the saved-tensor-count check
-        # that NON-REENTRANT does and that raises CheckpointError when SDPA swaps
-        # fused kernels between forward/recompute). NOT the FSDP-plugin's external
-        # checkpoint_wrapper (see build_grpo_fsdp_plugin / configs).
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+        # NON-REENTRANT for the sharded custom loop: reentrant checkpointing
+        # recomputes the forward OUTSIDE FSDP's backward param-gather hooks, so the
+        # embedding/lm_head land on CPU during recompute -> "index is on cuda:N,
+        # other tensors on cpu" (index_select) at the training backward. The
+        # non-reentrant recompute runs inside the backward where FSDP re-gathers
+        # params. GRPO pins SDPA (above), so the backend is stable across
+        # forward/recompute and the non-reentrant saved-tensor-count check is safe.
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         model.enable_input_require_grads()
     model.train()
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
@@ -1524,13 +1588,14 @@ def _load_ref_model(config):
     """
     from transformers import AutoModelForCausalLM
 
-    from kore.policy.configs import fsdp_enabled, preferred_attn_impl
+    from kore.policy.configs import fsdp_enabled
 
     ref_id = config.ref_checkpoint or config.model_id
     try:
-        # Fix 3/4: honor bf16 and skip device_map under distributed FSDP.
+        # Fix 3/4: honor bf16 and skip device_map under distributed FSDP. SDPA (not
+        # flash) — the ref runs the same padded logp forwards as the policy.
         ref_kwargs = {"torch_dtype": _model_dtype(config),
-                      "attn_implementation": preferred_attn_impl()}
+                      "attn_implementation": "sdpa"}
         if not fsdp_enabled(config):
             ref_kwargs["device_map"] = "auto"
         ref = AutoModelForCausalLM.from_pretrained(ref_id, **ref_kwargs)

@@ -29,7 +29,6 @@ from kore.policy.configs import (
     LoRAConfig,
     build_fsdp_kwargs,
     fsdp_enabled,
-    preferred_attn_impl,
 )
 
 log = get_logger("policy.dpo")
@@ -175,7 +174,14 @@ def train(config: DPOConfig) -> dict:
     dataset = Dataset.from_list(rows)
 
     dtype = torch.bfloat16 if config.bf16 else torch.float32
-    attn_impl = preferred_attn_impl()
+    # DPO uses SDPA, NOT flash_attention_2. DPO concatenates chosen+rejected into a
+    # right-PADDED batch (unlike SFT's packed/varlen inputs), and the ROCm
+    # FlashAttention-2 kernel hard-faults on that padded layout ("Memory access
+    # fault by GPU node-N" at the first step). SDPA handles the padded batch
+    # correctly; combined with reentrant gradient checkpointing it is also immune
+    # to the saved-tensor-count check, and its mem-efficient backend stays O(seq)
+    # in memory at long context.
+    attn_impl = "sdpa"
     model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=dtype,
                                                  attn_implementation=attn_impl)
     # Activation checkpointing (routed through fsdp_config) is INCOMPATIBLE with
@@ -185,15 +191,18 @@ def train(config: DPOConfig) -> dict:
     # which we turn OFF under FSDP (FSDP owns checkpointing), so disable it here.
     model.config.use_cache = False
 
-    # Reference refresh (iterative DPO): ``ref_model_id`` is the frozen reference
-    # for THIS round — the previous round's trained policy. For full-FT we load it
-    # explicitly. With LoRA, trl uses the frozen base (``model_id``, itself last
-    # round's merged checkpoint) as the implicit reference, so refreshing = simply
-    # pointing ``model_id`` at the new checkpoint each round; passing an explicit
-    # ref_model alongside a peft_config is unsupported by trl, so we skip it there.
+    # Reference model. For full-FT we ALWAYS load an EXPLICIT reference (the frozen
+    # ``ref_model_id`` for iterative DPO, else ``model_id`` — the SFT/prev-round
+    # checkpoint). trl then FSDP-shards + freezes it via ``accelerator.prepare_model``.
+    # We must NOT leave ref_model=None under full-FT: trl would then deep-copy the
+    # policy into an UNSHARDED reference (a second full 14B on ONE GPU) -> ROCm
+    # "Memory access fault" at the first step. With LoRA, trl uses the frozen base
+    # (adapter-disabled) as the implicit reference, so we pass no ref_model there
+    # (an explicit ref alongside a peft_config is unsupported by trl).
     ref_model = None
-    if not config.use_lora and config.ref_model_id and config.ref_model_id != config.model_id:
-        ref_model = AutoModelForCausalLM.from_pretrained(config.ref_model_id, torch_dtype=dtype,
+    if not config.use_lora:
+        ref_id = config.ref_model_id or config.model_id
+        ref_model = AutoModelForCausalLM.from_pretrained(ref_id, torch_dtype=dtype,
                                                          attn_implementation=attn_impl)
 
     peft_config = _peft_config(config) if config.use_lora else None

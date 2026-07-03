@@ -79,7 +79,10 @@ def test_build_fsdp_kwargs_full_ft_distributed():
     assert kw["fsdp"] == "full_shard auto_wrap"
     fc = kw["fsdp_config"]
     assert fc["transformer_layer_cls_to_wrap"] == ["Qwen3DecoderLayer"]
-    assert fc["activation_checkpointing"] is True  # from gradient_checkpointing default
+    # Activation checkpointing is NOT driven from fsdp_config (the external
+    # checkpoint_wrapper mismatches saved-tensor counts on FSDP1/use_orig_params);
+    # the Trainer stages enable HF's layer-internal use_reentrant=False path.
+    assert "activation_checkpointing" not in fc
     assert fc["use_orig_params"] is True
     assert fc["sync_module_states"] is True
     assert fc["cpu_ram_efficient_loading"] is True
@@ -112,9 +115,13 @@ def test_build_fsdp_kwargs_explicit_layer_cls_overrides_autodetect():
     assert kw["fsdp_config"]["transformer_layer_cls_to_wrap"] == ["CustomLayer"]
 
 
-def test_gradient_checkpointing_off_disables_activation_ckpt():
-    cfg = SFTConfig(use_lora=False, distributed=True, gradient_checkpointing=False)
-    assert build_fsdp_kwargs(cfg)["fsdp_config"]["activation_checkpointing"] is False
+def test_fsdp_config_never_sets_activation_checkpointing():
+    # Activation checkpointing is owned by the Trainer stage (HF gradient_checkpointing
+    # + use_reentrant=False), never by fsdp_config — regardless of the flag — because
+    # the FSDP-plugin external wrapper mismatches saved-tensor counts on FSDP1.
+    for gc in (True, False):
+        cfg = SFTConfig(use_lora=False, distributed=True, gradient_checkpointing=gc)
+        assert "activation_checkpointing" not in build_fsdp_kwargs(cfg)["fsdp_config"]
 
 
 # --------------------------------------------------------------------------- #
@@ -253,7 +260,9 @@ def test_accelerate_fsdp_yaml_is_valid_full_shard():
     assert fc["fsdp_auto_wrap_policy"] == "TRANSFORMER_BASED_WRAP"
     assert fc["fsdp_transformer_layer_cls_to_wrap"] == "Qwen3DecoderLayer"
     assert fc["fsdp_reshard_after_forward"] == "FULL_SHARD"  # ZeRO-3 equivalent
-    assert fc["fsdp_activation_checkpointing"] is True
+    # Activation checkpointing is done via HF Trainer gradient_checkpointing
+    # (use_reentrant=False), NOT the FSDP plugin (which mismatches tensor counts).
+    assert fc["fsdp_activation_checkpointing"] is False
     assert fc["fsdp_offload_params"] is False  # 14B default
 
 

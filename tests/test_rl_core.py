@@ -548,6 +548,8 @@ def _build_tiny_stack(decode_text, vocab=32):
             self.head = torch.nn.Linear(8, vocab)
             self.device = torch.device("cpu")
             self._init = self.head.weight.detach().clone()
+            # Mirror a real HF model surface the trainer touches.
+            self.config = SimpleNamespace(use_cache=True)
 
         def forward(self, input_ids):
             return SimpleNamespace(logits=self.head(self.emb(input_ids)))
@@ -557,7 +559,7 @@ def _build_tiny_stack(decode_text, vocab=32):
             gen = torch.randint(0, self.vocab, (1, n))
             return SimpleNamespace(sequences=torch.cat([input_ids, gen], dim=1))
 
-        def gradient_checkpointing_enable(self):
+        def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
             pass
 
         def enable_input_require_grads(self):

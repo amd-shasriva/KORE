@@ -48,9 +48,9 @@ fsdp_config:
   fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer  # 14B/32B Qwen3; use LlamaDecoderLayer for the 70B
   fsdp_backward_prefetch: BACKWARD_PRE
   fsdp_forward_prefetch: false
-  fsdp_state_dict_type: SHARDED_STATE_DICT        # scalable ckpt sharding for 32B/70B
+  fsdp_state_dict_type: FULL_STATE_DICT           # consolidate a plain HF ckpt so the next stage loads it via from_pretrained (cross-stage handoff)
   fsdp_use_orig_params: true
-  fsdp_activation_checkpointing: true             # trade compute for memory (needed at 14B+)
+  fsdp_activation_checkpointing: false            # done via HF Trainer gradient_checkpointing (use_reentrant=False); FSDP-plugin checkpointing mismatches saved-tensor counts on FSDP1/use_orig_params
   fsdp_cpu_ram_efficient_loading: true            # rank-0 streams weights, broadcasts
   fsdp_sync_module_states: true
   fsdp_offload_params: false                      # 14B: keep on GPU. 32B/70B: set true

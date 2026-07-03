@@ -24,7 +24,13 @@ import json
 from typing import Any
 
 from kore.obs import get_logger, gpu_mem_snapshot
-from kore.policy.configs import DPOConfig, LoRAConfig, build_fsdp_kwargs, fsdp_enabled
+from kore.policy.configs import (
+    DPOConfig,
+    LoRAConfig,
+    build_fsdp_kwargs,
+    fsdp_enabled,
+    preferred_attn_impl,
+)
 
 log = get_logger("policy.dpo")
 
@@ -75,9 +81,9 @@ def build_trl_dpo_kwargs(config) -> dict:
     Both are read via ``getattr`` so a plain ``DPOConfig`` (which has neither
     field) still works — set them as attributes (per round, alongside a refreshed
     ``ref_model_id``) for iterative DPO. FSDP kwargs are merged for the
-    distributed full-FT path; under FSDP activation-checkpointing is routed
-    through ``fsdp_config`` (so ``gradient_checkpointing`` is disabled here to
-    avoid the redundant-AllGather warning)."""
+    distributed full-FT path; activation checkpointing uses HF's layer-internal
+    NON-REENTRANT path (FSDP-safe), NOT ``fsdp_config`` (the external wrapper
+    mismatches saved-tensor counts on an FSDP1/use_orig_params unit)."""
     use_fsdp = fsdp_enabled(config)
     kwargs = dict(
         output_dir=config.output_dir,
@@ -91,7 +97,8 @@ def build_trl_dpo_kwargs(config) -> dict:
         max_length=config.max_length,
         max_prompt_length=config.max_prompt_length,
         bf16=config.bf16,
-        gradient_checkpointing=config.gradient_checkpointing and not use_fsdp,
+        gradient_checkpointing=bool(config.gradient_checkpointing),
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         seed=config.seed,
@@ -166,7 +173,15 @@ def train(config: DPOConfig) -> dict:
     dataset = Dataset.from_list(rows)
 
     dtype = torch.bfloat16 if config.bf16 else torch.float32
-    model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=dtype)
+    attn_impl = preferred_attn_impl()
+    model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=dtype,
+                                                 attn_implementation=attn_impl)
+    # Activation checkpointing (routed through fsdp_config) is INCOMPATIBLE with
+    # the KV cache: the cache changes the tensor count between forward and
+    # recompute -> torch.utils.checkpoint CheckpointError. HF's Trainer only
+    # auto-disables use_cache when TrainingArguments.gradient_checkpointing is set,
+    # which we turn OFF under FSDP (FSDP owns checkpointing), so disable it here.
+    model.config.use_cache = False
 
     # Reference refresh (iterative DPO): ``ref_model_id`` is the frozen reference
     # for THIS round — the previous round's trained policy. For full-FT we load it
@@ -176,7 +191,8 @@ def train(config: DPOConfig) -> dict:
     # ref_model alongside a peft_config is unsupported by trl, so we skip it there.
     ref_model = None
     if not config.use_lora and config.ref_model_id and config.ref_model_id != config.model_id:
-        ref_model = AutoModelForCausalLM.from_pretrained(config.ref_model_id, torch_dtype=dtype)
+        ref_model = AutoModelForCausalLM.from_pretrained(config.ref_model_id, torch_dtype=dtype,
+                                                         attn_implementation=attn_impl)
 
     peft_config = _peft_config(config) if config.use_lora else None
 

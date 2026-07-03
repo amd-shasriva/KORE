@@ -1112,12 +1112,24 @@ def build_fsdp_plugin(config):
     layer_cls = getattr(config, "fsdp_transformer_layer_cls", None) or detect_transformer_layer_cls(
         getattr(config, "model_id", ""))
     version = int(getattr(config, "fsdp_version", 1) or 1)
-    # FSDP1 expects the sharding strategy STRING; FSDP2 takes a bool. Both mean
-    # "reshard params after forward" == FULL_SHARD == ZeRO-3-equivalent.
-    reshard = True if version >= 2 else "FULL_SHARD"
+    # SHARD_GRAD_OP (ZeRO-2), NOT FULL_SHARD (ZeRO-3): do NOT reshard params after
+    # forward. This is THE enabler for co-located online RL under FSDP — params stay
+    # unsharded/replicated on every rank between forwards, so ``model.generate()``
+    # (many forwards) sees a normal 2-D embedding and each rank generates PURELY
+    # LOCALLY: no per-decode all-gather, no summon_full_params, no "'weight' must be
+    # 2-D", no post-reshard "embed on CPU" at the training forward, and ragged
+    # per-rank trajectory counts can't deadlock. Grads + optimizer state are STILL
+    # sharded (ZeRO-2), so a 14B/32B full-FT fits on 8x MI300. (FULL_SHARD reshards
+    # params to a 1-D flat buffer between forwards, which breaks generate() and is
+    # why the online rollout could not run under ZeRO-3.) For 70B where even
+    # replicated bf16 params are too large per rank, set cpu_offload / use ZeRO-3 +
+    # a separate inference engine.
+    # FSDP1 wants the sharding-strategy STRING; FSDP2 wants a bool (False = keep
+    # params unsharded after forward). Both express ZeRO-2 (SHARD_GRAD_OP).
+    reshard = False if version >= 2 else "SHARD_GRAD_OP"
     return FullyShardedDataParallelPlugin(
         fsdp_version=version,
-        reshard_after_forward=reshard,              # FULL_SHARD (ZeRO-3 equivalent)
+        reshard_after_forward=reshard,              # SHARD_GRAD_OP (ZeRO-2): params replicated
         auto_wrap_policy="transformer_based_wrap",
         transformer_cls_names_to_wrap=[layer_cls],
         cpu_offload=bool(getattr(config, "cpu_offload", False)),
@@ -1264,17 +1276,27 @@ def _accumulate_grpo_grads_distributed(local_terms, logp_fn, *, accelerator,
 
 
 def _summon_full_params_ctx(*models):
-    """Context that gathers FULL (unsharded) params for FSDP model(s) during rollout.
+    """Gather the ROOT FSDP unit's params (embed/lm_head) for ``generate()``.
 
-    Under FSDP ``FULL_SHARD`` the params are flattened/sharded BETWEEN forwards, so
-    ``model.generate()`` sees a 1-D embedding weight and raises ``RuntimeError:
-    'weight' must be 2-D``. Summoning full params makes every rank hold the whole
-    model for the rollout, so each rank generates its own trajectories PURELY
-    LOCALLY — no per-token all-gather (much faster than ``synced_gpus``) and no
-    collective inside the loop (so ragged per-rank trajectory counts can't
-    deadlock; only the symmetric summon enter/exit is collective). Params are
-    resharded on exit for the sharded training backward. Non-FSDP models (LoRA /
-    single-process / DeepSpeed) get a no-op context and keep their existing path.
+    ``model.generate()`` calls methods other than ``forward`` (e.g. it reads the
+    input embedding directly), and FSDP only all-gathers on ``forward``. Under
+    ``FULL_SHARD`` that leaves the root module's ``embed_tokens``/``lm_head``
+    flattened -> ``RuntimeError: 'weight' must be 2-D``.
+
+    The CANONICAL fix (pytorch/pytorch#123962, huggingface/transformers#30228) is
+    ``summon_full_params(root, recurse=False)``: it un-sharded ONLY the root unit's
+    params for the duration, while the separately-wrapped decoder blocks keep
+    sharding/unsharding through their OWN ``forward`` all-gathers. This is
+    memory-efficient (layers stay sharded) and — crucially — does NOT touch the
+    nested units' FSDP state, so the subsequent sharded TRAINING forward re-gathers
+    cleanly. (``recurse=True`` unshards the whole tree and leaves the nested state
+    inconsistent -> ``embed_tokens`` on CPU at the next training forward:
+    "index is on cuda:N, other tensors on cpu".)
+
+    Because the decoder blocks still run collective all-gathers during generation,
+    the caller MUST keep ranks in lockstep (``synced_gpus=True``) and issue the
+    SAME number of generate calls on every rank (equal trajectories/turns). Non-FSDP
+    models (LoRA / single-process / DeepSpeed) get a no-op context.
     """
     import contextlib
 
@@ -1296,6 +1318,10 @@ def _summon_full_params_ctx(*models):
     def _ctx():
         with contextlib.ExitStack() as stack:
             for m in fsdp_models:
+                # recurse=True: fully un-shard the policy on each rank for local
+                # generation (embed_tokens is wrapped in a nested unit here, so
+                # recurse=False does not reach it -> "'weight' must be 2-D").
+                # writeback=False since the rollout never mutates params.
                 stack.enter_context(
                     FSDP.summon_full_params(m, writeback=False, recurse=True))
             yield
@@ -1329,19 +1355,23 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
     traj_rewards, traj_correct, traj_infra = [], [], []
     turn_inputs, turn_ref, turn_old, turn_ntok, turn_codes = [], [], [], [], []
     traj_scores = []
-    # Gather FULL params for the rollout so generate()/logp forwards run on the
-    # unsharded model on EACH rank (fixes the FSDP "'weight' must be 2-D" embedding
-    # error; also collective-free inside -> ragged per-rank counts can't deadlock).
-    with _summon_full_params_ctx(model, ref_model):
-        for g in my:
-            d = _rollout(model, tok, env, task, config, rtoks[g], ref_model)
-            traj_rewards.append(d["rewards"]); traj_correct.append(d["correct"])
-            traj_infra.append(d["infra"]); turn_inputs.append(d["gen_inputs"])
-            turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
-            turn_ntok.append(d["n_tokens"]); turn_codes.append(d["codes"])
-            traj_scores.append(
-                kevin_trajectory_score(d["rewards"], d["correct"])
-                if config.kevin_best_kernel_scoring else (max(d["rewards"]) if d["rewards"] else 0.0))
+    # Full-param summon for generation is done ONCE per step by the caller (wrapping
+    # the whole dynamic-sampling rollout). Run the rollout forwards on the UNWRAPPED
+    # inner module: under summon its params are the full un-sharded weights, and
+    # calling it directly BYPASSES FSDP's forward hooks — so neither generate() nor
+    # the old-logp forward triggers a mid-summon reshard (which would flip params
+    # back to 1-D and crash the next generate with "'weight' must be 2-D"). The
+    # FSDP-wrapped `model` is still used for the SHARDED training forward/backward.
+    gen_model = getattr(model, "module", model)
+    for g in my:
+        d = _rollout(gen_model, tok, env, task, config, rtoks[g], ref_model)
+        traj_rewards.append(d["rewards"]); traj_correct.append(d["correct"])
+        traj_infra.append(d["infra"]); turn_inputs.append(d["gen_inputs"])
+        turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
+        turn_ntok.append(d["n_tokens"]); turn_codes.append(d["codes"])
+        traj_scores.append(
+            kevin_trajectory_score(d["rewards"], d["correct"])
+            if config.kevin_best_kernel_scoring else (max(d["rewards"]) if d["rewards"] else 0.0))
     returns, index = build_kevin_samples(traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra)
     samples, codes = [], []
     for (ti, tu), ret in zip(index, returns):
@@ -1392,16 +1422,31 @@ def _train_grpo_distributed(config, tasks):
     if is_main:
         configure(run_dir=getattr(config, "output_dir", None))
 
-    # Rollout generation strategy per backend:
-    #  * FSDP: we summon FULL params for the rollout (see _summon_full_params_ctx),
-    #    so each rank generates LOCALLY on the whole model -> synced_gpus MUST be
-    #    OFF (lockstep + ragged per-rank trajectory counts would deadlock, and it
-    #    is unnecessary once params are gathered).
-    #  * DeepSpeed ZeRO-3: params stay sharded during generate, so keep the
-    #    lockstep synced_gpus behavior from the config.
+    # Rollout generation strategy:
+    #  * FSDP: we summon FULL params (recurse=True) so each rank holds the whole
+    #    policy and generates PURELY LOCALLY — no param collectives during generate,
+    #    so synced_gpus MUST be OFF (ragged per-rank trajectory/length counts are
+    #    fine; lockstep would deadlock). The frozen reference is a full per-rank
+    #    model too (see below), so ref_logp is also local.
+    #  * DeepSpeed ZeRO-3: params stay sharded during generate -> keep synced_gpus.
     _is_fsdp = str(backend).lower() == "fsdp"
     setattr(config, "_grpo_synced_gpus",
             False if _is_fsdp else bool(getattr(config, "synced_gpus", True)))
+
+    # Equal trajectories per rank: the strided _rank_slice + lockstep generation
+    # require the Kevin group size G to be a MULTIPLE of world, else some ranks roll
+    # fewer trajectories, issue fewer (collective) generate calls, and deadlock the
+    # others. Round num_trajectories UP to the next multiple of world (a slightly
+    # larger group is harmless; an unequal split is not).
+    _G0 = int(config.num_trajectories)
+    if world > 1 and _G0 % world != 0:
+        _G = ((_G0 + world - 1) // world) * world
+        config.num_trajectories = _G
+        if is_main:
+            log.info("grpo distributed: rounded num_trajectories to a multiple of world "
+                     "(equal per-rank rollouts for lockstep FSDP generation)",
+                     requested=_G0, effective=_G, world=world)
+
     t_start = time.time()
     log.info("grpo distributed: starting", backend=backend, world=world, rank=rank,
              model=config.model_id, total_steps=config.total_steps,
@@ -1446,8 +1491,17 @@ def _train_grpo_distributed(config, tasks):
     if getattr(config, "ref_anchor_coef", 0.0) > 0:
         ref_model = _load_ref_model(config)
         if ref_model is not None:
-            # frozen reference is also sharded (eval mode) — never a full replica.
-            ref_model = accelerator.prepare_model(ref_model, evaluation_mode=True)
+            # The frozen KL-anchor reference is loaded as a FULL model on each rank
+            # (GPU, eval, no grad) — NOT FSDP-sharded. Rationale: it is only ever
+            # used for no-grad ref_logp forwards during the rollout; sharding it
+            # would require its own summon (accelerator.prepare_model(eval) does not
+            # reliably FSDP-wrap it, which left ref embed_tokens on CPU ->
+            # "index is on cuda:N, other tensors on cpu" during ref_logp). A full
+            # frozen 14B/32B fits per-rank on MI300 (bf16, no grads/optimizer). For
+            # 70B, shard the reference instead (summon it alongside the policy).
+            ref_model = ref_model.to(accelerator.device).eval()
+            for _p in ref_model.parameters():
+                _p.requires_grad_(False)
 
     tasks_per_step = max(1, getattr(config, "tasks_per_step", 1))
     target_groups = getattr(config, "target_groups", None) or tasks_per_step
@@ -1475,11 +1529,33 @@ def _train_grpo_distributed(config, tasks):
                 "any_correct": bool(merge_across_ranks(all_correct)),
                 "infra": local["infra"]}
 
+    _inner = getattr(model, "module", model)
+    _gc_on = bool(getattr(config, "gradient_checkpointing", True))
     for step in range(config.total_steps):
-        groups, attempts = dynamic_sampling_refill(
-            _roll, target_groups, min_std=config.starpo_min_std,
-            max_attempts=max_attempts, dynamic=dyn,
-            std_key=lambda g: group_reward_std(g["full_scores"]))
+        # Summon FULL policy params ONCE for the entire rollout phase of this step
+        # (all dynamic-sampling groups). generate() bypasses FSDP's forward hook, so
+        # params must be explicitly un-sharded; doing it once per step (not per group)
+        # keeps FSDP state stable. Exit before the sharded training forward/backward.
+        #
+        # CRITICAL: switch to INFERENCE mode for the rollout — enable the KV cache and
+        # DISABLE gradient checkpointing. Left on, gradient checkpointing forces
+        # use_cache=False, so every decode step recomputes the whole prefix (O(n^2)
+        # generation: a ~1000x slowdown + millions of warning lines). Restore training
+        # mode (grad-ckpt on, cache off) before the backward.
+        if _gc_on:
+            _inner.gradient_checkpointing_disable()
+        _inner.config.use_cache = True
+        _inner.eval()
+        with _summon_full_params_ctx(model):
+            groups, attempts = dynamic_sampling_refill(
+                _roll, target_groups, min_std=config.starpo_min_std,
+                max_attempts=max_attempts, dynamic=dyn,
+                std_key=lambda g: group_reward_std(g["full_scores"]))
+        _inner.config.use_cache = False
+        _inner.train()
+        if _gc_on:
+            _inner.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            _inner.enable_input_require_grads()
         if not groups:
             log.info("grpo(dist) step: dynamic-sampling exhausted — skipping", step=step,
                      attempts=attempts, rank=rank)

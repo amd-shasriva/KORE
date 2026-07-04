@@ -55,6 +55,35 @@ def _torch_dtype(name: str):
     return getattr(torch, DTYPES[name][0])
 
 
+# torch.compile'd baseline cache (one per fusion/gemm_fusion op+dtype).
+_FUSED_BASELINE_CACHE: dict = {}
+
+
+def _compile_baseline_enabled() -> bool:
+    """Grade fusion/gemm_fusion against the COMPILER-FUSED baseline (honest bar)
+    when KORE_COMPILE_BASELINE is truthy — closes the 'beat unfused eager' speedup
+    inflation. Off by default so unit tests / CPU dry-runs stay eager + cheap."""
+    return os.environ.get("KORE_COMPILE_BASELINE", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _fused_baseline(fn, key: str):
+    """Return ``torch.compile(fn)`` (fused, cached) when enabled, else ``fn``.
+
+    Compilation is the honest multi-kernel-fusion bar (the compiler fuses the
+    elementwise chain / GEMM epilogue), so the candidate must beat the FUSED kernel
+    rather than unfused eager. Any compile failure degrades to eager (never fatal)."""
+    if not _compile_baseline_enabled():
+        return fn
+    if key not in _FUSED_BASELINE_CACHE:
+        try:
+            import torch
+            _FUSED_BASELINE_CACHE[key] = torch.compile(fn)
+        except Exception:  # noqa: BLE001 — torch.compile unavailable/unsupported
+            _FUSED_BASELINE_CACHE[key] = fn
+    return _FUSED_BASELINE_CACHE[key]
+
+
 # --------------------------------------------------------------------------- #
 # Operator specs
 # --------------------------------------------------------------------------- #
@@ -361,8 +390,11 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
             return s.torch_fn(*[t.float() for t in xs]).to(xs[0].dtype)
 
         def baseline_fn(*xs):
-            # torch-eager composition == MULTI-KERNEL baseline (real headroom).
-            return s.torch_fn(*xs)
+            # Honest fused bar: torch.compile FUSES the elementwise chain into one
+            # kernel (when KORE_COMPILE_BASELINE=1), so the candidate must beat the
+            # COMPILER, not unfused eager (which would inflate the speedup). Falls
+            # back to eager multi-kernel when compile is off/unavailable.
+            return _fused_baseline(s.torch_fn, f"fusion:{op}:{dtype}")(*xs)
 
         arity = s.arity
     elif family == "gemm_fusion":
@@ -388,12 +420,18 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
                 y = y + xs[2].float()
             return act(y).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            # MULTI-KERNEL torch baseline: matmul (->hipBLASLt) + bias + activation.
+        def _eager_gemm_epilogue(*xs):
             y = torch.matmul(xs[0], xs[1])
             if s.has_bias:
                 y = y + xs[2]
             return act(y)
+
+        def baseline_fn(*xs):
+            # Honest fused bar: torch.compile fuses the bias+activation EPILOGUE into
+            # the hipBLASLt GEMM (when KORE_COMPILE_BASELINE=1), so the candidate must
+            # beat the compiler-fused epilogue-GEMM, not the unfused matmul+bias+act
+            # chain (which would inflate the speedup). Falls back to eager otherwise.
+            return _fused_baseline(_eager_gemm_epilogue, f"gemm_fusion:{op}:{dtype}")(*xs)
 
         arity = 3 if s.has_bias else 2
     else:

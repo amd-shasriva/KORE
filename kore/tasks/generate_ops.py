@@ -29,14 +29,27 @@ FAMILY_DTYPES = {
     "binary": ("bf16", "fp16"),
     "reduce": ("bf16", "fp16"),
     "fusion": ("bf16", "fp16", "fp32"),   # the high-headroom class -> all dtypes
+    "gemm_fusion": ("bf16", "fp16"),      # compute-bound; hipBLASLt-baselined
 }
 
-# Honest headroom tier per family: fusions beat torch-eager multi-kernel (real
-# speedup headroom); single elementwise/reduction are near-roofline (correctness-
-# training value, low speedup headroom). Recorded in task.yaml for the audit/reward.
+# Honest headroom tier per family: gemm_fusion (compute-bound, hipBLASLt baseline)
+# and fusion (real multi-kernel headroom) carry genuine speedup headroom; single
+# elementwise/reduction are near-roofline (correctness-training value). Recorded in
+# task.yaml for the audit/reward.
 FAMILY_TIER = {
     "unary": "elementwise", "binary": "elementwise", "reduce": "elementwise",
-    "fusion": "fusion",
+    "fusion": "fusion", "gemm_fusion": "gemm_fusion",
+}
+
+# GEMM tasks need M,N,K shapes (real LLM projection dims + a non-pow2 K tail).
+GEMM_SHAPES = {
+    "minimal": {"M": 64, "N": 256, "K": 256},
+    "primary": {"M": 512, "N": 4096, "K": 4096},
+    "validation": [
+        {"M": 1024, "N": 2048, "K": 2048},     # square-ish
+        {"M": 256, "N": 14336, "K": 4096},     # Llama MLP up-proj
+        {"M": 512, "N": 4096, "K": 4095},      # non-pow2 K tail (masking edge)
+    ],
 }
 
 # Family-appropriate shape sweeps (small/medium/large + a non-power-of-two tail).
@@ -72,7 +85,12 @@ if __name__ == "__main__":
 '''
 
 
+def _shape_str(s: dict) -> str:
+    return "{" + ", ".join(f"{k}: {v}" for k, v in s.items()) + "}"
+
+
 def _yaml(op: str, family: str, dtype: str, snr: float) -> str:
+    shp = GEMM_SHAPES if family == "gemm_fusion" else SHAPES
     lines = [
         f"task_id: gen_{op}_{dtype}",
         f"operation: {op}",
@@ -85,12 +103,12 @@ def _yaml(op: str, family: str, dtype: str, snr: float) -> str:
         f"baseline_tier: {FAMILY_TIER[family]}",
         "generated: true",
         "shapes:",
-        f"  minimal: {{M: {SHAPES['minimal']['M']}, N: {SHAPES['minimal']['N']}}}",
-        f"  primary: {{M: {SHAPES['primary']['M']}, N: {SHAPES['primary']['N']}}}",
+        f"  minimal: {_shape_str(shp['minimal'])}",
+        f"  primary: {_shape_str(shp['primary'])}",
         "  validation:",
     ]
-    for s in SHAPES["validation"]:
-        lines.append(f"    - {{M: {s['M']}, N: {s['N']}}}")
+    for s in shp["validation"]:
+        lines.append(f"    - {_shape_str(s)}")
     lines += [
         "targets:",
         f"  snr_db: {snr}",

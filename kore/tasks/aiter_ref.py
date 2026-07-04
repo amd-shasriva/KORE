@@ -114,6 +114,23 @@ def aiter_gemm_a8w8(
     return aiter.gemm_a8w8(xq, wq, x_scale, w_scale, dtype=out_dtype)
 
 
+# --- Batched / grouped GEMM ----------------------------------------------
+def aiter_batched_gemm_bf16(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """AITER batched bf16 GEMM: ``aiter.batched_gemm_bf16(A, B, out)`` (in-place).
+
+    Layout (CK): A [B, M, K], B [B, N, K] (so it computes ``A @ B^T`` per batch),
+    out [B, M, N] bf16, fp32 accumulation. This is the vendor batched GEMM the
+    serving stack calls for batched attention/MoE projections.
+    """
+    import aiter
+
+    B, M, _ = a.shape
+    N = b.shape[1]
+    out = torch.empty((B, M, N), dtype=torch.bfloat16, device=a.device)
+    aiter.batched_gemm_bf16(a, b, out)
+    return out
+
+
 # --- Dense bf16 GEMM ------------------------------------------------------
 def hipblaslt_gemm_bf16(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Production dense bf16 GEMM baseline: ``torch.matmul(A, B)``.

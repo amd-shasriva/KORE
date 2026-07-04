@@ -237,6 +237,35 @@ def _messages_to_text(messages: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _load_kernelbook_pairs(n: int, max_chars: int) -> list:
+    """Stream real (PyTorch module -> Triton) pairs from GPUMODE/KernelBook (HF).
+
+    Returns ``[(pseudo_path, doc_text), ...]`` formatted like the local task pairs.
+    Fully fail-safe: any error (missing datasets dep / offline / schema drift)
+    returns [] so the corpus build never breaks. Used as corpus text only.
+    """
+    try:
+        from datasets import load_dataset
+    except Exception:
+        return []
+    out: list = []
+    try:
+        ds = load_dataset("GPUMODE/KernelBook", split="train", streaming=True)
+        for i, ex in enumerate(ds):
+            if len(out) >= n or i >= n * 8:
+                break
+            py = ex.get("python_code") or ex.get("pytorch_code")
+            tri = ex.get("triton_code") or ex.get("original_triton_code")
+            if not (isinstance(py, str) and isinstance(tri, str) and py.strip() and tri.strip()):
+                continue
+            doc = (f"# PyTorch module\n\n{py.strip()[:max_chars]}\n\n"
+                   f"# Equivalent Triton kernel\n\n{tri.strip()[:max_chars]}\n")
+            out.append((Path(f"kernelbook/pair_{i}.py"), doc))
+    except Exception:
+        return out  # partial results are fine; never raise
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
@@ -315,6 +344,16 @@ def build_midtrain_corpus(
             )
             pairs.append((task_dir / "pair.py", doc))
     collected.append(("pytorch_triton_pairs", pairs))
+
+    # 2b. REAL PyTorch->Triton pairs from KernelBook (HF, use_hf only). ~18k verified
+    # (nn.Module -> Triton) pairs from torch.compile/Inductor — the best supervised
+    # translate-and-fuse corpus. Used as CORPUS TEXT only (not executed), so the
+    # NVIDIA/libdevice flavor of the Triton is fine for teaching the pattern.
+    kb_pairs: list[tuple[Path, str]] = []
+    if use_hf:
+        kb_pairs = _load_kernelbook_pairs(
+            n=max_files_per_source, max_chars=max_chars_per_file)
+    collected.append(("kernelbook", kb_pairs))
 
     # 3. Triton kernel Python files across the repos.
     triton_files: list[tuple[Path, str]] = []

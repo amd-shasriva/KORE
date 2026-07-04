@@ -461,6 +461,13 @@ def run(args) -> int:
         os.environ["KORE_SHAPE_AUGMENT"] = "1"
     if getattr(args, "speed_aggregation", None):
         os.environ["KORE_SPEED_AGG"] = str(args.speed_aggregation)
+    # Real retention eval: with --use-hf, measure general-capability retention on the
+    # REAL public benchmark splits (MMLU/HumanEval/IFEval/BFCL/LiveCodeBench/MTBench)
+    # via HuggingFace, capped to KORE_EVAL_N items/bench so the gate stays fast. The
+    # bundled smoke JSONLs remain the offline/CI fallback.
+    if getattr(args, "use_hf", False):
+        os.environ.setdefault("KORE_EVAL_FULL", "1")
+        os.environ.setdefault("KORE_EVAL_N", str(getattr(args, "eval_n", 300)))
 
     tasks = [get_task(t) for t in args.tasks.split(",")] if args.tasks else all_tasks()
     if args.stages:
@@ -1449,6 +1456,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speed-aggregation", dest="speed_aggregation",
                    choices=["worst", "cvar", "mean"], default="worst",
                    help="per-shape speedup aggregation for the reward (default worst)")
+    # real retention eval size cap per benchmark (with --use-hf); 0 = whole split.
+    p.add_argument("--eval-n", type=int, default=300, dest="eval_n",
+                   help="items per retention benchmark when --use-hf pulls real splits")
     return p
 
 

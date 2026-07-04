@@ -541,7 +541,11 @@ def _teacher(args):
     from kore.data.teacher import load_env_local, make_teacher
     load_env_local()
     kw = {"model": args.model_teacher} if args.model_teacher else {}
-    return make_teacher(args.teacher, **kw)
+    # resilient=True: a multi-day datagen makes tens of thousands of teacher calls;
+    # skip an individual transient gateway failure (after the inner 8-retry backoff)
+    # instead of crashing the whole campaign, but still hard-stop on a SUSTAINED
+    # outage so we never silently produce empty data.
+    return make_teacher(args.teacher, resilient=True, **kw)
 
 
 def _apply_split(ctx) -> None:

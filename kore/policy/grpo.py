@@ -792,6 +792,17 @@ def _train_grpo_fallback(config, tasks):
     ppo_epochs = max(1, getattr(config, "ppo_epochs", 1))
     task_cursor = 0
 
+    # ---- Open-ended verified co-evolution curriculum (optional, in-process) ---- #
+    controller = None
+    if bool(getattr(config, "coevolve", False)) and tasks:
+        from kore.openended.controller import CoevolutionController
+        controller = CoevolutionController(
+            tasks, seed=getattr(config, "seed", 0),
+            batch=getattr(config, "coevolve_batch", None),
+            k_attempts=config.num_trajectories,
+            include_vendor=getattr(config, "coevolve_include_vendor", True))
+        log.info("coevolve: frontier curriculum active", **controller.report())
+
     def _one_group(task, seed):
         """Roll out one task-group -> a dict with per-turn Kevin-credit samples.
 
@@ -808,6 +819,7 @@ def _train_grpo_fallback(config, tasks):
         traj_scores: list[float] = []
         traj_rewards, traj_correct, traj_infra = [], [], []
         turn_inputs, turn_ref, turn_old, turn_ntok, turn_codes = [], [], [], [], []
+        traj_speedups: list[list] = []
         for g in range(G):
             if config.agentic:
                 d = _rollout_agentic(model, tok, env, task, config, ref_model)
@@ -817,6 +829,7 @@ def _train_grpo_fallback(config, tasks):
             traj_infra.append(d["infra"]); turn_inputs.append(d["gen_inputs"])
             turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
             turn_ntok.append(d["n_tokens"]); turn_codes.append(d["codes"])
+            traj_speedups.append(d.get("speedups", []))
             traj_scores.append(
                 kevin_trajectory_score(d["rewards"], d["correct"])
                 if config.kevin_best_kernel_scoring else (max(d["rewards"]) if d["rewards"] else 0.0))
@@ -830,9 +843,16 @@ def _train_grpo_fallback(config, tasks):
             codes.append(turn_codes[ti][tu])
         correct_kernels = [turn_codes[ti][tu] for ti in range(G) for tu in range(len(traj_correct[ti]))
                            if traj_correct[ti][tu] and turn_codes[ti][tu]]
+        # Open-ended co-evolution feedback (item: coevolve). solve_rate = fraction of
+        # trajectories with any correct turn; best_speedup = max speedup over all
+        # correct turns (the archive's headroom-regret signal).
+        solve_rate = (sum(1 for tc in traj_correct if any(tc)) / G) if G else 0.0
+        _sus = [s for row in traj_speedups for s in row if s is not None]
+        best_speedup = max(_sus) if _sus else None
         return {"task": task, "traj_scores": traj_scores, "samples": samples, "codes": codes,
                 "correct_kernels": correct_kernels, "any_correct": any(any(c) for c in traj_correct),
-                "rtoks": rtoks, "infra": sum(1 for inf in traj_infra for x in inf if x)}
+                "rtoks": rtoks, "infra": sum(1 for inf in traj_infra for x in inf if x),
+                "solve_rate": solve_rate, "best_speedup": best_speedup}
 
     for step in range(config.total_steps):
         # ---- 1. DAPO dynamic sampling: OVERSAMPLE-AND-REFILL (item 2) ---- #
@@ -843,9 +863,19 @@ def _train_grpo_fallback(config, tasks):
         # StarPO-S so a bad step no longer shrinks the update.
         def _roll(attempt):
             nonlocal task_cursor
-            task = get_task(tasks[task_cursor % len(tasks)])
-            task_cursor += 1
-            return _one_group(task, step * 100003 + attempt)
+            if controller is not None:
+                tid = controller.next_task_id(step, attempt)
+            else:
+                tid = tasks[task_cursor % len(tasks)]
+                task_cursor += 1
+            g = _one_group(get_task(tid), step * 100003 + attempt)
+            # Record EVERY rolled group (survivors AND collapsed all-fail groups) so
+            # the frontier archive learns which tasks are unsolvable/trivial, not just
+            # the high-variance survivors that reach the training update.
+            if controller is not None:
+                controller.record(g["task"].task_id, g.get("solve_rate", 0.0),
+                                  g.get("best_speedup"))
+            return g
 
         groups, attempts = dynamic_sampling_refill(
             _roll, target_groups, min_std=config.starpo_min_std,
@@ -855,9 +885,16 @@ def _train_grpo_fallback(config, tasks):
             print(f"[grpo] step {step}: no non-degenerate groups in {attempts} attempts; skip")
             log.info("grpo step: dynamic-sampling exhausted — skipping", step=step,
                      attempts=attempts, target_groups=target_groups, reason="all groups collapsed")
+            if controller is not None:  # archive still updated per-roll — log the frontier
+                log.info("coevolve step (skipped)", step=step, **controller.report())
             log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
             continue
         step_infra = sum(g["infra"] for g in groups)
+
+        # ---- 1a. Co-evolution curriculum snapshot (archive is updated per-roll in
+        # _roll, so this just logs the co-evolved frontier state once per step). ---- #
+        if controller is not None:
+            log.info("coevolve step", step=step, **controller.report())
 
         # ---- 1b. GTPO all-fail code-similarity shaping (item 4c) ---- #
         # For an all-fail group (no correct kernel -> Kevin returns all 0), replace
@@ -1358,6 +1395,7 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
     traj_rewards, traj_correct, traj_infra = [], [], []
     turn_inputs, turn_ref, turn_old, turn_ntok, turn_codes = [], [], [], [], []
     traj_scores = []
+    traj_speedups: list[list] = []
     # Full-param summon for generation is done ONCE per step by the caller (wrapping
     # the whole dynamic-sampling rollout). Run the rollout forwards on the UNWRAPPED
     # inner module: under summon its params are the full un-sharded weights, and
@@ -1372,6 +1410,7 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
         traj_infra.append(d["infra"]); turn_inputs.append(d["gen_inputs"])
         turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
         turn_ntok.append(d["n_tokens"]); turn_codes.append(d["codes"])
+        traj_speedups.append(d.get("speedups", []))
         traj_scores.append(
             kevin_trajectory_score(d["rewards"], d["correct"])
             if config.kevin_best_kernel_scoring else (max(d["rewards"]) if d["rewards"] else 0.0))
@@ -1384,9 +1423,13 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
     correct_kernels = [turn_codes[ti][tu]
                        for ti in range(len(my)) for tu in range(len(traj_correct[ti]))
                        if traj_correct[ti][tu] and turn_codes[ti][tu]]
+    # local co-evolution feedback (gathered + reduced across ranks by the caller).
+    _local_su = [s for row in traj_speedups for s in row if s is not None]
     return {"traj_scores": traj_scores, "returns": [s[0] for s in samples], "samples": samples,
             "codes": codes, "correct_kernels": correct_kernels,
-            "infra": sum(1 for inf in traj_infra for x in inf if x)}
+            "infra": sum(1 for inf in traj_infra for x in inf if x),
+            "n_solved": sum(1 for tc in traj_correct if any(tc)), "n_traj": len(my),
+            "best_speedup": (max(_local_su) if _local_su else None)}
 
 
 def _train_grpo_distributed(config, tasks):
@@ -1516,10 +1559,29 @@ def _train_grpo_distributed(config, tasks):
     task_cursor = 0
     last_mean_r = None
 
+    # ---- Open-ended verified co-evolution curriculum (optional, distributed) ---- #
+    # Every rank builds the SAME controller (same seed + task list) and records the
+    # SAME cross-rank-gathered outcomes, so task selection stays identical on all
+    # ranks (a hard FSDP/ZeRO invariant: every rank must roll the same task).
+    controller = None
+    if bool(getattr(config, "coevolve", False)) and tasks:
+        from kore.openended.controller import CoevolutionController
+        controller = CoevolutionController(
+            tasks, seed=getattr(config, "seed", 0),
+            batch=getattr(config, "coevolve_batch", None),
+            k_attempts=config.num_trajectories,
+            include_vendor=getattr(config, "coevolve_include_vendor", True))
+        if rank == 0:
+            log.info("coevolve: frontier curriculum active (distributed)", **controller.report())
+
     def _roll(attempt):
         nonlocal task_cursor
-        task = get_task(tasks[task_cursor % len(tasks)])
-        task_cursor += 1
+        if controller is not None:
+            tid = controller.next_task_id(step, attempt)  # deterministic -> identical on all ranks
+        else:
+            tid = tasks[task_cursor % len(tasks)]
+            task_cursor += 1
+        task = get_task(tid)
         local = _rollout_slice_distributed(model, tok, task, config, ref_model,
                                             rank, world, seed=attempt * 100003 + rank)
         # gather across ranks -> the FULL group (every trajectory on every rank).
@@ -1527,11 +1589,29 @@ def _train_grpo_distributed(config, tasks):
         all_returns = _all_gather_object(local["returns"], accelerator)
         all_correct = _all_gather_object(local["correct_kernels"], accelerator)
         full_scores = merge_across_ranks(all_scores)
+        # gather the co-evolution outcome shards -> identical full-group signal on
+        # every rank (so the archive update is rank-invariant).
+        solve_rate = best_speedup = None
+        if controller is not None:
+            all_meta = _all_gather_object(
+                [(local.get("n_solved", 0), local.get("n_traj", 0), local.get("best_speedup"))],
+                accelerator)
+            meta = merge_across_ranks(all_meta)
+            tot_solved = sum(m[0] for m in meta)
+            tot_traj = sum(m[1] for m in meta) or 1
+            sus = [m[2] for m in meta if m[2] is not None]
+            solve_rate = tot_solved / tot_traj
+            best_speedup = max(sus) if sus else None
+            # Record EVERY rolled group with the rank-invariant gathered outcome, so
+            # the archive stays identical on all ranks (and learns from all-fail
+            # groups too, not just high-variance survivors).
+            controller.record(task.task_id, solve_rate or 0.0, best_speedup)
         return {"task": task, "local": local, "full_scores": full_scores,
                 "per_rank_returns": all_returns,
                 "correct_kernels": merge_across_ranks(all_correct),
                 "any_correct": bool(merge_across_ranks(all_correct)),
-                "infra": local["infra"]}
+                "infra": local["infra"],
+                "solve_rate": solve_rate, "best_speedup": best_speedup}
 
     _inner = getattr(model, "module", model)
     _gc_on = bool(getattr(config, "gradient_checkpointing", True))
@@ -1575,8 +1655,15 @@ def _train_grpo_distributed(config, tasks):
         if not groups:
             log.info("grpo(dist) step: dynamic-sampling exhausted — skipping", step=step,
                      attempts=attempts, rank=rank)
+            if controller is not None and rank == 0:
+                log.info("coevolve(dist) step (skipped)", step=step, **controller.report())
             log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
             continue
+
+        # Co-evolution curriculum snapshot (archive is updated per-roll in _roll,
+        # rank-invariantly, so this just logs the frontier state once per step).
+        if controller is not None and rank == 0:
+            log.info("coevolve(dist) step", step=step, **controller.report())
 
         # GTPO all-fail code-sim shaping against the gathered correct kernels.
         if config.gtpo_codesim:
@@ -1750,7 +1837,7 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
 
     turns: list[dict] = []
     out = {"rewards": [], "correct": [], "infra": [], "gen_inputs": [],
-           "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": []}
+           "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": [], "speedups": []}
     for _turn in range(config.num_turns):
         ctx_turns = mask_cot_turns(turns) if config.cot_masking else turns
         msgs = build_transcript(prompt, ctx_turns)
@@ -1811,6 +1898,7 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         out["old_logps"].append(old_lp)
         out["n_tokens"].append(n_tok)
         out["codes"].append(code)
+        out["speedups"].append(rr.speedup if rr.correct else None)
         turns.append({"response": text, "feedback": build_turn_feedback(obs)})
     return out
 
@@ -1857,7 +1945,7 @@ def _rollout_agentic(model, tok, env, task, config, ref_model=None):
     # Align the per-turn credit trace with the recorded assistant generations.
     n = min(len(turn_inputs), len(turn_rewards), len(turn_correct))
     out = {"rewards": [], "correct": [], "infra": [], "gen_inputs": [],
-           "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": []}
+           "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": [], "speedups": []}
     for t in range(n):
         gen_inputs = [turn_inputs[t]]
         prompt_ids, gen_ids = turn_inputs[t]
@@ -1878,6 +1966,7 @@ def _rollout_agentic(model, tok, env, task, config, ref_model=None):
         out["old_logps"].append(old_lp)
         out["n_tokens"].append(max(int(gen_ids.shape[0]), 1))
         out["codes"].append("")  # per-turn kernel source not exposed by the harness
+        out["speedups"].append(None)  # harness exposes no per-turn speedup
     return out
 
 

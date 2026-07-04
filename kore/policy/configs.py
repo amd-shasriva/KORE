@@ -285,6 +285,15 @@ class GRPOConfig(DistributedMixin):
     target_groups: Optional[int] = None     # #non-degenerate groups to collect (default: tasks_per_step)
     max_sampling_attempts: Optional[int] = None  # bound on oversampling (default: 3x target_groups)
 
+    # --- Open-ended verified co-evolution curriculum ---
+    # When True, task selection is driven by the frontier proposer (learnability
+    # p(1-p) + performance-headroom regret + MAP-Elites novelty) over the archive,
+    # co-evolving the curriculum with the policy, instead of fixed round-robin.
+    # Grounded to the registered task list (only runnable task_ids are proposed).
+    coevolve: bool = False
+    coevolve_batch: Optional[int] = None    # frontier proposals per refill (default: menu size, capped)
+    coevolve_include_vendor: bool = True    # include vendor-baselined ops in the space
+
     # --- Measurement efficiency: value-model bench prefilter ---
     value_prefilter: bool = False
     num_candidates_per_turn: int = 8        # generate N per turn, bench only the top-k

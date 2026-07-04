@@ -36,7 +36,7 @@ def test_make_reference_namespace(op):
     for key in ("parse_shape", "get_inputs", "ref_fn", "baseline_fn", "arity", "entry_name"):
         assert key in ns
     assert ns["entry_name"] == op
-    assert ns["arity"] in (1, 2)
+    assert ns["arity"] in (1, 2, 3)
 
 
 def test_reference_numerics_match_torch_cpu():

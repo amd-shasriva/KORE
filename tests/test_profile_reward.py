@@ -74,6 +74,27 @@ def test_profile_reward_adds_bounded_bonus_when_enabled():
     assert any(f.startswith("profile+") for f in hi.flags)
 
 
+def test_parses_rocprofv3_long_format(tmp_path):
+    """rocprofv3 1.x emits a LONG csv (one row per counter). The parser must fold
+    those into per-dispatch counter dicts (regression: this silently no-op'd)."""
+    from kore.verifier.parsers.rocprofv3 import parse_rocprofv3_csv
+    csv = tmp_path / "123_counter_collection.csv"
+    csv.write_text(
+        "Dispatch_Id,Kernel_Name,Counter_Name,Counter_Value\n"
+        "1,my_kernel,SQ_INSTS_VALU,1000\n"
+        "1,my_kernel,SQ_WAIT_INST_ANY,500\n"
+        "1,my_kernel,SQ_INSTS_VMEM,200\n"
+        "2,other_kernel,SQ_INSTS_VALU,50\n"
+    )
+    ks = parse_rocprofv3_csv(csv)
+    assert len(ks) == 2
+    k0 = next(k for k in ks if k.kernel_name == "my_kernel")
+    assert k0.counters["SQ_INSTS_VALU"] == 1000
+    assert k0.counters["SQ_WAIT_INST_ANY"] == 500
+    from kore.reward.profile_reward import issue_efficiency
+    assert issue_efficiency(k0.counters) is not None
+
+
 def test_profile_reward_never_dominates_fast_p():
     """A counter-efficient SLOW kernel must not out-reward a kernel that actually
     beats the baseline — the profiler shapes, it never leads."""

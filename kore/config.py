@@ -133,6 +133,21 @@ class KoreConfig:
     profile_reward_weight: float = field(
         default_factory=lambda: float(os.environ.get("KORE_PROFILE_REWARD_WEIGHT", "0.0")))
 
+    # --- P6: distributionally-robust speed aggregation (the method contribution) --
+    # How the per-shape speedup sweep is reduced to the scalar the speed reward
+    # optimizes. KORE optimizes the WORST shapes vs the production vendor baseline
+    # (AITER/hipBLASLt), not the average — so a kernel must be fast on the hardest
+    # shape, not just on average. This is the CVaR_alpha family:
+    #   "worst" : min over shapes (CVaR_{alpha->0}); the robust objective (DEFAULT,
+    #             byte-identical to the previous reward).
+    #   "cvar"  : geometric mean of the worst ceil(cvar_alpha*N) shapes (CVaR_alpha)
+    #             — a softer, denser-gradient robust objective for the trained arm.
+    #   "mean"  : geometric-mean speedup over all shapes (average-case ablation arm).
+    # Env-overridable so it propagates to the accelerate-launched training subprocs.
+    speed_aggregation: str = field(
+        default_factory=lambda: os.environ.get("KORE_SPEED_AGG", "worst"))
+    cvar_alpha: float = 0.5   # tail fraction for "cvar" (0<alpha<=1; ->0==worst, ==1==mean)
+
     # multi-turn credit
     gamma: float = 0.4
 
@@ -167,6 +182,9 @@ class KoreConfig:
         enforced — a bad KORE_PROFILE_REWARD_WEIGHT or an edited weight could
         silently invert tiers or let the profiler bonus outweigh a real speed win.
         """
+        assert self.speed_aggregation in ("worst", "mean", "cvar"), (
+            f"speed_aggregation must be worst|mean|cvar (got {self.speed_aggregation!r})")
+        assert 0.0 < self.cvar_alpha <= 1.0, "cvar_alpha must be in (0, 1]"
         # anti-hack floor is the unique minimum: hack < compile_fail < incorrect.
         assert self.reward_hack < self.reward_compile_fail < self.reward_incorrect, (
             "reward tiers must satisfy reward_hack < reward_compile_fail < reward_incorrect")

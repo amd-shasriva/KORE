@@ -459,6 +459,8 @@ def run(args) -> int:
         os.environ["KORE_PROFILE_REWARD_WEIGHT"] = str(args.profile_reward)
     if getattr(args, "shape_augment", False):
         os.environ["KORE_SHAPE_AUGMENT"] = "1"
+    if getattr(args, "speed_aggregation", None):
+        os.environ["KORE_SPEED_AGG"] = str(args.speed_aggregation)
 
     tasks = [get_task(t) for t in args.tasks.split(",")] if args.tasks else all_tasks()
     if args.stages:
@@ -1366,7 +1368,7 @@ def build_parser() -> argparse.ArgumentParser:
     # a single node without FSDP/DeepSpeed. Pass --full-ft for the locked full-FT
     # recipe, which REQUIRES a sharded multi-GPU launch (see docs/DISTRIBUTED.md).
     p.add_argument("--lora", dest="lora", action="store_true", default=True,
-                   help="use LoRA on SFT/DPO/GRPO (default; fits the 14B validation run)")
+                   help="use LoRA on SFT/DPO (GRPO is full-FT only); default bring-up mode")
     p.add_argument("--full-ft", dest="lora", action="store_false",
                    help="full fine-tune instead of LoRA (needs an FSDP/DeepSpeed launch)")
     p.add_argument("--no-retention-gate", dest="retention_gate", action="store_false",
@@ -1442,6 +1444,11 @@ def build_parser() -> argparse.ArgumentParser:
     # data scale: expand each op's shapes into a diverse small/med/large+odd set.
     p.add_argument("--shape-augment", dest="shape_augment", action="store_true",
                    help="augment per-operator shapes for shape-robust generalization")
+    # distributionally-robust speed objective (the method contribution): worst-shape
+    # (default), CVaR_alpha (softer robust), or mean (average-case ablation arm).
+    p.add_argument("--speed-aggregation", dest="speed_aggregation",
+                   choices=["worst", "cvar", "mean"], default="worst",
+                   help="per-shape speedup aggregation for the reward (default worst)")
     return p
 
 

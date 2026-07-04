@@ -219,8 +219,7 @@ class ToolExecutor:
             "snr_db": _round(getattr(obs, "snr_db", None), 2),
             "wall_ms": _round(getattr(obs, "wall_ms", None)),
             "baseline_ms": _round(getattr(obs, "baseline_ms", None)),
-            "registers": getattr(obs, "registers", None),
-            "occupancy": _round(getattr(obs, "occupancy", None), 3),
+            "profile_efficiency": _round(getattr(obs, "profile_efficiency", None), 3),
         }
 
     def _evaluate(self, src: str, do_bench: bool, multi_shape: bool):
@@ -303,17 +302,20 @@ class ToolExecutor:
     def _tool_pmc(self, args: dict) -> dict:
         src = args["kernel_src"]
         obs, rr = self._evaluate(src, do_bench=True, multi_shape=False)
-        counters = getattr(obs, "counters", None)
-        available = counters is not None or getattr(obs, "registers", None) is not None
+        # Surface the real hardware-counter signal KoreEnv computes: the
+        # baseline-relative roofline efficiency (rocprofv3). Available only when
+        # profiling is enabled (KORE_PROFILE_REWARD_WEIGHT>0), else honest stub.
+        eff = getattr(obs, "profile_efficiency", None)
+        available = eff is not None
         return {
             "ok": bool(obs.compiled),
             "tool": "pmc",
             "available": bool(available),
-            "registers": getattr(obs, "registers", None),
-            "occupancy": _round(getattr(obs, "occupancy", None), 3),
-            "counters": counters if isinstance(counters, dict) else {},
-            "diagnosis": getattr(obs, "diagnosis", None)
-            or ("counters unavailable on this env (stub)" if not available else None),
+            "profile_efficiency": _round(eff, 3),
+            "diagnosis": (f"roofline efficiency vs baseline: {eff:.2f} "
+                          "(1.0 = as efficient as the vendor kernel)" if available
+                          else "hardware-counter profiling disabled on this env "
+                               "(set KORE_PROFILE_REWARD_WEIGHT>0 to enable)"),
         }
 
     def _tool_keep(self, args: dict) -> dict:

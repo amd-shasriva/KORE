@@ -167,7 +167,7 @@ def test_build_grpo_accelerator_routes_to_selected_backend(monkeypatch):
 # --------------------------------------------------------------------------- #
 # grpo_config_from_dict JSON round-trip + `-m` entry
 # --------------------------------------------------------------------------- #
-def test_grpo_config_from_dict_roundtrip_nested_lora_and_tasks():
+def test_grpo_config_from_dict_ignores_stale_lora_and_tasks():
     cfg = grpo.grpo_config_from_dict({
         "model_id": "Qwen/Qwen3-14B",
         "use_lora": False,
@@ -177,13 +177,13 @@ def test_grpo_config_from_dict_roundtrip_nested_lora_and_tasks():
         "cpu_offload": True,
         "ref_anchor_coef": 1e-3,
         "tasks": ["rmsnorm_aiter", "gemm_bf16"],   # threaded by the campaign (NOT a field)
-        "lora": {"r": 8, "lora_alpha": 16},
+        "lora": {"r": 8, "lora_alpha": 16},        # GRPO is full-FT only: ignored
     })
     assert cfg.model_id == "Qwen/Qwen3-14B"
     assert cfg.use_lora is False and cfg.distributed is True
     assert cfg.sharding_backend == "deepspeed" and cfg.zero_stage == 3 and cfg.cpu_offload is True
-    assert cfg.lora.r == 8 and cfg.lora.lora_alpha == 16
-    # `tasks` is consumed by _main (train_grpo tasks=...), never a GRPOConfig field.
+    # GRPO has no `lora` field (full-FT only) and `tasks` is consumed by _main.
+    assert not hasattr(cfg, "lora")
     assert not hasattr(cfg, "tasks")
 
 

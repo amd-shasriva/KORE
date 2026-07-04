@@ -353,6 +353,50 @@ def test_phase_defaults_to_config():
 
 
 # --------------------------------------------------------------------------- #
+# P6: distributionally-robust speed aggregation (worst / cvar / mean)
+# --------------------------------------------------------------------------- #
+def _obs_shapes(ratios):
+    """Correct kernel with the given per-shape speedup ratios (base=1.0)."""
+    return Observation(compiled=True, validation_passed=True,
+                       snr_by_shape={f"s{i}": 99.0 for i in range(len(ratios))},
+                       wall_by_shape={f"s{i}": 1.0 / r for i, r in enumerate(ratios)},
+                       baseline_by_shape={f"s{i}": 1.0 for i in range(len(ratios))})
+
+
+def test_worst_is_default_and_min_over_shapes():
+    from kore.reward.reward import _aggregate_speedup
+    obs = _obs_shapes([0.5, 1.0, 2.0, 4.0])
+    assert abs(_aggregate_speedup(obs, CONFIG) - 0.5) < 1e-9  # default worst = min
+
+
+def test_aggregation_orders_worst_le_cvar_le_mean():
+    import math
+    from kore.reward.reward import _aggregate_speedup
+    ratios = [0.5, 1.0, 2.0, 4.0]
+    obs = _obs_shapes(ratios)
+    worst = _aggregate_speedup(obs, dataclasses.replace(CONFIG, speed_aggregation="worst"))
+    cvar = _aggregate_speedup(obs, dataclasses.replace(CONFIG, speed_aggregation="cvar", cvar_alpha=0.5))
+    mean = _aggregate_speedup(obs, dataclasses.replace(CONFIG, speed_aggregation="mean"))
+    assert worst <= cvar <= mean                    # monotone interpolation
+    assert abs(worst - 0.5) < 1e-9
+    # cvar_0.5 over 4 shapes = geomean of worst 2 = sqrt(0.5*1.0)
+    assert abs(cvar - math.sqrt(0.5 * 1.0)) < 1e-9
+    # mean = geomean of all 4
+    assert abs(mean - (0.5 * 1.0 * 2.0 * 4.0) ** 0.25) < 1e-9
+
+
+def test_aggregation_single_shape_and_default_no_behavior_change():
+    from kore.reward.reward import _aggregate_speedup, _worst_speedup
+    obs = _obs_shapes([1.5])
+    for mode in ("worst", "cvar", "mean"):
+        cfg = dataclasses.replace(CONFIG, speed_aggregation=mode)
+        assert abs(_aggregate_speedup(obs, cfg) - 1.5) < 1e-9   # single shape identical
+    # default (worst) == legacy _worst_speedup on a multi-shape obs
+    multi = _obs_shapes([0.7, 1.3, 2.0])
+    assert abs(_aggregate_speedup(multi, CONFIG) - _worst_speedup(multi)) < 1e-9
+
+
+# --------------------------------------------------------------------------- #
 # P4: speedup reshape — breaks the "correct-but-slow" plateau at the 1x crossover
 # --------------------------------------------------------------------------- #
 def test_fast_p_bonus_creates_reward_jump_at_baseline_crossover():

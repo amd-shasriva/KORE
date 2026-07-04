@@ -21,7 +21,11 @@ from kore.tasks._genops import DTYPES, _parse_shape
 
 # op -> family metadata; each op has a bespoke oracle/baseline/seed (below).
 VENDOR_OPS: tuple[str, ...] = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul",
-                               "softmax", "gemm_a8w8")
+                               "softmax", "gemm_a8w8", "fused_add_rmsnorm")
+
+# ops whose vendor BASELINE mutates its inputs in place (so the bench loop must
+# feed a fresh clone each timed call — see _genops._run_bench mutates_input path).
+VENDOR_MUTATES_INPUT: frozenset[str] = frozenset({"fused_add_rmsnorm"})
 
 # Real production shapes (hidden dims / gated-MLP widths) per op class, per the
 # KORE-Bench blueprint (Llama-3 / Qwen3 / Mixtral / DeepSeek-V3).
@@ -53,7 +57,8 @@ _FP8_GEMM_SHAPES = {  # XQ[M,K] @ WQ[N,K]^T -> [M,N] bf16 (fp8 a8w8 serving GEMM
 
 VENDOR_SHAPES = {"rmsnorm": _NORM_SHAPES, "layernorm": _NORM_SHAPES,
                  "silu_mul": _GATE_SHAPES, "gelu_mul": _GATE_SHAPES,
-                 "softmax": _SOFTMAX_SHAPES, "gemm_a8w8": _FP8_GEMM_SHAPES}
+                 "softmax": _SOFTMAX_SHAPES, "gemm_a8w8": _FP8_GEMM_SHAPES,
+                 "fused_add_rmsnorm": _NORM_SHAPES}
 VENDOR_DTYPES = ("bf16", "fp16")
 # Per-op dtype override (defaults to VENDOR_DTYPES). fp8 GEMM is fp8-in / bf16-out.
 VENDOR_OP_DTYPES = {"gemm_a8w8": ("fp8",)}
@@ -175,12 +180,32 @@ def make_vendor_reference(op: str, dtype: str) -> dict:
                                              out_dtype=torch.bfloat16)
 
         arity = 4
+
+    elif op == "fused_add_rmsnorm":
+        def get_inputs(shape, device="cuda", seed=0):
+            M, N = shape["M"], shape["N"]
+            x = _randn((M, N), device, seed)
+            residual = _randn((M, N), device, seed + 1)
+            w = (torch.randn((N,), generator=torch.Generator(device=device).manual_seed(seed + 2),
+                             device=device, dtype=torch.float32) * 0.1 + 1.0).to(tdt)
+            return (x, residual, w)
+
+        def ref_fn(x, residual, w):
+            added = x.float() + residual.float()
+            var = added.pow(2).mean(dim=-1, keepdim=True)
+            y = added * torch.rsqrt(var + EPS) * w.float()
+            return y.to(x.dtype), added.to(x.dtype)   # (normed, new_residual)
+
+        def baseline_fn(x, residual, w):
+            return aiter_ref.aiter_fused_add_rms_norm(x, residual, w, EPS)
+
+        arity = 3
     else:
         raise ValueError(f"unknown vendor op {op!r}")
 
     ns = {"parse_shape": _parse_shape, "get_inputs": get_inputs, "ref_fn": ref_fn,
           "baseline_fn": baseline_fn, "arity": arity, "entry_name": op, "dtype_name": dtype,
-          "family": f"vendor_{op}"}
+          "family": f"vendor_{op}", "mutates_input": op in VENDOR_MUTATES_INPUT}
     ns["adversarial_inputs"] = _make_adversarial_inputs(op, get_inputs)
     ns[f"{op}_ref"] = ref_fn
     return ns
@@ -416,12 +441,49 @@ def gemm_a8w8(xq: torch.Tensor, wq: torch.Tensor,
 '''
 
 
+_FUSED_ADD_RMSNORM_SEED = '''"""GENERATED vendor-baselined fused add-RMSNorm seed ({dtype}) vs aiter.fused_add_rms_norm_cu.
+added = x + residual (the new residual); y = RMSNorm(added) * weight. One program
+per row, fp32 accumulate, {tldt} store. Returns (y, added) — the candidate writes
+NEW tensors (the vendor baseline is in-place). Regenerate via generate_vendor_ops.py."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _fused_add_rmsnorm_kernel(x_ptr, res_ptr, w_ptr, y_ptr, added_ptr, sm, N, eps,
+                              BLOCK_N: tl.constexpr):
+    row = tl.program_id(0)
+    base = row * sm
+    offs = tl.arange(0, BLOCK_N)
+    mask = offs < N
+    x = tl.load(x_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+    r = tl.load(res_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+    added = x + r
+    tl.store(added_ptr + base + offs, added.to({tldt}), mask=mask)
+    var = tl.sum(added * added, axis=0) / N
+    rstd = 1.0 / tl.sqrt(var + eps)
+    w = tl.load(w_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+    tl.store(y_ptr + base + offs, (added * rstd * w).to({tldt}), mask=mask)
+
+
+def fused_add_rmsnorm(x, residual, weight, eps: float = 1e-6):
+    M, N = x.shape
+    y = torch.empty_like(x)
+    added = torch.empty_like(x)
+    _fused_add_rmsnorm_kernel[(M,)](x, residual, weight, y, added, x.stride(0), N, eps,
+                                    BLOCK_N=triton.next_power_of_2(N), num_warps=8)
+    return y, added
+'''
+
+
 def vendor_seed_source(op: str, dtype: str) -> str:
     tldt = DTYPES[dtype][1]
     if op == "softmax":
         return _SOFTMAX_SEED.format(dtype=dtype, tldt=tldt)
     if op == "gemm_a8w8":
         return _FP8_GEMM_SEED.format(dtype=dtype)
+    if op == "fused_add_rmsnorm":
+        return _FUSED_ADD_RMSNORM_SEED.format(dtype=dtype, tldt=tldt)
     if op == "rmsnorm":
         return _RMSNORM_SEED.format(dtype=dtype, tldt=tldt)
     if op == "layernorm":

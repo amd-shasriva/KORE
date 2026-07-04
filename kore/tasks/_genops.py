@@ -77,6 +77,18 @@ class ReduceSpec:
     torch_fn: Callable                # torch fn (x) -> [M] oracle/baseline
 
 
+@dataclass(frozen=True)
+class FusionSpec:
+    """A pointwise FUSION of 2-3 ops. The Triton seed computes the whole chain in
+    ONE pass (one HBM round-trip); the torch baseline runs it as SEPARATE eager
+    ops (multiple kernels / round-trips), so there is GENUINE speedup headroom vs
+    torch-eager — unlike a single elementwise op where torch is already near
+    roofline. This is the honest high-headroom operator class (KernelBench-L2 style)."""
+    tl_expr: str                      # fp32 Triton expr in terms of `a`, `b`(, `c`)
+    torch_fn: Callable                # torch composition (multi-kernel) baseline+oracle
+    arity: int = 2                    # 2 or 3 inputs
+
+
 def _lazy():
     import torch
     import torch.nn.functional as F
@@ -149,6 +161,49 @@ def _reduce_specs() -> dict[str, ReduceSpec]:
     }
 
 
+def _fusion_specs() -> dict[str, FusionSpec]:
+    """Pointwise fusions with REAL headroom vs torch-eager multi-kernel.
+
+    torch runs each op as a separate kernel (a+b -> kernel1, silu -> kernel2), so a
+    single fused Triton kernel saves the intermediate HBM round-trips. These are the
+    honest, high-headroom operator tasks (the baseline is torch-eager BY DESIGN, and
+    beating it is a genuine fusion win, not a copy-loop race)."""
+    import torch
+    import torch.nn.functional as F
+
+    def _silu(t): return F.silu(t)
+    def _gelu(t): return F.gelu(t, approximate="tanh")
+
+    return {
+        # 2-input fusions (a, b both [M,N])
+        "add_gelu":     FusionSpec(
+            "0.5 * (a + b) * (1.0 + (2.0 * tl.sigmoid(2.0 * (0.7978845608028654 * "
+            "((a + b) + 0.044715 * (a + b) * (a + b) * (a + b)))) - 1.0))",
+            lambda a, b: _gelu(a + b), 2),
+        "add_silu":     FusionSpec("(a + b) * tl.sigmoid(a + b)", lambda a, b: _silu(a + b), 2),
+        "silu_mul":     FusionSpec("(a * tl.sigmoid(a)) * b", lambda a, b: _silu(a) * b, 2),
+        "gelu_mul":     FusionSpec(
+            "(0.5 * a * (1.0 + (2.0 * tl.sigmoid(2.0 * (0.7978845608028654 * "
+            "(a + 0.044715 * a * a * a))) - 1.0))) * b",
+            lambda a, b: _gelu(a) * b, 2),
+        "sigmoid_mul":  FusionSpec("tl.sigmoid(a) * b", lambda a, b: torch.sigmoid(a) * b, 2),
+        "mul_relu":     FusionSpec("tl.maximum(a * b, 0.0)", lambda a, b: torch.relu(a * b), 2),
+        "mul_tanh":     FusionSpec("2.0 * tl.sigmoid(2.0 * (a * b)) - 1.0",
+                                   lambda a, b: torch.tanh(a * b), 2),
+        # 3-input fusions (a, b, c all [M,N])
+        "fma":          FusionSpec("a * b + c", lambda a, b, c: a * b + c, 3),
+        "fma_relu":     FusionSpec("tl.maximum(a * b + c, 0.0)",
+                                   lambda a, b, c: torch.relu(a * b + c), 3),
+        "fma_gelu":     FusionSpec(
+            "0.5 * (a * b + c) * (1.0 + (2.0 * tl.sigmoid(2.0 * (0.7978845608028654 * "
+            "((a * b + c) + 0.044715 * (a * b + c) * (a * b + c) * (a * b + c)))) - 1.0))",
+            lambda a, b, c: _gelu(a * b + c), 3),
+        "add_add_relu": FusionSpec("tl.maximum(a + b + c, 0.0)",
+                                   lambda a, b, c: torch.relu(a + b + c), 3),
+        "add_mul":      FusionSpec("(a + b) * c", lambda a, b, c: (a + b) * c, 3),
+    }
+
+
 # op registry: name -> (family, spec)
 def _registry() -> dict[str, tuple[str, object]]:
     reg: dict[str, tuple[str, object]] = {}
@@ -158,6 +213,8 @@ def _registry() -> dict[str, tuple[str, object]]:
         reg[n] = ("binary", s)
     for n, s in _reduce_specs().items():
         reg[n] = ("reduce", s)
+    for n, s in _fusion_specs().items():
+        reg[n] = ("fusion", s)
     return reg
 
 
@@ -238,6 +295,21 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
             return s.torch_fn(x)
 
         arity = 1
+    elif family == "fusion":
+        s: FusionSpec = spec
+        gen = _mk("signed")
+
+        def get_inputs(shape, device="cuda", seed=0):
+            return tuple(gen(shape, device, seed + i) for i in range(s.arity))
+
+        def ref_fn(*xs):
+            return s.torch_fn(*[t.float() for t in xs]).to(xs[0].dtype)
+
+        def baseline_fn(*xs):
+            # torch-eager composition == MULTI-KERNEL baseline (real headroom).
+            return s.torch_fn(*xs)
+
+        arity = s.arity
     else:
         raise ValueError(f"unknown family {family!r}")
 
@@ -359,6 +431,77 @@ def {op}(x: torch.Tensor) -> torch.Tensor:
 '''
 
 
+_FUSION2_TMPL = '''"""GENERATED seed Triton kernel for the {op} ({dtype}) fusion.
+
+Pointwise FUSION out = f(a, b) computed in ONE pass. torch-eager runs this as
+separate kernels, so a fused kernel saves HBM round-trips -> real speedup headroom.
+Regenerate via kore/tasks/generate_ops.py — do not hand-edit.
+"""
+from __future__ import annotations
+
+import torch
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _{op}_kernel(a_ptr, b_ptr, o_ptr, sa, sb, so, N, BLOCK_N: tl.constexpr):
+    row = tl.program_id(0)
+    col = tl.program_id(1)
+    offs = col * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = offs < N
+    a = tl.load(a_ptr + row * sa + offs, mask=mask, other=0.0).to(tl.float32)
+    b = tl.load(b_ptr + row * sb + offs, mask=mask, other=0.0).to(tl.float32)
+    o = {expr}
+    tl.store(o_ptr + row * so + offs, o.to({tldt}), mask=mask)
+
+
+def {op}(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    M, N = a.shape
+    o = torch.empty_like(a)
+    BLOCK_N = 1024
+    grid = (M, triton.cdiv(N, BLOCK_N))
+    _{op}_kernel[grid](a, b, o, a.stride(0), b.stride(0), o.stride(0), N,
+                       BLOCK_N=BLOCK_N, num_warps=4)
+    return o
+'''
+
+_FUSION3_TMPL = '''"""GENERATED seed Triton kernel for the {op} ({dtype}) fusion.
+
+Pointwise FUSION out = f(a, b, c) computed in ONE pass (vs torch-eager multi-kernel).
+Regenerate via kore/tasks/generate_ops.py — do not hand-edit.
+"""
+from __future__ import annotations
+
+import torch
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _{op}_kernel(a_ptr, b_ptr, c_ptr, o_ptr, sa, sb, sc, so, N, BLOCK_N: tl.constexpr):
+    row = tl.program_id(0)
+    col = tl.program_id(1)
+    offs = col * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = offs < N
+    a = tl.load(a_ptr + row * sa + offs, mask=mask, other=0.0).to(tl.float32)
+    b = tl.load(b_ptr + row * sb + offs, mask=mask, other=0.0).to(tl.float32)
+    c = tl.load(c_ptr + row * sc + offs, mask=mask, other=0.0).to(tl.float32)
+    o = {expr}
+    tl.store(o_ptr + row * so + offs, o.to({tldt}), mask=mask)
+
+
+def {op}(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    M, N = a.shape
+    o = torch.empty_like(a)
+    BLOCK_N = 1024
+    grid = (M, triton.cdiv(N, BLOCK_N))
+    _{op}_kernel[grid](a, b, c, o, a.stride(0), b.stride(0), c.stride(0), o.stride(0), N,
+                       BLOCK_N=BLOCK_N, num_warps=4)
+    return o
+'''
+
+
 def seed_source(op: str, family: str, dtype: str) -> str:
     tldt = DTYPES[dtype][1]
     if family == "unary":
@@ -372,6 +515,10 @@ def seed_source(op: str, family: str, dtype: str) -> str:
         return _REDUCE_TMPL.format(op=op, dtype=dtype, tldt=tldt, init=s.init,
                                    other=s.other, combine=s.combine, final=s.final,
                                    post=s.post)
+    if family == "fusion":
+        s = _registry()[op][1]
+        tmpl = _FUSION3_TMPL if s.arity == 3 else _FUSION2_TMPL
+        return tmpl.format(op=op, dtype=dtype, tldt=tldt, expr=s.tl_expr)
     raise ValueError(family)
 
 

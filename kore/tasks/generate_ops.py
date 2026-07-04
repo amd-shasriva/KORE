@@ -28,6 +28,15 @@ FAMILY_DTYPES = {
     "unary": ("bf16", "fp16", "fp32"),
     "binary": ("bf16", "fp16"),
     "reduce": ("bf16", "fp16"),
+    "fusion": ("bf16", "fp16", "fp32"),   # the high-headroom class -> all dtypes
+}
+
+# Honest headroom tier per family: fusions beat torch-eager multi-kernel (real
+# speedup headroom); single elementwise/reduction are near-roofline (correctness-
+# training value, low speedup headroom). Recorded in task.yaml for the audit/reward.
+FAMILY_TIER = {
+    "unary": "elementwise", "binary": "elementwise", "reduce": "elementwise",
+    "fusion": "fusion",
 }
 
 # Family-appropriate shape sweeps (small/medium/large + a non-power-of-two tail).
@@ -73,6 +82,7 @@ def _yaml(op: str, family: str, dtype: str, snr: float) -> str:
         "seed_kernel_name: seed_triton.py",
         f"snr_threshold: {snr}",
         f"op_family: {family}",
+        f"baseline_tier: {FAMILY_TIER[family]}",
         "generated: true",
         "shapes:",
         f"  minimal: {{M: {SHAPES['minimal']['M']}, N: {SHAPES['minimal']['N']}}}",

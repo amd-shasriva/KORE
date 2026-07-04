@@ -40,6 +40,18 @@ class KoreConfig:
     cv_threshold_pct: float = 3.0
     noise_floor_pct: float = 2.0
 
+    # anti-hack: determinism re-check on the RL correctness path. A reward-hacking
+    # kernel that emits (partly) random output can pass the SNR gate by LUCK on a
+    # single run. We re-run the primary shape once and require the verdict to be
+    # stable: still correct, and SNR within determinism_snr_tol_db of the first run.
+    # A kernel whose SNR swings more than the tolerance (or flips to incorrect) is
+    # non-deterministic and dropped to the incorrect tier (never rewarded). The
+    # tolerance is generous enough to spare legitimate atomic-reduction jitter
+    # (which perturbs SNR by <~1 dB) while catching a lucky-pass hack (which swings
+    # tens of dB, often to negative SNR).
+    verifier_determinism_check: bool = True
+    determinism_snr_tol_db: float = 10.0
+
     # reward shaping
     correctness_weight: float = 0.3
     excessive_speedup_flag: float = 10.0

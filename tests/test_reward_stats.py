@@ -66,6 +66,23 @@ def test_scan_blocks_post_verdict_and_aliased_delegation():
     assert scan_for_hacks("import triton.language as tl\n@triton.jit\ndef k():\n    y = tl.sigmoid(x)") is None
 
 
+def test_scan_blocks_mode_sniffing_and_timing_manipulation():
+    """A kernel that detects the bench-vs-correctness split (or manipulates the
+    timed region) can fake a speedup while staying 'correct' — must be rejected."""
+    # mode-sniffing via the driver CLI
+    assert scan_for_hacks("import sys\nif '--bench-mode' in sys.argv:\n    fast_path()") is not None
+    assert scan_for_hacks("import argparse\np=argparse.ArgumentParser()") is not None
+    assert scan_for_hacks("mode = '--impl'\ndef f(): pass") is not None
+    # timing manipulation
+    assert scan_for_hacks("import time\ndef f(x):\n    time.sleep(0.0)\n    return x") is not None
+    assert scan_for_hacks("torch.cuda.set_sync_debug_mode(0)") is not None
+    # forged bench timing line
+    assert scan_for_hacks("print('wall_ms: 0.001')") is not None
+    # legitimate Triton autotune config must NOT be flagged
+    assert scan_for_hacks(
+        "import triton\n@triton.autotune(configs=[], key=['M'])\n@triton.jit\ndef k():\n    pass") is None
+
+
 def test_scan_ignores_comments_and_docstrings():
     clean = (
         '"""This kernel matches aiter.rms_norm layout for MI300."""\n'

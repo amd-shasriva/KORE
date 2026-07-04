@@ -803,10 +803,31 @@ def _stage_build(ctx):
     kernel_records = [r for r in train if _rec_type(r) in ("repair", "win")]
     group_records = [r for r in train if _rec_type(r) == "ranked_group"]
 
+    # RFT / rejection sampling: concentrate SFT mass on the policy's own >tau wins
+    # (correct AND beating the baseline), stratified across tasks + deduped so the
+    # >1x region is bootstrapped without collapsing entropy. Oversampled `os` times
+    # into the kernel bucket (os=0 disables). See kore.data.rejection.
+    from kore.data.rejection import stratified_rft_select
+    rft_extra: list = []
+    os_factor = int(getattr(ctx["args"], "rft_oversample", 1))
+    if os_factor > 0:
+        rft_wins, rft_report = stratified_rft_select(
+            kernel_records, tau=float(getattr(ctx["args"], "rft_tau", 1.0)),
+            per_task_frac_cap=0.34, seed=ctx["args"].split_seed)
+        rft_extra = list(rft_wins) * os_factor
+        _log("build", f"RFT >{rft_report.tau}x wins: kept {rft_report.n_kept}/"
+                      f"{rft_report.n_pass_filter} (dedup {rft_report.n_after_dedup}), "
+                      f"task-entropy {rft_report.task_entropy}, oversample x{os_factor}")
+        LOG.event("rft_select", tau=rft_report.tau, n_pass=rft_report.n_pass_filter,
+                  n_dedup=rft_report.n_after_dedup, n_kept=rft_report.n_kept,
+                  task_entropy=rft_report.task_entropy, oversample=os_factor,
+                  per_task=rft_report.per_task)
+
     cfg = MultiCapSFTConfig()
     rows = build_multicap_dataset(ctx["data_root"], train_tasks, teacher, cfg,
                                   total=ctx["args"].sft_total, use_hf=ctx["args"].use_hf,
-                                  kernel_records=kernel_records)
+                                  kernel_records=kernel_records,
+                                  extra_records=rft_extra or None)
     _write_rows(ctx["data_root"] / "sft" / "multicap.jsonl", rows)
     _log("build", f"multicap SFT (train-only): {len(rows)} rows; "
                   f"mix={summarize_multicap(rows)['fractions']}")
@@ -1402,6 +1423,11 @@ def build_parser() -> argparse.ArgumentParser:
     # dense bonus; propagated to training subprocs via KORE_PROFILE_REWARD_WEIGHT.
     p.add_argument("--profile-reward", type=float, default=0.0, dest="profile_reward",
                    help="hardware-counter dense reward weight (0=off; ~0.15 to enable)")
+    # RFT / rejection sampling: bootstrap SFT on the policy's own >tau wins.
+    p.add_argument("--rft-tau", type=float, default=1.0, dest="rft_tau",
+                   help="min speedup for a win to enter the RFT bucket (default 1.0x)")
+    p.add_argument("--rft-oversample", type=int, default=1, dest="rft_oversample",
+                   help="times to oversample RFT >tau wins into SFT (0=disable)")
     return p
 
 

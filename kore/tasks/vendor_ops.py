@@ -21,7 +21,8 @@ from kore.tasks._genops import DTYPES, _parse_shape
 
 # op -> family metadata; each op has a bespoke oracle/baseline/seed (below).
 VENDOR_OPS: tuple[str, ...] = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul",
-                               "softmax", "gemm_a8w8", "fused_add_rmsnorm", "rope")
+                               "softmax", "gemm_a8w8", "fused_add_rmsnorm", "rope",
+                               "topk_softmax")
 
 # ops whose vendor BASELINE mutates its inputs in place (so the bench loop must
 # feed a fresh clone each timed call — see _genops._run_bench mutates_input path).
@@ -62,10 +63,19 @@ _ROPE_SHAPES = {  # x[S,B,H,D] NEOX rotary embedding; freqs[S,1,1,D//2] angles
                    {"S": 4096, "B": 1, "H": 32, "D": 64}],  # batched, GQA-wide, half head-dim
 }
 
+_TOPK_SHAPES = {  # gate[M,E] MoE router; softmax over E experts -> top-k -> renorm
+    "minimal": {"M": 64, "E": 8, "topk": 2},
+    "primary": {"M": 4096, "E": 32, "topk": 8},          # 32-expert router, top-8
+    "validation": [{"M": 8192, "E": 8, "topk": 2},        # Mixtral 8x, top-2
+                   {"M": 2048, "E": 64, "topk": 8},
+                   {"M": 4096, "E": 256, "topk": 8}],     # DeepSeek-V3 256-expert, top-8
+}
+
 VENDOR_SHAPES = {"rmsnorm": _NORM_SHAPES, "layernorm": _NORM_SHAPES,
                  "silu_mul": _GATE_SHAPES, "gelu_mul": _GATE_SHAPES,
                  "softmax": _SOFTMAX_SHAPES, "gemm_a8w8": _FP8_GEMM_SHAPES,
-                 "fused_add_rmsnorm": _NORM_SHAPES, "rope": _ROPE_SHAPES}
+                 "fused_add_rmsnorm": _NORM_SHAPES, "rope": _ROPE_SHAPES,
+                 "topk_softmax": _TOPK_SHAPES}
 VENDOR_DTYPES = ("bf16", "fp16")
 ROPE_BASE = 10000.0
 # Per-op dtype override (defaults to VENDOR_DTYPES). a8w8 GEMM sweeps fp8 + int8
@@ -254,6 +264,34 @@ def make_vendor_reference(op: str, dtype: str) -> dict:
             return aiter_ref.aiter_rope_neox(x, freqs)
 
         arity = 2
+
+    elif op == "topk_softmax":
+        from kore.tasks.aiter_ref_attn import aiter_topk_softmax
+
+        def _to_dense(topk_weights, topk_ids, E):
+            M = topk_weights.shape[0]
+            dense = torch.zeros((M, E), device=topk_weights.device, dtype=torch.float32)
+            dense.scatter_(1, topk_ids.long(), topk_weights.float())
+            return dense
+
+        def get_inputs(shape, device="cuda", seed=0):
+            M, E = shape["M"], shape["E"]
+            gate = torch.randn((M, E), generator=torch.Generator(device=device).manual_seed(seed),
+                               device=device, dtype=torch.float32).to(tdt)
+            return (gate, int(shape["topk"]))
+
+        def ref_fn(gate, topk):
+            E = gate.shape[1]
+            sm = torch.softmax(gate.float(), dim=-1)
+            tw, ti = torch.topk(sm, topk, dim=-1)
+            tw = tw / tw.sum(dim=-1, keepdim=True)
+            return _to_dense(tw, ti, E)                    # dense [M,E], order-independent
+
+        def baseline_fn(gate, topk):
+            w, ids = aiter_topk_softmax(gate, topk, True)
+            return _to_dense(w, ids, gate.shape[1])
+
+        arity = 2
     else:
         raise ValueError(f"unknown vendor op {op!r}")
 
@@ -278,6 +316,21 @@ def _make_adversarial_inputs(op: str, get_inputs, dtype: str = "bf16"):
 
     def _generic(shape, device="cuda", seed=0):
         return list(_adversarial_fills(get_inputs(shape, device=device, seed=seed)))
+
+    if op == "topk_softmax":
+        # Constant gates create expert TIES (softmax uniform), so different correct
+        # routers legitimately disagree — the generic fills would false-reject. Use
+        # strictly-DISTINCT integer ramps (bf16/fp16-exact for E<=256) so the top-k
+        # selection is unambiguous, exercising softmax numerics + selection order.
+        tdt = getattr(torch, DTYPES[dtype][0])
+
+        def _topk_adv(shape, device="cuda", seed=0):
+            M, E, topk = shape["M"], shape["E"], int(shape["topk"])
+            base = torch.arange(E, device=device, dtype=torch.float32).view(1, E).repeat(M, 1)
+            regimes = {"ramp": base, "neg_ramp": -base, "shifted": base - (E // 2)}
+            return [(name, (g.to(tdt), topk)) for name, g in regimes.items()]
+
+        return _topk_adv
 
     if op != "gemm_a8w8":
         return _generic
@@ -567,8 +620,54 @@ def rope(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
 '''
 
 
+_TOPK_SOFTMAX_SEED = '''"""GENERATED vendor-baselined MoE router seed ({dtype}) vs aiter.topk_softmax.
+gate[M,E] -> fp32 softmax over experts -> top-k (masked argmax) -> renorm; returned
+as a DENSE [M,E] weight tensor (order-independent grading; the vendor baseline is
+scattered to dense the same way). Regenerate via generate_vendor_ops.py."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _topk_softmax_kernel(gate_ptr, w_ptr, id_ptr, sg_m, sw_m, sid_m, E, topk,
+                         EMAX: tl.constexpr):
+    row = tl.program_id(0)
+    offs = tl.arange(0, EMAX)
+    mask = offs < E
+    g = tl.load(gate_ptr + row * sg_m + offs, mask=mask, other=-float("inf")).to(tl.float32)
+    m = tl.max(g, axis=0)
+    ex = tl.where(mask, tl.exp(g - m), 0.0)
+    probs = tl.where(mask, ex / tl.sum(ex, axis=0), -1.0)
+    pw = probs
+    wsum = 0.0
+    for _ in range(0, topk):
+        wsum += tl.max(pw, axis=0)
+        pw = tl.where(offs == tl.argmax(pw, axis=0), -1.0, pw)
+    pw = probs
+    for k in range(0, topk):
+        bv = tl.max(pw, axis=0)
+        bi = tl.argmax(pw, axis=0)
+        tl.store(id_ptr + row * sid_m + k, bi.to(tl.int32))
+        tl.store(w_ptr + row * sw_m + k, bv / wsum)
+        pw = tl.where(offs == bi, -1.0, pw)
+
+
+def topk_softmax(gate: torch.Tensor, topk: int) -> torch.Tensor:
+    M, E = gate.shape
+    w = torch.empty((M, topk), device=gate.device, dtype=torch.float32)
+    ids = torch.empty((M, topk), device=gate.device, dtype=torch.int32)
+    _topk_softmax_kernel[(M,)](gate, w, ids, gate.stride(0), w.stride(0), ids.stride(0),
+                              E, topk, EMAX=triton.next_power_of_2(E), num_warps=4)
+    dense = torch.zeros((M, E), device=gate.device, dtype=torch.float32)
+    dense.scatter_(1, ids.long(), w)
+    return dense
+'''
+
+
 def vendor_seed_source(op: str, dtype: str) -> str:
     tldt = DTYPES[dtype][1]
+    if op == "topk_softmax":
+        return _TOPK_SOFTMAX_SEED.format(dtype=dtype)
     if op == "softmax":
         return _SOFTMAX_SEED.format(dtype=dtype, tldt=tldt)
     if op == "gemm_a8w8":

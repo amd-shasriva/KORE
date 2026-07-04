@@ -778,8 +778,11 @@ def _adversarial_fills(inputs):
         "sign_alt": lambda t: (torch.ones_like(t.reshape(-1)).cumsum(0) % 2 * 2 - 1)
                                 .to(t.dtype).reshape(t.shape),
     }
+    def _fill(fill, t):
+        return fill(t) if (torch.is_tensor(t) and torch.is_floating_point(t)) else t
+
     for name, fill in patterns.items():
-        yield name, tuple(fill(t) if torch.is_floating_point(t) else t for t in inputs)
+        yield name, tuple(_fill(fill, t) for t in inputs)
 
 
 def _adversarial_sets(ref, shape):

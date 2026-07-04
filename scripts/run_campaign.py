@@ -62,6 +62,7 @@ import argparse
 import importlib
 import inspect
 import json
+import os
 import subprocess
 import threading
 import time
@@ -450,6 +451,12 @@ def _artifact_ok(ctx, stage: str) -> bool:
 # --------------------------------------------------------------------------- #
 def run(args) -> int:
     from kore.tasks.registry import all_tasks, get_task
+
+    # P5: propagate the hardware-counter dense-reward weight to every stage
+    # subprocess (env + training run under their own processes) BEFORE anything
+    # imports CONFIG, so the reward path picks it up consistently.
+    if getattr(args, "profile_reward", 0.0):
+        os.environ["KORE_PROFILE_REWARD_WEIGHT"] = str(args.profile_reward)
 
     tasks = [get_task(t) for t in args.tasks.split(",")] if args.tasks else all_tasks()
     if args.stages:
@@ -1390,6 +1397,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--evolve-generations", type=int, default=4, dest="evolve_generations")
     p.add_argument("--soup-out", default="runs/soup", dest="soup_out")
     p.add_argument("--eval-budget", type=int, default=5, dest="eval_budget")
+    # P5 flagship novelty: dense hardware-counter (rocprofv3) reward weight. 0 =
+    # off (default). A small value (e.g. 0.15) enables the roofline-attainment
+    # dense bonus; propagated to training subprocs via KORE_PROFILE_REWARD_WEIGHT.
+    p.add_argument("--profile-reward", type=float, default=0.0, dest="profile_reward",
+                   help="hardware-counter dense reward weight (0=off; ~0.15 to enable)")
     return p
 
 

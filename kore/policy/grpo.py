@@ -746,14 +746,9 @@ def _train_grpo_fallback(config, tasks):
         # (reentrant leaves them sharded/CPU -> device-mismatch). SDPA is pinned for
         # GRPO so the backend is stable and the saved-tensor-count check is safe.
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        model.enable_input_require_grads()  # critical for PEFT + grad-ckpt
+        model.enable_input_require_grads()
 
-    if config.use_lora:
-        from peft import LoraConfig, get_peft_model
-
-        model = get_peft_model(model, LoraConfig(
-            r=config.lora.r, lora_alpha=config.lora.lora_alpha, lora_dropout=0.0,
-            target_modules=list(config.lora.target_modules), task_type="CAUSAL_LM"))
+    # Full-parameter fine-tuning only (LoRA removed): every parameter trains.
     model.train()
     trainable = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable, lr=config.learning_rate)

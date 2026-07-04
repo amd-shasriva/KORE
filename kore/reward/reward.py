@@ -230,6 +230,42 @@ class RewardResult:
     detail: str = ""
 
 
+def _speedup_term(su_scored: float, su_raw: float, obs: Observation, cfg,
+                  flags: list[str]) -> float:
+    """P4 speed reward: log-shaped speedup + significance-gated fast_p bonuses.
+
+    ``su_scored`` is the (excessive-capped / high-variance-damped) speedup used for
+    the continuous term; ``su_raw`` is the measured speedup used for the discrete
+    threshold checks. Returns a NON-NEGATIVE speed contribution, so a correct
+    kernel always scores >= ``correctness_weight`` (lexicographic dominance holds).
+
+    Continuous term (breaks the linear plateau, steeper at the 1x crossover):
+        speedup_log=True  ->  w*su           (su <= 1, linear, non-negative)
+                              w*(1 + ln(su))  (su >  1, emphasized)
+        speedup_log=False ->  w*max(su, 0)    (legacy linear)
+    Discrete term (the strong ">1x" signal): cumulative ``fast_p_bonus`` for each
+    threshold met, awarded ONLY when the speedup is statistically trustworthy
+    (cv <= cv_threshold_pct) and not an excessive-speedup measurement outlier.
+    """
+    w = float(getattr(cfg, "speedup_weight", 1.0) or 0.0)
+    if getattr(cfg, "speedup_log", False) and su_scored > 1.0:
+        term = w * (1.0 + math.log(su_scored))
+    else:
+        term = w * max(su_scored, 0.0)
+
+    bonuses = getattr(cfg, "fast_p_bonus", ()) or ()
+    if bonuses:
+        sig_only = bool(getattr(cfg, "fast_p_significant_only", True))
+        trustworthy = (obs.cv_pct is None) or (obs.cv_pct <= cfg.cv_threshold_pct)
+        excessive = "excessive_speedup" in flags
+        if (not sig_only) or (trustworthy and not excessive):
+            for thr, bonus in bonuses:
+                if su_raw >= thr:
+                    term += float(bonus)
+                    flags.append(f"fast_p>={thr}")
+    return term
+
+
 def _all_shapes_pass(obs: Observation, dtype: str, cfg, snr_threshold: Optional[float] = None) -> bool:
     thr = snr_threshold if snr_threshold is not None else cfg.snr_threshold_for(dtype)
     if obs.snr_by_shape:
@@ -341,7 +377,7 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
         flags.append("phase:correctness")
         speed_term = 0.0
     else:
-        speed_term = max(su_scored, 0.0)
+        speed_term = _speedup_term(su_scored, su, obs, cfg, flags)
     reward = base + speed_term + fmt
     rr = RewardResult(reward, True, su, "correct_timed", flags,
                       f"worst-shape speedup {su:.3f}x vs baseline"

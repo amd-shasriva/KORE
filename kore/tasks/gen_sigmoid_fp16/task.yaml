@@ -1,0 +1,19 @@
+task_id: gen_sigmoid_fp16
+operation: sigmoid
+dtype: fp16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: unary
+generated: true
+shapes:
+  minimal: {M: 64, N: 512}
+  primary: {M: 4096, N: 8192}
+  validation:
+    - {M: 8192, N: 4096}
+    - {M: 2048, N: 11008}
+    - {M: 4096, N: 8191}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_sigmoid

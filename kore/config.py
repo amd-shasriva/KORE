@@ -75,6 +75,32 @@ class KoreConfig:
     #   "latency"     : full correctness_weight + speedup (same as "full")
     reward_phase: str = "full"
 
+    # --- P4: speedup shaping to break the "correct-but-slow" (lazy-optimization)
+    # plateau and give real GROUP-RELATIVE gradient at the >1x crossover ----------
+    # Diagnosis (Dr.Kernel 2026 "lazy optimization"): a purely LINEAR speed term
+    # (reward = correctness_weight + su) gives almost no reward *contrast* in the
+    # 0.7-1.1x band the policy stalls in, so GRPO's group-relative advantage barely
+    # distinguishes a 0.95x kernel from a 1.05x one — the model learns "be correct"
+    # and stops. Two fixes (both preserve lexicographic dominance: every correct
+    # kernel still scores >= correctness_weight > any incorrect kernel):
+    #   1. speedup_log: shape the speed term as w*su for su<=1 (linear, non-negative)
+    #      and w*(1+ln(su)) for su>1 — continuous at su=1, monotonic, but with a
+    #      steeper effective slope right at the baseline crossover.
+    #   2. fast_p_bonus: significance-gated DISCRETE bonuses for actually BEATING the
+    #      baseline at 1.0x / 1.2x / 1.5x. This is the strong signal that makes ">1x"
+    #      a distinct, high-value outcome (large positive group-relative advantage
+    #      for the kernels that cross the baseline), instead of a marginal linear
+    #      increment. Only awarded when the timing is statistically trustworthy
+    #      (cv <= cv_threshold_pct) and not flagged as a measurement-error outlier,
+    #      so the policy cannot farm the bonus with noisy/lucky timings.
+    speedup_weight: float = 1.0
+    speedup_log: bool = True
+    # cumulative (threshold, bonus) pairs; awarded for every threshold the (worst-
+    # shape) speedup meets when significant. Sum kept modest vs correctness_weight
+    # so it never inverts the correctness gate.
+    fast_p_bonus: tuple = ((1.0, 0.30), (1.2, 0.30), (1.5, 0.40))
+    fast_p_significant_only: bool = True
+
     # multi-turn credit
     gamma: float = 0.4
 

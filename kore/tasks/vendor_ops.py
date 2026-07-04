@@ -22,7 +22,7 @@ from kore.tasks._genops import DTYPES, _parse_shape
 # op -> family metadata; each op has a bespoke oracle/baseline/seed (below).
 VENDOR_OPS: tuple[str, ...] = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul",
                                "softmax", "gemm_a8w8", "fused_add_rmsnorm", "rope",
-                               "topk_softmax")
+                               "topk_softmax", "batched_gemm")
 
 # ops whose vendor BASELINE mutates its inputs in place (so the bench loop must
 # feed a fresh clone each timed call — see _genops._run_bench mutates_input path).
@@ -71,16 +71,24 @@ _TOPK_SHAPES = {  # gate[M,E] MoE router; softmax over E experts -> top-k -> ren
                    {"M": 4096, "E": 256, "topk": 8}],     # DeepSeek-V3 256-expert, top-8
 }
 
+_BATCHED_GEMM_SHAPES = {  # A[B,M,K] @ B[B,N,K]^T -> [B,M,N] bf16 (batched attn/MoE proj)
+    "minimal": {"B": 2, "M": 128, "N": 128, "K": 256},
+    "primary": {"B": 8, "M": 512, "N": 512, "K": 512},
+    "validation": [{"B": 16, "M": 256, "N": 256, "K": 1024},
+                   {"B": 4, "M": 1024, "N": 1024, "K": 512},
+                   {"B": 8, "M": 512, "N": 513, "K": 512}],  # batched, wide, non-pow2 N
+}
+
 VENDOR_SHAPES = {"rmsnorm": _NORM_SHAPES, "layernorm": _NORM_SHAPES,
                  "silu_mul": _GATE_SHAPES, "gelu_mul": _GATE_SHAPES,
                  "softmax": _SOFTMAX_SHAPES, "gemm_a8w8": _FP8_GEMM_SHAPES,
                  "fused_add_rmsnorm": _NORM_SHAPES, "rope": _ROPE_SHAPES,
-                 "topk_softmax": _TOPK_SHAPES}
+                 "topk_softmax": _TOPK_SHAPES, "batched_gemm": _BATCHED_GEMM_SHAPES}
 VENDOR_DTYPES = ("bf16", "fp16")
 ROPE_BASE = 10000.0
 # Per-op dtype override (defaults to VENDOR_DTYPES). a8w8 GEMM sweeps fp8 + int8
-# (both 8-bit-in / bf16-out; the seed is dtype-agnostic: 8-bit -> fp32 accumulate).
-VENDOR_OP_DTYPES = {"gemm_a8w8": ("fp8", "int8")}
+# (both 8-bit-in / bf16-out); batched GEMM is bf16-only (aiter.batched_gemm_bf16).
+VENDOR_OP_DTYPES = {"gemm_a8w8": ("fp8", "int8"), "batched_gemm": ("bf16",)}
 
 
 def vendor_op_dtypes(op: str) -> tuple[str, ...]:
@@ -290,6 +298,23 @@ def make_vendor_reference(op: str, dtype: str) -> dict:
         def baseline_fn(gate, topk):
             w, ids = aiter_topk_softmax(gate, topk, True)
             return _to_dense(w, ids, gate.shape[1])
+
+        arity = 2
+
+    elif op == "batched_gemm":
+        def get_inputs(shape, device="cuda", seed=0):
+            B, M, N, K = shape["B"], shape["M"], shape["N"], shape["K"]
+            g = torch.Generator(device=device).manual_seed(seed)
+            sc = 1.0 / (K ** 0.5)   # keep accumulated magnitude ~O(1) for stable bf16
+            a = (torch.randn((B, M, K), generator=g, device=device, dtype=torch.float32) * sc).to(tdt)
+            b = (torch.randn((B, N, K), generator=g, device=device, dtype=torch.float32) * sc).to(tdt)
+            return (a, b)
+
+        def ref_fn(a, b):
+            return torch.bmm(a.float(), b.transpose(1, 2).float()).to(a.dtype)  # A@B^T per batch
+
+        def baseline_fn(a, b):
+            return aiter_ref.aiter_batched_gemm_bf16(a, b)
 
         arity = 2
     else:
@@ -664,8 +689,62 @@ def topk_softmax(gate: torch.Tensor, topk: int) -> torch.Tensor:
 '''
 
 
+_BATCHED_GEMM_SEED = '''"""GENERATED vendor-baselined batched GEMM seed ({dtype}) vs aiter.batched_gemm_bf16.
+C[b] = A[b] @ B[b]^T per batch; A[B,M,K], B[B,N,K] -> C[B,M,N] bf16, fp32 accumulate.
+One program per (batch, m-tile, n-tile). Regenerate via generate_vendor_ops.py."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _bgemm_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
+                  sab, sam, sak, sbb, sbn, sbk, scb, scm, scn,
+                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pid = tl.program_id(0)
+    num_m = tl.cdiv(M, BM)
+    num_n = tl.cdiv(N, BN)
+    per_batch = num_m * num_n
+    batch = pid // per_batch
+    rem = pid % per_batch
+    pid_m = rem // num_n
+    pid_n = rem % num_n
+    offs_m = pid_m * BM + tl.arange(0, BM)
+    offs_n = pid_n * BN + tl.arange(0, BN)
+    offs_k = tl.arange(0, BK)
+    a_ptrs = a_ptr + batch * sab + (offs_m[:, None] * sam + offs_k[None, :] * sak)
+    b_ptrs = b_ptr + batch * sbb + (offs_n[None, :] * sbn + offs_k[:, None] * sbk)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BK)):
+        kmask = offs_k < K - k * BK
+        a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & kmask[None, :], other=0.0)
+        b = tl.load(b_ptrs, mask=(offs_n[None, :] < N) & kmask[:, None], other=0.0)
+        acc += tl.dot(a.to(tl.float32), b.to(tl.float32))
+        a_ptrs += BK * sak
+        b_ptrs += BK * sbk
+    c_ptrs = c_ptr + batch * scb + offs_m[:, None] * scm + offs_n[None, :] * scn
+    cmask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    tl.store(c_ptrs, acc.to(tl.bfloat16), mask=cmask)
+
+
+def batched_gemm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    B, M, K = a.shape
+    N = b.shape[1]
+    c = torch.empty((B, M, N), device=a.device, dtype=torch.bfloat16)
+    BM, BN, BK = 64, 64, 64
+    grid = (B * triton.cdiv(M, BM) * triton.cdiv(N, BN),)
+    _bgemm_kernel[grid](a, b, c, M, N, K,
+                        a.stride(0), a.stride(1), a.stride(2),
+                        b.stride(0), b.stride(1), b.stride(2),
+                        c.stride(0), c.stride(1), c.stride(2),
+                        BM=BM, BN=BN, BK=BK, num_warps=4, num_stages=2)
+    return c
+'''
+
+
 def vendor_seed_source(op: str, dtype: str) -> str:
     tldt = DTYPES[dtype][1]
+    if op == "batched_gemm":
+        return _BATCHED_GEMM_SEED.format(dtype=dtype)
     if op == "topk_softmax":
         return _TOPK_SOFTMAX_SEED.format(dtype=dtype)
     if op == "softmax":

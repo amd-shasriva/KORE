@@ -78,6 +78,18 @@ class ReduceSpec:
 
 
 @dataclass(frozen=True)
+class GemmFusionSpec:
+    """A GEMM with a FUSED epilogue (bias add + activation). This is the COMPUTE-
+    BOUND high-value class: torch runs it as SEPARATE kernels (matmul -> hipBLASLt,
+    then + bias, then activation), each an extra HBM round-trip of the [M,N] output;
+    a fused Triton kernel keeps the tile in registers between matmul and epilogue.
+    Baseline = the torch multi-kernel chain (matmul dispatches to the hipBLASLt
+    vendor GEMM), so beating it is a genuine fusion win against a production baseline."""
+    has_bias: bool
+    act: str                          # "none" | "relu" | "gelu" | "silu"
+
+
+@dataclass(frozen=True)
 class FusionSpec:
     """A pointwise FUSION of 2-3 ops. The Triton seed computes the whole chain in
     ONE pass (one HBM round-trip); the torch baseline runs it as SEPARATE eager
@@ -204,6 +216,41 @@ def _fusion_specs() -> dict[str, FusionSpec]:
     }
 
 
+def _gemm_fusion_specs() -> dict[str, GemmFusionSpec]:
+    """GEMM + fused bias/activation epilogues (compute-bound, hipBLASLt-baselined)."""
+    return {
+        "gemm_bias":        GemmFusionSpec(True, "none"),
+        "gemm_relu":        GemmFusionSpec(False, "relu"),
+        "gemm_gelu":        GemmFusionSpec(False, "gelu"),
+        "gemm_silu":        GemmFusionSpec(False, "silu"),
+        "gemm_bias_relu":   GemmFusionSpec(True, "relu"),
+        "gemm_bias_gelu":   GemmFusionSpec(True, "gelu"),
+        "gemm_bias_silu":   GemmFusionSpec(True, "silu"),
+    }
+
+
+# torch activation (fp32 oracle + native baseline) per act code.
+def _torch_act(name: str):
+    import torch
+    import torch.nn.functional as F
+    return {
+        "none": lambda y: y,
+        "relu": torch.relu,
+        "gelu": lambda y: F.gelu(y, approximate="tanh"),
+        "silu": F.silu,
+    }[name]
+
+
+# Triton fp32 epilogue activation on `acc` (libdevice-free), per act code.
+_TL_ACT = {
+    "none": "",
+    "relu": "    acc = tl.maximum(acc, 0.0)\n",
+    "gelu": ("    _gi = 0.7978845608028654 * (acc + 0.044715 * acc * acc * acc)\n"
+             "    acc = 0.5 * acc * (1.0 + (2.0 * tl.sigmoid(2.0 * _gi) - 1.0))\n"),
+    "silu": "    acc = acc * tl.sigmoid(acc)\n",
+}
+
+
 # op registry: name -> (family, spec)
 def _registry() -> dict[str, tuple[str, object]]:
     reg: dict[str, tuple[str, object]] = {}
@@ -215,6 +262,8 @@ def _registry() -> dict[str, tuple[str, object]]:
         reg[n] = ("reduce", s)
     for n, s in _fusion_specs().items():
         reg[n] = ("fusion", s)
+    for n, s in _gemm_fusion_specs().items():
+        reg[n] = ("gemm_fusion", s)
     return reg
 
 
@@ -310,6 +359,37 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
             return s.torch_fn(*xs)
 
         arity = s.arity
+    elif family == "gemm_fusion":
+        s: GemmFusionSpec = spec
+        act = _torch_act(s.act)
+
+        def get_inputs(shape, device="cuda", seed=0):
+            g = torch.Generator(device=device).manual_seed(seed)
+            M, N, K = shape["M"], shape["N"], shape["K"]
+            # 1/sqrt(K) scale keeps the accumulated GEMM magnitude ~O(1) (stable bf16).
+            sc = 1.0 / (K ** 0.5)
+            a = (torch.randn((M, K), generator=g, device=device, dtype=torch.float32) * sc).to(tdt)
+            b = (torch.randn((K, N), generator=g, device=device, dtype=torch.float32) * sc).to(tdt)
+            if s.has_bias:
+                bias = (torch.randn((N,), generator=g, device=device, dtype=torch.float32)).to(tdt)
+                return (a, b, bias)
+            return (a, b)
+
+        def ref_fn(*xs):
+            a, b = xs[0].float(), xs[1].float()
+            y = a @ b
+            if s.has_bias:
+                y = y + xs[2].float()
+            return act(y).to(xs[0].dtype)
+
+        def baseline_fn(*xs):
+            # MULTI-KERNEL torch baseline: matmul (->hipBLASLt) + bias + activation.
+            y = torch.matmul(xs[0], xs[1])
+            if s.has_bias:
+                y = y + xs[2]
+            return act(y)
+
+        arity = 3 if s.has_bias else 2
     else:
         raise ValueError(f"unknown family {family!r}")
 
@@ -502,8 +582,96 @@ def {op}(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
 '''
 
 
+_GEMM_TMPL = '''"""GENERATED seed Triton GEMM + fused epilogue for {op} ({dtype}).
+
+C = act(A @ B [+ bias]) in ONE kernel (fp32 accumulate, {tldt} store). torch runs
+this as matmul (-> hipBLASLt) + bias + activation = SEPARATE kernels, so fusing
+saves HBM round-trips of the [M,N] output -> real headroom vs the vendor path.
+Grouped tiling + K-mask (ROCm/gfx942-safe, libdevice-free act). Regenerate via
+kore/tasks/generate_ops.py — do not hand-edit.
+"""
+from __future__ import annotations
+
+import torch
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _{op}_kernel(
+    a_ptr, b_ptr, c_ptr, bias_ptr,
+    M, N, K,
+    stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    num_pid_in_group = GROUP_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    offs_am = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
+    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
+    offs_k = tl.arange(0, BLOCK_K)
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_K)):
+        k_rem = K - k * BLOCK_K
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < k_rem, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_rem, other=0.0)
+        acc += tl.dot(a, b)
+        a_ptrs += BLOCK_K * stride_ak
+        b_ptrs += BLOCK_K * stride_bk
+
+    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+{bias_block}{act_block}    c = acc.to({tldt})
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    tl.store(c_ptrs, c, mask=c_mask)
+
+
+def {op}({args}) -> torch.Tensor:
+    M, K = a.shape
+    K2, N = b.shape
+    c = torch.empty((M, N), device=a.device, dtype={torch_dt})
+    if M <= 16:
+        BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M, nw, ns = 16, 128, 64, 1, 4, 2
+    else:
+        BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M, nw, ns = 128, 128, 32, 8, 4, 2
+    grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
+    _{op}_kernel[grid](
+        a, b, c, {bias_arg},
+        M, N, K,
+        a.stride(0), a.stride(1), b.stride(0), b.stride(1), c.stride(0), c.stride(1),
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, GROUP_M=GROUP_M,
+        num_warps=nw, num_stages=ns,
+    )
+    return c
+'''
+
+
 def seed_source(op: str, family: str, dtype: str) -> str:
     tldt = DTYPES[dtype][1]
+    if family == "gemm_fusion":
+        s: GemmFusionSpec = _registry()[op][1]
+        torch_dt = f"torch.{DTYPES[dtype][0]}"
+        if s.has_bias:
+            bias_block = ("    bias = tl.load(bias_ptr + offs_cn, mask=offs_cn < N, "
+                          "other=0.0).to(tl.float32)\n    acc += bias[None, :]\n")
+            args, bias_arg = "a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor", "bias"
+        else:
+            bias_block = ""
+            args, bias_arg = "a: torch.Tensor, b: torch.Tensor", "a"  # dummy ptr, unused
+        return _GEMM_TMPL.format(op=op, dtype=dtype, tldt=tldt, torch_dt=torch_dt,
+                                 bias_block=bias_block, act_block=_TL_ACT[s.act],
+                                 args=args, bias_arg=bias_arg)
     if family == "unary":
         s: UnarySpec = _registry()[op][1]
         return _UNARY_TMPL.format(op=op, dtype=dtype, tldt=tldt, expr=s.tl_expr)

@@ -360,7 +360,14 @@ class KoreEnv:
                 _ev("DEBUG", "profile_run", task=self.task.task_id, impl=impl,
                     ok=False, rc=rc)
                 return None
-            csvs = _glob.glob(os.path.join(outdir, "**", "*.csv"), recursive=True)
+            # rocprofv3 writes <pid>_counter_collection.csv (+ an agent_info.csv we
+            # must ignore). Prefer the counter file; never parse agent_info.
+            csvs = _glob.glob(os.path.join(outdir, "**", "*counter_collection.csv"),
+                              recursive=True)
+            if not csvs:
+                csvs = [c for c in _glob.glob(os.path.join(outdir, "**", "*.csv"),
+                                              recursive=True)
+                        if "agent_info" not in os.path.basename(c)]
             kernels = []
             for c in csvs:
                 try:

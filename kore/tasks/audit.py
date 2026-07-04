@@ -28,6 +28,7 @@ class DataScaleReport:
     total_effective_shapes: int
     shapes_per_op_min: int
     shapes_per_op_max: int
+    baseline_tiers: dict[str, int] = field(default_factory=dict)
     heldout_families: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -37,6 +38,10 @@ class DataScaleReport:
             f"(train {self.n_train}, held-out {self.n_heldout})",
             f"  families:         {len(self.families)}  {dict(self.families)}",
             f"  dtypes:           {dict(self.dtypes)}",
+            # honest headroom breakdown: vendor (real AITER/hipBLASLt baseline) +
+            # fusion (real multi-kernel headroom) are the "real speedup" ops;
+            # elementwise are correctness-training (low speedup headroom).
+            f"  baseline tiers:   {dict(self.baseline_tiers)}",
             f"  base shapes:      {self.total_base_shapes}",
             f"  effective shapes: {self.total_effective_shapes} "
             f"(per-op {self.shapes_per_op_min}-{self.shapes_per_op_max})",
@@ -55,10 +60,14 @@ def audit(shape_augment: bool | None = None, augment_max: int = 6) -> DataScaleR
     eff_total = 0
     per_op: list[int] = []
     heldout_fams: set[str] = set()
+    tiers: Counter = Counter()
 
     for t in tasks:
         fams[operator_family(t)] += 1
         dtypes[t.dtype] += 1
+        # honest headroom tier: generated tasks carry baseline_tier; hand-authored
+        # tasks (with real AITER/hipBLASLt baselines) count as "vendor".
+        tiers[t.raw.get("baseline_tier", "vendor")] += 1
         base = t.shapes or []
         base_total += len(base)
         eff = augment_shapes(base, max_shapes=augment_max) if shape_augment else base
@@ -69,6 +78,7 @@ def audit(shape_augment: bool | None = None, augment_max: int = 6) -> DataScaleR
             heldout_fams.add(operator_family(t))
 
     return DataScaleReport(
+        baseline_tiers=dict(tiers),
         n_operators=len(tasks),
         n_train=sum(1 for t in tasks if not is_heldout(t)),
         n_heldout=sum(1 for t in tasks if is_heldout(t)),

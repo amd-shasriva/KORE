@@ -1422,16 +1422,17 @@ def _train_grpo_distributed(config, tasks):
     if is_main:
         configure(run_dir=getattr(config, "output_dir", None))
 
-    # Rollout generation strategy:
-    #  * FSDP: we summon FULL params (recurse=True) so each rank holds the whole
-    #    policy and generates PURELY LOCALLY — no param collectives during generate,
-    #    so synced_gpus MUST be OFF (ragged per-rank trajectory/length counts are
-    #    fine; lockstep would deadlock). The frozen reference is a full per-rank
-    #    model too (see below), so ref_logp is also local.
-    #  * DeepSpeed ZeRO-3: params stay sharded during generate -> keep synced_gpus.
-    _is_fsdp = str(backend).lower() == "fsdp"
-    setattr(config, "_grpo_synced_gpus",
-            False if _is_fsdp else bool(getattr(config, "synced_gpus", True)))
+    # Rollout generation MUST run with synced_gpus=True under sharding. Even though
+    # we summon_full_params for the rollout, the auto-wrapped decoder-layer FSDP
+    # units STILL issue a per-forward all_gather on every decode step (summon only
+    # reliably keeps the ROOT embed/lm_head unsharded; nested units re-gather).
+    # Different ranks generate different-length sequences (ragged), so WITHOUT
+    # synced_gpus they would issue a different NUMBER of per-token all_gathers and
+    # deadlock (7 ranks spinning in NCCL, 1 idle — the classic FSDP desync).
+    # synced_gpus=True keeps every rank stepping in lockstep until all are done.
+    # (Verified end-to-end in scripts/_repro_grpo_step.py.) DeepSpeed ZeRO-3 needs
+    # it for the same reason (params sharded during generate).
+    setattr(config, "_grpo_synced_gpus", bool(getattr(config, "synced_gpus", True)))
 
     # Equal trajectories per rank: the strided _rank_slice + lockstep generation
     # require the Kevin group size G to be a MULTIPLE of world, else some ranks roll

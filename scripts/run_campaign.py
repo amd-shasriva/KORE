@@ -1148,6 +1148,8 @@ def _stage_grpo(ctx):
             kw.update(num_trajectories=8, tasks_per_step=2, num_turns=3)
         if ctx["args"].grpo_steps:
             kw["total_steps"] = ctx["args"].grpo_steps
+        if getattr(ctx["args"], "adaptive_steps", False):
+            kw["adaptive_steps"] = True
         return kw
 
     def _run_grpo(*, model_id, output_dir, reward_phase="all", run_name=None):
@@ -1428,6 +1430,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="min speedup for a win to enter the RFT bucket (default 1.0x)")
     p.add_argument("--rft-oversample", type=int, default=1, dest="rft_oversample",
                    help="times to oversample RFT >tau wins into SFT (0=disable)")
+    # Adaptive GRPO horizon: stop when the reward mean plateaus (bounded by
+    # total_steps). Ensures the policy trains long enough to actually move.
+    p.add_argument("--adaptive-steps", dest="adaptive_steps",
+                   action="store_true", help="adaptive GRPO horizon (plateau early-stop)")
     return p
 
 

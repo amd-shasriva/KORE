@@ -69,6 +69,20 @@ def clip_higher_ratio(ratio, advantage, lo: float = 0.2, hi: float = 0.28):
     return min(ratio * advantage, clipped * advantage)
 
 
+def is_overlong(n_tokens: int, max_response_length: int, buffer_len: int) -> bool:
+    """DAPO Overlong Filtering predicate (pure, unit-testable).
+
+    A response whose length is within ``buffer_len`` tokens of the generation cap
+    was almost certainly TRUNCATED (cut off mid-kernel), so its per-token log-probs
+    are a noisy, biased learning signal and should be masked out of the policy
+    loss. Returns True when the sample is overlong (=> drop). Disabled (always
+    False) when the cap is unset/non-positive.
+    """
+    if not max_response_length or max_response_length <= 0:
+        return False
+    return n_tokens >= max(1, int(max_response_length) - max(0, int(buffer_len)))
+
+
 # --------------------------------------------------------------------------- #
 # Kevin multi-turn credit (best-kernel trajectory scoring)
 # --------------------------------------------------------------------------- #
@@ -1527,6 +1541,18 @@ def _train_grpo_distributed(config, tasks):
 
     _inner = getattr(model, "module", model)
     _gc_on = bool(getattr(config, "gradient_checkpointing", True))
+    # Adaptive horizon: stop when the (cross-rank-identical) reward mean plateaus.
+    # total_steps is the hard cap; the controller may stop earlier. Decisions are
+    # identical on every rank (mean_r is derived from gathered scores), so ranks
+    # break in lockstep.
+    _step_ctrl = None
+    if getattr(config, "adaptive_steps", False):
+        from kore.policy.dynamic import DynamicStepController
+        _step_ctrl = DynamicStepController(
+            min_steps=int(getattr(config, "min_steps", 100)),
+            max_steps=int(config.total_steps),
+            patience=int(getattr(config, "plateau_patience", 40)),
+            min_delta=float(getattr(config, "plateau_min_delta", 1e-3)))
     for step in range(config.total_steps):
         # Summon FULL policy params ONCE for the entire rollout phase of this step
         # (all dynamic-sampling groups). generate() bypasses FSDP's forward hook, so
@@ -1587,6 +1613,7 @@ def _train_grpo_distributed(config, tasks):
         # Global (cross-rank) advantages per kept group -> this rank's slice.
         local_terms = []
         local_tokens = 0
+        n_overlong = 0
         for gi in keep:
             g = groups[gi]
             # re-gather returns AFTER GTPO shaping so advantages see shaped returns.
@@ -1597,8 +1624,14 @@ def _train_grpo_distributed(config, tasks):
             for adv, sample in zip(my_adv, g["local"]["samples"]):
                 if not sample[1]:
                     continue
+                n_tok = max(int(_sample_field(sample, 4, 1) or 1), 1)
+                # DAPO overlong filtering: drop truncated responses (noisy gradient).
+                if getattr(config, "overlong_mask", False) and is_overlong(
+                        n_tok, config.max_response_length, config.overlong_buffer_len):
+                    n_overlong += 1
+                    continue
                 local_terms.append((adv, sample))
-                local_tokens += max(int(_sample_field(sample, 4, 1) or 1), 1)
+                local_tokens += n_tok
 
         # global token normalizer + lockstep bound, agreed across ranks.
         all_tokens = _all_gather_object(local_tokens, accelerator)
@@ -1634,8 +1667,14 @@ def _train_grpo_distributed(config, tasks):
             log.event("grpo_step_dist", step=step, backend=backend, world=world,
                       n_groups=len(groups), n_kept_groups=len(keep), n_attempts=attempts,
                       reward_mean=mean_r, loss=loss_value, global_tokens=global_total_tokens,
-                      **gpu_mem_snapshot())
+                      n_overlong_masked=n_overlong, **gpu_mem_snapshot())
         log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
+
+        if _step_ctrl is not None and _step_ctrl.update(step, mean_r):
+            if is_main:
+                log.info("grpo(dist): adaptive early-stop", step=step + 1,
+                         reason=_step_ctrl.stopped_reason, best=_step_ctrl.best)
+            break
 
     # Gather the sharded weights into a plain checkpoint on the main process.
     accelerator.wait_for_everyone()

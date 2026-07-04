@@ -164,6 +164,23 @@ class GRPOConfig(DistributedMixin):
     clip_ratio_high: float = 0.28          # Clip-Higher upper bound (1 + 0.28)
     adv_eps: float = 1e-6                  # group-normalization epsilon
     ppo_epochs: int = 2                    # minibatch passes per rollout batch (reuse old_logp)
+    # DAPO Overlong Filtering: a response within overlong_buffer_len tokens of the
+    # generation cap was (almost certainly) TRUNCATED; its per-token log-probs are
+    # a noisy, biased gradient (the kernel is cut off mid-emit), so it is masked out
+    # of the policy loss. Prevents length-hacking + truncation noise from stalling
+    # the policy. Default on with a 512-token buffer (DAPO recipe).
+    overlong_mask: bool = True
+    overlong_buffer_len: int = 512
+
+    # --- Dynamic training horizon (adaptive steps) --------------------------------
+    # Instead of a fixed step count, keep training WHILE the monitored signal (the
+    # rollout reward / held-out fast_p) is still climbing, and stop early once it
+    # plateaus — so a run neither wastes compute after convergence nor stops before
+    # the policy has actually moved. See kore.policy.dynamic.DynamicStepController.
+    adaptive_steps: bool = False           # off by default (fixed total_steps)
+    min_steps: int = 100                   # never stop before this many steps
+    plateau_patience: int = 40             # stop after this many steps w/o improvement
+    plateau_min_delta: float = 1e-3        # min reward gain that counts as improvement
 
     # --- Optimization (Kevin recipe) ---
     learning_rate: float = 2e-6            # Kevin: 2e-6

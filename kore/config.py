@@ -182,7 +182,7 @@ class KoreConfig:
         enforced — a bad KORE_PROFILE_REWARD_WEIGHT or an edited weight could
         silently invert tiers or let the profiler bonus outweigh a real speed win.
         """
-        assert self.speed_aggregation in ("worst", "mean", "cvar"), (
+        assert self.speed_aggregation.lower() in ("worst", "mean", "cvar"), (
             f"speed_aggregation must be worst|mean|cvar (got {self.speed_aggregation!r})")
         assert 0.0 < self.cvar_alpha <= 1.0, "cvar_alpha must be in (0, 1]"
         # anti-hack floor is the unique minimum: hack < compile_fail < incorrect.

@@ -56,8 +56,6 @@ class Observation:
     snr_by_shape: dict[str, float] = field(default_factory=dict)
     validation_passed: bool = False
     error_text: Optional[str] = None
-    registers: Optional[int] = None
-    occupancy: Optional[float] = None
     dtype: str = "fp32"
     cv_pct: Optional[float] = None
     flagged_hack: bool = False
@@ -183,19 +181,65 @@ def _strip_comments_and_docstrings(src: str) -> str:
     return src
 
 
-def _worst_speedup(obs: Observation) -> Optional[float]:
-    """Speedup on the worst shape: min over shapes of baseline/candidate."""
+def _shape_ratios(obs: Observation) -> list[float]:
+    """Per-shape speedup ratios base_ms/cand_ms (a gain; higher is better)."""
+    out: list[float] = []
     if obs.baseline_by_shape and obs.wall_by_shape:
-        ratios = []
         for k, cand in obs.wall_by_shape.items():
             base = obs.baseline_by_shape.get(k)
             if base and cand and cand > 0:
-                ratios.append(base / cand)
-        if ratios:
-            return min(ratios)
+                out.append(base / cand)
+    return out
+
+
+def _worst_speedup(obs: Observation) -> Optional[float]:
+    """Speedup on the worst shape: min over shapes of baseline/candidate.
+
+    This is the diagnostic + eval metric (always worst-shape) and the CVaR_{a->0}
+    endpoint of :func:`_aggregate_speedup`."""
+    ratios = _shape_ratios(obs)
+    if ratios:
+        return min(ratios)
     if obs.baseline_ms and obs.wall_ms and obs.wall_ms > 0:
         return obs.baseline_ms / obs.wall_ms
     return None
+
+
+def _aggregate_speedup(obs: Observation, cfg) -> Optional[float]:
+    """Distributionally-robust speed aggregation over the per-shape speedup sweep.
+
+    KORE's contribution is a *distributionally-robust* speed objective against the
+    PRODUCTION vendor baseline: rather than the average-case speedup, it optimizes
+    the worst shapes, so the policy must be fast on the hardest shape a practitioner
+    hits — not just on average. This exposes the whole CVaR_alpha family (worst =
+    CVaR_{a->0}, mean = CVaR_1) at a single point; all downstream shaping (log term,
+    fast_p bonuses, significance) then applies to the chosen aggregate.
+
+      "worst" : min over shapes (current behavior; the robust objective / default).
+      "cvar"  : geometric mean of the worst ceil(alpha*N) shapes (CVaR_alpha).
+      "mean"  : geometric-mean speedup over all shapes (average-case ablation arm).
+
+    Geometric mean (mean-of-logs) is used for cvar/mean so the family is linear in
+    ln(ratio) — consistent with the log-speedup shaping — and scale-correct for
+    ratios. Degrades to the single-shape / scalar case identically to _worst_speedup,
+    so the default ("worst") is byte-identical to the previous reward.
+    """
+    ratios = _shape_ratios(obs)
+    if not ratios:
+        if obs.baseline_ms and obs.wall_ms and obs.wall_ms > 0:
+            return obs.baseline_ms / obs.wall_ms
+        return None
+    mode = (getattr(cfg, "speed_aggregation", "worst") or "worst").lower()
+    n = len(ratios)
+    if mode == "worst" or n == 1:
+        return min(ratios)                       # CVaR_{alpha->0}
+    if mode == "mean":
+        k = n
+    else:  # "cvar"
+        alpha = float(getattr(cfg, "cvar_alpha", 0.5) or 0.5)
+        k = max(1, min(n, math.ceil(alpha * n)))
+    worst_logs = sorted(math.log(r) for r in ratios)[:k]  # k worst (smallest) ratios
+    return math.exp(sum(worst_logs) / k)
 
 
 def _worst_snr(obs: Observation) -> Optional[float]:
@@ -400,7 +444,7 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     # (never a penalty) — correct-fast vs correct-slow stays a pure speed ordering.
     base = cfg.correctness_weight
     fmt = _format_component(response, cfg)
-    su = _worst_speedup(obs)
+    su = _aggregate_speedup(obs, cfg)  # distributionally-robust (default: worst-shape)
     if su is None:
         rr = RewardResult(base + fmt, True, None, "correct_no_bench", flags,
                           "correct; no timing")

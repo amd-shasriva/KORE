@@ -2010,15 +2010,12 @@ def grpo_config_from_dict(d: dict):
     ids through the JSON so the sharded run trains on exactly the right tasks — so
     it is popped here (and surfaced by :func:`_main` to ``train_grpo(tasks=...)``).
     """
-    from kore.policy.configs import GRPOConfig, LoRAConfig
+    from kore.policy.configs import GRPOConfig
 
     d = dict(d)
     d.pop("tasks", None)          # handled by _main -> train_grpo(tasks=...)
-    lora = d.pop("lora", None)
-    cfg = GRPOConfig(**d)
-    if lora is not None:
-        cfg.lora = LoRAConfig(**lora)
-    return cfg
+    d.pop("lora", None)           # GRPO is full-FT only; ignore any stale LoRA block
+    return GRPOConfig(**d)
 
 
 def _main(argv: Optional[list] = None) -> int:

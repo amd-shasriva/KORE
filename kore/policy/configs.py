@@ -215,10 +215,10 @@ class GRPOConfig(DistributedMixin):
     # path in this loop, so those flags implied capabilities that don't exist.
     # (Distributed FULL-FT is handled by the FSDP fields from DistributedMixin.)
 
-    # LoRA path removed from the GRPO trainer (full-parameter FT only); defaults OFF
-    # so the in-process save never hits the removed merge_and_unload branch.
+    # LoRA path removed from the GRPO trainer (full-parameter FT only); use_lora
+    # defaults OFF and only gates FSDP selection. No `lora` config field: GRPO never
+    # applies PEFT (the LoRAConfig type is still used by SFT/DPO/midtrain).
     use_lora: bool = False
-    lora: LoRAConfig = field(default_factory=LoRAConfig)
 
     # --- Sharded FULL-PARAMETER distributed training (best-in-world RL) ---
     # These take effect ONLY for full-FT (``use_lora=False``) launched as a

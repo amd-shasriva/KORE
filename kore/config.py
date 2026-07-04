@@ -52,6 +52,13 @@ class KoreConfig:
     verifier_determinism_check: bool = True
     determinism_snr_tol_db: float = 10.0
 
+    # data scale: expand each task's shapes into a diverse (small/medium/large +
+    # non-aligned) set so the policy must learn shape-robust kernels, not memorize
+    # one tile config. Opt-in (changes eval cost + difficulty). See tasks/augment.py.
+    shape_augment: bool = field(
+        default_factory=lambda: os.environ.get("KORE_SHAPE_AUGMENT", "0") == "1")
+    shape_augment_max: int = 6
+
     # reward shaping
     correctness_weight: float = 0.3
     excessive_speedup_flag: float = 10.0

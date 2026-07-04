@@ -704,10 +704,9 @@ def _train_grpo_fallback(config, tasks):
          SFT/reference checkpoint, run for ``ppo_epochs`` minibatch passes that
          reuse the detached rollout ``old_logp``.
 
-    Full-FT vs LoRA follows ``config.use_lora`` (the locked recipe is full-FT).
-    When LoRA is used the adapter is merged before saving so soup/serve load a
-    full model. Gradient checkpointing + PEFT needs ``enable_input_require_grads``
-    or ``.backward()`` sees no grad path.
+    Full-parameter fine-tuning only (the LoRA path was removed from GRPO); the
+    model is always saved as full weights. Gradient checkpointing needs
+    ``enable_input_require_grads`` or ``.backward()`` sees no grad path.
 
     When ``config.distributed`` full-FT is requested (``use_lora=False`` under an
     ``accelerate launch`` process group) this dispatches to
@@ -1206,8 +1205,6 @@ def _dummy_gen_inputs(tok, device):
     issue the SAME number of collective forwards (ZeRO-3/FSDP all-gather per
     forward), so it runs this 1-token forward whose loss is scaled by 0.
     """
-    import torch
-
     ids = tok("x", return_tensors="pt").input_ids.to(device)
     return [(ids, ids[0][:1])]
 

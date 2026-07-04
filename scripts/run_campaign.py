@@ -812,7 +812,7 @@ def _stage_build(ctx):
     # mixer's content-hash dedup, unlike row duplication). rft_oversample>0 enables;
     # 0 keeps every win. See kore.data.rejection.
     from kore.data.rejection import stratified_rft_select
-    if int(getattr(ctx["args"], "rft_oversample", 1)) > 0:
+    if getattr(ctx["args"], "rft", True):
         repairs = [r for r in kernel_records if _rec_type(r) == "repair"]
         wins = [r for r in kernel_records if _rec_type(r) == "win"]
         kept_wins, rft_report = stratified_rft_select(
@@ -1432,8 +1432,9 @@ def build_parser() -> argparse.ArgumentParser:
     # RFT / rejection sampling: bootstrap SFT on the policy's own >tau wins.
     p.add_argument("--rft-tau", type=float, default=1.0, dest="rft_tau",
                    help="min speedup for a win to survive RFT rejection (default 1.0x)")
-    p.add_argument("--rft-oversample", type=int, default=1, dest="rft_oversample",
-                   help=">0 enables RFT rejection (drop sub-tau wins from SFT); 0 keeps all wins")
+    # RFT rejection is ON by default; --no-rft keeps all wins (incl. sub-tau/slow).
+    p.add_argument("--rft", dest="rft", action=argparse.BooleanOptionalAction,
+                   default=True, help="RFT rejection: drop sub-tau (slow) wins from SFT (default on)")
     # Adaptive GRPO horizon: stop when the reward mean plateaus (bounded by
     # total_steps). Ensures the policy trains long enough to actually move.
     p.add_argument("--adaptive-steps", dest="adaptive_steps",

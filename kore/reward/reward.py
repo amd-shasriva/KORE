@@ -74,8 +74,16 @@ _HACK_PATTERNS = [
     (r"\baiter\.", "calls aiter op instead of computing"),
     (r"\bimport\s+rocblas\b|\bhipblaslt\b|\brocblas\b|\bmiopen\b|\brocsolver\b|\bhipblas\b",
      "calls a vendor library instead of computing"),
-    (r"torch\.(matmul|mm|bmm|addmm|einsum|softmax|rms_norm|layer_norm|scaled_dot_product_attention)\s*\(",
+    (r"torch\.(matmul|mm|bmm|addmm|baddbmm|einsum|softmax|rms_norm|layer_norm|scaled_dot_product_attention)\s*\(",
      "delegates to a torch op instead of a kernel"),
+    # extended matmul family (all contract to a vendor GEMM/BLAS call).
+    (r"torch\.(tensordot|chain_matmul|mv|inner|vdot|dot|kron)\s*\(",
+     "delegates to a torch matmul-family op instead of computing"),
+    (r"torch\.linalg\.(multi_dot|matmul)\s*\(", "delegates to torch.linalg matmul"),
+    (r"\b(?!tl\.)(?!triton\.)[A-Za-z_]\w*\.(?:tensordot|chain_matmul|mv|inner|vdot|kron)\s*\(",
+     "delegates a matmul-family op via a handle"),
+    # augmented matmul assignment `c @= b` (the non-augmented form is caught below).
+    (r"[\w\)\]][^\S\n]*@=", "uses the @= matmul-assign operator (delegates to the vendor GEMM)"),
     (r"torch\.nn\.functional\.\w+\s*\(", "delegates to torch.nn.functional"),
     (r"\bF\.(scaled_dot_product_attention|linear|softmax|rms_norm|layer_norm|gelu|silu|conv\w*)\s*\(",
      "delegates to torch.nn.functional"),

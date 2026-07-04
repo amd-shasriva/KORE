@@ -59,7 +59,11 @@ def passes_win_filter(rec: Any, tau: float = 1.0,
 
 def task_entropy(per_task: dict[str, int]) -> float:
     """Normalized Shannon entropy in [0,1] of the kept-set task distribution.
-    1.0 = perfectly uniform across tasks (max diversity), 0 = single task."""
+
+    1.0 = perfectly uniform across the represented tasks (max diversity). A single
+    represented task returns 1.0 (trivially uniform over its one task); an empty
+    set returns 0.0. Diversity across MORE tasks is reflected by the denominator
+    log(len(per_task)), so the metric is comparable at a fixed task count."""
     total = sum(per_task.values())
     if total <= 0 or len(per_task) <= 1:
         return 0.0 if total <= 0 else 1.0 if len(per_task) == 1 else 0.0

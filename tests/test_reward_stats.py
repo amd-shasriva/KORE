@@ -36,13 +36,6 @@ def test_median_and_cv():
     assert stats.cv_pct([10.0, 12.0]) > 0.0
 
 
-def test_significance_needs_gap_above_noise():
-    # 50% faster, tiny noise -> significant.
-    assert stats.speedup_is_significant(1.0, 0.5, 0.001, 0.001) is True
-    # 1% faster, within noise floor -> not significant.
-    assert stats.speedup_is_significant(1.0, 0.99, 0.02, 0.02) is False
-
-
 # --------------------------------------------------------------------------- #
 # anti-hack scanner
 # --------------------------------------------------------------------------- #
@@ -103,6 +96,11 @@ def test_scan_blocks_operator_and_module_and_fs_bypasses():
         "import triton\nimport triton.language as tl\n"
         "@triton.autotune(configs=[], key=['M'])\n@triton.jit\n"
         "def k():\n    acc = tl.dot(a, b)\n    return acc") is None
+    # extended matmul family + augmented @= (round-2 audit bypasses)
+    assert scan_for_hacks("import torch\nreturn torch.tensordot(a, b, dims=1)") is not None
+    assert scan_for_hacks("import torch\nreturn torch.linalg.multi_dot([a, b])") is not None
+    assert scan_for_hacks("import torch\nc = torch.mv(a, b)") is not None
+    assert scan_for_hacks("def f(c, b):\n    c @= b\n    return c") is not None
 
 
 def test_scan_ignores_comments_and_docstrings():

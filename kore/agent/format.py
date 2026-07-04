@@ -24,7 +24,7 @@ import json
 import re
 from typing import Any, Optional
 
-from kore.agent.tools import TOOL_SCHEMAS, TOOL_NAMES
+from kore.agent.tools import TOOL_SCHEMAS
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 _FENCED_JSON_RE = re.compile(

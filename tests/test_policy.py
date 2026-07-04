@@ -210,7 +210,7 @@ def test_code_shingle_cosine_symmetric_and_bounded():
 def test_all_policy_modules_import_without_heavy_deps():
     import importlib
 
-    for mod in ("format", "grpo", "anticollapse", "sft", "rft", "dpo", "serve", "configs"):
+    for mod in ("format", "grpo", "anticollapse", "sft", "dpo", "serve", "configs"):
         importlib.import_module(f"kore.policy.{mod}")
 
 

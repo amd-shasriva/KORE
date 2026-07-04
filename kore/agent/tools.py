@@ -21,9 +21,7 @@ Nothing here imports torch/vllm; the only GPU contact is the injected env.
 
 from __future__ import annotations
 
-import json
 import re
-from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from kore.reward.reward import compute_reward

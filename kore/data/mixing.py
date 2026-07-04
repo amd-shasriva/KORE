@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import random
 from collections import Counter
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
 from kore.env.replay import kernel_hash
 from kore.obs import get_logger

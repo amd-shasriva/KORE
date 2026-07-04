@@ -315,7 +315,67 @@ class KoreEnv:
             obs.wall_ms = max(wall_by_shape.values())
         if base_by_shape:
             obs.baseline_ms = max(base_by_shape.values())
+
+        # P5 (flagship novelty): dense hardware-counter efficiency, baseline-relative.
+        # Feature-flagged (profile_reward_weight>0) and fully fail-safe: any profiler
+        # hiccup leaves profile_efficiency=None and never affects the correctness/
+        # speedup verdict. Collected once on the primary shape only (rocprof is slow).
+        if getattr(self.cfg, "profile_reward_weight", 0.0) > 0.0:
+            try:
+                obs.profile_efficiency = self._collect_profile(driver, shapes[0], workdir, env)
+            except Exception as e:  # pragma: no cover - GPU/rocprof only
+                _ev("DEBUG", "profile_error", task=task.task_id, error=str(e)[:200])
+                obs.profile_efficiency = None
         return obs
+
+    def _collect_profile(self, driver: Path, sh: Shape, workdir: Path,
+                         env: dict) -> Optional[float]:
+        """rocprofv3 PMC on candidate + reference -> baseline-relative efficiency.
+
+        Returns a score in [0,1] (see kore.reward.profile_reward) or None if the
+        profiler is unavailable or produced no usable counters. Never raises to the
+        caller path that matters (wrapped by the caller's try/except)."""
+        import glob as _glob
+        import tempfile as _tmp
+        from kore.reward import profile_reward as _pr
+        from kore.verifier.parsers.rocprofv3 import parse_rocprofv3_csv
+        from kore.verifier.pmc import COUNTER_SETS
+
+        counters = COUNTER_SETS["full"]
+
+        def _counters_for(impl: str) -> Optional[dict]:
+            outdir = _tmp.mkdtemp(prefix=f"pmc_{impl}_", dir=str(workdir))
+            cmd = ["rocprofv3", "--pmc", *counters, "-d", outdir,
+                   "--output-format", "csv", "--",
+                   sys.executable, str(driver), "--impl", impl, *sh.as_args()]
+            rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
+            if timed or rc != 0:
+                _ev("DEBUG", "profile_run", task=self.task.task_id, impl=impl,
+                    ok=False, rc=rc)
+                return None
+            csvs = _glob.glob(os.path.join(outdir, "**", "*.csv"), recursive=True)
+            kernels = []
+            for c in csvs:
+                try:
+                    kernels.extend(parse_rocprofv3_csv(c))
+                except Exception:
+                    pass
+            if not kernels:
+                return None
+            # Aggregate all dispatches for this impl (a kernel may launch several).
+            agg: dict[str, int] = {}
+            for k in kernels:
+                for name, val in k.counters.items():
+                    agg[name] = agg.get(name, 0) + int(val)
+            return agg or None
+
+        cand = _counters_for("candidate")
+        ref = _counters_for("reference")
+        if not cand or not ref:
+            return None
+        score = _pr.profile_efficiency_score(cand, ref)
+        _ev("DEBUG", "profile_score", task=self.task.task_id, score=score)
+        return score
 
     def _bench_multi(self, driver: Path, sh: Shape, impl: str, workdir: Path, env: dict):
         """Bench a (shape, impl) ``min..max_variance_runs`` times; return

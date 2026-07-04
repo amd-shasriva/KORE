@@ -113,6 +113,19 @@ class KoreConfig:
     fast_p_bonus: tuple = ((1.0, 0.30), (1.2, 0.30), (1.5, 0.40))
     fast_p_significant_only: bool = True
 
+    # --- P5: hardware-counter-grounded DENSE reward (flagship novelty) ----------
+    # A bounded, baseline-relative roofline-attainment bonus (see
+    # kore.reward.profile_reward) added ONLY on the correct tier. It gives gradient
+    # in the correct-but-slow band where wall-clock speedup is flat, by rewarding
+    # the causes of speed (fewer pipeline stalls / less memory traffic than the
+    # vendor baseline). Kept STRICTLY below the fast_p bonuses so actually beating
+    # the baseline always dominates a merely counter-efficient kernel. Weight 0.0
+    # => fully inert (feature-flagged); enabled via --profile-reward once the
+    # rocprofv3 path is GPU-validated, then ablated as the novel contribution.
+    # Env-overridable so it propagates to the accelerate-launched training subprocs.
+    profile_reward_weight: float = field(
+        default_factory=lambda: float(os.environ.get("KORE_PROFILE_REWARD_WEIGHT", "0.0")))
+
     # multi-turn credit
     gamma: float = 0.4
 

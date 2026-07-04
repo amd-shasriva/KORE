@@ -63,6 +63,9 @@ class Observation:
     flagged_hack: bool = False
     hack_reason: Optional[str] = None
     infra_error: bool = False   # timeout/OOM/segfault/import — NOT a kernel signal
+    # P5: baseline-relative hardware-counter efficiency in [0,1] (rocprofv3), or
+    # None when profiling is off/unavailable. Consumed as a bounded dense bonus.
+    profile_efficiency: Optional[float] = None
 
 
 # Patterns that indicate the "kernel" is cheating rather than computing.
@@ -391,6 +394,14 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
         speed_term = 0.0
     else:
         speed_term = _speedup_term(su_scored, su, obs, cfg, flags)
+        # P5: bounded, baseline-relative hardware-counter dense bonus (flagship
+        # novelty). Only on the correct tier; strictly below the fast_p bonuses so
+        # real wall-clock wins always dominate. Inert when weight==0 / no profile.
+        pw = float(getattr(cfg, "profile_reward_weight", 0.0) or 0.0)
+        if pw > 0.0 and obs.profile_efficiency is not None:
+            prof_term = pw * max(0.0, min(1.0, obs.profile_efficiency))
+            speed_term += prof_term
+            flags.append(f"profile+{prof_term:.3f}")
     reward = base + speed_term + fmt
     rr = RewardResult(reward, True, su, "correct_timed", flags,
                       f"worst-shape speedup {su:.3f}x vs baseline"

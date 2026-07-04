@@ -29,10 +29,21 @@ def test_vendor_reference_namespace(op):
 
 
 def test_vendor_op_dtypes_override():
-    # fp8 GEMM is fp8-only; norm/act ops use the default bf16/fp16 sweep.
-    assert V.vendor_op_dtypes("gemm_a8w8") == ("fp8",)
+    # a8w8 GEMM sweeps fp8 + int8; norm/act ops use the default bf16/fp16 sweep.
+    assert V.vendor_op_dtypes("gemm_a8w8") == ("fp8", "int8")
     assert V.vendor_op_dtypes("softmax") == V.VENDOR_DTYPES
     assert V.vendor_op_dtypes("rmsnorm") == V.VENDOR_DTYPES
+
+
+def test_vendor_int8_gemm_oracle_cpu():
+    import torch
+
+    ns = V.make_vendor_reference("gemm_a8w8", "int8")
+    xq, wq, xs, ws = ns["get_inputs"]({"M": 8, "N": 16, "K": 32}, device="cpu", seed=0)
+    assert xq.dtype == torch.int8 and wq.dtype == torch.int8
+    out = ns["ref_fn"](xq, wq, xs, ws)
+    exp = (xq.float() * xs.float()) @ (wq.float() * ws.float().reshape(-1, 1)).t()
+    assert torch.allclose(out.float(), exp, atol=1e-2, rtol=1e-2)
 
 
 def test_vendor_softmax_and_gemm_oracle_cpu():

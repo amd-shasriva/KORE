@@ -43,15 +43,16 @@ _SIMPLE_GENOPS_FAMILIES = ("unary", "binary", "reduce")
 
 # vendor op -> family (matches generate_vendor_ops.py `op_family: vendor_<op>`).
 _VENDOR_OPS = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul", "softmax", "gemm_a8w8",
-               "fused_add_rmsnorm", "rope", "topk_softmax", "batched_gemm")
+               "fused_add_rmsnorm", "rope", "topk_softmax", "batched_gemm",
+               "gemm_a8w8_blockscale")
 
 # per-op fusion depth for vendor ops (reduction/affine/gated chains).
 _VENDOR_FUSION_DEPTH = {"rmsnorm": 2, "layernorm": 3, "silu_mul": 2, "gelu_mul": 2,
                         "softmax": 2, "gemm_a8w8": 2, "fused_add_rmsnorm": 3, "rope": 1,
-                        "topk_softmax": 3, "batched_gemm": 1}
+                        "topk_softmax": 3, "batched_gemm": 1, "gemm_a8w8_blockscale": 2}
 
 # vendor ops that are matmul-class (compute-bound) rather than memory-bound.
-_VENDOR_COMPUTE_BOUND = frozenset({"gemm_a8w8", "batched_gemm"})
+_VENDOR_COMPUTE_BOUND = frozenset({"gemm_a8w8", "batched_gemm", "gemm_a8w8_blockscale"})
 
 
 @functools.lru_cache(maxsize=1)

@@ -23,10 +23,14 @@ log = get_logger("data.teacher")
 
 
 # Bounded exponential-backoff retry defaults for the network-backed teachers.
-_MAX_RETRIES = 4          # total attempts = _MAX_RETRIES
+# Sized to ride out multi-minute gateway hiccups / rate-limit windows: a multi-day
+# datagen makes tens of thousands of teacher calls and WILL hit transient 5xx /
+# timeouts / rate limits — the run must not die on one. 8 attempts with the backoff
+# below span ~4-5 minutes of resilience per call before giving up.
+_MAX_RETRIES = 8          # total attempts = _MAX_RETRIES
 _BACKOFF_BASE = 1.0       # seconds; delay = _BACKOFF_BASE * 2**attempt
-_BACKOFF_CAP = 30.0       # seconds; never wait longer than this
-_REQUEST_TIMEOUT = 120.0  # per-request wall timeout (seconds)
+_BACKOFF_CAP = 60.0       # seconds; never wait longer than this
+_REQUEST_TIMEOUT = 180.0  # per-request wall timeout (seconds)
 
 
 def _retry_call(fn: Callable[[], Any], *, what: str, stats: Optional[dict] = None):
@@ -344,14 +348,59 @@ class ClaudeTeacher:
         return result
 
 
-def make_teacher(kind: str = "stub", **kwargs) -> TeacherClient:
+class ResilientTeacher:
+    """Wrap a teacher so a TRANSIENT total-failure (all retries exhausted on one
+    call) SKIPS that sample (returns "") instead of crashing the whole run — but a
+    SUSTAINED outage (``max_consecutive_failures`` in a row) still raises, so we
+    never silently produce empty datagen (no silent degradation).
+
+    A multi-day datagen makes tens of thousands of teacher calls; occasional 5xx /
+    rate-limit / timeout errors are inevitable and must not kill the campaign. One
+    failed generation among thousands is noise (skip it); an hour of consecutive
+    failures is a real outage (stop, resumably). Delegates everything else to the
+    wrapped teacher.
+    """
+
+    def __init__(self, inner, max_consecutive_failures: int = 15):
+        self._inner = inner
+        self._max_consec = int(max_consecutive_failures)
+        self._consec = 0
+        self._total_skipped = 0
+
+    def __getattr__(self, name):  # delegate non-overridden attrs to the inner teacher
+        return getattr(self._inner, name)
+
+    def generate(self, messages, **kwargs) -> str:
+        try:
+            out = self._inner.generate(messages, **kwargs)
+            self._consec = 0  # reset the outage counter on any success
+            return out
+        except Exception as e:  # noqa: BLE001 - retries already exhausted inside inner
+            self._consec += 1
+            self._total_skipped += 1
+            log.error("teacher.generate exhausted retries — SKIPPING this sample "
+                      "(resilient); will hard-stop if the outage is sustained",
+                      exc_type=type(e).__name__, exc=str(e)[:200],
+                      consecutive_failures=self._consec,
+                      max_consecutive=self._max_consec, total_skipped=self._total_skipped)
+            if self._consec >= self._max_consec:
+                raise RuntimeError(
+                    f"teacher unavailable: {self._consec} consecutive generation "
+                    f"failures (sustained outage) — stopping so the run can resume "
+                    f"later rather than produce empty data") from e
+            return ""
+
+
+def make_teacher(kind: str = "stub", *, resilient: bool = False, **kwargs) -> TeacherClient:
     kind = (kind or "stub").lower()
     if kind == "stub":
-        return StubTeacher(**kwargs)
-    if kind == "vllm":
-        return VLLMTeacher(**kwargs)
-    if kind == "hf":
-        return HFTeacher(**kwargs)
-    if kind in ("claude", "anthropic", "opus"):
-        return ClaudeTeacher(**kwargs)
-    raise ValueError(f"unknown teacher kind: {kind}")
+        base = StubTeacher(**kwargs)
+    elif kind == "vllm":
+        base = VLLMTeacher(**kwargs)
+    elif kind == "hf":
+        base = HFTeacher(**kwargs)
+    elif kind in ("claude", "anthropic", "opus"):
+        base = ClaudeTeacher(**kwargs)
+    else:
+        raise ValueError(f"unknown teacher kind: {kind}")
+    return ResilientTeacher(base) if resilient else base

@@ -42,18 +42,20 @@ _SAMPLES_DIR = Path(__file__).resolve().parent / "replay_samples"
 # formatters normalize each dataset's native schema into chat ``messages``.
 HF_SOURCES: dict[str, dict] = {
     "code": {
-        # Permissive code corpus; format a file/snippet into an "explain this" row.
-        "path": "bigcode/the-stack-smol",
-        "config": "data/python",
+        # REAL code instruction->response (Magicoder Evol-Instruct): genuine coding
+        # problems with worked solutions — NOT an echo of a raw snippet.
+        "path": "ise-uiuc/Magicoder-Evol-Instruct-110K",
+        "config": None,
         "split": "train",
-        "text_keys": ("content", "text"),
+        "qa_keys": ("instruction", "response"),
     },
     "math": {
-        # GSM8K grade-school math word problems with worked solutions.
-        "path": "openai/gsm8k",
-        "config": "main",
-        "split": "train",
-        "qa_keys": ("question", "answer"),
+        # OpenMathInstruct-2: large CoT math (tiling/indexing/numerics reasoning that
+        # transfers to kernels). GSM8K remains the bundled/secondary fallback.
+        "path": "nvidia/OpenMathInstruct-2",
+        "config": None,
+        "split": "train_1M",
+        "qa_keys": ("problem", "generated_solution"),
     },
     "chat": {
         # Tulu-3 SFT mixture: already chat-formatted ``messages``.
@@ -70,11 +72,12 @@ HF_SOURCES: dict[str, dict] = {
         "messages_key": "messages",
     },
     "tool_use": {
-        # Function-calling trajectories (xLAM / ToolACE), reformatted to chat.
-        "path": "Salesforce/xlam-function-calling-60k",
+        # ToolACE: diverse function-calling trajectories (public, sharegpt-style
+        # ``conversations``). Reformatted to chat messages. (xLAM is gated -> avoid.)
+        "path": "Team-ACE/ToolACE",
         "config": None,
         "split": "train",
-        "qa_keys": ("query", "answers"),
+        "sharegpt_key": "conversations",
     },
 }
 
@@ -179,10 +182,39 @@ def _fmt_code(ex: dict, spec: dict, kind: str) -> Optional[dict]:
     ], "_source": kind}
 
 
+_SHAREGPT_ROLE = {"human": "user", "user": "user", "gpt": "assistant",
+                  "assistant": "assistant", "system": "system", "tool": "tool",
+                  "function": "tool", "observation": "tool"}
+
+
+def _fmt_sharegpt(ex: dict, spec: dict, kind: str) -> Optional[dict]:
+    """Convert a sharegpt-style ``conversations`` list ({from,value}) to chat."""
+    conv = ex.get(spec.get("sharegpt_key", "conversations"))
+    if not isinstance(conv, list) or not conv:
+        return None
+    msgs = []
+    for turn in conv:
+        if not isinstance(turn, dict):
+            return None
+        role = _SHAREGPT_ROLE.get(str(turn.get("from", "")).lower())
+        val = turn.get("value")
+        if role is None or not isinstance(val, str) or not val.strip():
+            continue
+        msgs.append({"role": role, "content": val.strip()})
+    return _as_chat_row({"messages": msgs}, kind) if len(msgs) >= 2 else None
+
+
 def _formatter_for(kind: str, spec: dict) -> Callable[[dict, dict, str], Optional[dict]]:
+    # spec-driven so a "code" source can be real instruction->response (qa) rather
+    # than a raw-snippet echo: messages -> passthrough; qa_keys -> qa; text_keys ->
+    # code-snippet formatter (last resort).
     if spec.get("messages_key"):
         return _fmt_messages_passthrough
-    if kind == "code":
+    if spec.get("sharegpt_key"):
+        return _fmt_sharegpt
+    if spec.get("qa_keys"):
+        return _fmt_qa
+    if spec.get("text_keys"):
         return _fmt_code
     return _fmt_qa
 

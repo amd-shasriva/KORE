@@ -293,6 +293,10 @@ class GRPOConfig(DistributedMixin):
     coevolve: bool = False
     coevolve_batch: Optional[int] = None    # frontier proposals per refill (default: menu size, capped)
     coevolve_include_vendor: bool = True    # include vendor-baselined ops in the space
+    # Distillation sink: append verified >=min_speedup winning kernels discovered
+    # during co-evolution to this JSONL (WinRecords) for expert-iteration/RFT reuse.
+    coevolve_distill_path: Optional[str] = None
+    coevolve_distill_min_speedup: float = 1.0
 
     # --- Measurement efficiency: value-model bench prefilter ---
     value_prefilter: bool = False

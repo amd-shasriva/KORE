@@ -401,6 +401,7 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
         "arity": arity,
         "entry_name": op,
         "dtype_name": dtype,
+        "family": family,
     }
     ns[f"{op}_ref"] = ref_fn   # conventional alias
     return ns
@@ -748,7 +749,29 @@ def _load_candidate(task_dir: str, entry: str):
     return getattr(_load_candidate._mod, entry)
 
 
+def _adversarial_fills(inputs):
+    """Structured hard inputs that break lucky-pass / edge-case-missing kernels
+    (verification-in-the-loop). Each fill preserves every input's shape/dtype/device
+    but replaces its values with a canonical hard regime. Only meaningful for the
+    ELEMENTWISE checkable class (unary/binary/fusion), where correctness is a pure
+    per-element map and these regimes are exhaustive of the qualitative cases."""
+    import torch
+    patterns = {
+        "zeros": lambda t: torch.zeros_like(t),
+        "ones": lambda t: torch.ones_like(t),
+        "neg_ones": lambda t: -torch.ones_like(t),
+        "large": lambda t: torch.full_like(t, 1.0e3),
+        "neg_large": lambda t: torch.full_like(t, -1.0e3),
+        "small": lambda t: torch.full_like(t, 1.0e-3),
+        "sign_alt": lambda t: (torch.ones_like(t.reshape(-1)).cumsum(0) % 2 * 2 - 1)
+                                .to(t.dtype).reshape(t.shape),
+    }
+    for name, fill in patterns.items():
+        yield name, [fill(t) if torch.is_floating_point(t) else t for t in inputs]
+
+
 def _run_correctness(ref, task_dir, shape) -> int:
+    import os
     import torch
     fn = _load_candidate(task_dir, ref.entry_name)
     worst, maxd, ok = 999.0, 0.0, True
@@ -765,6 +788,31 @@ def _run_correctness(ref, task_dir, shape) -> int:
         worst = min(worst, _snr_db(o, r))
         maxd = max(maxd, (o.float() - r.float()).abs().max().item())
         ok = ok and torch.allclose(o.float(), r.float(), atol=1e-2, rtol=1e-2)
+
+    # Verification-in-the-loop: enumerated adversarial regimes for the elementwise
+    # checkable class. Opt-in via KORE_VERIFIED_CORRECTNESS=1 so default gates are
+    # unchanged. A kernel correct on random inputs but wrong at e.g. x==0 is
+    # rejected here with certainty (no lucky-pass on the enumerated regimes).
+    if os.environ.get("KORE_VERIFIED_CORRECTNESS") == "1" and \
+            getattr(ref, "family", None) in ("unary", "binary", "fusion"):
+        base_inputs = ref.get_inputs(shape, device="cuda", seed=0)
+        for name, adv in _adversarial_fills(base_inputs):
+            r = ref.ref_fn(*adv)
+            try:
+                o = fn(*adv)
+            except Exception as e:  # noqa: BLE001
+                print("SNR: -999.00 dB"); print("allclose: False"); print("max_diff: inf")
+                print(f"ADVERSARIAL_ERROR[{name}]: {type(e).__name__}: {e}")
+                return 0
+            torch.cuda.synchronize()
+            snr = _snr_db(o, r)
+            passed = torch.allclose(o.float(), r.float(), atol=1e-2, rtol=1e-2)
+            worst = min(worst, snr)
+            maxd = max(maxd, (o.float() - r.float()).abs().max().item())
+            if not passed:
+                ok = False
+                print(f"ADVERSARIAL_FAIL[{name}]: SNR {snr:.2f} dB")
+
     print(f"SNR: {worst:.2f} dB"); print(f"allclose: {ok}"); print(f"max_diff: {maxd:.6f}")
     return 0
 

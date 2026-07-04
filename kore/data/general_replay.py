@@ -37,48 +37,79 @@ _SAMPLES_DIR = Path(__file__).resolve().parent / "replay_samples"
 # --------------------------------------------------------------------------- #
 # Real HF sources (only touched when use_hf is enabled)
 # --------------------------------------------------------------------------- #
-# Each entry: (dataset_path, config, split, row->chat-messages formatter).
-# These are the recommended named sources for the full (non-smoke) build; the
-# formatters normalize each dataset's native schema into chat ``messages``.
-HF_SOURCES: dict[str, dict] = {
-    "code": {
-        # REAL code instruction->response (Magicoder Evol-Instruct): genuine coding
-        # problems with worked solutions — NOT an echo of a raw snippet.
-        "path": "ise-uiuc/Magicoder-Evol-Instruct-110K",
-        "config": None,
-        "split": "train",
-        "qa_keys": ("instruction", "response"),
-    },
-    "math": {
-        # OpenMathInstruct-2: large CoT math (tiling/indexing/numerics reasoning that
-        # transfers to kernels). GSM8K remains the bundled/secondary fallback.
-        "path": "nvidia/OpenMathInstruct-2",
-        "config": None,
-        "split": "train_1M",
-        "qa_keys": ("problem", "generated_solution"),
-    },
-    "chat": {
-        # Tulu-3 SFT mixture: already chat-formatted ``messages``.
-        "path": "allenai/tulu-3-sft-mixture",
-        "config": None,
-        "split": "train",
-        "messages_key": "messages",
-    },
-    "instruction_following": {
-        # Same mixture; IF-heavy subset (native ``messages``).
-        "path": "allenai/tulu-3-sft-mixture",
-        "config": None,
-        "split": "train",
-        "messages_key": "messages",
-    },
-    "tool_use": {
-        # ToolACE: diverse function-calling trajectories (public, sharegpt-style
-        # ``conversations``). Reformatted to chat messages. (xLAM is gated -> avoid.)
-        "path": "Team-ACE/ToolACE",
-        "config": None,
-        "split": "train",
-        "sharegpt_key": "conversations",
-    },
+# Each kind maps to an ORDERED list of candidate specs (dataset_path, config,
+# split, native-schema formatter hint). The loader tries them in order and uses
+# the FIRST that yields usable rows, so the SOTA-2026 primary can degrade to a
+# proven fallback (offline / gated / schema drift) without breaking the build.
+# Verified current (2025-2026) SOTA choices; older sources kept as fallbacks.
+HF_SOURCES: dict[str, list[dict]] = {
+    "code": [
+        {
+            # OpenCodeInstruct (NVIDIA, 2025): 5M verified code instruction->solution
+            # (Stack-V2 OSS-Instruct + TACO seeds, unit-tested, Qwen/Llama-validated).
+            # The current SOTA open code-SFT set; supersedes Magicoder Evol-Instruct.
+            "path": "nvidia/OpenCodeInstruct",
+            "config": None,
+            "split": "train",
+            "qa_keys": ("input", "output"),
+        },
+        {   # fallback: Magicoder Evol-Instruct (2023) — proven, cached offline.
+            "path": "ise-uiuc/Magicoder-Evol-Instruct-110K",
+            "config": None,
+            "split": "train",
+            "qa_keys": ("instruction", "response"),
+        },
+    ],
+    "math": [
+        {
+            # OpenThoughts3-1.2M (2025 SOTA reasoning): 850k math + 250k code + 100k
+            # science LONG-CoT traces (QwQ-32B). Primary math+reasoning source — the
+            # long chain-of-thought (tiling/indexing/numerics reasoning) transfers to
+            # kernels AND closes the reasoning-CoT retention gap so domain SFT/RL
+            # doesn't erode the base model's chain-of-thought.
+            "path": "open-thoughts/OpenThoughts3-1.2M",
+            "config": None,
+            "split": "train",
+            "sharegpt_key": "conversations",
+        },
+        {   # fallback: OpenMathInstruct-2 (NVIDIA) 1M CoT math (cached offline).
+            "path": "nvidia/OpenMathInstruct-2",
+            "config": None,
+            "split": "train_1M",
+            "qa_keys": ("problem", "generated_solution"),
+        },
+    ],
+    "chat": [
+        {   # Tulu-3 SFT mixture: already chat-formatted ``messages``.
+            "path": "allenai/tulu-3-sft-mixture",
+            "config": None,
+            "split": "train",
+            "messages_key": "messages",
+        },
+    ],
+    "instruction_following": [
+        {   # Same mixture; IF-heavy subset (native ``messages``).
+            "path": "allenai/tulu-3-sft-mixture",
+            "config": None,
+            "split": "train",
+            "messages_key": "messages",
+        },
+    ],
+    "tool_use": [
+        {
+            # ToolACE: diverse function-calling trajectories (sharegpt-style).
+            "path": "Team-ACE/ToolACE",
+            "config": None,
+            "split": "train",
+            "sharegpt_key": "conversations",
+        },
+        {   # fallback: Salesforce xLAM function-calling (single-turn).
+            "path": "Salesforce/xlam-function-calling-60k",
+            "config": None,
+            "split": "train",
+            "qa_keys": ("query", "answers"),
+        },
+    ],
 }
 
 
@@ -188,7 +219,11 @@ _SHAREGPT_ROLE = {"human": "user", "user": "user", "gpt": "assistant",
 
 
 def _fmt_sharegpt(ex: dict, spec: dict, kind: str) -> Optional[dict]:
-    """Convert a sharegpt-style ``conversations`` list ({from,value}) to chat."""
+    """Convert a sharegpt-style ``conversations`` list to chat messages.
+
+    Handles both the classic ShareGPT ``{from, value}`` turn schema and the
+    ``{role, content}`` schema (e.g. OpenThoughts3), so long-CoT reasoning sets
+    normalize cleanly."""
     conv = ex.get(spec.get("sharegpt_key", "conversations"))
     if not isinstance(conv, list) or not conv:
         return None
@@ -196,8 +231,9 @@ def _fmt_sharegpt(ex: dict, spec: dict, kind: str) -> Optional[dict]:
     for turn in conv:
         if not isinstance(turn, dict):
             return None
-        role = _SHAREGPT_ROLE.get(str(turn.get("from", "")).lower())
-        val = turn.get("value")
+        raw_role = turn.get("from", turn.get("role", ""))
+        role = _SHAREGPT_ROLE.get(str(raw_role).lower())
+        val = turn.get("value", turn.get("content"))
         if role is None or not isinstance(val, str) or not val.strip():
             continue
         msgs.append({"role": role, "content": val.strip()})
@@ -219,16 +255,16 @@ def _formatter_for(kind: str, spec: dict) -> Callable[[dict, dict, str], Optiona
     return _fmt_qa
 
 
-def _load_from_hf(kind: str, n: int, seed: int) -> list[dict]:
-    """Attempt to load ``n`` chat rows for ``kind`` from a real HF dataset.
+def _candidate_specs(kind: str) -> list[dict]:
+    """Ordered candidate HF specs for a kind (back-compat: wrap a bare dict)."""
+    spec = HF_SOURCES[kind]
+    return spec if isinstance(spec, list) else [spec]
 
-    Heavy import is inside the function. Raises on any failure so the caller can
-    fall back to bundled samples.
-    """
+
+def _load_one_spec(spec: dict, kind: str, n: int, seed: int) -> list[dict]:
+    """Stream ``n`` usable rows from a single HF spec (raises if none)."""
     from datasets import load_dataset  # guarded heavy import
 
-    spec = HF_SOURCES[kind]
-    # Stream to avoid downloading the full dataset for a replay sample.
     ds = load_dataset(
         spec["path"], spec.get("config"), split=spec.get("split", "train"),
         streaming=True,
@@ -239,8 +275,7 @@ def _load_from_hf(kind: str, n: int, seed: int) -> list[dict]:
         pass  # some streaming datasets don't support shuffle; take head order
     fmt = _formatter_for(kind, spec)
     rows: list[dict] = []
-    # Scan a bounded number of examples so a low yield can't loop forever.
-    budget = max(n * 20, 200)
+    budget = max(n * 20, 200)  # bound the scan so a low yield can't loop forever
     for i, ex in enumerate(ds):
         if len(rows) >= n or i >= budget:
             break
@@ -248,8 +283,26 @@ def _load_from_hf(kind: str, n: int, seed: int) -> list[dict]:
         if row is not None:
             rows.append(row)
     if not rows:
-        raise RuntimeError(f"HF source for {kind!r} yielded no usable rows")
+        raise RuntimeError(f"HF source {spec.get('path')!r} for {kind!r} yielded no rows")
     return rows
+
+
+def _load_from_hf(kind: str, n: int, seed: int) -> list[dict]:
+    """Load ``n`` chat rows for ``kind``, trying each candidate spec in order.
+
+    Heavy import is inside. Returns the first spec that yields rows; raises only
+    if EVERY candidate fails, so the caller can fall back to bundled samples.
+    """
+    errors: list[str] = []
+    for spec in _candidate_specs(kind):
+        try:
+            rows = _load_one_spec(spec, kind, n, seed)
+            if rows:
+                return rows
+        except Exception as e:  # noqa: BLE001 — try the next candidate
+            errors.append(f"{spec.get('path')}: {type(e).__name__}: {e}")
+            continue
+    raise RuntimeError(f"all HF sources for {kind!r} failed: {'; '.join(errors)}")
 
 
 # --------------------------------------------------------------------------- #

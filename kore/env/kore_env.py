@@ -279,14 +279,24 @@ class KoreEnv:
             rc2, out2, timed2 = self._exec([sys.executable, str(driver), *sh0.as_args()],
                                            workdir, env, self.correctness_timeout)
             kind2, _ = self._classify(out2, rc2, timed2)
-            m2, ac2 = _last(_SNR, out2), _last(_ALLCLOSE, out2)
-            snr2 = float(m2.group(1)) if m2 else None
-            ac2_false = bool(ac2 and ac2.group(1).lower() == "false")
-            ok2 = (kind2 == "ok" and not ac2_false
-                   and ((snr2 is not None and snr2 >= thr)
-                        or bool(ac2 and ac2.group(1).lower() == "true")))
-            tol = float(getattr(self.cfg, "determinism_snr_tol_db", 10.0))
-            stable, reason = _determinism_stable(snr_by_shape.get(sh0.name), snr2, ok2, tol)
+            snr2 = None
+            # A transient INFRA error (timeout/OOM/HIP flake) on the re-run is NOT
+            # evidence the kernel is non-deterministic — treat it as inconclusive and
+            # keep the (already-verified) correct verdict, so a one-off flake can
+            # never cache a correct kernel as incorrect (preserves infra-vs-kernel).
+            if kind2 == "infra":
+                _ev("DEBUG", "verify_determinism", task=task.task_id, shape=sh0.name,
+                    inconclusive=True, reason="infra error on re-run")
+                stable, reason = True, ""
+            else:
+                m2, ac2 = _last(_SNR, out2), _last(_ALLCLOSE, out2)
+                snr2 = float(m2.group(1)) if m2 else None
+                ac2_false = bool(ac2 and ac2.group(1).lower() == "false")
+                ok2 = (kind2 == "ok" and not ac2_false
+                       and ((snr2 is not None and snr2 >= thr)
+                            or bool(ac2 and ac2.group(1).lower() == "true")))
+                tol = float(getattr(self.cfg, "determinism_snr_tol_db", 10.0))
+                stable, reason = _determinism_stable(snr_by_shape.get(sh0.name), snr2, ok2, tol)
             _ev("DEBUG", "verify_determinism", task=task.task_id, shape=sh0.name,
                 snr1=snr_by_shape.get(sh0.name), snr2=snr2, stable=stable)
             if not stable:
@@ -308,8 +318,19 @@ class KoreEnv:
         base_by_shape: dict[str, float] = {}
         cvs: list[float] = []
         for sh in shapes:
-            cand, cand_cv = self._bench_multi(driver, sh, "candidate", workdir, env)
-            ref, _ = self._bench_multi(driver, sh, "reference", workdir, env)
+            cand, cand_cv, poisoned = self._bench_multi(driver, sh, "candidate", workdir, env)
+            # Anti-hack: the candidate bench re-verifies correctness AFTER timing.
+            # A False post-timing verdict means the kernel produced correct output
+            # for the correctness calls but garbage while timed (invocation-count
+            # timing hack) -> reject the whole eval as a hack, never reward it.
+            if poisoned:
+                _ev("WARN", "eval_bench_hack", task=task.task_id, shape=sh.name,
+                    source_sha=_sha12(source),
+                    reason="post-timing correctness failed (bench-time reward hack)")
+                return Observation(compiled=False, dtype=task.dtype, validation_passed=False,
+                                   flagged_hack=True, hack_reason="bench-time output mismatch",
+                                   error_text="reward-hack: kernel incorrect under timing")
+            ref, _, _ = self._bench_multi(driver, sh, "reference", workdir, env)
             if cand is not None:
                 wall_by_shape[sh.name] = cand
                 cvs.append(cand_cv)
@@ -352,9 +373,14 @@ class KoreEnv:
 
         def _counters_for(impl: str) -> Optional[dict]:
             outdir = _tmp.mkdtemp(prefix=f"pmc_{impl}_", dir=str(workdir))
+            # --bench-mode is REQUIRED: drivers honor --impl (candidate vs reference)
+            # ONLY in bench mode; without it both runs execute correctness on the
+            # candidate -> identical work -> a degenerate ~1.0 profile score. Small
+            # warmup/iters keep rocprof's multi-pass replay cheap.
             cmd = ["rocprofv3", "--pmc", *counters, "-d", outdir,
                    "--output-format", "csv", "--",
-                   sys.executable, str(driver), "--impl", impl, *sh.as_args()]
+                   sys.executable, str(driver), "--bench-mode", "--impl", impl,
+                   "--warmup", "2", "--iters", "3", *sh.as_args()]
             rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
             if timed or rc != 0:
                 _ev("DEBUG", "profile_run", task=self.task.task_id, impl=impl,
@@ -393,30 +419,54 @@ class KoreEnv:
 
     def _bench_multi(self, driver: Path, sh: Shape, impl: str, workdir: Path, env: dict):
         """Bench a (shape, impl) ``min..max_variance_runs`` times; return
-        (median-of-medians, CV%). Extra runs are taken only if variance is high."""
-        cmd = [sys.executable, str(driver), "--bench-mode", "--impl", impl, *sh.as_args()]
+        (median-of-medians, CV%, poisoned).
+
+        ``poisoned`` (candidate only) is True when the driver's POST-TIMING
+        correctness re-verification failed — i.e. the kernel produced correct output
+        for the correctness calls but garbage while being timed (the invocation-count
+        timing hack). The timed window (warmup/iters) is RANDOMIZED per run so a
+        stateful kernel cannot know which call indices are timed vs verified.
+        """
+        import random as _random
         samples: list[float] = []
         n_min = max(1, self.cfg.min_variance_runs)
         n_max = max(n_min, self.cfg.max_variance_runs)
+        poisoned = False
         for i in range(n_max):
+            # randomized timed window (defeats fixed-call-index bench sniffing)
+            w = _random.randint(max(4, self.cfg.warmup_iters - 3), self.cfg.warmup_iters + 4)
+            it = _random.randint(max(8, self.cfg.bench_iters - 5), self.cfg.bench_iters + 6)
+            cmd = [sys.executable, str(driver), "--bench-mode", "--impl", impl,
+                   "--warmup", str(w), "--iters", str(it), *sh.as_args()]
             with _LOG.timer("bench_exec", task=self.task.task_id, shape=sh.name,
                             impl=impl, run=i):
                 rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
             if timed or rc != 0:
                 break
+            # post-timing correctness verdict (candidate driver only): a False
+            # allclose or a sub-threshold SNR AFTER the timed loop is a hack.
+            if impl == "candidate":
+                ac = _last(_ALLCLOSE, out)
+                snr = _last(_SNR, out)
+                if (ac and ac.group(1).lower() == "false") or \
+                   (snr and float(snr.group(1)) < self._snr_threshold):
+                    poisoned = True
+                    break
             m = _last(_MEDIAN, out)
             if m:
                 samples.append(float(m.group(1)))
             if i + 1 >= n_min and len(samples) >= n_min and _cv_pct(samples) <= self.cfg.cv_threshold_pct:
                 break
+        if poisoned:
+            return None, float("inf"), True
         if not samples:
             _ev("DEBUG", "bench_shape", task=self.task.task_id, shape=sh.name, impl=impl,
                 median_ms=None, cv_pct=None, runs=0)
-            return None, float("inf")
+            return None, float("inf"), False
         med, cv = _median(samples), _cv_pct(samples)
         _ev("DEBUG", "bench_shape", task=self.task.task_id, shape=sh.name, impl=impl,
             median_ms=round(med, 4), cv_pct=round(cv, 3), runs=len(samples))
-        return med, cv
+        return med, cv, False
 
 
 def _determinism_stable(snr1: Optional[float], snr2: Optional[float],

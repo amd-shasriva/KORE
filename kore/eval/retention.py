@@ -142,10 +142,12 @@ def _hf_load_split(
     import datasets  # heavy + optional; guarded on purpose
 
     stream = n is not None
+    # some benches (e.g. livecodebench) ship a custom loader script.
+    kw = dict(split=split, streaming=stream, trust_remote_code=True)
     if config is not None:
-        ds = datasets.load_dataset(path, config, split=split, streaming=stream)
+        ds = datasets.load_dataset(path, config, **kw)
     else:
-        ds = datasets.load_dataset(path, split=split, streaming=stream)
+        ds = datasets.load_dataset(path, **kw)
     rows: list[dict] = []
     for i, row in enumerate(ds):
         if n is not None and i >= n:
@@ -391,7 +393,15 @@ def _resolve_bench_items(scorer) -> list[dict]:
         return scorer.items
     if scorer.full or _truthy_env("KORE_EVAL_FULL"):
         try:
-            full = load_full_bench(scorer.name, scorer.n)
+            # cap the pulled split: explicit scorer.n, else KORE_EVAL_N (keeps the
+            # retention GATE fast — a few hundred items per bench is plenty of signal).
+            n = scorer.n
+            if n is None:
+                try:
+                    n = int(os.environ.get("KORE_EVAL_N", "") or 0) or None
+                except ValueError:
+                    n = None
+            full = load_full_bench(scorer.name, n)
             if full:
                 scorer.source = "full-hf"
                 return full

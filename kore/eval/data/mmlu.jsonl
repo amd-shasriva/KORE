@@ -1,5 +1,6 @@
-# SMOKE SUBSET — canonical MMLU-style multiple-choice items. NOT the full bench.
-# TODO: load the full MMLU / MMLU-Pro test split (HF: cais/mmlu, TIGER-Lab/MMLU-Pro) for a real run.
+# SMOKE SUBSET (offline/CI fallback). A REAL run pulls the full MMLU test split
+# from HF (cais/mmlu) automatically via --use-hf / KORE_EVAL_FULL=1 (capped by
+# --eval-n / KORE_EVAL_N). This file is only used when HF is unavailable.
 {"id": "mmlu-0", "subject": "elementary_mathematics", "question": "What is 7 multiplied by 8?", "choices": ["54", "56", "63", "48"], "answer": "B"}
 {"id": "mmlu-1", "subject": "geography", "question": "What is the capital city of Japan?", "choices": ["Seoul", "Beijing", "Tokyo", "Bangkok"], "answer": "C"}
 {"id": "mmlu-2", "subject": "astronomy", "question": "Which planet in our solar system is closest to the Sun?", "choices": ["Venus", "Earth", "Mars", "Mercury"], "answer": "D"}

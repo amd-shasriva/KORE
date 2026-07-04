@@ -753,12 +753,18 @@ def _load_candidate(task_dir: str, entry: str):
     return getattr(_load_candidate._mod, entry)
 
 
+# Families whose inputs are plain float tensors, so the generic adversarial fills
+# (fill every float input with a hard regime) are a valid, exhaustive-of-the-
+# qualitative-cases verification battery. Quantized/structured-input ops (fp8/int8
+# GEMM, etc.) must instead author their own ``adversarial_inputs`` on the reference.
+_GENERIC_ADV_FAMILIES = ("unary", "binary", "reduce", "fusion", "gemm_fusion")
+
+
 def _adversarial_fills(inputs):
     """Structured hard inputs that break lucky-pass / edge-case-missing kernels
     (verification-in-the-loop). Each fill preserves every input's shape/dtype/device
-    but replaces its values with a canonical hard regime. Only meaningful for the
-    ELEMENTWISE checkable class (unary/binary/fusion), where correctness is a pure
-    per-element map and these regimes are exhaustive of the qualitative cases."""
+    but replaces its FLOAT values with a canonical hard regime (integer/index inputs
+    are left intact). Yields ``(name, inputs_tuple)``."""
     import torch
     patterns = {
         "zeros": lambda t: torch.zeros_like(t),
@@ -771,7 +777,46 @@ def _adversarial_fills(inputs):
                                 .to(t.dtype).reshape(t.shape),
     }
     for name, fill in patterns.items():
-        yield name, [fill(t) if torch.is_floating_point(t) else t for t in inputs]
+        yield name, tuple(fill(t) if torch.is_floating_point(t) else t for t in inputs)
+
+
+def _adversarial_sets(ref, shape):
+    """Op-class-aware adversarial input battery (or None if not checkable).
+
+    Priority: an op-authored ``ref.adversarial_inputs(shape, device=...)`` (used by
+    vendor/quantized ops that must respect fp8/int8 quantization + scale structure);
+    otherwise the generic float fills for the plain-float generated families."""
+    if hasattr(ref, "adversarial_inputs"):
+        return list(ref.adversarial_inputs(shape, device="cuda"))
+    if getattr(ref, "family", None) in _GENERIC_ADV_FAMILIES:
+        return list(_adversarial_fills(ref.get_inputs(shape, device="cuda", seed=0)))
+    return None
+
+
+def _as_tuple(x):
+    return x if isinstance(x, (tuple, list)) else (x,)
+
+
+def _clone_inputs(inputs):
+    """Clone tensor inputs so an IN-PLACE candidate/oracle (e.g. fused_add_rmsnorm)
+    can't corrupt the shared inputs between the reference and candidate calls."""
+    import torch
+    return tuple(t.clone() if torch.is_tensor(t) else t for t in inputs)
+
+
+def _compare_outputs(out, ref_out):
+    """SNR/max_diff/allclose over single-tensor OR multi-output (tuple) results.
+
+    Returns ``(worst_snr_db, max_abs_diff, allclose_all)`` — the worst SNR and the
+    logical-AND of allclose across every output tensor."""
+    import torch
+    outs, refs = _as_tuple(out), _as_tuple(ref_out)
+    worst, maxd, ok = 999.0, 0.0, True
+    for o, r in zip(outs, refs):
+        worst = min(worst, _snr_db(o, r))
+        maxd = max(maxd, (o.float() - r.float()).abs().max().item())
+        ok = ok and bool(torch.allclose(o.float(), r.float(), atol=1e-2, rtol=1e-2))
+    return worst, maxd, ok
 
 
 def _run_correctness(ref, task_dir, shape) -> int:
@@ -781,39 +826,36 @@ def _run_correctness(ref, task_dir, shape) -> int:
     worst, maxd, ok = 999.0, 0.0, True
     for s in range(_num_correct_trials()):
         inputs = ref.get_inputs(shape, device="cuda", seed=s)
-        r = ref.ref_fn(*inputs)
+        r = ref.ref_fn(*_clone_inputs(inputs))
         try:
-            o = fn(*inputs)
+            o = fn(*_clone_inputs(inputs))
         except Exception as e:  # noqa: BLE001
             print("SNR: -999.00 dB"); print("allclose: False"); print("max_diff: inf")
             print(f"CANDIDATE_ERROR: {type(e).__name__}: {e}")
             return 0
         torch.cuda.synchronize()
-        worst = min(worst, _snr_db(o, r))
-        maxd = max(maxd, (o.float() - r.float()).abs().max().item())
-        ok = ok and torch.allclose(o.float(), r.float(), atol=1e-2, rtol=1e-2)
+        snr, md, cok = _compare_outputs(o, r)
+        worst = min(worst, snr); maxd = max(maxd, md); ok = ok and cok
 
-    # Verification-in-the-loop: enumerated adversarial regimes for the elementwise
-    # checkable class. Opt-in via KORE_VERIFIED_CORRECTNESS=1 so default gates are
-    # unchanged. A kernel correct on random inputs but wrong at e.g. x==0 is
-    # rejected here with certainty (no lucky-pass on the enumerated regimes).
-    if os.environ.get("KORE_VERIFIED_CORRECTNESS") == "1" and \
-            getattr(ref, "family", None) in ("unary", "binary", "fusion"):
-        base_inputs = ref.get_inputs(shape, device="cuda", seed=0)
-        for name, adv in _adversarial_fills(base_inputs):
-            r = ref.ref_fn(*adv)
+    # Verification-in-the-loop: enumerated adversarial regimes. Opt-in via
+    # KORE_VERIFIED_CORRECTNESS=1 so default gates are unchanged. A kernel correct
+    # on random inputs but wrong at e.g. x==0 is rejected here with certainty (no
+    # lucky-pass on the enumerated regimes). Covers unary/binary/reduce/fusion/
+    # gemm_fusion (generic fills) + any op with an authored adversarial battery.
+    if os.environ.get("KORE_VERIFIED_CORRECTNESS") == "1":
+        adv_sets = _adversarial_sets(ref, shape)
+        for name, adv in (adv_sets or []):
+            r = ref.ref_fn(*_clone_inputs(adv))
             try:
-                o = fn(*adv)
+                o = fn(*_clone_inputs(adv))
             except Exception as e:  # noqa: BLE001
                 print("SNR: -999.00 dB"); print("allclose: False"); print("max_diff: inf")
                 print(f"ADVERSARIAL_ERROR[{name}]: {type(e).__name__}: {e}")
                 return 0
             torch.cuda.synchronize()
-            snr = _snr_db(o, r)
-            passed = torch.allclose(o.float(), r.float(), atol=1e-2, rtol=1e-2)
-            worst = min(worst, snr)
-            maxd = max(maxd, (o.float() - r.float()).abs().max().item())
-            if not passed:
+            snr, md, cok = _compare_outputs(o, r)
+            worst = min(worst, snr); maxd = max(maxd, md)
+            if not cok:
                 ok = False
                 print(f"ADVERSARIAL_FAIL[{name}]: SNR {snr:.2f} dB")
 
@@ -823,11 +865,15 @@ def _run_correctness(ref, task_dir, shape) -> int:
 
 def _run_bench(ref, task_dir, shape, impl, warmup, iters) -> int:
     inputs = ref.get_inputs(shape, device="cuda", seed=0)
-    if impl in ("reference", "torch"):
-        fn = lambda: ref.baseline_fn(*inputs)
+    base = ref.baseline_fn if impl in ("reference", "torch") else \
+        _load_candidate(task_dir, ref.entry_name)
+    if getattr(ref, "mutates_input", False):
+        # In-place ops (e.g. fused_add_rmsnorm) mutate their inputs, so a repeated
+        # timing loop must feed a fresh clone each call. The clone cost is applied
+        # IDENTICALLY to candidate + baseline, so the speedup ratio stays fair.
+        fn = lambda: base(*_clone_inputs(inputs))
     else:
-        cand = _load_candidate(task_dir, ref.entry_name)
-        fn = lambda: cand(*inputs)
+        fn = lambda: base(*inputs)
     return _time_fn(fn, warmup, iters)
 
 

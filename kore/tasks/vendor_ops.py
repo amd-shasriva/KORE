@@ -179,9 +179,53 @@ def make_vendor_reference(op: str, dtype: str) -> dict:
         raise ValueError(f"unknown vendor op {op!r}")
 
     ns = {"parse_shape": _parse_shape, "get_inputs": get_inputs, "ref_fn": ref_fn,
-          "baseline_fn": baseline_fn, "arity": arity, "entry_name": op, "dtype_name": dtype}
+          "baseline_fn": baseline_fn, "arity": arity, "entry_name": op, "dtype_name": dtype,
+          "family": f"vendor_{op}"}
+    ns["adversarial_inputs"] = _make_adversarial_inputs(op, get_inputs)
     ns[f"{op}_ref"] = ref_fn
     return ns
+
+
+def _make_adversarial_inputs(op: str, get_inputs):
+    """Op-class-aware adversarial input battery (verification-in-the-loop).
+
+    Plain-float vendor ops reuse the generic float fills (zeros/ones/large/small/
+    sign-alt), which are exhaustive of the qualitative regimes. Quantized GEMM ops
+    must build the battery in FLOAT then quantize, so the fp8 codes + scales stay a
+    valid dequantizable pair (filling the fp8 tensors directly would be nonsense)."""
+    import torch
+
+    from kore.tasks._genops import _adversarial_fills
+
+    def _generic(shape, device="cuda", seed=0):
+        return list(_adversarial_fills(get_inputs(shape, device=device, seed=seed)))
+
+    if op != "gemm_a8w8":
+        return _generic
+
+    from kore.tasks import aiter_ref
+
+    def _quant_gemm(shape, device="cuda", seed=0):
+        M, N, K = shape["M"], shape["N"], shape["K"]
+        regimes = {
+            "zeros": (torch.zeros((M, K)), torch.zeros((N, K))),
+            "ones": (torch.ones((M, K)), torch.ones((N, K))),
+            "large": (torch.full((M, K), 100.0), torch.full((N, K), 100.0)),
+            "small": (torch.full((M, K), 1e-2), torch.full((N, K), 1e-2)),
+            "mixed_sign": (torch.ones((M, K)).cumsum(1) % 2 * 2 - 1,
+                           torch.ones((N, K)).cumsum(1) % 2 * 2 - 1),
+        }
+        out = []
+        for name, (a, w) in regimes.items():
+            a = a.to(device=device, dtype=torch.float32)
+            w = w.to(device=device, dtype=torch.float32)
+            xq, sx = aiter_ref.per_tensor_quant_fp8(a)
+            wq, sw = aiter_ref.per_tensor_quant_fp8(w)
+            out.append((name, (xq, wq, sx.repeat(M, 1).contiguous(),
+                               sw.repeat(1, N).contiguous())))
+        return out
+
+    return _quant_gemm
 
 
 # --------------------------------------------------------------------------- #

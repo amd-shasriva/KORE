@@ -208,7 +208,7 @@ def _problem_volume(desc: TaskDescriptor) -> int:
 # Behavior / difficulty features
 # --------------------------------------------------------------------------- #
 _COMPUTE_BOUND_FAMILIES = frozenset({"gemm_fusion"})
-_PRECISION_CLASS = {"bf16": "16b", "fp16": "16b", "fp32": "32b", "fp8": "8b"}
+_PRECISION_CLASS = {"bf16": "16b", "fp16": "16b", "fp32": "32b", "fp8": "8b", "int8": "8b"}
 # problem-volume thresholds (elements, or M*N*K work for gemm) -> scale class.
 _SCALE_SMALL = 1_000_000
 _SCALE_LARGE = 1_000_000_000

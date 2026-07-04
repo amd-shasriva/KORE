@@ -321,7 +321,11 @@ class MidTrainConfig(DistributedMixin):
     model_id: str = MODEL_14B
     corpus_path: str = "data/midtrain/corpus.jsonl"
     output_dir: str = "runs/midtrain"
-    general_replay_frac: float = 0.15       # 10-15% general shards (strong-shift regime)
+    # CPT replay: Triton/HIP is FAR from the base LM distribution, so the forgetting
+    # literature (Ibrahim et al. 2024; DeepSeek-V2's 30% replay) says a large-shift
+    # domain needs ~30-35% general replay + LR re-warm/re-decay to acquire the domain
+    # WITHOUT wrecking general/chat ability. 0.30 (was 0.15).
+    general_replay_frac: float = 0.30
     learning_rate: float = 1e-5
     lr_scheduler_type: str = "cosine"
     num_train_epochs: float = 1.0
@@ -340,12 +344,17 @@ class MultiCapSFTConfig(SFTConfig):
     backbone; ~10% agentic tool-use trajectories = the orchestration skill.
     """
 
-    frac_kernel_repair_opt: float = 0.35
+    # Dual-capability SFT mix (research-tuned for a model that is SIMULTANEOUSLY a
+    # kernel generator, a chat model, and an orchestrator). ~38% kernel / ~12%
+    # agentic / ~50% general (chat+code+math). The large, co-mixed general plurality
+    # (esp. chat 0.27) is what keeps IFEval/MT-Bench up while the kernel+agentic
+    # slices specialize — the literature-backed guard against specialization collapse.
+    frac_kernel_repair_opt: float = 0.28   # was 0.35
     frac_kernel_qa: float = 0.10
-    frac_agentic_tooluse: float = 0.10
-    frac_general_code: float = 0.20
-    frac_math_reasoning: float = 0.15
-    frac_general_chat: float = 0.10
+    frac_agentic_tooluse: float = 0.12     # was 0.10
+    frac_general_code: float = 0.13        # was 0.20 (now REAL code instruct data)
+    frac_math_reasoning: float = 0.10      # was 0.15 (now REAL CoT math data)
+    frac_general_chat: float = 0.27        # was 0.10 -> the "talk to it" backbone
     use_lora: bool = False                  # full-FT, governed by replay + small LR
     num_train_epochs: float = 3.0
 

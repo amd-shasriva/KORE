@@ -42,10 +42,14 @@ from typing import Iterable, Optional
 _SIMPLE_GENOPS_FAMILIES = ("unary", "binary", "reduce")
 
 # vendor op -> family (matches generate_vendor_ops.py `op_family: vendor_<op>`).
-_VENDOR_OPS = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul")
+_VENDOR_OPS = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul", "softmax", "gemm_a8w8")
 
 # per-op fusion depth for vendor ops (reduction/affine/gated chains).
-_VENDOR_FUSION_DEPTH = {"rmsnorm": 2, "layernorm": 3, "silu_mul": 2, "gelu_mul": 2}
+_VENDOR_FUSION_DEPTH = {"rmsnorm": 2, "layernorm": 3, "silu_mul": 2, "gelu_mul": 2,
+                        "softmax": 2, "gemm_a8w8": 2}
+
+# vendor ops that are matmul-class (compute-bound) rather than memory-bound.
+_VENDOR_COMPUTE_BOUND = frozenset({"gemm_a8w8"})
 
 
 @functools.lru_cache(maxsize=1)
@@ -71,6 +75,12 @@ def _genops_shape_tables() -> tuple:
 def _vendor_tables() -> tuple:
     from kore.tasks.vendor_ops import VENDOR_DTYPES, VENDOR_SHAPES
     return VENDOR_SHAPES, tuple(VENDOR_DTYPES)
+
+
+@functools.lru_cache(maxsize=32)
+def _vendor_op_dtypes(op: str) -> tuple:
+    from kore.tasks.vendor_ops import vendor_op_dtypes
+    return tuple(vendor_op_dtypes(op))
 
 
 def _regime_dims(shapes: dict) -> dict:
@@ -136,10 +146,10 @@ def _enumerate_cached(include_vendor: bool) -> tuple:
             for regime in regimes:
                 descs.append(TaskDescriptor("genops", family, op, dtype, regime))
     if include_vendor:
-        vendor_shapes, vendor_dtypes = _vendor_tables()
+        vendor_shapes, _ = _vendor_tables()
         for op in _VENDOR_OPS:
             regimes = _regime_dims(vendor_shapes[op])
-            for dtype in vendor_dtypes:
+            for dtype in _vendor_op_dtypes(op):     # per-op dtype sweep (fp8 GEMM etc.)
                 for regime in regimes:
                     descs.append(
                         TaskDescriptor("vendor", vendor_family(op), op, dtype, regime))
@@ -197,7 +207,7 @@ def _problem_volume(desc: TaskDescriptor) -> int:
 # Behavior / difficulty features
 # --------------------------------------------------------------------------- #
 _COMPUTE_BOUND_FAMILIES = frozenset({"gemm_fusion"})
-_PRECISION_CLASS = {"bf16": "16b", "fp16": "16b", "fp32": "32b"}
+_PRECISION_CLASS = {"bf16": "16b", "fp16": "16b", "fp32": "32b", "fp8": "8b"}
 # problem-volume thresholds (elements, or M*N*K work for gemm) -> scale class.
 _SCALE_SMALL = 1_000_000
 _SCALE_LARGE = 1_000_000_000
@@ -205,7 +215,9 @@ _SCALE_LARGE = 1_000_000_000
 
 def arithmetic_intensity(desc: TaskDescriptor) -> str:
     """``compute-bound`` (matmul-class) vs ``memory-bound`` (elementwise/reduce)."""
-    return "compute-bound" if desc.family in _COMPUTE_BOUND_FAMILIES else "memory-bound"
+    if desc.family in _COMPUTE_BOUND_FAMILIES or desc.op in _VENDOR_COMPUTE_BOUND:
+        return "compute-bound"
+    return "memory-bound"
 
 
 def fusion_depth(desc: TaskDescriptor) -> int:
@@ -286,8 +298,7 @@ MUTATION_KINDS = ("shape", "dtype", "fusion")
 
 def _valid_dtypes(desc: TaskDescriptor) -> list[str]:
     if desc.source == "vendor":
-        _, vendor_dtypes = _vendor_tables()
-        return list(vendor_dtypes)
+        return list(_vendor_op_dtypes(desc.op))
     return list(_genops_family_dtypes()[desc.family])
 
 

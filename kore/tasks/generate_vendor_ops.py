@@ -70,7 +70,7 @@ def _yaml(op: str, dtype: str, snr: float) -> str:
 def generate(dry: bool = False) -> list[str]:
     written: list[str] = []
     for op in V.VENDOR_OPS:
-        for dtype in V.VENDOR_DTYPES:
+        for dtype in V.vendor_op_dtypes(op):
             snr = V.DTYPES[dtype][2]
             tid = f"genv_{op}_{dtype}"
             written.append(tid)

@@ -1,0 +1,20 @@
+task_id: genv_softmax_bf16
+operation: softmax
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: vendor_softmax
+baseline_tier: vendor
+generated: true
+shapes:
+  minimal: {M: 64, N: 1024}
+  primary: {M: 8192, N: 8192}
+  validation:
+    - {M: 4096, N: 32768}
+    - {M: 16384, N: 2048}
+    - {M: 8192, N: 8191}
+targets:
+  snr_db: 30.0
+  comparison_baseline: aiter_softmax

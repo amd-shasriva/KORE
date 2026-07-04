@@ -143,7 +143,16 @@ def main() -> int:
     p.add_argument("--impl", default="candidate", choices=["candidate", "reference", "torch"])
     a = p.parse_args()
     shape = ref.parse_shape(a.shape)
-    return run_bench(shape, a.impl, a.warmup, a.iters) if a.bench_mode else run_correctness(shape, a.mode)
+    if a.bench_mode:
+        rc = run_bench(shape, a.impl, a.warmup, a.iters)
+        # Anti-hack post-timing correctness: a stateful kernel that returns correct
+        # output for the correctness calls but garbage during timing is caught here
+        # (the verify runs on LATE invocations; the env invalidates the bench on a
+        # False verdict).
+        if a.impl == "candidate":
+            run_correctness(shape, a.mode)
+        return rc
+    return run_correctness(shape, a.mode)
 
 
 if __name__ == "__main__":

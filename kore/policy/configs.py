@@ -208,7 +208,9 @@ class GRPOConfig(DistributedMixin):
     # path in this loop, so those flags implied capabilities that don't exist.
     # (Distributed FULL-FT is handled by the FSDP fields from DistributedMixin.)
 
-    use_lora: bool = True
+    # LoRA path removed from the GRPO trainer (full-parameter FT only); defaults OFF
+    # so the in-process save never hits the removed merge_and_unload branch.
+    use_lora: bool = False
     lora: LoRAConfig = field(default_factory=LoRAConfig)
 
     # --- Sharded FULL-PARAMETER distributed training (best-in-world RL) ---
@@ -241,7 +243,12 @@ class GRPOConfig(DistributedMixin):
     # AVSPO virtual-sample injection: when a group's reward std < variance_floor,
     # inject ``avspo_virtual_k`` virtual samples into the NORMALIZATION stats only
     # (no PG term) to guarantee a variance floor. 0.0 disables (pure GRPO).
-    variance_floor: float = 0.0            # AVSPO tau trigger (0 disables)
+    # AVSPO variance floor. Default 0.1 (not 0) as defense-in-depth against the
+    # (r-mean)/(std+eps) blow-up: a group whose std is tiny but above starpo_min_std
+    # would otherwise get ~1/std (huge) advantages and spike the gradient on a long
+    # run. The floor bounds aug_std >= sqrt(k*tau^2/(n+k)) > 0. (The campaign already
+    # sets 0.1 when anti-collapse is on; this makes standalone GRPO safe too.)
+    variance_floor: float = 0.1            # AVSPO tau trigger (0 disables)
     avspo_virtual_k: int = 2               # #virtual samples injected at +/- tau
     # Real SC-GRPO: for partial-solve groups, re-score other turns' tokens with a
     # correct kernel as an in-context demo (teacher) and weight the per-token PG

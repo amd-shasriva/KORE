@@ -157,6 +157,31 @@ class KoreConfig:
     def __post_init__(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self._check_reward_invariants()
+
+    def _check_reward_invariants(self) -> None:
+        """Fail fast if a (possibly env-overridden) config would break the
+        lexicographic reward ladder or let a shaping term lead the objective.
+
+        These are the invariants the reward code documents but previously never
+        enforced — a bad KORE_PROFILE_REWARD_WEIGHT or an edited weight could
+        silently invert tiers or let the profiler bonus outweigh a real speed win.
+        """
+        # anti-hack floor is the unique minimum: hack < compile_fail < incorrect.
+        assert self.reward_hack < self.reward_compile_fail < self.reward_incorrect, (
+            "reward tiers must satisfy reward_hack < reward_compile_fail < reward_incorrect")
+        # a shaped-incorrect kernel (<= eps_shape + format_weight) can never reach
+        # the correct tier (>= correctness_weight).
+        assert self.eps_shape + self.format_weight < self.correctness_weight, (
+            "eps_shape + format_weight must stay below correctness_weight "
+            "(else an incorrect kernel could reach the correct tier)")
+        # the profiler dense bonus SHAPES, never LEADS: it must be strictly below the
+        # smallest fast_p threshold bonus so a genuinely faster kernel always wins.
+        if self.profile_reward_weight and self.fast_p_bonus:
+            min_bonus = min(b for _, b in self.fast_p_bonus)
+            assert self.profile_reward_weight < min_bonus, (
+                f"profile_reward_weight ({self.profile_reward_weight}) must be < the "
+                f"smallest fast_p bonus ({min_bonus}) so the profiler never leads")
 
 
 CONFIG = KoreConfig()

@@ -983,15 +983,12 @@ def _train_grpo_fallback(config, tasks):
             _save_grpo_checkpoint(model, tok, config, step + 1)
         log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
 
-    # Merge LoRA into the base before saving so soup/serve load a full model.
+    # LoRA was removed (full-parameter fine-tuning only): the in-process model is a
+    # plain AutoModelForCausalLM, so ALWAYS save full weights. (The old use_lora
+    # branch called model.merge_and_unload() on a non-PEFT model -> AttributeError.)
     out = config.output_dir
-    if config.use_lora:
-        log.info("saving: merging LoRA adapter into base", out=out)
-        merged = model.merge_and_unload()
-        merged.save_pretrained(out)
-    else:
-        log.info("saving: full-FT weights", out=out)
-        model.save_pretrained(out)
+    log.info("saving: full-FT weights", out=out)
+    model.save_pretrained(out)
     tok.save_pretrained(out)
     log.metric("grpo_done", steps=config.total_steps, mean_reward_last=last_mean_r, out=out,
                **gpu_mem_snapshot())

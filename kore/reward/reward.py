@@ -132,6 +132,21 @@ _HACK_PATTERNS = [
     (r"\bsubprocess\b|\bmultiprocessing\b|\bthreading\b|os\.system|os\.popen|os\.fork",
      "spawns processes/threads (isolation escape)"),
     (r"open\s*\([^)]*['\"][waxr]?[wax]\+?['\"]", "opens a file for writing (filesystem escape)"),
+    # filesystem escape beyond open(): pathlib write, chmod (defeat 0o444 staging),
+    # process spawn.
+    (r"\.write_text\s*\(|\.write_bytes\s*\(", "writes a file via pathlib (filesystem escape)"),
+    (r"\bos\.(chmod|replace|rename|remove|unlink|spawn\w*|posix_spawn)\b",
+     "mutates the filesystem / spawns a process (isolation escape)"),
+    # matmul OPERATOR delegation: `return a @ b` lowers to aten::matmul -> hipBLASLt
+    # (pure vendor delegation). `@decorator` lines start with @ (no operand before),
+    # so requiring an operand char before @ excludes decorators.
+    # NB: horizontal-whitespace only ([^\S\n]) so a decorator stack (`)\n@triton.jit`
+    # / `tl\n@triton.jit`) is NOT matched — only an operand `@` operand on ONE line.
+    (r"[\w\)\]][^\S\n]*@[^\S\n]*[\w\(]", "uses the @ matmul operator (delegates to the vendor GEMM)"),
+    # module-table access to reach torch/vendor/oracle while dodging import scans.
+    (r"\bsys\.modules\b", "reaches libraries via sys.modules (delegation/escape channel)"),
+    # reading the environment: a mode-sniff / escape channel a pure kernel never needs.
+    (r"\bos\.environ\b|\bos\.getenv\b|\bgetenv\s*\(", "reads the environment (mode-sniff/escape channel)"),
 ]
 _SILENT_FALLBACK = re.compile(r"except\s*[\w. ,()]*:\s*(?:\n\s*)*(?:return|pass|out\s*=)", re.MULTILINE)
 
@@ -274,9 +289,14 @@ def _speedup_term(su_scored: float, su_raw: float, obs: Observation, cfg,
         sig_only = bool(getattr(cfg, "fast_p_significant_only", True))
         trustworthy = (obs.cv_pct is None) or (obs.cv_pct <= cfg.cv_threshold_pct)
         excessive = "excessive_speedup" in flags
+        # Require the speedup to clear the threshold by the measurement noise floor
+        # (not just tie it): a kernel that merely PARITIES the baseline (1.00x) — or
+        # beats it only within combined timing noise — must not farm the crossover
+        # bonus. margin = 1 + noise_floor_pct/100 (e.g. 1.0x threshold -> need 1.02x).
+        margin = 1.0 + float(getattr(cfg, "noise_floor_pct", 0.0) or 0.0) / 100.0
         if (not sig_only) or (trustworthy and not excessive):
             for thr, bonus in bonuses:
-                if su_raw >= thr:
+                if su_raw >= thr * margin:
                     term += float(bonus)
                     flags.append(f"fast_p>={thr}")
     return term

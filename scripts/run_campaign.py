@@ -805,31 +805,33 @@ def _stage_build(ctx):
     kernel_records = [r for r in train if _rec_type(r) in ("repair", "win")]
     group_records = [r for r in train if _rec_type(r) == "ranked_group"]
 
-    # RFT / rejection sampling: concentrate SFT mass on the policy's own >tau wins
-    # (correct AND beating the baseline), stratified across tasks + deduped so the
-    # >1x region is bootstrapped without collapsing entropy. Oversampled `os` times
-    # into the kernel bucket (os=0 disables). See kore.data.rejection.
+    # RFT / rejection sampling (ReST-EM): train SFT on the policy's HIGH-reward
+    # kernels only — keep all repair turns (they teach correctness) but REJECT the
+    # sub-tau (slower-than-baseline) wins, keeping only the stratified, deduped >tau
+    # wins. This concentrates mass on the >1x region by EXCLUSION (robust to the
+    # mixer's content-hash dedup, unlike row duplication). rft_oversample>0 enables;
+    # 0 keeps every win. See kore.data.rejection.
     from kore.data.rejection import stratified_rft_select
-    rft_extra: list = []
-    os_factor = int(getattr(ctx["args"], "rft_oversample", 1))
-    if os_factor > 0:
-        rft_wins, rft_report = stratified_rft_select(
-            kernel_records, tau=float(getattr(ctx["args"], "rft_tau", 1.0)),
+    if int(getattr(ctx["args"], "rft_oversample", 1)) > 0:
+        repairs = [r for r in kernel_records if _rec_type(r) == "repair"]
+        wins = [r for r in kernel_records if _rec_type(r) == "win"]
+        kept_wins, rft_report = stratified_rft_select(
+            wins, tau=float(getattr(ctx["args"], "rft_tau", 1.0)),
             per_task_frac_cap=0.34, seed=ctx["args"].split_seed)
-        rft_extra = list(rft_wins) * os_factor
-        _log("build", f"RFT >{rft_report.tau}x wins: kept {rft_report.n_kept}/"
-                      f"{rft_report.n_pass_filter} (dedup {rft_report.n_after_dedup}), "
-                      f"task-entropy {rft_report.task_entropy}, oversample x{os_factor}")
-        LOG.event("rft_select", tau=rft_report.tau, n_pass=rft_report.n_pass_filter,
-                  n_dedup=rft_report.n_after_dedup, n_kept=rft_report.n_kept,
-                  task_entropy=rft_report.task_entropy, oversample=os_factor,
+        rejected = len(wins) - rft_report.n_kept
+        kernel_records = repairs + list(kept_wins)
+        _log("build", f"RFT rejection: kept {rft_report.n_kept}/{len(wins)} wins "
+                      f">={rft_report.tau}x (rejected {rejected} slow/dup), "
+                      f"+{len(repairs)} repairs, task-entropy {rft_report.task_entropy}")
+        LOG.event("rft_select", tau=rft_report.tau, n_wins=len(wins),
+                  n_pass=rft_report.n_pass_filter, n_kept=rft_report.n_kept,
+                  n_rejected=rejected, task_entropy=rft_report.task_entropy,
                   per_task=rft_report.per_task)
 
     cfg = MultiCapSFTConfig()
     rows = build_multicap_dataset(ctx["data_root"], train_tasks, teacher, cfg,
                                   total=ctx["args"].sft_total, use_hf=ctx["args"].use_hf,
-                                  kernel_records=kernel_records,
-                                  extra_records=rft_extra or None)
+                                  kernel_records=kernel_records)
     _write_rows(ctx["data_root"] / "sft" / "multicap.jsonl", rows)
     _log("build", f"multicap SFT (train-only): {len(rows)} rows; "
                   f"mix={summarize_multicap(rows)['fractions']}")
@@ -1429,9 +1431,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="hardware-counter dense reward weight (0=off; ~0.15 to enable)")
     # RFT / rejection sampling: bootstrap SFT on the policy's own >tau wins.
     p.add_argument("--rft-tau", type=float, default=1.0, dest="rft_tau",
-                   help="min speedup for a win to enter the RFT bucket (default 1.0x)")
+                   help="min speedup for a win to survive RFT rejection (default 1.0x)")
     p.add_argument("--rft-oversample", type=int, default=1, dest="rft_oversample",
-                   help="times to oversample RFT >tau wins into SFT (0=disable)")
+                   help=">0 enables RFT rejection (drop sub-tau wins from SFT); 0 keeps all wins")
     # Adaptive GRPO horizon: stop when the reward mean plateaus (bounded by
     # total_steps). Ensures the policy trains long enough to actually move.
     p.add_argument("--adaptive-steps", dest="adaptive_steps",

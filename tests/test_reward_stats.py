@@ -17,10 +17,11 @@ def _expected_speed_term(su_scored: float, su_raw: float,
         term = w * (1.0 + math.log(su_scored))
     else:
         term = w * max(su_scored, 0.0)
+    margin = 1.0 + CONFIG.noise_floor_pct / 100.0
     if CONFIG.fast_p_bonus and ((not CONFIG.fast_p_significant_only)
                                 or (significant and not excessive)):
         for thr, bonus in CONFIG.fast_p_bonus:
-            if su_raw >= thr:
+            if su_raw >= thr * margin:
                 term += bonus
     return term
 
@@ -83,6 +84,27 @@ def test_scan_blocks_mode_sniffing_and_timing_manipulation():
         "import triton\n@triton.autotune(configs=[], key=['M'])\n@triton.jit\ndef k():\n    pass") is None
 
 
+def test_scan_blocks_operator_and_module_and_fs_bypasses():
+    """Bypasses found in audit: @ matmul operator, sys.modules delegation,
+    pathlib/chmod filesystem escape, and os.environ mode-sniffing."""
+    # @ matmul operator = pure vendor-GEMM delegation
+    assert scan_for_hacks("def f(a, b):\n    return a @ b") is not None
+    assert scan_for_hacks("def f(a, b):\n    return a@b") is not None
+    # module-table access to reach torch/oracle
+    assert scan_for_hacks("import sys\nreturn sys.modules['torch'].matmul(a, b)") is not None
+    assert scan_for_hacks("import sys\nsys.modules.get('torch').mm(a, b)") is not None
+    # filesystem escape past the open('w') pattern
+    assert scan_for_hacks("from pathlib import Path\nPath('reference.py').write_text('x')") is not None
+    assert scan_for_hacks("import os\nos.chmod('reference.py', 0o644)") is not None
+    # env read (mode-sniff / escape channel)
+    assert scan_for_hacks("import os\nif os.environ.get('BENCH'): fast()") is not None
+    # a decorator STACK must NOT trip the @ operator rule (regression)
+    assert scan_for_hacks(
+        "import triton\nimport triton.language as tl\n"
+        "@triton.autotune(configs=[], key=['M'])\n@triton.jit\n"
+        "def k():\n    acc = tl.dot(a, b)\n    return acc") is None
+
+
 def test_scan_ignores_comments_and_docstrings():
     clean = (
         '"""This kernel matches aiter.rms_norm layout for MI300."""\n'
@@ -124,8 +146,10 @@ def test_reward_correct_timed_worst_shape_speedup():
     # "x=1" does not parse to a FULL_KERNEL, so the format term is 0.
     expected = CONFIG.correctness_weight + _expected_speed_term(1.5, 1.5)
     assert abs(rr.reward - expected) < 1e-9
-    for thr in (1.0, 1.2, 1.5):
-        assert f"fast_p>={thr}" in rr.flags
+    # 1.5x clears the 1.0x and 1.2x thresholds (with the noise-floor margin) but not
+    # the 1.5x threshold (needs 1.5*1.02=1.53x), so only those two bonuses fire.
+    assert "fast_p>=1.0" in rr.flags and "fast_p>=1.2" in rr.flags
+    assert "fast_p>=1.5" not in rr.flags
 
 
 def test_correct_but_slow_still_beats_incorrect():
@@ -337,11 +361,12 @@ def test_fast_p_bonus_creates_reward_jump_at_baseline_crossover():
     """The central plateau fix: crossing 1.0x must be a DISTINCT high-value event,
     not a marginal linear increment. A 1.01x kernel should out-reward a 0.99x one
     by ~the first fast_p bonus, giving GRPO strong group-relative advantage."""
+    # below vs clearly-above the noise-floor-margined 1.0x crossover (need >=1.02x)
     just_below = compute_reward(_obs_correct(0.99), "x=1", dtype=_DT)
-    just_above = compute_reward(_obs_correct(1.01), "x=1", dtype=_DT)
+    just_above = compute_reward(_obs_correct(1.05), "x=1", dtype=_DT)
     assert just_below.correct and just_above.correct
     jump = just_above.reward - just_below.reward
-    # dominated by the 1.0x threshold bonus (0.30), far above the ~0.02 linear step
+    # dominated by the 1.0x threshold bonus (0.30), far above the ~0.05 linear step
     assert jump >= CONFIG.fast_p_bonus[0][1] * 0.9
     assert "fast_p>=1.0" in just_above.flags
     assert not any(f.startswith("fast_p") for f in just_below.flags)
@@ -418,6 +443,6 @@ def test_all_task_seeds_stay_clean_and_rewardable():
     tasks = all_tasks()
     assert len(tasks) == 15
     for t in tasks:
-        assert scan_for_hacks(t.seed_source) is None, f"{t.name}: seed wrongly flagged"
+        assert scan_for_hacks(t.seed_source) is None, f"{t.task_id}: seed wrongly flagged"
         rr = compute_reward(_obs_correct(2.0), t.seed_source, dtype=t.dtype)
         assert rr.correct is True and rr.tier == "correct_timed"

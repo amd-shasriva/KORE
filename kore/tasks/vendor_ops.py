@@ -21,7 +21,7 @@ from kore.tasks._genops import DTYPES, _parse_shape
 
 # op -> family metadata; each op has a bespoke oracle/baseline/seed (below).
 VENDOR_OPS: tuple[str, ...] = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul",
-                               "softmax", "gemm_a8w8", "fused_add_rmsnorm")
+                               "softmax", "gemm_a8w8", "fused_add_rmsnorm", "rope")
 
 # ops whose vendor BASELINE mutates its inputs in place (so the bench loop must
 # feed a fresh clone each timed call — see _genops._run_bench mutates_input path).
@@ -55,11 +55,19 @@ _FP8_GEMM_SHAPES = {  # XQ[M,K] @ WQ[N,K]^T -> [M,N] bf16 (fp8 a8w8 serving GEMM
                    {"M": 4096, "N": 4096, "K": 4095}],  # MLP up-proj, decode, non-pow2 K
 }
 
+_ROPE_SHAPES = {  # x[S,B,H,D] NEOX rotary embedding; freqs[S,1,1,D//2] angles
+    "minimal": {"S": 128, "B": 1, "H": 8, "D": 64},
+    "primary": {"S": 4096, "B": 1, "H": 32, "D": 128},   # Llama-3 8B attention
+    "validation": [{"S": 2048, "B": 2, "H": 32, "D": 128}, {"S": 8192, "B": 1, "H": 40, "D": 128},
+                   {"S": 4096, "B": 1, "H": 32, "D": 64}],  # batched, GQA-wide, half head-dim
+}
+
 VENDOR_SHAPES = {"rmsnorm": _NORM_SHAPES, "layernorm": _NORM_SHAPES,
                  "silu_mul": _GATE_SHAPES, "gelu_mul": _GATE_SHAPES,
                  "softmax": _SOFTMAX_SHAPES, "gemm_a8w8": _FP8_GEMM_SHAPES,
-                 "fused_add_rmsnorm": _NORM_SHAPES}
+                 "fused_add_rmsnorm": _NORM_SHAPES, "rope": _ROPE_SHAPES}
 VENDOR_DTYPES = ("bf16", "fp16")
+ROPE_BASE = 10000.0
 # Per-op dtype override (defaults to VENDOR_DTYPES). fp8 GEMM is fp8-in / bf16-out.
 VENDOR_OP_DTYPES = {"gemm_a8w8": ("fp8",)}
 
@@ -200,6 +208,33 @@ def make_vendor_reference(op: str, dtype: str) -> dict:
             return aiter_ref.aiter_fused_add_rms_norm(x, residual, w, EPS)
 
         arity = 3
+
+    elif op == "rope":
+        def get_inputs(shape, device="cuda", seed=0):
+            S, B, H, D = shape["S"], shape["B"], shape["H"], shape["D"]
+            g = torch.Generator(device=device).manual_seed(seed)
+            x = torch.randn((S, B, H, D), generator=g, device=device, dtype=torch.float32).to(tdt)
+            inv_freq = 1.0 / (ROPE_BASE ** (torch.arange(0, D, 2, device=device,
+                                                          dtype=torch.float32) / D))
+            t = torch.arange(S, device=device, dtype=torch.float32)
+            freqs = torch.einsum("i,j->ij", t, inv_freq).view(S, 1, 1, D // 2).contiguous()
+            return (x, freqs)
+
+        def ref_fn(x, freqs):
+            xf = x.float()
+            D = xf.shape[-1]
+            cos = torch.cos(freqs).float()
+            sin = torch.sin(freqs).float()
+            cos = torch.cat([cos, cos], dim=-1)
+            sin = torch.cat([sin, sin], dim=-1)
+            x1, x2 = xf[..., : D // 2], xf[..., D // 2:]
+            rot = torch.cat([-x2, x1], dim=-1)
+            return (xf * cos + rot * sin).to(x.dtype)
+
+        def baseline_fn(x, freqs):
+            return aiter_ref.aiter_rope_neox(x, freqs)
+
+        arity = 2
     else:
         raise ValueError(f"unknown vendor op {op!r}")
 
@@ -476,6 +511,44 @@ def fused_add_rmsnorm(x, residual, weight, eps: float = 1e-6):
 '''
 
 
+_ROPE_SEED = '''"""GENERATED vendor-baselined NEOX RoPE seed ({dtype}) vs aiter.rope_fwd.
+x[S,B,H,D], freqs[S,1,1,D//2] angles. One program per (s,b,h) row; half-width
+rotate-NEOX identity (o1=x1*cos-x2*sin, o2=x2*cos+x1*sin), fp32 math, {tldt} store.
+Regenerate via generate_vendor_ops.py."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _rope_kernel(x_ptr, f_ptr, y_ptr, B, H, D,
+                 sxs, sxb, sxh, sxd, sfs, HALF: tl.constexpr):
+    pid = tl.program_id(0)
+    h = pid % H
+    tmp = pid // H
+    b = tmp % B
+    s = tmp // B
+    base = s * sxs + b * sxb + h * sxh
+    offs = tl.arange(0, HALF)
+    x1 = tl.load(x_ptr + base + offs * sxd).to(tl.float32)
+    x2 = tl.load(x_ptr + base + (offs + HALF) * sxd).to(tl.float32)
+    theta = tl.load(f_ptr + s * sfs + offs).to(tl.float32)
+    cos = tl.cos(theta)
+    sin = tl.sin(theta)
+    tl.store(y_ptr + base + offs * sxd, (x1 * cos - x2 * sin).to({tldt}))
+    tl.store(y_ptr + base + (offs + HALF) * sxd, (x2 * cos + x1 * sin).to({tldt}))
+
+
+def rope(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    S, B, H, D = x.shape
+    y = torch.empty_like(x)
+    f = freqs.reshape(S, D // 2)
+    _rope_kernel[(S * B * H,)](x, f, y, B, H, D,
+                               x.stride(0), x.stride(1), x.stride(2), x.stride(3),
+                               f.stride(0), HALF=D // 2, num_warps=4)
+    return y
+'''
+
+
 def vendor_seed_source(op: str, dtype: str) -> str:
     tldt = DTYPES[dtype][1]
     if op == "softmax":
@@ -484,6 +557,8 @@ def vendor_seed_source(op: str, dtype: str) -> str:
         return _FP8_GEMM_SEED.format(dtype=dtype)
     if op == "fused_add_rmsnorm":
         return _FUSED_ADD_RMSNORM_SEED.format(dtype=dtype, tldt=tldt)
+    if op == "rope":
+        return _ROPE_SEED.format(dtype=dtype, tldt=tldt)
     if op == "rmsnorm":
         return _RMSNORM_SEED.format(dtype=dtype, tldt=tldt)
     if op == "layernorm":

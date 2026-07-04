@@ -68,8 +68,9 @@ VENDOR_SHAPES = {"rmsnorm": _NORM_SHAPES, "layernorm": _NORM_SHAPES,
                  "fused_add_rmsnorm": _NORM_SHAPES, "rope": _ROPE_SHAPES}
 VENDOR_DTYPES = ("bf16", "fp16")
 ROPE_BASE = 10000.0
-# Per-op dtype override (defaults to VENDOR_DTYPES). fp8 GEMM is fp8-in / bf16-out.
-VENDOR_OP_DTYPES = {"gemm_a8w8": ("fp8",)}
+# Per-op dtype override (defaults to VENDOR_DTYPES). a8w8 GEMM sweeps fp8 + int8
+# (both 8-bit-in / bf16-out; the seed is dtype-agnostic: 8-bit -> fp32 accumulate).
+VENDOR_OP_DTYPES = {"gemm_a8w8": ("fp8", "int8")}
 
 
 def vendor_op_dtypes(op: str) -> tuple[str, ...]:
@@ -78,6 +79,24 @@ def vendor_op_dtypes(op: str) -> tuple[str, ...]:
 
 
 EPS = 1e-6
+INT8_MAX = 127.0
+
+
+def _quant_a8w8(x, qdtype: str):
+    """Per-tensor symmetric quantization to fp8 (e4m3fnuz) or int8, returning
+    ``(q, scale)`` with ``x ~= q.float() * scale`` (scale is a scalar fp32 tensor)."""
+    import torch
+
+    from kore.tasks import aiter_ref
+
+    if qdtype == "fp8":
+        return aiter_ref.per_tensor_quant_fp8(x)
+    if qdtype == "int8":
+        amax = x.abs().max().clamp(min=1e-12)
+        scale = (amax / INT8_MAX).to(torch.float32)
+        q = (x.float() / scale).round().clamp(-INT8_MAX, INT8_MAX).to(torch.int8)
+        return q, scale.reshape(())
+    raise ValueError(f"unknown a8w8 quant dtype {qdtype!r}")
 
 
 # --------------------------------------------------------------------------- #
@@ -167,16 +186,16 @@ def make_vendor_reference(op: str, dtype: str) -> dict:
         arity = 1
 
     elif op == "gemm_a8w8":
+        qdtype = dtype  # "fp8" or "int8"
+
         def get_inputs(shape, device="cuda", seed=0):
             M, N, K = shape["M"], shape["N"], shape["K"]
             g = torch.Generator(device=device).manual_seed(seed)
             a = torch.randn((M, K), generator=g, device=device, dtype=torch.float32)
             w = torch.randn((N, K), generator=g, device=device, dtype=torch.float32)
-            xq, sx = aiter_ref.per_tensor_quant_fp8(a)
-            wq, sw = aiter_ref.per_tensor_quant_fp8(w)
-            x_scale = sx.repeat(M, 1).contiguous()   # [M,1]
-            w_scale = sw.repeat(1, N).contiguous()   # [1,N]
-            return (xq, wq, x_scale, w_scale)
+            xq, sx = _quant_a8w8(a, qdtype)
+            wq, sw = _quant_a8w8(w, qdtype)
+            return (xq, wq, sx.repeat(M, 1).contiguous(), sw.repeat(1, N).contiguous())
 
         def ref_fn(xq, wq, x_scale, w_scale):
             a_deq = xq.float() * x_scale.float()               # [M,K]
@@ -241,12 +260,12 @@ def make_vendor_reference(op: str, dtype: str) -> dict:
     ns = {"parse_shape": _parse_shape, "get_inputs": get_inputs, "ref_fn": ref_fn,
           "baseline_fn": baseline_fn, "arity": arity, "entry_name": op, "dtype_name": dtype,
           "family": f"vendor_{op}", "mutates_input": op in VENDOR_MUTATES_INPUT}
-    ns["adversarial_inputs"] = _make_adversarial_inputs(op, get_inputs)
+    ns["adversarial_inputs"] = _make_adversarial_inputs(op, get_inputs, dtype)
     ns[f"{op}_ref"] = ref_fn
     return ns
 
 
-def _make_adversarial_inputs(op: str, get_inputs):
+def _make_adversarial_inputs(op: str, get_inputs, dtype: str = "bf16"):
     """Op-class-aware adversarial input battery (verification-in-the-loop).
 
     Plain-float vendor ops reuse the generic float fills (zeros/ones/large/small/
@@ -263,8 +282,6 @@ def _make_adversarial_inputs(op: str, get_inputs):
     if op != "gemm_a8w8":
         return _generic
 
-    from kore.tasks import aiter_ref
-
     def _quant_gemm(shape, device="cuda", seed=0):
         M, N, K = shape["M"], shape["N"], shape["K"]
         regimes = {
@@ -279,8 +296,8 @@ def _make_adversarial_inputs(op: str, get_inputs):
         for name, (a, w) in regimes.items():
             a = a.to(device=device, dtype=torch.float32)
             w = w.to(device=device, dtype=torch.float32)
-            xq, sx = aiter_ref.per_tensor_quant_fp8(a)
-            wq, sw = aiter_ref.per_tensor_quant_fp8(w)
+            xq, sx = _quant_a8w8(a, dtype)   # dtype: "fp8" | "int8"
+            wq, sw = _quant_a8w8(w, dtype)
             out.append((name, (xq, wq, sx.repeat(M, 1).contiguous(),
                                sw.repeat(1, N).contiguous())))
         return out
@@ -414,9 +431,10 @@ def softmax(x: torch.Tensor) -> torch.Tensor:
     return y
 '''
 
-_FP8_GEMM_SEED = '''"""GENERATED vendor-baselined fp8 (a8w8) GEMM seed ({dtype}) vs aiter.gemm_a8w8.
-Y = (XQ*x_scale) @ (WQ*w_scale)^T, bf16 out. fp8 up-converted in-register, fp32
-accumulate, scales on the accumulator. Regenerate via generate_vendor_ops.py."""
+_FP8_GEMM_SEED = '''"""GENERATED vendor-baselined a8w8 GEMM seed ({dtype}) vs aiter.gemm_a8w8.
+Y = (XQ*x_scale) @ (WQ*w_scale)^T, bf16 out. 8-bit (fp8/int8) operands up-converted
+in-register to fp32, fp32 accumulate, scales on the accumulator. Dtype-agnostic:
+the load->fp32 path handles both fp8 e4m3fnuz and int8. Regenerate via generate_vendor_ops.py."""
 from __future__ import annotations
 import torch, triton, triton.language as tl
 

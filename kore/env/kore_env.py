@@ -264,6 +264,30 @@ class KoreEnv:
         thr = self._snr_threshold
         correct = validation_passed and bool(snr_by_shape) and all(v >= thr for v in snr_by_shape.values())
 
+        # Anti-hack determinism re-check: re-run the primary shape once and require
+        # a stable verdict, so a kernel cannot be rewarded for passing the SNR gate
+        # by luck (partly-random output). One extra exec, only when already correct.
+        if correct and getattr(self.cfg, "verifier_determinism_check", False):
+            sh0 = shapes[0]
+            rc2, out2, timed2 = self._exec([sys.executable, str(driver), *sh0.as_args()],
+                                           workdir, env, self.correctness_timeout)
+            kind2, _ = self._classify(out2, rc2, timed2)
+            m2, ac2 = _last(_SNR, out2), _last(_ALLCLOSE, out2)
+            snr2 = float(m2.group(1)) if m2 else None
+            ac2_false = bool(ac2 and ac2.group(1).lower() == "false")
+            ok2 = (kind2 == "ok" and not ac2_false
+                   and ((snr2 is not None and snr2 >= thr)
+                        or bool(ac2 and ac2.group(1).lower() == "true")))
+            tol = float(getattr(self.cfg, "determinism_snr_tol_db", 10.0))
+            stable, reason = _determinism_stable(snr_by_shape.get(sh0.name), snr2, ok2, tol)
+            _ev("DEBUG", "verify_determinism", task=task.task_id, shape=sh0.name,
+                snr1=snr_by_shape.get(sh0.name), snr2=snr2, stable=stable)
+            if not stable:
+                _ev("WARN", "eval_nondeterministic", task=task.task_id,
+                    source_sha=_sha12(source), reason=reason)
+                correct = False
+                last_err = reason
+
         obs = Observation(
             compiled=compiled, dtype=task.dtype,
             snr_by_shape=snr_by_shape,
@@ -319,6 +343,23 @@ class KoreEnv:
         _ev("DEBUG", "bench_shape", task=self.task.task_id, shape=sh.name, impl=impl,
             median_ms=round(med, 4), cv_pct=round(cv, 3), runs=len(samples))
         return med, cv
+
+
+def _determinism_stable(snr1: Optional[float], snr2: Optional[float],
+                        ok2: bool, tol_db: float) -> tuple[bool, str]:
+    """Anti-hack determinism verdict: is a second correctness run consistent?
+
+    A kernel that passes the SNR gate by LUCK (partly random output) will fail or
+    swing wildly on a re-run. Returns ``(stable, reason)``. Stable requires the
+    re-run to still be correct AND its SNR to stay within ``tol_db`` of the first
+    run. ``tol_db`` is generous enough to spare legitimate atomic-reduction jitter.
+    """
+    if not ok2:
+        return False, "non-deterministic: 2nd correctness run failed the SNR gate"
+    if snr1 is not None and snr2 is not None and abs(snr1 - snr2) > tol_db:
+        return False, (f"non-deterministic: SNR drifted {abs(snr1 - snr2):.1f} dB "
+                       f"(> {tol_db:.1f} dB) between identical runs")
+    return True, ""
 
 
 def _tail(s: str, n: int = 800) -> str:

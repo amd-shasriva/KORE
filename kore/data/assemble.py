@@ -13,7 +13,7 @@ and general replay always falls back to bundled samples, so this runs offline
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from kore.data import build_datasets as bd
 from kore.data.general_replay import load_general_replay

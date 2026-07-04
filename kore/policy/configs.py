@@ -160,10 +160,17 @@ class GRPOConfig(DistributedMixin):
     # the k3 retention anchor ``ref_anchor_coef`` (see below); there was never a
     # second, separate KL coefficient, and the step log used to mislabel the
     # anchor as ``kl_coef``. Kevin's "KL = 0" is expressed by ``ref_anchor_coef``.
-    clip_ratio_low: float = 0.2            # Clip-Higher lower bound (1 - 0.2)
-    clip_ratio_high: float = 0.28          # Clip-Higher upper bound (1 + 0.28)
+    # KORE's importance ratio is length-normalized (token-MEAN logprob), i.e. the
+    # GSPO *sequence* ratio, not DAPO's per-token ratio — so DAPO's 0.2/0.28
+    # token-level clip bounds never bind (a legit sequence ratio sits within ~1%
+    # of 1.0). We therefore (a) run on-policy (ppo_epochs=1) so old_logp==new_logp
+    # and the ratio is ~1 by construction (no off-policy drift to clip), and
+    # (b) set sequence-scale clip bounds as defense-in-depth for any ppo_epochs>1.
+    clip_ratio_low: float = 0.03           # GSPO sequence-ratio lower bound (was 0.2, inert)
+    clip_ratio_high: float = 0.04          # asymmetric clip-higher, sequence scale
     adv_eps: float = 1e-6                  # group-normalization epsilon
-    ppo_epochs: int = 2                    # minibatch passes per rollout batch (reuse old_logp)
+    ppo_epochs: int = 1                    # on-policy (was 2): sequence-ratio clip can't
+                                           # safely protect a 2nd off-policy epoch uncalibrated
     # DAPO Overlong Filtering: a response within overlong_buffer_len tokens of the
     # generation cap was (almost certainly) TRUNCATED; its per-token log-probs are
     # a noisy, biased gradient (the kernel is cut off mid-emit), so it is masked out

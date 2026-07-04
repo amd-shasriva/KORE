@@ -28,7 +28,6 @@ from kore.policy.configs import (
     DPOConfig,
     LoRAConfig,
     build_fsdp_kwargs,
-    fsdp_enabled,
 )
 
 log = get_logger("policy.dpo")
@@ -85,7 +84,6 @@ def build_trl_dpo_kwargs(config) -> dict:
     downgrade; reentrant skips the saved-tensor-count check that NON-REENTRANT does
     and that raises CheckpointError when SDPA swaps kernels), NOT ``fsdp_config``
     (the external wrapper is the other source of the mismatch on FSDP1)."""
-    use_fsdp = fsdp_enabled(config)
     kwargs = dict(
         output_dir=config.output_dir,
         beta=config.beta,

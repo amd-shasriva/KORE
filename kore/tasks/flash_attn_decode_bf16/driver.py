@@ -24,10 +24,19 @@ from kore.tasks.aiter_ref_attn import aiter_flash_attn  # noqa: E402
 
 
 def _load_candidate():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernel.py")
-    spec = importlib.util.spec_from_file_location("candidate_kernel", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # Cache the loaded candidate MODULE for the life of the process so a stateful
+    # kernel's module globals (e.g. an invocation counter) PERSIST across the bench
+    # timing loop and the post-timing correctness re-verification. Without this,
+    # run_correctness would reload the module and reset the counter, letting a
+    # "correct-for-first-N-calls, garbage-after" kernel evade the anti-hack check.
+    if getattr(_load_candidate, "_mod", None) is not None:
+        mod = _load_candidate._mod
+    else:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernel.py")
+        spec = importlib.util.spec_from_file_location("candidate_kernel", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _load_candidate._mod = mod
     return mod.flash_attn_decode
 
 

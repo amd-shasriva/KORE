@@ -37,7 +37,7 @@ from kore.config import CONFIG
 from kore.env.replay import ReplayCache
 from kore.obs import get_logger
 from kore.reward.reward import Observation, scan_for_hacks
-from kore.reward.reward import _worst_speedup as _worst_speedup
+from kore.reward.reward import _worst_speedup
 from kore.reward.stats import cv_pct as _cv_pct
 from kore.reward.stats import median as _median
 from kore.tasks.base import Shape, Task

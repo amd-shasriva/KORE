@@ -9,7 +9,6 @@ if the loop achieved any net speedup over the initial kernel.
 
 from __future__ import annotations
 
-from typing import Optional
 
 from kore.config import CONFIG
 from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, extract_kernel

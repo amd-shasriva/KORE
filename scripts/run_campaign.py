@@ -457,6 +457,8 @@ def run(args) -> int:
     # imports CONFIG, so the reward path picks it up consistently.
     if getattr(args, "profile_reward", 0.0):
         os.environ["KORE_PROFILE_REWARD_WEIGHT"] = str(args.profile_reward)
+    if getattr(args, "shape_augment", False):
+        os.environ["KORE_SHAPE_AUGMENT"] = "1"
 
     tasks = [get_task(t) for t in args.tasks.split(",")] if args.tasks else all_tasks()
     if args.stages:
@@ -1434,6 +1436,9 @@ def build_parser() -> argparse.ArgumentParser:
     # total_steps). Ensures the policy trains long enough to actually move.
     p.add_argument("--adaptive-steps", dest="adaptive_steps",
                    action="store_true", help="adaptive GRPO horizon (plateau early-stop)")
+    # data scale: expand each op's shapes into a diverse small/med/large+odd set.
+    p.add_argument("--shape-augment", dest="shape_augment", action="store_true",
+                   help="augment per-operator shapes for shape-robust generalization")
     return p
 
 

@@ -20,7 +20,8 @@ from __future__ import annotations
 from kore.tasks._genops import DTYPES, _parse_shape
 
 # op -> family metadata; each op has a bespoke oracle/baseline/seed (below).
-VENDOR_OPS: tuple[str, ...] = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul")
+VENDOR_OPS: tuple[str, ...] = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul",
+                               "softmax", "gemm_a8w8")
 
 # Real production shapes (hidden dims / gated-MLP widths) per op class, per the
 # KORE-Bench blueprint (Llama-3 / Qwen3 / Mixtral / DeepSeek-V3).
@@ -37,9 +38,32 @@ _GATE_SHAPES = {  # x[M, 2*inter] ; N = 2*inter (input width)
                    {"M": 4096, "N": 28670}],   # 2*11008, small, non-pow2 tail
 }
 
+_SOFTMAX_SHAPES = {  # x[M, N] ; softmax over N (attention logits / vocab rows)
+    "minimal": {"M": 64, "N": 1024},
+    "primary": {"M": 8192, "N": 8192},
+    "validation": [{"M": 4096, "N": 32768}, {"M": 16384, "N": 2048},
+                   {"M": 8192, "N": 8191}],   # large vocab, wide batch, non-pow2 tail
+}
+_FP8_GEMM_SHAPES = {  # XQ[M,K] @ WQ[N,K]^T -> [M,N] bf16 (fp8 a8w8 serving GEMM)
+    "minimal": {"M": 128, "N": 128, "K": 256},
+    "primary": {"M": 4096, "N": 4096, "K": 4096},
+    "validation": [{"M": 8192, "N": 8192, "K": 1024}, {"M": 2048, "N": 14336, "K": 8192},
+                   {"M": 4096, "N": 4096, "K": 4095}],  # MLP up-proj, decode, non-pow2 K
+}
+
 VENDOR_SHAPES = {"rmsnorm": _NORM_SHAPES, "layernorm": _NORM_SHAPES,
-                 "silu_mul": _GATE_SHAPES, "gelu_mul": _GATE_SHAPES}
+                 "silu_mul": _GATE_SHAPES, "gelu_mul": _GATE_SHAPES,
+                 "softmax": _SOFTMAX_SHAPES, "gemm_a8w8": _FP8_GEMM_SHAPES}
 VENDOR_DTYPES = ("bf16", "fp16")
+# Per-op dtype override (defaults to VENDOR_DTYPES). fp8 GEMM is fp8-in / bf16-out.
+VENDOR_OP_DTYPES = {"gemm_a8w8": ("fp8",)}
+
+
+def vendor_op_dtypes(op: str) -> tuple[str, ...]:
+    """The dtype sweep for a vendor op (per-op override or the global default)."""
+    return VENDOR_OP_DTYPES.get(op, VENDOR_DTYPES)
+
+
 EPS = 1e-6
 
 
@@ -115,6 +139,42 @@ def make_vendor_reference(op: str, dtype: str) -> dict:
                 return aiter_ref.aiter_gelu_tanh_and_mul(x)
 
         arity = 1
+
+    elif op == "softmax":
+        def get_inputs(shape, device="cuda", seed=0):
+            M, N = shape["M"], shape["N"]
+            return (_randn((M, N), device, seed, scale=2.0),)  # logit-scale rows
+
+        def ref_fn(x):
+            return torch.softmax(x.float(), dim=-1).to(x.dtype)
+
+        def baseline_fn(x):
+            return aiter_ref.torch_softmax_lastdim(x)  # ROCm MIOpen fused softmax
+
+        arity = 1
+
+    elif op == "gemm_a8w8":
+        def get_inputs(shape, device="cuda", seed=0):
+            M, N, K = shape["M"], shape["N"], shape["K"]
+            g = torch.Generator(device=device).manual_seed(seed)
+            a = torch.randn((M, K), generator=g, device=device, dtype=torch.float32)
+            w = torch.randn((N, K), generator=g, device=device, dtype=torch.float32)
+            xq, sx = aiter_ref.per_tensor_quant_fp8(a)
+            wq, sw = aiter_ref.per_tensor_quant_fp8(w)
+            x_scale = sx.repeat(M, 1).contiguous()   # [M,1]
+            w_scale = sw.repeat(1, N).contiguous()   # [1,N]
+            return (xq, wq, x_scale, w_scale)
+
+        def ref_fn(xq, wq, x_scale, w_scale):
+            a_deq = xq.float() * x_scale.float()               # [M,K]
+            w_deq = wq.float() * w_scale.float().reshape(-1, 1)  # [N,K]
+            return (a_deq @ w_deq.t()).to(torch.bfloat16)
+
+        def baseline_fn(xq, wq, x_scale, w_scale):
+            return aiter_ref.aiter_gemm_a8w8(xq, wq, x_scale, w_scale,
+                                             out_dtype=torch.bfloat16)
+
+        arity = 4
     else:
         raise ValueError(f"unknown vendor op {op!r}")
 
@@ -215,8 +275,109 @@ def {op}(x: torch.Tensor) -> torch.Tensor:
 '''
 
 
+_SOFTMAX_SEED = '''"""GENERATED vendor-baselined row-softmax seed ({dtype}) vs torch/MIOpen softmax.
+Online (streaming) softmax: pass 1 running max+sum, pass 2 normalize+store, so any
+row width N fits regardless of BLOCK_N. Regenerate via generate_vendor_ops.py."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _softmax_kernel(x_ptr, y_ptr, sm, N, BLOCK_N: tl.constexpr):
+    row = tl.program_id(0)
+    base = row * sm
+    m = -float("inf")
+    s = 0.0
+    for start in range(0, N, BLOCK_N):
+        offs = start + tl.arange(0, BLOCK_N)
+        mask = offs < N
+        x = tl.load(x_ptr + base + offs, mask=mask, other=-float("inf")).to(tl.float32)
+        blk_max = tl.max(x, axis=0)
+        new_m = tl.maximum(m, blk_max)
+        s = s * tl.exp(m - new_m) + tl.sum(tl.exp(x - new_m), axis=0)
+        m = new_m
+    for start in range(0, N, BLOCK_N):
+        offs = start + tl.arange(0, BLOCK_N)
+        mask = offs < N
+        x = tl.load(x_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+        tl.store(y_ptr + base + offs, (tl.exp(x - m) / s).to({tldt}), mask=mask)
+
+
+def softmax(x: torch.Tensor) -> torch.Tensor:
+    M, N = x.shape
+    y = torch.empty_like(x)
+    _softmax_kernel[(M,)](x, y, x.stride(0), N, BLOCK_N=1024, num_warps=8)
+    return y
+'''
+
+_FP8_GEMM_SEED = '''"""GENERATED vendor-baselined fp8 (a8w8) GEMM seed ({dtype}) vs aiter.gemm_a8w8.
+Y = (XQ*x_scale) @ (WQ*w_scale)^T, bf16 out. fp8 up-converted in-register, fp32
+accumulate, scales on the accumulator. Regenerate via generate_vendor_ops.py."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _gemm_a8w8_kernel(a_ptr, b_ptr, c_ptr, xs_ptr, ws_ptr, M, N, K,
+                      stride_am, stride_ak, stride_bn, stride_bk, stride_cm, stride_cn,
+                      BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+                      GROUP_M: tl.constexpr):
+    pid = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    num_pid_in_group = GROUP_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+    offs_am = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
+    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
+    offs_k = tl.arange(0, BLOCK_K)
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_bn[None, :] * stride_bn + offs_k[:, None] * stride_bk)
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_K)):
+        kmask = offs_k[None, :] < K - k * BLOCK_K
+        a = tl.load(a_ptrs, mask=kmask, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
+        acc += tl.dot(a.to(tl.float32), b.to(tl.float32))
+        a_ptrs += BLOCK_K * stride_ak
+        b_ptrs += BLOCK_K * stride_bk
+    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    xs = tl.load(xs_ptr + offs_cm, mask=offs_cm < M, other=0.0).to(tl.float32)
+    ws = tl.load(ws_ptr + offs_cn, mask=offs_cn < N, other=0.0).to(tl.float32)
+    acc = acc * xs[:, None] * ws[None, :]
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    tl.store(c_ptrs, acc.to(tl.bfloat16), mask=c_mask)
+
+
+def gemm_a8w8(xq: torch.Tensor, wq: torch.Tensor,
+              x_scale: torch.Tensor, w_scale: torch.Tensor) -> torch.Tensor:
+    M, K = xq.shape
+    N, _ = wq.shape
+    c = torch.empty((M, N), device=xq.device, dtype=torch.bfloat16)
+    xs = x_scale.reshape(-1).contiguous()
+    ws = w_scale.reshape(-1).contiguous()
+    BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M = 64, 128, 64, 8
+    grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
+    _gemm_a8w8_kernel[grid](xq, wq, c, xs, ws, M, N, K,
+                            xq.stride(0), xq.stride(1), wq.stride(0), wq.stride(1),
+                            c.stride(0), c.stride(1),
+                            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+                            GROUP_M=GROUP_M, num_warps=4, num_stages=2)
+    return c
+'''
+
+
 def vendor_seed_source(op: str, dtype: str) -> str:
     tldt = DTYPES[dtype][1]
+    if op == "softmax":
+        return _SOFTMAX_SEED.format(dtype=dtype, tldt=tldt)
+    if op == "gemm_a8w8":
+        return _FP8_GEMM_SEED.format(dtype=dtype)
     if op == "rmsnorm":
         return _RMSNORM_SEED.format(dtype=dtype, tldt=tldt)
     if op == "layernorm":

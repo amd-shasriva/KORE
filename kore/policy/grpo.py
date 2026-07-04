@@ -687,6 +687,44 @@ def _save_grpo_checkpoint(model, tok, config, step):
     return ckpt
 
 
+def _verified_gate_on() -> bool:
+    """True when the adversarial verification gate is active (KORE_VERIFIED_CORRECTNESS)."""
+    import os
+    return os.environ.get("KORE_VERIFIED_CORRECTNESS") == "1"
+
+
+def _build_distill_sink(config):
+    """Optional co-evolution distillation sink (writes winning kernels to JSONL)."""
+    path = getattr(config, "coevolve_distill_path", None)
+    if not path:
+        return None
+    from kore.policy.coevolve_distill import DistillationSink
+    sink = DistillationSink(
+        path, min_speedup=getattr(config, "coevolve_distill_min_speedup", 1.0),
+        require_verified=_verified_gate_on())
+    log.info("coevolve distillation sink active", path=str(path), **sink.stats())
+    return sink
+
+
+def _distill_group(sink, task_id, best_speedup, best_kernel_src, config):
+    """Feed one group's fastest verified winning kernel to the distillation sink.
+
+    Best-effort: distillation must never fail a training step."""
+    if sink is None or not best_kernel_src or not best_speedup:
+        return
+    if best_speedup < getattr(config, "coevolve_distill_min_speedup", 1.0):
+        return
+    win = {"task_id": task_id, "final_source": best_kernel_src, "kernel_src": best_kernel_src,
+           "speedup": float(best_speedup), "verified": _verified_gate_on(), "snr_db": None}
+    try:
+        n = sink.record([win])
+        if n:
+            log.info("coevolve distilled win", task=task_id, speedup=round(float(best_speedup), 4),
+                     **sink.stats())
+    except Exception as e:  # noqa: BLE001 - distillation is best-effort
+        log.warn("coevolve distillation failed", task=task_id, error=repr(e))
+
+
 def _train_grpo_fallback(config, tasks):
     """Compact in-process GRPO loop implementing the locked KORE recipe.
 
@@ -794,6 +832,7 @@ def _train_grpo_fallback(config, tasks):
 
     # ---- Open-ended verified co-evolution curriculum (optional, in-process) ---- #
     controller = None
+    distill_sink = _build_distill_sink(config)
     if bool(getattr(config, "coevolve", False)) and tasks:
         from kore.openended.controller import CoevolutionController
         controller = CoevolutionController(
@@ -845,14 +884,21 @@ def _train_grpo_fallback(config, tasks):
                            if traj_correct[ti][tu] and turn_codes[ti][tu]]
         # Open-ended co-evolution feedback (item: coevolve). solve_rate = fraction of
         # trajectories with any correct turn; best_speedup = max speedup over all
-        # correct turns (the archive's headroom-regret signal).
+        # correct turns (the archive's headroom-regret signal); best_kernel_src = the
+        # source of the fastest correct kernel (fed to the distillation sink).
         solve_rate = (sum(1 for tc in traj_correct if any(tc)) / G) if G else 0.0
-        _sus = [s for row in traj_speedups for s in row if s is not None]
-        best_speedup = max(_sus) if _sus else None
+        best_speedup = None
+        best_kernel_src = None
+        for ti in range(G):
+            for tu, su in enumerate(traj_speedups[ti]):
+                if su is not None and (best_speedup is None or su > best_speedup):
+                    best_speedup = su
+                    best_kernel_src = (turn_codes[ti][tu] if tu < len(turn_codes[ti]) else None)
         return {"task": task, "traj_scores": traj_scores, "samples": samples, "codes": codes,
                 "correct_kernels": correct_kernels, "any_correct": any(any(c) for c in traj_correct),
                 "rtoks": rtoks, "infra": sum(1 for inf in traj_infra for x in inf if x),
-                "solve_rate": solve_rate, "best_speedup": best_speedup}
+                "solve_rate": solve_rate, "best_speedup": best_speedup,
+                "best_kernel_src": best_kernel_src}
 
     for step in range(config.total_steps):
         # ---- 1. DAPO dynamic sampling: OVERSAMPLE-AND-REFILL (item 2) ---- #
@@ -875,6 +921,8 @@ def _train_grpo_fallback(config, tasks):
             if controller is not None:
                 controller.record(g["task"].task_id, g.get("solve_rate", 0.0),
                                   g.get("best_speedup"))
+            _distill_group(distill_sink, g["task"].task_id, g.get("best_speedup"),
+                           g.get("best_kernel_src"), config)
             return g
 
         groups, attempts = dynamic_sampling_refill(
@@ -1424,12 +1472,18 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
                        for ti in range(len(my)) for tu in range(len(traj_correct[ti]))
                        if traj_correct[ti][tu] and turn_codes[ti][tu]]
     # local co-evolution feedback (gathered + reduced across ranks by the caller).
-    _local_su = [s for row in traj_speedups for s in row if s is not None]
+    _local_best_su = None
+    _local_best_src = None
+    for ti in range(len(my)):
+        for tu, su in enumerate(traj_speedups[ti]):
+            if su is not None and (_local_best_su is None or su > _local_best_su):
+                _local_best_su = su
+                _local_best_src = (turn_codes[ti][tu] if tu < len(turn_codes[ti]) else None)
     return {"traj_scores": traj_scores, "returns": [s[0] for s in samples], "samples": samples,
             "codes": codes, "correct_kernels": correct_kernels,
             "infra": sum(1 for inf in traj_infra for x in inf if x),
             "n_solved": sum(1 for tc in traj_correct if any(tc)), "n_traj": len(my),
-            "best_speedup": (max(_local_su) if _local_su else None)}
+            "best_speedup": _local_best_su, "best_kernel_src": _local_best_src}
 
 
 def _train_grpo_distributed(config, tasks):
@@ -1564,6 +1618,7 @@ def _train_grpo_distributed(config, tasks):
     # SAME cross-rank-gathered outcomes, so task selection stays identical on all
     # ranks (a hard FSDP/ZeRO invariant: every rank must roll the same task).
     controller = None
+    distill_sink = _build_distill_sink(config) if rank == 0 else None  # rank-0 owns the file
     if bool(getattr(config, "coevolve", False)) and tasks:
         from kore.openended.controller import CoevolutionController
         controller = CoevolutionController(
@@ -1592,20 +1647,29 @@ def _train_grpo_distributed(config, tasks):
         # gather the co-evolution outcome shards -> identical full-group signal on
         # every rank (so the archive update is rank-invariant).
         solve_rate = best_speedup = None
-        if controller is not None:
+        if controller is not None or distill_sink is not None:
             all_meta = _all_gather_object(
-                [(local.get("n_solved", 0), local.get("n_traj", 0), local.get("best_speedup"))],
+                [(local.get("n_solved", 0), local.get("n_traj", 0),
+                  local.get("best_speedup"), local.get("best_kernel_src"))],
                 accelerator)
             meta = merge_across_ranks(all_meta)
             tot_solved = sum(m[0] for m in meta)
             tot_traj = sum(m[1] for m in meta) or 1
-            sus = [m[2] for m in meta if m[2] is not None]
             solve_rate = tot_solved / tot_traj
-            best_speedup = max(sus) if sus else None
+            # global fastest correct kernel across ranks (identical view on all ranks).
+            best_speedup, best_src = None, None
+            for m in meta:
+                if m[2] is not None and (best_speedup is None or m[2] > best_speedup):
+                    best_speedup, best_src = m[2], m[3]
             # Record EVERY rolled group with the rank-invariant gathered outcome, so
             # the archive stays identical on all ranks (and learns from all-fail
             # groups too, not just high-variance survivors).
-            controller.record(task.task_id, solve_rate or 0.0, best_speedup)
+            if controller is not None:
+                controller.record(task.task_id, solve_rate or 0.0, best_speedup)
+            # Distillation is rank-0-only (owns the file); the gathered inputs are
+            # identical on every rank so the chosen win is deterministic.
+            if distill_sink is not None:
+                _distill_group(distill_sink, task.task_id, best_speedup, best_src, config)
         return {"task": task, "local": local, "full_scores": full_scores,
                 "per_rank_returns": all_returns,
                 "correct_kernels": merge_across_ranks(all_correct),

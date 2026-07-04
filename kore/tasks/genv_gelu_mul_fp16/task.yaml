@@ -1,0 +1,20 @@
+task_id: genv_gelu_mul_fp16
+operation: gelu_mul
+dtype: fp16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: vendor_gelu_mul
+baseline_tier: vendor
+generated: true
+shapes:
+  minimal: {M: 64, N: 1024}
+  primary: {M: 4096, N: 28672}
+  validation:
+    - {M: 8192, N: 22016}
+    - {M: 2048, N: 8192}
+    - {M: 4096, N: 28670}
+targets:
+  snr_db: 30.0
+  comparison_baseline: aiter_gelu_mul

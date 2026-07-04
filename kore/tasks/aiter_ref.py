@@ -63,6 +63,27 @@ def aiter_silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def aiter_gelu_tanh_and_mul(x: torch.Tensor) -> torch.Tensor:
+    """AITER ``gelu_tanh_and_mul(out, input)`` (in-place into out).
+
+    Input is (M, 2*inter); returns GELU-tanh(x[:, :inter]) * x[:, inter:] as (M, inter).
+    The tanh-approx GELU is the LLM-standard gated activation (GeGLU).
+    """
+    import aiter
+
+    inter = x.shape[-1] // 2
+    out = torch.empty((*x.shape[:-1], inter), dtype=x.dtype, device=x.device)
+    aiter.gelu_tanh_and_mul(out, x)
+    return out
+
+
+def aiter_layer_norm_noaffine_ok(x, weight, bias, eps: float) -> torch.Tensor:
+    """AITER LayerNorm wrapper (thin alias to aiter.layer_norm) for the vendor tasks."""
+    import aiter
+
+    return aiter.layer_norm(x, weight, bias, eps)
+
+
 # --- fp8 GEMM -------------------------------------------------------------
 def per_tensor_quant_fp8(x: torch.Tensor):
     """Per-tensor symmetric quantization to fp8 e4m3fnuz.

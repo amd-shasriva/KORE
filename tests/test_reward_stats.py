@@ -478,12 +478,12 @@ def test_full_lexicographic_ordering_with_shaping_on():
 
 
 def test_all_task_seeds_stay_clean_and_rewardable():
-    """The 15 shipped task seeds must never be flagged as hacks (anti-hack must
-    not over-fire) and, when correct, must land in the correct tier."""
+    """Every task seed (hand-authored + generated) must never be flagged as a hack
+    (anti-hack must not over-fire) and, when correct, must land in the correct tier."""
     from kore.tasks.registry import all_tasks
 
     tasks = all_tasks()
-    assert len(tasks) == 15
+    assert len(tasks) >= 100   # wide suite: 15 hand-authored + generated operators
     for t in tasks:
         assert scan_for_hacks(t.seed_source) is None, f"{t.task_id}: seed wrongly flagged"
         rr = compute_reward(_obs_correct(2.0), t.seed_source, dtype=t.dtype)

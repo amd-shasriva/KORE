@@ -1,0 +1,19 @@
+task_id: gen_softplus_fp32
+operation: softplus
+dtype: fp32
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 40.0
+op_family: unary
+generated: true
+shapes:
+  minimal: {M: 64, N: 512}
+  primary: {M: 4096, N: 8192}
+  validation:
+    - {M: 8192, N: 4096}
+    - {M: 2048, N: 11008}
+    - {M: 4096, N: 8191}
+targets:
+  snr_db: 40.0
+  comparison_baseline: torch_softplus

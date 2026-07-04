@@ -22,7 +22,7 @@ from kore.tasks._genops import DTYPES, _parse_shape
 # op -> family metadata; each op has a bespoke oracle/baseline/seed (below).
 VENDOR_OPS: tuple[str, ...] = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul",
                                "softmax", "gemm_a8w8", "fused_add_rmsnorm", "rope",
-                               "topk_softmax", "batched_gemm")
+                               "topk_softmax", "batched_gemm", "gemm_a8w8_blockscale")
 
 # ops whose vendor BASELINE mutates its inputs in place (so the bench loop must
 # feed a fresh clone each timed call — see _genops._run_bench mutates_input path).
@@ -71,6 +71,13 @@ _TOPK_SHAPES = {  # gate[M,E] MoE router; softmax over E experts -> top-k -> ren
                    {"M": 4096, "E": 256, "topk": 8}],     # DeepSeek-V3 256-expert, top-8
 }
 
+_BLOCKSCALE_SHAPES = {  # DeepSeek-V3 block-scaled fp8 GEMM; N,K multiples of 128
+    "minimal": {"M": 128, "N": 256, "K": 256},
+    "primary": {"M": 4096, "N": 4096, "K": 4096},
+    "validation": [{"M": 8192, "N": 8192, "K": 1024}, {"M": 2048, "N": 14336, "K": 4096},
+                   {"M": 4095, "N": 512, "K": 512}],  # decode, MLP up-proj, non-aligned M
+}
+
 _BATCHED_GEMM_SHAPES = {  # A[B,M,K] @ B[B,N,K]^T -> [B,M,N] bf16 (batched attn/MoE proj)
     "minimal": {"B": 2, "M": 128, "N": 128, "K": 256},
     "primary": {"B": 8, "M": 512, "N": 512, "K": 512},
@@ -83,12 +90,14 @@ VENDOR_SHAPES = {"rmsnorm": _NORM_SHAPES, "layernorm": _NORM_SHAPES,
                  "silu_mul": _GATE_SHAPES, "gelu_mul": _GATE_SHAPES,
                  "softmax": _SOFTMAX_SHAPES, "gemm_a8w8": _FP8_GEMM_SHAPES,
                  "fused_add_rmsnorm": _NORM_SHAPES, "rope": _ROPE_SHAPES,
-                 "topk_softmax": _TOPK_SHAPES, "batched_gemm": _BATCHED_GEMM_SHAPES}
+                 "topk_softmax": _TOPK_SHAPES, "batched_gemm": _BATCHED_GEMM_SHAPES,
+                 "gemm_a8w8_blockscale": _BLOCKSCALE_SHAPES}
 VENDOR_DTYPES = ("bf16", "fp16")
 ROPE_BASE = 10000.0
 # Per-op dtype override (defaults to VENDOR_DTYPES). a8w8 GEMM sweeps fp8 + int8
 # (both 8-bit-in / bf16-out); batched GEMM is bf16-only (aiter.batched_gemm_bf16).
-VENDOR_OP_DTYPES = {"gemm_a8w8": ("fp8", "int8"), "batched_gemm": ("bf16",)}
+VENDOR_OP_DTYPES = {"gemm_a8w8": ("fp8", "int8"), "batched_gemm": ("bf16",),
+                    "gemm_a8w8_blockscale": ("fp8",)}
 
 
 def vendor_op_dtypes(op: str) -> tuple[str, ...]:
@@ -98,6 +107,45 @@ def vendor_op_dtypes(op: str) -> tuple[str, ...]:
 
 EPS = 1e-6
 INT8_MAX = 127.0
+
+
+BLK = 128  # DeepSeek-V3 block size (1x128 activation, 128x128 weight)
+
+
+def _quant_1x128(x):
+    """Per-1x128 (per-token-group) fp8 quant. x[M,K] -> (xq[M,K] fp8, xs[M,K//128])."""
+    import torch
+
+    from kore.tasks.aiter_ref import FP8_DTYPE, FP8_MAX
+    M, K = x.shape
+    xb = x.view(M, K // BLK, BLK)
+    amax = xb.abs().amax(-1, keepdim=True).clamp(min=1e-8)
+    s = amax / FP8_MAX
+    xq = (xb / s).clamp(-FP8_MAX, FP8_MAX).to(FP8_DTYPE).view(M, K)
+    return xq, s.squeeze(-1).to(torch.float32).contiguous()
+
+
+def _quant_128x128(w):
+    """Per-128x128 block fp8 quant. w[N,K] -> (wq[N,K] fp8, ws[N//128,K//128])."""
+    import torch
+
+    from kore.tasks.aiter_ref import FP8_DTYPE, FP8_MAX
+    N, K = w.shape
+    wb = w.view(N // BLK, BLK, K // BLK, BLK)
+    amax = wb.abs().amax(dim=(1, 3), keepdim=True).clamp(min=1e-8)
+    s = amax / FP8_MAX
+    wq = (wb / s).clamp(-FP8_MAX, FP8_MAX).to(FP8_DTYPE).view(N, K)
+    return wq, s.squeeze(1).squeeze(-1).to(torch.float32).contiguous()
+
+
+def _blockscale_ref(xq, wq, xs, ws):
+    """Exact fp32 dequant-matmul oracle for block-scaled fp8 GEMM -> bf16."""
+    import torch
+    M, K = xq.shape
+    N = wq.shape[0]
+    xd = (xq.view(M, K // BLK, BLK).float() * xs[:, :, None]).view(M, K)
+    wd = (wq.view(N // BLK, BLK, K // BLK, BLK).float() * ws[:, None, :, None]).view(N, K)
+    return (xd @ wd.t()).to(torch.bfloat16)
 
 
 def _quant_a8w8(x, qdtype: str):
@@ -317,6 +365,25 @@ def make_vendor_reference(op: str, dtype: str) -> dict:
             return aiter_ref.aiter_batched_gemm_bf16(a, b)
 
         arity = 2
+
+    elif op == "gemm_a8w8_blockscale":
+        def get_inputs(shape, device="cuda", seed=0):
+            M, N, K = shape["M"], shape["N"], shape["K"]
+            g = torch.Generator(device=device).manual_seed(seed)
+            X = torch.randn((M, K), generator=g, device=device, dtype=torch.float32) * 0.2
+            W = torch.randn((N, K), generator=g, device=device, dtype=torch.float32) * 0.2
+            xq, xs = _quant_1x128(X)
+            wq, ws = _quant_128x128(W)
+            return (xq, wq, xs, ws)
+
+        def ref_fn(xq, wq, xs, ws):
+            return _blockscale_ref(xq, wq, xs, ws)
+
+        def baseline_fn(xq, wq, xs, ws):
+            import aiter
+            return aiter.gemm_a8w8_blockscale(xq, wq, xs, ws, dtype=torch.bfloat16)
+
+        arity = 4
     else:
         raise ValueError(f"unknown vendor op {op!r}")
 
@@ -356,6 +423,25 @@ def _make_adversarial_inputs(op: str, get_inputs, dtype: str = "bf16"):
             return [(name, (g.to(tdt), topk)) for name, g in regimes.items()]
 
         return _topk_adv
+
+    if op == "gemm_a8w8_blockscale":
+        def _blockscale_adv(shape, device="cuda", seed=0):
+            M, N, K = shape["M"], shape["N"], shape["K"]
+            regimes = {
+                "zeros": (torch.zeros((M, K)), torch.zeros((N, K))),
+                "ones": (torch.ones((M, K)), torch.ones((N, K))),
+                "large": (torch.full((M, K), 10.0), torch.full((N, K), 10.0)),
+                "small": (torch.full((M, K), 1e-2), torch.full((N, K), 1e-2)),
+            }
+            out = []
+            for name, (X, W) in regimes.items():
+                X = X.to(device=device, dtype=torch.float32)
+                W = W.to(device=device, dtype=torch.float32)
+                xq, xs = _quant_1x128(X)
+                wq, ws = _quant_128x128(W)
+                out.append((name, (xq, wq, xs, ws)))
+            return out
+        return _blockscale_adv
 
     if op != "gemm_a8w8":
         return _generic
@@ -741,8 +827,61 @@ def batched_gemm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 '''
 
 
+_BLOCKSCALE_SEED = '''"""GENERATED vendor-baselined block-scaled fp8 GEMM seed ({dtype}) vs aiter.gemm_a8w8_blockscale.
+DeepSeek-V3 blockscale: XQ[M,K] fp8 with x_scale[M,K//128] (1x128), WQ[N,K] fp8 with
+w_scale[N//128,K//128] (128x128) -> Y = X_deq @ W_deq^T bf16. Per-128-K-block dequant
+applied on the fp32 accumulator. Regenerate via generate_vendor_ops.py."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _bs_kernel(a_ptr, b_ptr, c_ptr, xs_ptr, ws_ptr, M, N, K, KB,
+               sam, sak, sbn, sbk, scm, scn, sxm, sxk, swn, swk,
+               BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pid = tl.program_id(0)
+    num_n = N // BN                       # BN == 128 == weight n-block
+    pid_m = pid // num_n
+    pid_n = pid % num_n
+    offs_m = pid_m * BM + tl.arange(0, BM)
+    offs_n = pid_n * BN + tl.arange(0, BN)
+    offs_k = tl.arange(0, BK)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for kb in range(0, KB):
+        koff = kb * BK + offs_k
+        a = tl.load(a_ptr + offs_m[:, None] * sam + koff[None, :] * sak,
+                    mask=offs_m[:, None] < M, other=0.0).to(tl.float32)   # [BM,BK]
+        b = tl.load(b_ptr + offs_n[None, :] * sbn + koff[:, None] * sbk,
+                    mask=offs_n[None, :] < N, other=0.0).to(tl.float32)   # [BK,BN]
+        p = tl.dot(a, b)                                                  # [BM,BN]
+        xs = tl.load(xs_ptr + offs_m * sxm + kb * sxk,
+                     mask=offs_m < M, other=0.0).to(tl.float32)           # [BM]
+        ws = tl.load(ws_ptr + pid_n * swn + kb * swk).to(tl.float32)      # scalar
+        acc += p * xs[:, None] * ws
+    c_ptrs = c_ptr + offs_m[:, None] * scm + offs_n[None, :] * scn
+    tl.store(c_ptrs, acc.to(tl.bfloat16),
+             mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
+
+
+def gemm_a8w8_blockscale(xq, wq, x_scale, w_scale) -> torch.Tensor:
+    M, K = xq.shape
+    N = wq.shape[0]
+    c = torch.empty((M, N), device=xq.device, dtype=torch.bfloat16)
+    BM, BN, BK = 64, 128, 128
+    grid = (triton.cdiv(M, BM) * (N // BN),)
+    _bs_kernel[grid](xq, wq, c, x_scale, w_scale, M, N, K, K // BK,
+                     xq.stride(0), xq.stride(1), wq.stride(0), wq.stride(1),
+                     c.stride(0), c.stride(1), x_scale.stride(0), x_scale.stride(1),
+                     w_scale.stride(0), w_scale.stride(1),
+                     BM=BM, BN=BN, BK=BK, num_warps=4, num_stages=2)
+    return c
+'''
+
+
 def vendor_seed_source(op: str, dtype: str) -> str:
     tldt = DTYPES[dtype][1]
+    if op == "gemm_a8w8_blockscale":
+        return _BLOCKSCALE_SEED.format(dtype=dtype)
     if op == "batched_gemm":
         return _BATCHED_GEMM_SEED.format(dtype=dtype)
     if op == "topk_softmax":

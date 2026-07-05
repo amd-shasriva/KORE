@@ -627,9 +627,38 @@ def _eval_tasks(ctx) -> list:
     return out or ctx["tasks"]
 
 
+def _datagen_counts(ctx) -> dict:
+    a = ctx["args"]
+    return {"n_repair": a.n_repair, "n_parents": a.n_parents, "k": a.k,
+            "wins_gens": a.wins_gens, "n_agentic": a.n_agentic,
+            "max_tool_turns": a.max_tool_turns}
+
+
+def _datagen_plan(ctx):
+    """(workers, n_gpus) for parallel datagen; workers<=1 -> sequential path."""
+    from kore.data.parallel_datagen import detect_gpus
+    n_gpus = detect_gpus()
+    req = int(getattr(ctx["args"], "datagen_workers", 0) or 0)
+    workers = req if req > 0 else n_gpus   # 0 = auto (one per GPU)
+    return workers, n_gpus
+
+
 def _stage_datagen(ctx):
     if ctx["dry"]:
-        _log("datagen", "would generate repair/groups/wins per task (teacher + GPU env)")
+        _log("datagen", "would generate repair/groups/wins per task (teacher + GPU env), "
+                        "parallel-sharded across GPUs when --datagen-workers != 1")
+        return
+    # Parallel path: shard tasks across GPUs with concurrent teacher streams (resumable).
+    workers, n_gpus = _datagen_plan(ctx)
+    if workers > 1:
+        from kore.data.parallel_datagen import DATAGEN_KINDS, run_parallel_datagen
+        train = _train_tasks(ctx)
+        summary = run_parallel_datagen(
+            [t.task_id for t in train], DATAGEN_KINDS, ctx["data_root"],
+            _datagen_counts(ctx), n_workers=workers, n_gpus=n_gpus,
+            teacher_kind=ctx["args"].teacher, model_teacher=ctx["args"].model_teacher,
+            log=lambda m: _log("datagen", m))
+        LOG.event("datagen_parallel", workers=workers, n_gpus=n_gpus, **summary)
         return
     from kore.data.gen_groups import generate_groups
     from kore.data.gen_repair import generate_repairs
@@ -656,7 +685,20 @@ def _stage_datagen(ctx):
 
 def _stage_agentic(ctx):
     if ctx["dry"]:
-        _log("agentic", "would generate build/test/bench/pmc tool-use trajectories per task")
+        _log("agentic", "would generate build/test/bench/pmc tool-use trajectories per task "
+                        "(parallel-sharded across GPUs when --datagen-workers != 1)")
+        return
+    # Parallel path: shard agentic trajectory generation across GPUs (resumable).
+    workers, n_gpus = _datagen_plan(ctx)
+    if workers > 1:
+        from kore.data.parallel_datagen import AGENTIC_KINDS, run_parallel_datagen
+        train = _train_tasks(ctx)
+        summary = run_parallel_datagen(
+            [t.task_id for t in train], AGENTIC_KINDS, ctx["data_root"],
+            _datagen_counts(ctx), n_workers=workers, n_gpus=n_gpus,
+            teacher_kind=ctx["args"].teacher, model_teacher=ctx["args"].model_teacher,
+            log=lambda m: _log("agentic", m))
+        LOG.event("agentic_parallel", workers=workers, n_gpus=n_gpus, **summary)
         return
     from kore.data.gen_agentic import generate_agentic_trajectories
     from kore.data.schemas import write_jsonl
@@ -1396,6 +1438,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wins-gens", type=int, default=8, dest="wins_gens")
     p.add_argument("--n-agentic", type=int, default=16, dest="n_agentic")
     p.add_argument("--max-tool-turns", type=int, default=8, dest="max_tool_turns")
+    # Parallel datagen: shard tasks across GPUs with concurrent teacher streams.
+    # 0 = auto (one worker per GPU); 1 = the sequential path. >GPU-count oversubscribes
+    # each GPU to overlap teacher latency (safe: verification runs in short driver
+    # subprocesses). The single highest-leverage speedup for the full-scale run.
+    p.add_argument("--datagen-workers", type=int, default=0, dest="datagen_workers",
+                   help="parallel datagen worker processes (0=auto=one per GPU; 1=sequential)")
     p.add_argument("--sft-total", type=int, default=20000, dest="sft_total")
     p.add_argument("--midtrain-out", default="runs/midtrain", dest="midtrain_out")
     p.add_argument("--sft-out", default="runs/sft", dest="sft_out")

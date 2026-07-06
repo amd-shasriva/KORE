@@ -326,10 +326,18 @@ def measure_kernel(task, label: str, source: str, shape, peaks: dict, arch: str,
 # --------------------------------------------------------------------------- #
 # trajectory assembly: seed + cached group candidates (for check c ordering)
 # --------------------------------------------------------------------------- #
-def trajectory_sources(task, max_kernels: int) -> list[tuple[str, str]]:
-    """(label, source) list: seed first, then distinct cached group candidates."""
+def trajectory_sources(task, max_kernels: int, generate_variants: bool = True) -> list[tuple[str, str]]:
+    """(label, source) trajectory: seed, cached group candidates, then generated
+    optimization variants (tile/vectorize/pipeline/num_warps sweeps of the seed).
+
+    The variants give check (c) a real trajectory of correct-but-varying-speed
+    kernels: they change schedule knobs (tile sizes, num_warps, num_stages,
+    vectorization) that move the kernel through the physical state space while
+    preserving correctness, which is exactly the "in-valley" motion (c) tests.
+    """
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
+    seed = None
     try:
         seed = task.seed_source
         out.append(("seed", seed))
@@ -352,6 +360,28 @@ def trajectory_sources(task, max_kernels: int) -> list[tuple[str, str]]:
                     seen.add(src.strip())
                     if len(out) >= max_kernels:
                         break
+    if generate_variants and seed and len(out) < max_kernels:
+        import random
+        try:
+            from kore.data.mutate import apply_operator, list_operators
+            ops = list_operators("optimize")
+            rng = random.Random(1234)
+            frontier = [seed]
+            while len(out) < max_kernels and frontier:
+                base = frontier.pop(0)
+                for op in ops:
+                    if len(out) >= max_kernels:
+                        break
+                    try:
+                        variant, _ = apply_operator(op, base, rng)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if variant and variant.strip() not in seen:
+                        out.append((f"opt:{op}", variant))
+                        seen.add(variant.strip())
+                        frontier.append(variant)
+        except Exception:  # noqa: BLE001 - mutate unavailable -> seed/groups only
+            pass
     return out[:max_kernels]
 
 
@@ -399,7 +429,9 @@ def check_c(per_task: dict[str, list[KernelMeasure]]) -> dict:
         traj = [m for m in ms if m.correct and m.cand_ms and m.stall_frac is not None]
         if len(traj) < 3:
             continue
-        traj.sort(key=lambda m: (m.speedup or 0.0))  # ascending "improvement"
+        # order by SOL attainment (eta) ascending = "improvement" direction; robust
+        # when no vendor baseline exists (speedup may be None for aiter-only tasks).
+        traj.sort(key=lambda m: (m.eta or 0.0))
         tasks_used += 1
         for a, b in zip(traj, traj[1:]):
             dwall = abs((b.cand_ms - a.cand_ms) / a.cand_ms) if a.cand_ms else 1.0

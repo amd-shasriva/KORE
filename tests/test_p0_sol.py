@@ -77,11 +77,9 @@ def test_ols_r2_perfect_linear():
 
 # ---------------- decomposition ---------------- #
 def test_decompose_counters():
-    counters = {"SQ_WAIT_INST_ANY": 100, "SQ_INSTS_VALU_MFMA_BF16": 300,
-                "SQ_INSTS_VMEM": 100, "SQ_INSTS_VALU": 0}
-    stall, mem = P._decompose(counters)
-    assert stall is not None and 0 <= stall <= 1
-    assert mem is not None and abs(mem - 0.25) < 1e-6  # vmem/(vmem+mfma)=100/400
+    stall, occ = P._decompose({"MemUnitStalled": 40.0, "OccupancyPercent": 75.0})
+    assert abs(stall - 0.40) < 1e-6   # MemUnitStalled/100
+    assert abs(occ - 0.75) < 1e-6     # OccupancyPercent/100
 
 
 def test_decompose_empty():
@@ -89,10 +87,10 @@ def test_decompose_empty():
 
 
 # ---------------- checks + decision ---------------- #
-def _mk(eta=None, speedup=None, stall=None, mem=None, resid=None, correct=True, cand=1.0):
+def _mk(eta=None, speedup=None, stall=None, occ=None, resid=None, correct=True, cand=1.0):
     return P.KernelMeasure(task_id="t", label="l", correct=correct, snr_db=40.0,
                            cand_ms=cand, vendor_ms=None, t_min_ms=0.5, eta=eta,
-                           speedup=speedup, residual_ms=resid, stall_frac=stall, mem_frac=mem)
+                           speedup=speedup, residual_ms=resid, stall_frac=stall, occupancy=occ)
 
 
 def test_check_a_pass():

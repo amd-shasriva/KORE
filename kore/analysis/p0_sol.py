@@ -147,8 +147,8 @@ class KernelMeasure:
     speedup: Optional[float]          # vendor_ms / cand_ms
     residual_ms: Optional[float]      # cand_ms - t_min_ms
     counters: dict = field(default_factory=dict)
-    stall_frac: Optional[float] = None
-    mem_frac: Optional[float] = None
+    stall_frac: Optional[float] = None       # MemUnitStalled / 100
+    occupancy: Optional[float] = None         # OccupancyPercent / 100
     error: Optional[str] = None
 
 
@@ -217,63 +217,78 @@ def _correctness(driver: Path, shape_args: list[str], env: dict,
     return snr, ac, err
 
 
-def _profile_pmc(driver: Path, shape_args: list[str], counters: list[str],
-                 env: dict, timeout: int) -> dict:
-    """Run the candidate under rocprofv3 --pmc; return aggregated counter dict.
-    Best-effort: any failure returns {} so checks (b)/(c) degrade gracefully."""
+# gfx950/CDNA4 derived metrics (verified via `rocprofv3 --list-avail`). These are
+# the named residual components: occupancy, memory-stall, MFMA (compute) utilization,
+# and active cycles. NB: gfx950 renamed the raw counters (e.g.
+# SQ_INSTS_VALU_MFMA_MOPS_BF16, not ..._MFMA_BF16), so the old SQ_* names collect
+# nothing — we request the derived metrics instead.
+_PMC_METRICS = ["OccupancyPercent", "MemUnitStalled", "MfmaUtil", "GRBM_GUI_ACTIVE"]
+
+
+def _profile_pmc(driver: Path, shape_args: list[str], env: dict, timeout: int) -> dict:
+    """Run the candidate under rocprofv3 --pmc; return the main kernel's counters.
+
+    rocprofv3's gfx950 CSV is LONG format (one row per dispatch x counter, columns
+    ``Kernel_Name, Counter_Name, Counter_Value, Start_Timestamp, End_Timestamp``).
+    We group by kernel, pick the one with the largest total GPU time (the compute
+    kernel, not input setup), and return its mean counter values. Best-effort: any
+    failure returns {} so checks (b)/(c) degrade gracefully.
+    """
     if not shutil.which("rocprofv3"):
         return {}
+    import csv as _csv
+    import glob as _glob
     outdir = Path(tempfile.mkdtemp(prefix="p0_pmc_"))
-    cmd = ["rocprofv3", "--pmc", *counters, "-d", str(outdir), "--output-format", "csv",
+    cmd = ["rocprofv3", "--pmc", *_PMC_METRICS, "-d", str(outdir), "--output-format", "csv",
            "--", sys.executable, str(driver), "--bench-mode", "--impl", "candidate",
            "--warmup", "2", "--iters", "5", *shape_args]
     try:
         rc, out, timed = _exec(cmd, driver.parent, env, timeout)
         if timed or rc != 0:
             return {}
-        try:
-            from kore.verifier.parsers.rocprofv3 import parse_rocprofv3_csv
-        except Exception:  # noqa: BLE001
-            return {}
-        agg: dict[str, float] = {}
-        import glob as _glob
-        csvs = _glob.glob(str(outdir / "*.csv")) + _glob.glob(str(outdir / "**/*.csv"), recursive=True)
+        csvs = _glob.glob(str(outdir / "**" / "*counter_collection.csv"), recursive=True) \
+            + _glob.glob(str(outdir / "*counter_collection.csv"))
+        per_kernel: dict[str, dict] = {}
         for cp in csvs:
             try:
-                for k in parse_rocprofv3_csv(cp):
-                    for name, val in k.counters.items():
-                        agg[name] = agg.get(name, 0.0) + float(val)
+                with open(cp, newline="") as f:
+                    for row in _csv.DictReader(f):
+                        kn = row.get("Kernel_Name") or ""
+                        cname = row.get("Counter_Name") or ""
+                        if not kn or not cname:
+                            continue
+                        try:
+                            cval = float(row.get("Counter_Value", "nan"))
+                            dur = float(row.get("End_Timestamp", 0)) - float(row.get("Start_Timestamp", 0))
+                        except (TypeError, ValueError):
+                            continue
+                        d = per_kernel.setdefault(kn, {"dur": 0.0, "vals": {}})
+                        d["dur"] += max(dur, 0.0)
+                        d["vals"].setdefault(cname, []).append(cval)
             except Exception:  # noqa: BLE001
                 continue
-        return agg
+        if not per_kernel:
+            return {}
+        main = max(per_kernel.values(), key=lambda d: d["dur"])
+        return {name: (sum(v) / len(v)) for name, v in main["vals"].items() if v}
     finally:
         shutil.rmtree(outdir, ignore_errors=True)
 
 
 def _decompose(counters: dict) -> tuple[Optional[float], Optional[float]]:
-    """First-order stall / memory fractions from SQ counters (0..1). None if absent.
+    """Named residual fractions from gfx950 derived metrics: (stall_frac, occupancy).
 
-    stall_frac ~ wait cycles vs issued work; mem_frac ~ vmem vs (vmem+mfma). These
-    are the counter-derived regressors for the residual decomposition (check b).
-    Deliberately simple + documented; refine with derived occupancy metrics later.
+    ``MemUnitStalled`` and ``OccupancyPercent`` are rocprofv3 derived metrics on a
+    0..100 scale; we normalize to 0..1. ``stall_frac`` is the memory-stall fraction
+    (time the memory unit was stalled) and ``occupancy`` is achieved GPU occupancy.
+    These are the counter-derived regressors for the residual decomposition (check b):
+    residual time is expected to grow with stall and with the occupancy *deficit*.
     """
-    def c(*names):
-        for n in names:
-            if n in counters:
-                return float(counters[n])
-        return 0.0
-
-    wait_any = c("SQ_WAIT_INST_ANY")
-    wait_lds = c("SQ_WAIT_INST_LDS")
-    wait_vmem = c("SQ_WAIT_INST_VMEM")
-    mfma = c("SQ_INSTS_VALU_MFMA_BF16", "SQ_INSTS_VALU_MFMA_F16", "SQ_INSTS_VALU_MFMA_F32")
-    valu = c("SQ_INSTS_VALU")
-    vmem = c("SQ_INSTS_VMEM")
-    work = mfma + valu + vmem
-    wait = wait_any + wait_lds + wait_vmem
-    stall_frac = (wait / (wait + work)) if (wait + work) > 0 else None
-    mem_frac = (vmem / (vmem + mfma)) if (vmem + mfma) > 0 else None
-    return stall_frac, mem_frac
+    stall = counters.get("MemUnitStalled")
+    occ = counters.get("OccupancyPercent")
+    stall_frac = (float(stall) / 100.0) if stall is not None else None
+    occupancy = (float(occ) / 100.0) if occ is not None else None
+    return stall_frac, occupancy
 
 
 def measure_kernel(task, label: str, source: str, shape, peaks: dict, arch: str,
@@ -291,11 +306,10 @@ def measure_kernel(task, label: str, source: str, shape, peaks: dict, arch: str,
         cand_ms = _bench(driver, shape.as_args(), "candidate", warmup, iters, env, timeout) if correct else None
         vendor_ms = _bench(driver, shape.as_args(), "reference", warmup, iters, env, timeout)
         counters = {}
-        stall_frac = mem_frac = None
+        stall_frac = occupancy = None
         if do_pmc and correct and cand_ms:
-            from kore.verifier.pmc import COUNTER_SETS
-            counters = _profile_pmc(driver, shape.as_args(), COUNTER_SETS["full"], env, timeout)
-            stall_frac, mem_frac = _decompose(counters)
+            counters = _profile_pmc(driver, shape.as_args(), env, timeout)
+            stall_frac, occupancy = _decompose(counters)
         eta = (t_min / cand_ms) if (cand_ms and t_min == t_min) else None
         speedup = (vendor_ms / cand_ms) if (vendor_ms and cand_ms) else None
         residual = (cand_ms - t_min) if (cand_ms and t_min == t_min) else None
@@ -303,7 +317,7 @@ def measure_kernel(task, label: str, source: str, shape, peaks: dict, arch: str,
             task_id=task.task_id, label=label, correct=correct, snr_db=snr,
             cand_ms=cand_ms, vendor_ms=vendor_ms, t_min_ms=t_min, eta=eta,
             speedup=speedup, residual_ms=residual, counters=counters,
-            stall_frac=stall_frac, mem_frac=mem_frac, error=err if not correct else None,
+            stall_frac=stall_frac, occupancy=occupancy, error=err if not correct else None,
         )
     finally:
         shutil.rmtree(wd, ignore_errors=True)
@@ -355,18 +369,25 @@ def check_a(measures: list[KernelMeasure]) -> dict:
 
 
 def check_b(measures: list[KernelMeasure]) -> dict:
-    rows = [(m.stall_frac, m.mem_frac, m.residual_ms) for m in measures
-            if m.stall_frac is not None and m.mem_frac is not None and m.residual_ms is not None]
+    # regress the residual time on counter-derived "time lost" terms:
+    #   t_stall = stall_frac * measured ; t_occ_deficit = (1 - occupancy) * measured
+    rows = [m for m in measures if m.stall_frac is not None and m.occupancy is not None
+            and m.residual_ms is not None and m.cand_ms]
     if len(rows) < 5:
         return {"r2": None, "n": len(rows), "verdict": "SKIP",
                 "note": "need >=5 kernels with PMC counters + residual"}
-    X = [[r[0], r[1]] for r in rows]
-    y = [r[2] for r in rows]
+    X = [[m.stall_frac * m.cand_ms, (1.0 - m.occupancy) * m.cand_ms] for m in rows]
+    y = [m.residual_ms for m in rows]
     r2 = ols_r2(X, y)
     if r2 is None:
         return {"r2": None, "n": len(rows), "verdict": "WEAK", "note": "numpy absent / under-determined"}
     verdict = "PASS" if r2 >= 0.7 else "WEAK"
     return {"r2": r2, "n": len(rows), "verdict": verdict}
+
+
+def _dominant_residual(m: KernelMeasure) -> float:
+    """Dominant named residual component: max(stall fraction, occupancy deficit)."""
+    return max(m.stall_frac or 0.0, 1.0 - (m.occupancy if m.occupancy is not None else 1.0))
 
 
 def check_c(per_task: dict[str, list[KernelMeasure]]) -> dict:
@@ -384,7 +405,7 @@ def check_c(per_task: dict[str, list[KernelMeasure]]) -> dict:
             dwall = abs((b.cand_ms - a.cand_ms) / a.cand_ms) if a.cand_ms else 1.0
             if dwall < flat_tol:
                 in_valley += 1
-                if (b.stall_frac or 0) < (a.stall_frac or 0):  # dominant residual term falls
+                if _dominant_residual(b) < _dominant_residual(a):  # dominant residual term falls
                     monotone += 1
     if in_valley < 3:
         return {"frac": None, "in_valley_pairs": in_valley, "tasks": tasks_used,

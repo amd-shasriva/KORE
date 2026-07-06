@@ -1,62 +1,74 @@
-# P0 (roofline / Speed-of-Light) — preliminary results on gfx950 (MI350)
+# P0 (roofline / Speed-of-Light) results — native gfx950 (MI350X)
 
-Status: **pipeline validated on-GPU; full statistical verdict pending more vendor baselines.**
+Status: **native stack working; check (b) PASSES; checks (a)/(c) partially blocked (documented below).**
 
-## Node
-- Host: `cv350-...` — 8× **gfx950** (MI350-class, CDNA4), ROCm 7.2.3, `rocprofv3` present.
-- Disk 2.2 GB/s, 3 TB RAM. Node is healthy.
+## Node & stack
+- Host `cv350-...` — 8× **gfx950** (AMD Instinct **MI350X**, CDNA4), ROCm 7.2.3, `rocprofv3`.
+- **Native stack (no override):** `torch 2.10.0+rocm7.0` (hip 7.0.51831) + `pytorch-triton-rocm 3.5.1`.
+  `torch.cuda.get_arch_list()` includes `gfx950`; device reports `AMD Instinct MI350X`. Verified
+  real bf16 matmul + Triton kernels run natively.
+- Disk 2.2 GB/s, 3 TB RAM. (Torch's public rocm6.4 wheel rejects gfx950; rocm7.0 is required and works.)
 
-## Software stack (how P0 runs today)
-The only public PyTorch-ROCm wheel that installed cleanly is `torch==2.9.1+rocm6.4`, whose
-bundled ROCm-6.4 runtime **rejects gfx950** (`Unsupported HSA device gfx950 ... hipErrorNoDevice`).
-Workaround for **preliminary** runs: `HSA_OVERRIDE_GFX_VERSION=9.4.2`, which makes HIP treat the
-CDNA4 device as its CDNA3 sibling **gfx942**. gfx942 kernels are ISA-compatible enough to execute
-on gfx950 (verified: real bf16 matmul + a Triton kernel run correctly).
+## Roofline model
+`T_min = max(W_flops/P_peak, Q_bytes/B_peak)`, `eta = T_min/T_measured` (SOL attainment).
+gfx950 peaks (approx, env-overridable via `KORE_PEAK_{BF16,FP8,HBM_BW}`): HBM 8.0 TB/s, bf16 2.5 PF/s, fp8 5.0 PF/s.
 
-- `torch 2.9.1+rocm6.4` + `pytorch-triton-rocm 3.5.1`, run under `HSA_OVERRIDE_GFX_VERSION=9.4.2`.
-- **Caveat:** these are gfx942-compiled kernels on gfx950 hardware → performance is *indicative,
-  not native-gfx950-tuned*. Fine for validating the **methodology**; not for headline perf claims.
-- **Native path identified** for real runs: `torch 2.10.0+rocm7.0`
-  (`https://download.pytorch.org/whl/rocm7.0`) or AMD's `torch 2.11.0+rocm7.13` gfx950 nightly
-  (`https://rocm.nightlies.amd.com/v2/gfx950-dcgpu/`).
+## Full native sweep — all 15 tasks (seed kernels)
+Every seed is **correct** on native gfx950 (torch fp32 oracle). η = SOL attained; speedup vs vendor
+where a vendor baseline was available (torch/hipBLASLt; aiter pending — see below).
 
-## Roofline model (kore/analysis/rooflines.py)
-`T_min = max(W_flops / P_peak, Q_bytes / B_peak)`, `eta = T_min / T_measured` (SOL attainment).
-gfx950 peaks used (approximate; env-overridable via `KORE_PEAK_{BF16,FP8,HBM_BW}`):
-HBM 8.0 TB/s, bf16 2.5 PFLOP/s, fp8 5.0 PFLOP/s.
-
-| task | dtype | bound | AI (FLOP/B) | T_min |
+| task | bound | η (SOL) | speedup vs vendor | note |
 |---|---|---|---|---|
-| gemm_bf16 (4096³) | bf16 | compute | 1365 | 55.0 µs |
-| softmax_bf16 (4096²) | bf16 | memory | 1.25 | 8.4 µs |
+| silu_mul_bf16 | memory | 38.2% | – | aiter pending |
+| fused_add_rmsnorm_bf16 | memory | 37.0% | – | aiter pending |
+| gelu_tanh_bf16 | memory | 35.1% | 0.90× | torch F.gelu |
+| rmsnorm_aiter | memory | 34.1% | – | aiter pending |
+| layernorm_bf16 | memory | 33.7% | – | aiter pending |
+| gemm_bf16 | compute | 21.4% | **0.46×** | hipBLASLt |
+| softmax_bf16 | memory | 16.4% | 0.59× | torch.softmax |
+| quant_fp8_pertoken | memory | 12.9% | – | aiter pending |
+| flash_attn_decode_bf16 | memory | 10.1% | – | aiter pending |
+| rope_bf16 | memory | 9.8% | – | aiter pending |
+| paged_attn_decode_bf16 | memory | 2.2% | – | aiter pending |
+| flash_attn_prefill_bf16 | compute | 1.3% | – | aiter pending |
+| fused_moe_silu_bf16 | compute | 0.8% | – | aiter pending |
+| gemm_fp8_a8w8 | compute | 0.6% | – | aiter pending |
+| topk_softmax_bf16 | memory | 0.2% | – | aiter pending |
 
-## Preliminary measurements (seed kernels, gfx942-override)
-| task | correct | η (SOL) | speedup vs vendor | vendor |
-|---|---|---|---|---|
-| gemm_bf16 | ✅ | 19.1% | **0.974×** | hipBLASLt (torch.matmul) |
-| softmax_bf16 | ✅ | 16.0% | 0.581× | torch.softmax |
+**Reading:** the naive seeds sit far below SOL exactly on the hard operators (attention, MoE, fp8
+GEMM at <3%), and closer on memory-bound norms/activations (34–38%). The vendor-beating gap is
+real: seed GEMM is 0.46× hipBLASLt.
 
-**Reading:** the seed GEMM is correct but ~0.97× the vendor and only ~19% of the roofline —
-the "correct-but-slow wall" appears in the very first measurement. This is exactly the regime
-KORE targets.
+## The three checks (native, PMC on)
+```
+(a) eta predicts speedup   : rho=0.50 (n=3)     -> WEAK   (only torch-baseline tasks have a vendor speedup yet)
+(b) residual decomp R^2    : 0.997  (n=17)      -> PASS   (residual = stall + occupancy-deficit time; STRONG)
+(c) monotone-in-valley frac: -      (pairs=1)   -> SKIP   (need >=3 correct kernels/task as trajectories)
+```
 
-## What's validated
-- End-to-end P0 path on real GPU: stage kernel → Triton compile → correctness (SNR) →
-  candidate bench → vendor bench → analytic `T_min` → `eta` + speedup. ✅
-- `kore/analysis/{rooflines,p0_sol}.py` + 17 CPU tests. ✅
+**check (b) is the headline preliminary result:** on real gfx950, the runtime residual
+`(T_measured - T_min)` decomposes into counter-derived named terms (memory-stall time +
+occupancy-deficit time) with **R² = 0.997** across 17 kernels. The "named gradient" the KORE
+paradigm relies on is measurable — not drowned by cross-terms.
 
-## What a full GO/PARTIAL/FALLBACK/PIVOT verdict still needs
-1. **More vendor baselines** — install `aiter` (gfx950) to unlock rmsnorm/silu/layernorm/rope/
-   quant/moe/attention baselines (→ ≥5–10 `(eta, speedup)` points for check (a)).
-2. **More correct candidate kernels per task** — current `data/groups/*` candidates largely fail
-   under the override; need fresh datagen or the value-model candidates for check (c) trajectories.
-3. **PMC decomposition** — validate `rocprofv3` counter collection under profiling (check (b)).
-4. **Native gfx950 torch** (rocm7.0) for non-override, headline-grade perf numbers.
+## PMC (gfx950 fix)
+gfx950/CDNA4 renamed raw counters, so the original SQ_* names collected nothing. Now using
+rocprofv3 **derived metrics** (`OccupancyPercent`, `MemUnitStalled`, `MfmaUtil`, `GRBM_GUI_ACTIVE`),
+parsing the long-format `*_counter_collection.csv` and picking the longest-running compute kernel.
+
+## Remaining for a complete GO/PARTIAL/FALLBACK/PIVOT verdict
+1. **check (a) needs more vendor baselines.** aiter was cloned + built for gfx950, and
+   `aiter_ref.py` is now version-robust (resolves `aiter.ops.*`). BUT the current aiter kernels
+   require **triton ≥ 3.6.0**, while the torch 2.10+rocm7.0 stack ships **triton 3.5.1**. Options:
+   (i) move to AMD's `torch 2.11+rocm7.13` + `triton 3.6` gfx950 nightly (another ~4.8 GB), or
+   (ii) use aiter CK `_cu` variants (no triton dep) with adjusted signatures, or
+   (iii) add torch-optimized baselines (F.rms_norm/F.layer_norm/SDPA) as the framework bar.
+2. **check (c) needs trajectories** — ≥3 correct kernels per task (seed + variants) so the
+   dominant-residual-falls-while-wall-flat test has data. Generate via the mutation/evolve operators.
 
 ## Reproduce
 ```bash
 source ~/kore-venv/bin/activate
-HSA_OVERRIDE_GFX_VERSION=9.4.2 python -m kore.analysis.p0_sol \
-  --tasks gemm_bf16,softmax_bf16 --arch gfx950 --warmup 5 --iters 20 --no-pmc \
-  --out runs/p0_override.json
+python -m kore.analysis.p0_sol --arch gfx950 --warmup 5 --iters 20 \
+  --max-kernels-per-task 6 --out runs/p0_full.json      # native, no override
 ```

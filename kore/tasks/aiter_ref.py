@@ -22,12 +22,40 @@ FP8_DTYPE = torch.float8_e4m3fnuz
 FP8_MAX = float(torch.finfo(FP8_DTYPE).max)  # 240.0
 
 
+# AITER moved its ops from top-level (``aiter.rms_norm``) into submodules
+# (``aiter.ops.rmsnorm.rms_norm``) in newer releases. Resolve version-robustly:
+# try top-level first (old API), then the known ``aiter.ops.*`` submodules.
+_AITER_OP_MODULES = (
+    "ops.rmsnorm", "ops.norm", "ops.activation", "ops.gemm_op_a8w8",
+    "ops.rope", "ops.quant", "ops.mha", "ops.attention", "ops.paged_attn",
+    "ops.moe", "ops.moe_op", "ops.topk", "ops",
+)
+
+
+def _aiter_fn(name: str):
+    """Return AITER callable ``name`` from top-level or an ``aiter.ops.*`` submodule."""
+    import importlib
+
+    import aiter
+
+    fn = getattr(aiter, name, None)
+    if callable(fn):
+        return fn
+    for sub in _AITER_OP_MODULES:
+        try:
+            mod = importlib.import_module(f"aiter.{sub}")
+        except Exception:  # noqa: BLE001 - submodule may be absent/broken in some builds
+            continue
+        fn = getattr(mod, name, None)
+        if callable(fn):
+            return fn
+    raise AttributeError(f"aiter has no callable '{name}' (checked top-level + ops.*)")
+
+
 # --- RMSNorm family -------------------------------------------------------
 def aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """AITER CK RMSNorm: ``aiter.rms_norm(input, weight, epsilon)`` -> Tensor."""
-    import aiter
-
-    return aiter.rms_norm(x, weight, eps)
+    return _aiter_fn("rms_norm")(x, weight, eps)
 
 
 def aiter_fused_add_rms_norm(
@@ -43,9 +71,7 @@ def aiter_fused_add_rms_norm(
     We operate on the passed tensors directly (caller owns cloning for a fair
     benchmark) and return ``(normed, new_residual)`` = ``(x, residual)``.
     """
-    import aiter
-
-    aiter.fused_add_rms_norm_cu(x, residual, weight, eps)
+    _aiter_fn("fused_add_rms_norm_cu")(x, residual, weight, eps)
     return x, residual
 
 
@@ -55,11 +81,9 @@ def aiter_silu_and_mul(x: torch.Tensor) -> torch.Tensor:
 
     Input is (M, 2*inter); returns SiLU(x[:, :inter]) * x[:, inter:] as (M, inter).
     """
-    import aiter
-
     inter = x.shape[-1] // 2
     out = torch.empty((*x.shape[:-1], inter), dtype=x.dtype, device=x.device)
-    aiter.silu_and_mul(out, x)
+    _aiter_fn("silu_and_mul")(out, x)
     return out
 
 
@@ -88,9 +112,7 @@ def aiter_gemm_a8w8(
     Layout (CK): XQ [M, K], WQ [N, K] (computes ``X @ W^T``), x_scale [M, 1],
     w_scale [1, N], both fp32. Returns [M, N] in ``out_dtype``.
     """
-    import aiter
-
-    return aiter.gemm_a8w8(xq, wq, x_scale, w_scale, dtype=out_dtype)
+    return _aiter_fn("gemm_a8w8")(xq, wq, x_scale, w_scale, dtype=out_dtype)
 
 
 # --- Dense bf16 GEMM ------------------------------------------------------
@@ -114,9 +136,7 @@ def aiter_layer_norm(
     2D row LayerNorm over the last dim (mean + variance subtraction), affine
     with weight+bias. Returns a tensor of the same shape/dtype.
     """
-    import aiter
-
-    return aiter.layer_norm(x, weight, bias, eps)
+    return _aiter_fn("layer_norm")(x, weight, bias, eps)
 
 
 # --- Softmax --------------------------------------------------------------
@@ -155,9 +175,7 @@ def aiter_rope_neox(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     nope_first=False)`` -> rotated tensor (S, B, H, D). This is the vendor HIP
     rope kernel used by the serving stack.
     """
-    import aiter
-
-    return aiter.rope_fwd(x, freqs, 0, True, False, False)
+    return _aiter_fn("rope_fwd")(x, freqs, 0, True, False, False)
 
 
 # --- Dynamic per-token fp8 quantization ----------------------------------
@@ -169,10 +187,8 @@ def aiter_dynamic_per_token_quant(x: torch.Tensor):
     in place (returns None). ``x ≈ out.float() * scales``. This is the vendor
     quant kernel the serving stack calls for W8A8 / fp8 activation quant.
     """
-    import aiter
-
     M, N = x.shape
     out = torch.empty((M, N), dtype=FP8_DTYPE, device=x.device)
     scales = torch.empty((M, 1), dtype=torch.float32, device=x.device)
-    aiter.dynamic_per_token_scaled_quant(out, x, scales)
+    _aiter_fn("dynamic_per_token_scaled_quant")(out, x, scales)
     return out, scales

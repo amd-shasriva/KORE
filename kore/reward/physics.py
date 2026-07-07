@@ -156,14 +156,18 @@ def compute_residual_reward(obs: Observation, physics: PhysicsSignal, source: st
 # import cycle with kore.analysis.p0_sol.
 # --------------------------------------------------------------------------- #
 def observation_from_measure(m, dtype: str = "bf16") -> Observation:
-    """Build an :class:`Observation` from a ``KernelMeasure``-like object."""
+    """Build an :class:`Observation` from a ``KernelMeasure``-like object.
+
+    Occupancy is carried by the :class:`PhysicsSignal` (see
+    :func:`physics_from_measure`), not the Observation — the Observation only needs
+    the correctness-gate inputs that :func:`compute_reward` consumes.
+    """
     return Observation(
         compiled=True,
         snr_db=getattr(m, "snr_db", None),
         wall_ms=getattr(m, "cand_ms", None),
         baseline_ms=getattr(m, "vendor_ms", None),
         validation_passed=bool(getattr(m, "correct", False)),
-        occupancy=getattr(m, "occupancy", None),
         dtype=dtype,
     )
 

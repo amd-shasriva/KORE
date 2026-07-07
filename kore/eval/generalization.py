@@ -5,8 +5,10 @@ stall/occupancy residual) is *operator-independent*, so a policy trained to
 descend the residual on some operator families should transfer to families it
 never saw. This harness makes that claim falsifiable WITHOUT any training:
 
-  1. Partition the operator zoo into disjoint FAMILIES (norm, activation, gemm,
-     attention, moe, reduction, positional, quant).
+  1. Classify every task into a disjoint operator FAMILY (gemm, norm, activation,
+     reduction, attention, moe, positional, quant) via :func:`classify` — a
+     registry-independent, ordered pattern match on the task id / operation, so it
+     scales to the full authoring-engine task zoo (100s of ops) and future ops.
   2. Hold out ENTIRE families (e.g. train excludes attention + moe) and assert
      there is no task- or family-level leakage between the train and held-out
      splits.
@@ -15,59 +17,82 @@ never saw. This harness makes that claim falsifiable WITHOUT any training:
      (as produced by ``kore.analysis.p0_sol``). The same call runs later against
      a trained checkpoint's measured kernels -- it is a pure offline eval and
      NEVER launches training.
-
-This is deliberately measurement-consuming: it does not itself run the GPU. Feed
-it the p0 study JSON (seed/zero-shot kernels now, a checkpoint's kernels later)
-and it reports transfer to unseen families.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
 from typing import Optional
 
 from kore.reward.physics import (
     DEFAULT_PHYSICS_WEIGHT,
-    PhysicsSignal,
     compute_residual_reward,
     observation_from_measure,
     physics_from_measure,
 )
 
 # --------------------------------------------------------------------------- #
-# Operator families: the single source of truth for the holdout split. Every
-# KORE task id maps to exactly one family. Keep in sync with tasks/registry.py.
+# Operator-family classifier. Ordered rules: FIRST match wins. Matches on the
+# task id (e.g. "gen_gemm_silu_fp16") or a raw operation ("gemm_silu") -- task
+# ids encode the operation, so this is registry-independent. NB order matters:
+# gemm-epilogue fusions (gemm_silu) must hit "gemm" before "activation", and
+# "row_"/"softmax" hit "reduction" while bare "maximum"/"minimum" fall through to
+# the "activation" elementwise catch-all.
 # --------------------------------------------------------------------------- #
-FAMILIES: dict[str, set[str]] = {
-    "norm": {"rmsnorm_aiter", "layernorm_bf16", "fused_add_rmsnorm_bf16"},
-    "activation": {"silu_mul_bf16", "gelu_tanh_bf16"},
-    "gemm": {"gemm_bf16", "gemm_fp8_a8w8"},
-    "attention": {"flash_attn_decode_bf16", "flash_attn_prefill_bf16",
-                  "paged_attn_decode_bf16"},
-    "moe": {"fused_moe_silu_bf16", "topk_softmax_bf16"},
-    "reduction": {"softmax_bf16"},
-    "positional": {"rope_bf16"},
-    "quant": {"quant_fp8_pertoken"},
-}
+FAMILY_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("attention",  ("attn", "attention", "flash", "paged")),
+    ("moe",        ("moe", "expert", "topk")),
+    ("gemm",       ("gemm", "matmul", "bmm")),
+    ("norm",       ("rmsnorm", "layernorm", "layer_norm", "rms_norm", "groupnorm", "batchnorm", "norm")),
+    ("positional", ("rope", "rotary")),
+    ("quant",      ("quant",)),
+    ("reduction",  ("softmax", "row_", "reduce", "argmax", "cumsum")),
+    ("activation", ()),  # catch-all: elementwise ops + (gated) activations
+]
+FAMILIES: tuple[str, ...] = tuple(f for f, _ in FAMILY_RULES)
+
+
+def classify(name: str) -> str:
+    """Classify a task id OR operation string into one operator family."""
+    s = (name or "").lower()
+    for fam, keys in FAMILY_RULES:
+        if not keys:
+            return fam  # catch-all
+        if any(k in s for k in keys):
+            return fam
+    return "activation"
 
 
 def family_of(task_id: str) -> Optional[str]:
-    """Family for a task id, or None if it is not registered in any family."""
-    for fam, members in FAMILIES.items():
-        if task_id in members:
-            return fam
-    return None
+    """Operator family for a task id (None only for an empty id)."""
+    if not task_id:
+        return None
+    return classify(task_id)
 
 
-def all_registered_tasks() -> set[str]:
-    out: set[str] = set()
-    for members in FAMILIES.values():
-        out |= members
-    return out
+def all_families() -> tuple[str, ...]:
+    return FAMILIES
+
+
+def registry_task_ids() -> list[str]:
+    """All task ids from the KORE registry (best-effort; empty if unavailable)."""
+    try:
+        from kore.tasks.registry import all_tasks
+        return [t.task_id for t in all_tasks()]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def families_of_tasks(task_ids) -> dict:
+    """Group task ids by family -> {family: sorted[task_id]}."""
+    out: dict[str, list] = {}
+    for t in task_ids:
+        out.setdefault(family_of(t), []).append(t)
+    return {k: sorted(v) for k, v in out.items()}
 
 
 @dataclass
@@ -90,27 +115,22 @@ class HoldoutSplit:
 
 def make_holdout_split(heldout_families: list[str],
                        task_ids: Optional[list[str]] = None) -> HoldoutSplit:
-    """Build a family-level holdout split.
+    """Build a family-level holdout split over ``task_ids`` (default: the registry).
 
-    ``heldout_families`` are excluded from training; every other family is a
-    training family. ``task_ids`` restricts the universe (defaults to all
-    registered tasks) so the split reflects only tasks actually present.
-    Raises ``ValueError`` for an unknown family or an unregistered task.
+    ``heldout_families`` are excluded from training; every other present family is a
+    training family. Raises ``ValueError`` for an unknown family name.
     """
-    universe = set(task_ids) if task_ids is not None else all_registered_tasks()
-    unknown = [t for t in universe if family_of(t) is None]
-    if unknown:
-        raise ValueError(f"tasks not in any family: {sorted(unknown)}")
     bad_fam = [f for f in heldout_families if f not in FAMILIES]
     if bad_fam:
-        raise ValueError(f"unknown families: {bad_fam} (known: {sorted(FAMILIES)})")
-    held_fams = set(heldout_families)
-    train_fams = [f for f in FAMILIES if f not in held_fams]
-    heldout_tasks = sorted(t for t in universe if family_of(t) in held_fams)
-    train_tasks = sorted(t for t in universe if family_of(t) not in held_fams)
+        raise ValueError(f"unknown families: {bad_fam} (known: {list(FAMILIES)})")
+    universe = list(task_ids) if task_ids is not None else registry_task_ids()
+    held = set(heldout_families)
+    present = {family_of(t) for t in universe if t}
+    heldout_tasks = sorted(t for t in universe if family_of(t) in held)
+    train_tasks = sorted(t for t in universe if family_of(t) not in held)
     split = HoldoutSplit(
-        heldout_families=list(held_fams),
-        train_families=train_fams,
+        heldout_families=sorted(held),
+        train_families=sorted(present - held),
         heldout_tasks=heldout_tasks,
         train_tasks=train_tasks,
     )
@@ -238,7 +258,6 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     measures = load_measures(Path(args.measures))
     present = sorted({m.get("task_id") for m in measures if m.get("task_id")})
-    present = [t for t in present if family_of(t) is not None]
     heldout = [f.strip() for f in args.heldout.split(",") if f.strip()]
     split = make_holdout_split(heldout, task_ids=present or None)
     result = evaluate_generalization(split, measures, physics_weight=args.physics_weight)

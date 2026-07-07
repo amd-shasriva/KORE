@@ -1,0 +1,40 @@
+# KORE conductor/gfx runtime — VERIFIED working set (2026-07-07), Python 3.10.
+#
+# The venv persists under your account, so you normally don't reinstall. This file
+# exists to rebuild it reproducibly if it's ever lost. ORDER MATTERS:
+#
+#   python -m venv ~/kore-venv && source ~/kore-venv/bin/activate
+#   # 1) ROCm torch FIRST, from the ROCm index (PyPI would install a CUDA build that
+#   #    breaks the GPU: torch.cuda.is_available() -> False):
+#   pip install torch==2.10.0+rocm7.0 pytorch-triton-rocm==3.5.1 \
+#       --index-url https://download.pytorch.org/whl/rocm7.0
+#   # 2) then the rest WITH torch pinned so nothing upgrades it to a CUDA wheel:
+#   printf 'torch==2.10.0+rocm7.0\n' > /tmp/torch.txt
+#   pip install -c /tmp/torch.txt -r requirements-conductor.txt \
+#       --extra-index-url https://download.pytorch.org/whl/rocm7.0
+#
+# Version caps matter: transformers<5 / trl<1 keep the training APIs this code was
+# written against (trl uses `processing_class`, SFTConfig `max_length`, native GRPO
+# loop). Newer majors both break those APIs and require torch>2.10 (forcing a CUDA
+# torch). Do NOT `pip install -U`.
+
+# --- training / RL stack (train + value extras) ---
+transformers==4.57.6
+accelerate==1.14.0
+datasets==3.6.0
+trl==0.29.1
+peft==0.19.1
+xgboost==3.2.0
+scikit-learn==1.7.2
+
+# --- teacher (AMD LLM gateway) ---
+anthropic==0.116.0
+
+# --- base ---
+numpy==2.2.6
+pyyaml>=6.0
+
+# torch / pytorch-triton-rocm are installed separately from the ROCm index (step 1
+# above); pinned here for reference only:
+# torch==2.10.0+rocm7.0
+# pytorch-triton-rocm==3.5.1

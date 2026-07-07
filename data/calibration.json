@@ -1,0 +1,24 @@
+{
+  "arch": "gfx950",
+  "matmul_n": 8192,
+  "hbm_triad_mb": 1024,
+  "measured": {
+    "hbm_bytes_per_s": 4598902124222.504,
+    "bf16_flops_per_s": 1272550180309179.2,
+    "fp8_flops_per_s": null
+  },
+  "datasheet": {
+    "hbm_bytes_per_s": 8000000000000.0,
+    "bf16_flops_per_s": 2500000000000000.0,
+    "fp8_flops_per_s": 5000000000000000.0
+  },
+  "measured_over_datasheet": {
+    "hbm": 0.574862765527813,
+    "bf16": 0.5090200721236717,
+    "fp8": null
+  },
+  "env_exports": {
+    "KORE_PEAK_HBM_BW": "4.598902e+12",
+    "KORE_PEAK_BF16": "1.272550e+15"
+  }
+}

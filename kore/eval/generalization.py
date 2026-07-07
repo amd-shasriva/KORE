@@ -202,6 +202,8 @@ def evaluate_generalization(split: HoldoutSplit, measures: list[dict],
         sig = physics_from_measure(rec)
         rr = compute_residual_reward(obs, sig, source="", dtype=dtype,
                                      physics_weight=physics_weight)
+        if not rr.correct:  # honor the reward's own correctness gate, not just the flag
+            continue
         eta = rec.eta if rec.eta is not None else (
             rec.t_min_ms / rec.cand_ms if rec.cand_ms else None)
         agg = per_family.setdefault(fam, {"etas": [], "rewards": [], "speedups": [],

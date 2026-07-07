@@ -9,11 +9,21 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Optional
 
 from kore.reward.reward import Observation
+
+# Field set of the CURRENT Observation. Replay JSONL written by older code may
+# carry removed fields (e.g. occupancy/registers) or lack new ones; filtering to
+# this set makes the cache forward/backward compatible instead of silently
+# dropping otherwise-valid cached evaluations (bench is the scarce resource).
+_OBS_FIELDS = {f.name for f in fields(Observation)}
+
+
+def _obs_from_dict(rec: dict) -> Observation:
+    return Observation(**{k: v for k, v in rec.items() if k in _OBS_FIELDS})
 
 
 def kernel_hash(source: str) -> str:
@@ -47,7 +57,7 @@ class ReplayCache:
 
     def get(self, task_id: str, source: str) -> Optional[Observation]:
         rec = self._mem.get(source_key(task_id, source))
-        return Observation(**rec) if rec is not None else None
+        return _obs_from_dict(rec) if rec is not None else None
 
     def put(self, task_id: str, source: str, obs: Observation) -> None:
         key = source_key(task_id, source)

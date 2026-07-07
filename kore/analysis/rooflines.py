@@ -144,6 +144,18 @@ def flops_bytes(operation: str, dims: dict[str, int], dtype: str) -> Optional[tu
         return default
 
     try:
+        # ---- batched / grouped GEMM (exact) -------------------------------
+        # Must precede the dense-GEMM branch ("batched_gemm" contains "gemm").
+        if "batched_gemm" in op or "grouped_gemm" in op or op == "bmm":
+            B = g("B", "batch", "num_batches", default=1)
+            M, N, K = dims["M"], dims["N"], dims["K"]
+            flops = 2.0 * B * M * N * K
+            if is_fp8:
+                by = B * ((M * K + K * N) * 1 + M * N * 2)
+            else:
+                by = B * (M * K + K * N + M * N) * e
+            return flops, float(by)
+
         # ---- GEMM / matmul (exact) -----------------------------------------
         if "gemm" in op or "matmul" in op:
             M, N, K = dims["M"], dims["N"], dims["K"]
@@ -231,6 +243,22 @@ def flops_bytes(operation: str, dims: dict[str, int], dtype: str) -> Optional[tu
             flops = 4.0 * B * H * S * S * D * 0.5        # causal prefill (~half)
             by = (2 * B * H * S * D + 2 * B * KV * S * D) * e
             return flops, float(by)
+
+        # ---- generic elementwise (memory-bound LOWER bound) ---------------
+        # Any remaining op with usable integer dims (the gen_*/genv_* activation
+        # + pointwise zoo: relu, add, mul, exp, sqrt, sigmoid, tanh, mish, ...)
+        # is modeled as a memory-bound elementwise kernel. Mandatory HBM traffic
+        # is at LEAST read one operand + write one output = 2*size bytes -- a true
+        # LOWER bound on traffic (never an over-estimate), so T_min is a valid
+        # lower bound and eta = T_min/T_measured stays in (0, 1]. ~1 flop/elem.
+        size = 1
+        seen_dim = False
+        for v in dims.values():
+            if isinstance(v, int) and v > 0:
+                size *= v
+                seen_dim = True
+        if seen_dim:
+            return float(size), float(2 * size * e)
     except (KeyError, TypeError):
         return None
     return None

@@ -24,8 +24,10 @@ def test_flops_bytes_gemm_fp8():
     assert by == (4096 ** 2 + 4096 ** 2) * 1 + 4096 ** 2 * 2  # fp8 in, bf16 out
 
 
-def test_flops_bytes_rmsnorm_unmodeled_returns_none_for_unknown():
-    assert R.flops_bytes("totally_unknown_op", {"M": 8, "N": 8}, "bf16") is None
+def test_flops_bytes_unmodeled_returns_none_without_dims():
+    # ops with no usable dims are unmodelable; ops WITH dims now get a generic
+    # memory-bound elementwise lower bound (see test_rooflines).
+    assert R.flops_bytes("totally_unknown_op", {}, "bf16") is None
 
 
 def test_roofline_gemm_compute_bound_gfx950():

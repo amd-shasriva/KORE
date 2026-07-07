@@ -74,8 +74,23 @@ def test_quant_fp8_pertoken_exact():
     assert by == 4096 * 8192 * 2 + 4096 * 8192 * 1 + 4096 * 4
 
 
-def test_unknown_op_returns_none():
-    assert R.flops_bytes("no_such_op", {"M": 8, "N": 8}, "bf16") is None
+def test_unmodelable_op_no_dims_returns_none():
+    assert R.flops_bytes("no_such_op", {}, "bf16") is None
+
+
+def test_batched_gemm_exact():
+    flops, by = R.flops_bytes("batched_gemm", {"B": 8, "M": 128, "N": 256, "K": 512}, "bf16")
+    assert flops == 2.0 * 8 * 128 * 256 * 512
+    assert by == 8 * (128 * 512 + 512 * 256 + 128 * 256) * 2
+
+
+def test_generic_elementwise_memory_bound_lower_bound():
+    # any op with usable dims but no explicit model -> memory-bound elementwise
+    # LOWER bound: flops = size, bytes = 2*size (read one operand + write output),
+    # a true traffic lower bound so eta = T_min/T_measured stays in (0, 1].
+    flops, by = R.flops_bytes("some_pointwise", {"M": 128, "N": 256}, "bf16")
+    assert flops == 128 * 256
+    assert by == 2 * 128 * 256 * 2   # 2 * size * bf16(2B)
 
 
 def test_roofline_bound_is_max_of_compute_mem():

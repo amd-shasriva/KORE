@@ -1,0 +1,153 @@
+{
+  "n_points": 132,
+  "per_family_counts": {
+    "attention": 27,
+    "norm": 27,
+    "moe": 18,
+    "activation": 18,
+    "gemm": 15,
+    "quant": 9,
+    "positional": 9,
+    "reduction": 9
+  },
+  "testA_raw_checkb_form": {
+    "normalized": false,
+    "pooled_in_sample_r2": 0.9783452913113776,
+    "per_family": {
+      "activation": {
+        "n_test": 18,
+        "r2_out_of_family": 0.21162900786964522,
+        "r2_in_family_ceiling": 0.9183933182954731
+      },
+      "attention": {
+        "n_test": 27,
+        "r2_out_of_family": 0.9496030926146127,
+        "r2_in_family_ceiling": 0.9992103440710812
+      },
+      "gemm": {
+        "n_test": 15,
+        "r2_out_of_family": 0.9892666212017872,
+        "r2_in_family_ceiling": 0.9934831264517
+      },
+      "moe": {
+        "n_test": 18,
+        "r2_out_of_family": 0.9408650755265004,
+        "r2_in_family_ceiling": 0.9978689318487503
+      },
+      "norm": {
+        "n_test": 27,
+        "r2_out_of_family": -0.240368945310117,
+        "r2_in_family_ceiling": 0.9995216807183628
+      },
+      "positional": {
+        "n_test": 9,
+        "r2_out_of_family": 0.003285232905307578,
+        "r2_in_family_ceiling": 0.9993539533609077
+      },
+      "quant": {
+        "n_test": 9,
+        "r2_out_of_family": -0.131828772140129,
+        "r2_in_family_ceiling": 0.8489782156101027
+      },
+      "reduction": {
+        "n_test": 9,
+        "r2_out_of_family": -0.050901584576130254,
+        "r2_in_family_ceiling": 0.9989571280471099
+      }
+    },
+    "median_out_of_family_r2": 0.1074571203874764,
+    "min_out_of_family_r2": -0.240368945310117,
+    "n_families_scored": 8,
+    "coef_stability": {
+      "beta_mean": [
+        89.2593,
+        1.1623,
+        -0.0219
+      ],
+      "beta_std": [
+        44.8916,
+        0.0261,
+        0.0136
+      ],
+      "beta_cv": [
+        0.503,
+        0.022,
+        0.617
+      ]
+    }
+  },
+  "testA_normalized_sol_gap_form": {
+    "normalized": true,
+    "pooled_in_sample_r2": 0.3139733392095355,
+    "per_family": {
+      "activation": {
+        "n_test": 18,
+        "r2_out_of_family": -1.9104894880994028,
+        "r2_in_family_ceiling": 0.2830302237540785
+      },
+      "attention": {
+        "n_test": 27,
+        "r2_out_of_family": 0.39604201939153627,
+        "r2_in_family_ceiling": 0.6339720501190342
+      },
+      "gemm": {
+        "n_test": 15,
+        "r2_out_of_family": 0.17119746631163157,
+        "r2_in_family_ceiling": 0.9748672401048023
+      },
+      "moe": {
+        "n_test": 18,
+        "r2_out_of_family": -348.3490416236986,
+        "r2_in_family_ceiling": 0.6159522017935719
+      },
+      "norm": {
+        "n_test": 27,
+        "r2_out_of_family": -5.130673112437393,
+        "r2_in_family_ceiling": 0.8733094239026165
+      },
+      "positional": {
+        "n_test": 9,
+        "r2_out_of_family": -26.035217152180554,
+        "r2_in_family_ceiling": 0.9973738851213002
+      },
+      "quant": {
+        "n_test": 9,
+        "r2_out_of_family": -5.050890944958727,
+        "r2_in_family_ceiling": 0.47603489291963397
+      },
+      "reduction": {
+        "n_test": 9,
+        "r2_out_of_family": -1.8440001823704235,
+        "r2_in_family_ceiling": 0.9221819875840171
+      }
+    },
+    "median_out_of_family_r2": -3.480690216529065,
+    "min_out_of_family_r2": -348.3490416236986,
+    "n_families_scored": 8,
+    "coef_stability": {
+      "beta_mean": [
+        -7.7434,
+        0.3795,
+        0.5824
+      ],
+      "beta_std": [
+        7.6859,
+        0.0612,
+        0.0576
+      ],
+      "beta_cv": [
+        0.993,
+        0.161,
+        0.099
+      ]
+    }
+  },
+  "testC_family_decodability": {
+    "loo_accuracy": 0.553,
+    "majority_baseline": 0.205,
+    "n_classes": 8,
+    "chance": 0.125,
+    "separable_signal": 0.348
+  },
+  "verdict": "PARADIGM NOT SUPPORTED: residual structure is operator-specific -> use the combination framing; residual latent looks like a operator-separable latent (per-family patches)."
+}

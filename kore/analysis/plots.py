@@ -31,10 +31,24 @@ def _load(path: str) -> dict:
     return json.loads(Path(path).read_text())
 
 
+def _seed_points(rep: dict) -> list:
+    """One representative (seed, primary shape) measure per operator for per-op bars.
+
+    Multi-shape runs label kernels ``seed@<shape>``; prefer ``seed@primary``, then
+    any ``seed@*``, then any timed measure. Deduplicated to one point per task."""
+    pref = [m for m in rep["measures"] if m.get("eta") and m.get("label") == "seed@primary"]
+    if not pref:
+        pref = [m for m in rep["measures"] if m.get("eta") and str(m.get("label", "")).startswith("seed")]
+    if not pref:
+        pref = [m for m in rep["measures"] if m.get("eta")]
+    seen: dict = {}
+    for m in pref:
+        seen.setdefault(m["task_id"], m)
+    return list(seen.values())
+
+
 def fig_roofline_eta(rep: dict, out: Path) -> None:
-    ms = [m for m in rep["measures"] if m.get("eta") and m.get("label") == "seed"]
-    if not ms:
-        ms = [m for m in rep["measures"] if m.get("eta")]
+    ms = _seed_points(rep)
     bound = {r["task_id"]: r["bound"] for r in rep["rooflines"]}
     ms.sort(key=lambda m: m["eta"], reverse=True)
     names = [m["task_id"] for m in ms]
@@ -73,9 +87,11 @@ def fig_eta_vs_speedup(rep: dict, out: Path) -> None:
         ax.axhline(1.0, ls="--", color=GREY, label="parity with vendor (speedup=1)")
     rho = rep["checks"]["a"].get("rho")
     n = rep["checks"]["a"].get("n")
+    ci = rep["checks"]["a"].get("ci95")
+    ci_s = f"  95%CI[{ci[0]:.2f},{ci[1]:.2f}]" if ci else ""
     ax.set_xlabel("SOL attainment  η  (%)")
     ax.set_ylabel("speedup vs production baseline  (vendor / candidate)")
-    ax.set_title(f"Check (a): does η predict speedup?   Spearman ρ = {rho:.3f} (n={n})"
+    ax.set_title(f"Check (a): does η predict speedup?   Spearman ρ = {rho:.3f} (n={n}){ci_s}"
                  if rho is not None else "Check (a): η vs speedup")
     ax.grid(alpha=0.3)
     ax.legend(loc="best")
@@ -101,8 +117,10 @@ def fig_residual_fit(rep: dict, out: Path) -> None:
         lim = [0, max(float(y.max()), float(pred.max())) * 1.05]
         ax.plot(lim, lim, ls="--", color=GREY, label="y = x (perfect)")
         ax.set_xlim(lim); ax.set_ylim(lim)
+        ci = rep["checks"]["b"].get("ci95")
+        ci_s = f"  95%CI[{ci[0]:.3f},{ci[1]:.3f}]" if ci else ""
         ax.set_title(f"Check (b): residual decomposes into stall + occupancy-deficit\n"
-                     f"measured vs counter-predicted residual   R² = {r2:.4f} (n={len(rows)})")
+                     f"measured vs counter-predicted residual   R² = {r2:.4f} (n={len(rows)}){ci_s}")
     else:
         ax.set_title("Check (b): insufficient PMC data")
     ax.set_xlabel("predicted residual time from PMC terms  (ms)")
@@ -146,27 +164,30 @@ def fig_monotone_valley(rep: dict, out: Path) -> None:
 
 
 def fig_correct_but_slow(rep: dict, out: Path) -> None:
-    ms = [m for m in rep["measures"] if m.get("eta") and m.get("speedup") and m.get("label") == "seed"]
-    if not ms:
-        ms = [m for m in rep["measures"] if m.get("eta") and m.get("speedup")]
+    ms = [m for m in _seed_points(rep) if m.get("speedup")]
     ms.sort(key=lambda m: m["speedup"])
     names = [m["task_id"] for m in ms]
     sp = [m["speedup"] for m in ms]
-    # strong vendor kernels vs unoptimized torch framework fallback (honest distinction)
-    STRONG = {"gemm_bf16", "softmax_bf16", "gelu_tanh_bf16", "gemm_fp8_a8w8"}
+    # honest coloring by the ACTUAL baseline used (from the labeled run):
+    # aiter_vendor = real AITER CK production kernel; hipblaslt_vendor = hipBLASLt
+    # GEMM; framework = torch fused op (no standalone AITER kernel for that op).
+    bt = [m.get("baseline_type") for m in ms]
+    cmap = {"aiter_vendor": ACCENT, "hipblaslt_vendor": BLUE, "framework": GREEN}
+    colors = [cmap.get(b, GREY) for b in bt]
+    n_aiter = sum(1 for b in bt if b in ("aiter_vendor", "hipblaslt_vendor"))
     fig, ax = plt.subplots(figsize=(9.5, 5.2))
-    colors = [ACCENT if n in STRONG else GREEN for n in names]
     ax.bar(range(len(names)), sp, color=colors)
     ax.axhline(1.0, ls="--", color=GREY, label="baseline parity (speedup=1)")
     ax.set_xticks(range(len(names)))
     ax.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("seed speedup vs its baseline")
-    ax.set_title("All 15 seeds are CORRECT. Seed vs baseline:\n"
-                 "below the STRONG vendor kernels (red: GEMM→hipBLASLt, softmax, GELU); "
-                 ">1× only vs the\nunoptimized torch framework fallback (green: rms/layer-norm, silu — see §5)")
+    ax.set_ylabel("seed speedup vs its PRODUCTION baseline")
+    ax.set_title(f"All seeds are CORRECT. Seed speedup vs the real production baseline\n"
+                 f"({n_aiter}/{len(names)} measured against AITER/hipBLASLt vendor kernels; "
+                 f"seeds sit below the vendor bar — the correct-but-slow wall)")
     from matplotlib.patches import Patch
-    ax.legend(handles=[Patch(color=ACCENT, label="strong vendor baseline (hipBLASLt / torch fused)"),
-                       Patch(color=GREEN, label="framework fallback (unoptimized torch; AITER is the gold bar)")],
+    ax.legend(handles=[Patch(color=ACCENT, label="AITER vendor (CK kernel)"),
+                       Patch(color=BLUE, label="hipBLASLt vendor (GEMM)"),
+                       Patch(color=GREEN, label="framework (torch; no standalone AITER op)")],
               loc="upper left", fontsize=8)
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()

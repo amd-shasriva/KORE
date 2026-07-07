@@ -66,13 +66,23 @@ fi
 STAGES="${KORE_STAGES:-$DEFAULT_STAGES}"
 echo "[run_conductor] stages=$STAGES"
 
+# Datagen/agentic are TEACHER-API-bound (each worker mostly waits on a ~1-7s Claude
+# call; the GPUs sit idle in between), so throughput scales with concurrency, not
+# GPU count. Verified on this node: 3TB RAM / 384 CPUs and the gateway serves 64
+# concurrent calls with zero throttling. Oversubscribe the 8 GPUs (workers %% n_gpus
+# pins each worker to a GPU) to ~4x for a 4x-faster datagen; benchmark timing stays
+# usable because most evals are cached + win detection is ratio-based. Override with
+# KORE_DATAGEN_WORKERS (e.g. 8 for pristine timing, 48 for max speed).
+DATAGEN_WORKERS="${KORE_DATAGEN_WORKERS:-32}"
+echo "[run_conductor] datagen/agentic workers=$DATAGEN_WORKERS (teacher-bound; oversubscribing 8 GPUs)"
+
 # No --tasks -> ALL registered tasks (train = non-held-out; eval = attention family).
 # --adaptive-steps -> GRPO plateau early-stop. Full campaign defaults otherwise.
 exec "$PY" scripts/run_campaign.py \
   --model Qwen/Qwen3-14B \
   --full-ft --use-hf --teacher claude \
   --adaptive-steps \
-  --datagen-workers 8 \
+  --datagen-workers "$DATAGEN_WORKERS" \
   --stages "$STAGES" \
   --data-root data/full14b \
   --midtrain-out runs/full/midtrain \

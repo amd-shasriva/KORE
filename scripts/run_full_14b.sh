@@ -7,6 +7,12 @@ set -euo pipefail
 cd /root/Kore-rl/kore
 export PYTHONPATH=/root/Kore-rl/kore:${PYTHONPATH:-}
 
+# CRITICAL: the FSDP stages need ALL GPUs visible so accelerate assigns one per rank.
+# A stale HIP_VISIBLE_DEVICES/CUDA_VISIBLE_DEVICES in the calling shell pins every rank
+# to a single GPU -> NCCL "Duplicate GPU detected". Clear them here (the parallel
+# datagen workers re-pin HIP_VISIBLE_DEVICES per-worker internally).
+unset HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES
+
 # --- best-in-world integrity levers (propagate to every stage subprocess) ---
 export KORE_VERIFIED_CORRECTNESS=1     # enumerated adversarial no-lucky-pass gate
 export KORE_COMPILE_BASELINE=1         # honest compiler-fused baseline (anti speedup-inflation)

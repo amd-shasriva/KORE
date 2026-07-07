@@ -1,0 +1,187 @@
+{"ts": 1783042561.5636954, "stage": "midtrain", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783042597.8788788, "stage": "midtrain", "status": "error", "elapsed_s": 36.3152, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'midtrain', 'data_smoke/launch/midtrain.json'])"}
+{"ts": 1783046985.1606789, "stage": "midtrain", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783047607.5926874, "stage": "midtrain", "status": "gate_passed", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783047607.64398, "stage": "midtrain", "status": "done", "elapsed_s": 622.4818, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783047632.802053, "stage": "midtrain", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783047660.047174, "stage": "midtrain", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783047881.2893026, "stage": "midtrain", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783048054.803001, "stage": "midtrain", "status": "gate_skipped", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783048054.8033884, "stage": "midtrain", "status": "done", "elapsed_s": 173.5139, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783048054.8034465, "stage": "datagen", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783049064.084123, "stage": "datagen", "status": "done", "elapsed_s": 1009.2804, "artifact": "data_smoke/repair"}
+{"ts": 1783049064.084195, "stage": "agentic", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783049300.9305606, "stage": "agentic", "status": "done", "elapsed_s": 236.8462, "artifact": "data_smoke/agentic"}
+{"ts": 1783049300.9306338, "stage": "build", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783049402.1598337, "stage": "build", "status": "done", "elapsed_s": 101.2289, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783049402.1599145, "stage": "sft", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783049582.1064, "stage": "sft", "status": "gate_skipped", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783049582.106887, "stage": "sft", "status": "done", "elapsed_s": 179.9467, "artifact": "runs_smoke/sft"}
+{"ts": 1783049582.10696, "stage": "dpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783049642.665629, "stage": "dpo", "status": "error", "elapsed_s": 60.5587, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'dpo', 'data_smoke/launch/dpo.json'])"}
+{"ts": 1783105553.845276, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783105553.8453736, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783105553.8454454, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783105553.845522, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783105553.845586, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783105553.845612, "stage": "dpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783105751.2176187, "stage": "dpo", "status": "gate_skipped", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783105751.21816, "stage": "dpo", "status": "done", "elapsed_s": 197.3722, "artifact": "runs_smoke/dpo"}
+{"ts": 1783105751.2182193, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783107582.5865755, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783107582.5866714, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783107582.586742, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783107582.586827, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783107582.5868905, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783107582.5869641, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783107582.5869882, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783107621.1065376, "stage": "grpo", "status": "error", "elapsed_s": 38.5195, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783108380.40552, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783108380.4056122, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783108380.4056797, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783108380.4057527, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783108380.4058213, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783108380.4058936, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783108380.4059184, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783108416.462362, "stage": "grpo", "status": "error", "elapsed_s": 36.0564, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783108721.4470668, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783108721.447163, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783108721.4472332, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783108721.4473078, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783108721.447369, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783108721.447438, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783108721.4474623, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783109099.0604239, "stage": "grpo", "status": "error", "elapsed_s": 377.613, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783109407.636546, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783109407.636641, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783109407.636711, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783109407.6367862, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783109407.636861, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783109407.6369216, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783109407.6369467, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783109781.0216558, "stage": "grpo", "status": "error", "elapsed_s": 373.3847, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783110031.9592333, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783110031.9593287, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783110031.959401, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783110031.9594755, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783110031.9595373, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783110031.9596004, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783110031.9596245, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783110415.3018308, "stage": "grpo", "status": "error", "elapsed_s": 383.3422, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783111010.2719235, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783111010.272032, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783111010.2721062, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783111010.2721817, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783111010.2722461, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783111010.2723067, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783111010.272332, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783111383.990099, "stage": "grpo", "status": "error", "elapsed_s": 373.7178, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783112073.8999102, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783112073.9000058, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783112073.9000783, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783112073.9001532, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783112073.9002166, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783112073.9002771, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783112073.9003034, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783112449.9975383, "stage": "grpo", "status": "error", "elapsed_s": 376.0972, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783112704.1347113, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783112704.1348193, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783112704.1348915, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783112704.1349635, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783112704.1350238, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783112704.135083, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783112704.1351068, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783113084.301253, "stage": "grpo", "status": "error", "elapsed_s": 380.1661, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783113277.1516833, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783113277.1517868, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783113277.1518703, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783113277.151944, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783113277.152014, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783113277.1520746, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783113277.1520987, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783113660.6159303, "stage": "grpo", "status": "error", "elapsed_s": 383.4638, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783113901.0419219, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783113901.0420203, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783113901.0420916, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783113901.04218, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783113901.0422444, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783113901.042307, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783113901.0423331, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783114280.8878274, "stage": "grpo", "status": "error", "elapsed_s": 379.8455, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783114631.871572, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783114631.8716683, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783114631.8717368, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783114631.871822, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783114631.871886, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783114631.871946, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783114631.8719704, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783115009.574311, "stage": "grpo", "status": "error", "elapsed_s": 377.7023, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783115316.8136575, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783115316.8137546, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783115316.8138347, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783115316.8139112, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783115316.8139756, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783115316.814038, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783115316.8140633, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783115323.4567418, "stage": "grpo", "status": "error", "elapsed_s": 6.6427, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783115684.9017136, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783115684.9018183, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783115684.9018886, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783115684.901963, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783115684.9020333, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783115684.9020915, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783115684.9021144, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783115722.4773858, "stage": "grpo", "status": "error", "elapsed_s": 37.5753, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783116094.302392, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783116094.3024879, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783116094.3025575, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783116094.3026302, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783116094.3026924, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783116094.302753, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783116094.3027778, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783116475.2078266, "stage": "grpo", "status": "error", "elapsed_s": 380.905, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783116755.3960037, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783116755.3961015, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783116755.3961716, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783116755.3962467, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783116755.3963096, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783116755.3963706, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783116755.396395, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783117133.0891986, "stage": "grpo", "status": "error", "elapsed_s": 377.6928, "artifact": "CalledProcessError(1, ['bash', '/root/Kore-rl/kore/scripts/launch_distributed.sh', 'grpo', 'data_smoke/launch/grpo.json'])"}
+{"ts": 1783117441.2935073, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783117441.293602, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783117441.293671, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783117441.2937438, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783117441.2938135, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783117441.293874, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783117441.2938986, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783119136.8484197, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783119136.8485157, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783119136.8485858, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783119136.8486607, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783119136.8487248, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783119136.8487852, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783119136.8488257, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783123143.6638732, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783123143.66398, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783123143.664061, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783123143.6641374, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783123143.6642013, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783123143.664261, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783123143.6642854, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783124255.5403893, "stage": "grpo", "status": "gate_skipped", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783124255.540879, "stage": "grpo", "status": "done", "elapsed_s": 1111.8763, "artifact": "runs_smoke/grpo"}
+{"ts": 1783124255.5409493, "stage": "soup", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783124265.4033542, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/midtrain"}
+{"ts": 1783124265.4034495, "stage": "datagen", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/repair"}
+{"ts": 1783124265.4035206, "stage": "agentic", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/agentic"}
+{"ts": 1783124265.4035916, "stage": "build", "status": "skipped", "elapsed_s": 0.0, "artifact": "data_smoke/sft/multicap.jsonl"}
+{"ts": 1783124265.4036534, "stage": "sft", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/sft"}
+{"ts": 1783124265.4037144, "stage": "dpo", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs_smoke/dpo"}
+{"ts": 1783124265.4037576, "stage": "grpo", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783124422.2951014, "stage": "grpo", "status": "gate_skipped", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783124422.2955728, "stage": "grpo", "status": "done", "elapsed_s": 156.8915, "artifact": "runs_smoke/grpo"}
+{"ts": 1783124422.2956448, "stage": "soup", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783126518.2141623, "stage": "soup", "status": "done", "elapsed_s": 2095.9159, "artifact": "runs_smoke/soup"}
+{"ts": 1783126518.2160895, "stage": "eval", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783127203.609165, "stage": "eval", "status": "done", "elapsed_s": 685.3921, "artifact": "data_smoke/eval/bakeoff.json"}

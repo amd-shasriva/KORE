@@ -1,0 +1,3 @@
+{"text": "import triton\nimport triton.language as tl\n@triton.jit\ndef add(x_ptr,y_ptr,o_ptr,n,BLOCK:tl.constexpr):\n    pid=tl.program_id(0); offs=pid*BLOCK+tl.arange(0,BLOCK); m=offs<n\n    tl.store(o_ptr+offs, tl.load(x_ptr+offs,mask=m)+tl.load(y_ptr+offs,mask=m), mask=m)\n"}
+{"text": "ROCm gfx942 MI300 tuning: pick BLOCK sizes and num_warps to maximize occupancy; watch LDS bank conflicts with rocprof.\n"}
+{"text": "import torch\ndef rmsnorm(x,w,eps=1e-6):\n    v=x.float().pow(2).mean(-1,keepdim=True)\n    return (x.float()*torch.rsqrt(v+eps)).to(x.dtype)*w\n"}

@@ -1,0 +1,5 @@
+{"ts": 1783214020.8468852, "stage": "midtrain", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783234548.4904013, "stage": "midtrain", "status": "gate_passed", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783234548.5439243, "stage": "midtrain", "status": "done", "elapsed_s": 20527.6896, "artifact": "runs/full/midtrain"}
+{"ts": 1783234548.5443068, "stage": "datagen", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783443801.7630758, "stage": "datagen", "status": "error", "elapsed_s": 209253.2188, "artifact": "KeyboardInterrupt()"}

@@ -16,6 +16,7 @@ dist/
 # ignore all run output subdirs (checkpoints/adapters/models) but keep the
 # small replay_*.jsonl verification caches at runs/ top level.
 runs/*/
+runs_smoke/
 *.log
 
 # vendored external repos (large; cloned separately)

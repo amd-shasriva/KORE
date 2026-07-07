@@ -69,14 +69,14 @@ def _obs_correct_slow():
     return Observation(compiled=True, dtype="bf16", validation_passed=True,
                        snr_by_shape={"primary": 40.0}, snr_db=40.0,
                        wall_by_shape={"primary": 2.0}, baseline_by_shape={"primary": 2.0},
-                       wall_ms=2.0, baseline_ms=2.0, registers=64, occupancy=0.5)
+                       wall_ms=2.0, baseline_ms=2.0)
 
 
 def _obs_correct_fast():
     return Observation(compiled=True, dtype="bf16", validation_passed=True,
                        snr_by_shape={"primary": 41.0}, snr_db=41.0,
                        wall_by_shape={"primary": 1.0}, baseline_by_shape={"primary": 2.0},
-                       wall_ms=1.0, baseline_ms=2.0, registers=48, occupancy=0.75)
+                       wall_ms=1.0, baseline_ms=2.0)
 
 
 class FakeEnv:
@@ -183,12 +183,14 @@ def test_executor_build_test_bench_dispatch():
     assert r["correct"] is True and r["speedup"] == 2.0 and r["reward"] > 0.3
 
 
-def test_executor_pmc_surfaces_counters_or_stub():
+def test_executor_pmc_surfaces_efficiency_or_stub():
     ex = ToolExecutor(FakeEnv(), FakeTask())
     r = ex.dispatch({"name": "pmc", "arguments": {"kernel_src": "good"}})
     assert r["tool"] == "pmc"
-    assert r["registers"] == 64 and r["occupancy"] == 0.5
-    assert r["available"] is True
+    # FakeEnv doesn't populate profile_efficiency (profiling off) -> honest stub.
+    assert r["available"] is False
+    assert r["profile_efficiency"] is None
+    assert "profiling disabled" in r["diagnosis"]
 
 
 def test_executor_unknown_and_malformed_calls():

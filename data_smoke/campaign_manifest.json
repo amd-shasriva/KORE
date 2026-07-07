@@ -1,0 +1,29 @@
+{
+  "model": "Qwen/Qwen3-14B",
+  "midtrain_ckpt": "runs_smoke/midtrain",
+  "sft_ckpt": "runs_smoke/sft",
+  "dpo_ckpt": "runs_smoke/dpo",
+  "grpo_ckpt": "runs_smoke/grpo",
+  "final": "runs_smoke/soup",
+  "done_stages": [
+    "agentic",
+    "build",
+    "datagen",
+    "dpo",
+    "eval",
+    "grpo",
+    "midtrain",
+    "sft",
+    "soup"
+  ],
+  "train_tasks": [
+    "rmsnorm_aiter",
+    "gemm_bf16"
+  ],
+  "eval_tasks": [
+    "flash_attn_prefill_bf16",
+    "flash_attn_decode_bf16",
+    "paged_attn_decode_bf16"
+  ],
+  "updated": 1783127203.6082652
+}

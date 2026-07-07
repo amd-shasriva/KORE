@@ -37,7 +37,7 @@ from kore.config import CONFIG
 from kore.env.replay import ReplayCache
 from kore.obs import get_logger
 from kore.reward.reward import Observation, scan_for_hacks
-from kore.reward.reward import _worst_speedup as _worst_speedup
+from kore.reward.reward import _worst_speedup
 from kore.reward.stats import cv_pct as _cv_pct
 from kore.reward.stats import median as _median
 from kore.tasks.base import Shape, Task
@@ -121,6 +121,13 @@ class KoreEnv:
     def _shapes(self, multi_shape: bool) -> list[Shape]:
         shapes = self.task.shapes or [Shape("default", {})]
         if multi_shape:
+            # data-scale: optionally expand to a diverse shape set (shape-robust RL).
+            if getattr(self.cfg, "shape_augment", False):
+                from kore.tasks.augment import augment_shapes
+                aug = augment_shapes(shapes, max_shapes=int(getattr(
+                    self.cfg, "shape_augment_max", 6)))
+                if aug:
+                    return aug
             return shapes
         primary = self.task.shape("primary") or self.task.shape("minimal") or shapes[0]
         return [primary]
@@ -264,6 +271,40 @@ class KoreEnv:
         thr = self._snr_threshold
         correct = validation_passed and bool(snr_by_shape) and all(v >= thr for v in snr_by_shape.values())
 
+        # Anti-hack determinism re-check: re-run the primary shape once and require
+        # a stable verdict, so a kernel cannot be rewarded for passing the SNR gate
+        # by luck (partly-random output). One extra exec, only when already correct.
+        if correct and getattr(self.cfg, "verifier_determinism_check", False):
+            sh0 = shapes[0]
+            rc2, out2, timed2 = self._exec([sys.executable, str(driver), *sh0.as_args()],
+                                           workdir, env, self.correctness_timeout)
+            kind2, _ = self._classify(out2, rc2, timed2)
+            snr2 = None
+            # A transient INFRA error (timeout/OOM/HIP flake) on the re-run is NOT
+            # evidence the kernel is non-deterministic — treat it as inconclusive and
+            # keep the (already-verified) correct verdict, so a one-off flake can
+            # never cache a correct kernel as incorrect (preserves infra-vs-kernel).
+            if kind2 == "infra":
+                _ev("DEBUG", "verify_determinism", task=task.task_id, shape=sh0.name,
+                    inconclusive=True, reason="infra error on re-run")
+                stable, reason = True, ""
+            else:
+                m2, ac2 = _last(_SNR, out2), _last(_ALLCLOSE, out2)
+                snr2 = float(m2.group(1)) if m2 else None
+                ac2_false = bool(ac2 and ac2.group(1).lower() == "false")
+                ok2 = (kind2 == "ok" and not ac2_false
+                       and ((snr2 is not None and snr2 >= thr)
+                            or bool(ac2 and ac2.group(1).lower() == "true")))
+                tol = float(getattr(self.cfg, "determinism_snr_tol_db", 10.0))
+                stable, reason = _determinism_stable(snr_by_shape.get(sh0.name), snr2, ok2, tol)
+            _ev("DEBUG", "verify_determinism", task=task.task_id, shape=sh0.name,
+                snr1=snr_by_shape.get(sh0.name), snr2=snr2, stable=stable)
+            if not stable:
+                _ev("WARN", "eval_nondeterministic", task=task.task_id,
+                    source_sha=_sha12(source), reason=reason)
+                correct = False
+                last_err = reason
+
         obs = Observation(
             compiled=compiled, dtype=task.dtype,
             snr_by_shape=snr_by_shape,
@@ -277,8 +318,19 @@ class KoreEnv:
         base_by_shape: dict[str, float] = {}
         cvs: list[float] = []
         for sh in shapes:
-            cand, cand_cv = self._bench_multi(driver, sh, "candidate", workdir, env)
-            ref, _ = self._bench_multi(driver, sh, "reference", workdir, env)
+            cand, cand_cv, poisoned = self._bench_multi(driver, sh, "candidate", workdir, env)
+            # Anti-hack: the candidate bench re-verifies correctness AFTER timing.
+            # A False post-timing verdict means the kernel produced correct output
+            # for the correctness calls but garbage while timed (invocation-count
+            # timing hack) -> reject the whole eval as a hack, never reward it.
+            if poisoned:
+                _ev("WARN", "eval_bench_hack", task=task.task_id, shape=sh.name,
+                    source_sha=_sha12(source),
+                    reason="post-timing correctness failed (bench-time reward hack)")
+                return Observation(compiled=False, dtype=task.dtype, validation_passed=False,
+                                   flagged_hack=True, hack_reason="bench-time output mismatch",
+                                   error_text="reward-hack: kernel incorrect under timing")
+            ref, _, _ = self._bench_multi(driver, sh, "reference", workdir, env)
             if cand is not None:
                 wall_by_shape[sh.name] = cand
                 cvs.append(cand_cv)
@@ -291,34 +343,147 @@ class KoreEnv:
             obs.wall_ms = max(wall_by_shape.values())
         if base_by_shape:
             obs.baseline_ms = max(base_by_shape.values())
+
+        # P5 (flagship novelty): dense hardware-counter efficiency, baseline-relative.
+        # Feature-flagged (profile_reward_weight>0) and fully fail-safe: any profiler
+        # hiccup leaves profile_efficiency=None and never affects the correctness/
+        # speedup verdict. Collected once on the primary shape only (rocprof is slow).
+        if getattr(self.cfg, "profile_reward_weight", 0.0) > 0.0:
+            try:
+                obs.profile_efficiency = self._collect_profile(driver, shapes[0], workdir, env)
+            except Exception as e:  # pragma: no cover - GPU/rocprof only
+                _ev("DEBUG", "profile_error", task=task.task_id, error=str(e)[:200])
+                obs.profile_efficiency = None
         return obs
+
+    def _collect_profile(self, driver: Path, sh: Shape, workdir: Path,
+                         env: dict) -> Optional[float]:
+        """rocprofv3 PMC on candidate + reference -> baseline-relative efficiency.
+
+        Returns a score in [0,1] (see kore.reward.profile_reward) or None if the
+        profiler is unavailable or produced no usable counters. Never raises to the
+        caller path that matters (wrapped by the caller's try/except)."""
+        import glob as _glob
+        import tempfile as _tmp
+        from kore.reward import profile_reward as _pr
+        from kore.verifier.parsers.rocprofv3 import parse_rocprofv3_csv
+        from kore.verifier.pmc import COUNTER_SETS
+
+        counters = COUNTER_SETS["full"]
+
+        def _counters_for(impl: str) -> Optional[dict]:
+            outdir = _tmp.mkdtemp(prefix=f"pmc_{impl}_", dir=str(workdir))
+            # --bench-mode is REQUIRED: drivers honor --impl (candidate vs reference)
+            # ONLY in bench mode; without it both runs execute correctness on the
+            # candidate -> identical work -> a degenerate ~1.0 profile score. Small
+            # warmup/iters keep rocprof's multi-pass replay cheap.
+            cmd = ["rocprofv3", "--pmc", *counters, "-d", outdir,
+                   "--output-format", "csv", "--",
+                   sys.executable, str(driver), "--bench-mode", "--impl", impl,
+                   "--warmup", "2", "--iters", "3", *sh.as_args()]
+            rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
+            if timed or rc != 0:
+                _ev("DEBUG", "profile_run", task=self.task.task_id, impl=impl,
+                    ok=False, rc=rc)
+                return None
+            # rocprofv3 writes <pid>_counter_collection.csv (+ an agent_info.csv we
+            # must ignore). Prefer the counter file; never parse agent_info.
+            csvs = _glob.glob(os.path.join(outdir, "**", "*counter_collection.csv"),
+                              recursive=True)
+            if not csvs:
+                csvs = [c for c in _glob.glob(os.path.join(outdir, "**", "*.csv"),
+                                              recursive=True)
+                        if "agent_info" not in os.path.basename(c)]
+            kernels = []
+            for c in csvs:
+                try:
+                    kernels.extend(parse_rocprofv3_csv(c))
+                except Exception:
+                    pass
+            if not kernels:
+                return None
+            # Aggregate all dispatches for this impl (a kernel may launch several).
+            agg: dict[str, int] = {}
+            for k in kernels:
+                for name, val in k.counters.items():
+                    agg[name] = agg.get(name, 0) + int(val)
+            return agg or None
+
+        cand = _counters_for("candidate")
+        ref = _counters_for("reference")
+        if not cand or not ref:
+            return None
+        score = _pr.profile_efficiency_score(cand, ref)
+        _ev("DEBUG", "profile_score", task=self.task.task_id, score=score)
+        return score
 
     def _bench_multi(self, driver: Path, sh: Shape, impl: str, workdir: Path, env: dict):
         """Bench a (shape, impl) ``min..max_variance_runs`` times; return
-        (median-of-medians, CV%). Extra runs are taken only if variance is high."""
-        cmd = [sys.executable, str(driver), "--bench-mode", "--impl", impl, *sh.as_args()]
+        (median-of-medians, CV%, poisoned).
+
+        ``poisoned`` (candidate only) is True when the driver's POST-TIMING
+        correctness re-verification failed — i.e. the kernel produced correct output
+        for the correctness calls but garbage while being timed (the invocation-count
+        timing hack). The timed window (warmup/iters) is RANDOMIZED per run so a
+        stateful kernel cannot know which call indices are timed vs verified.
+        """
+        import random as _random
         samples: list[float] = []
         n_min = max(1, self.cfg.min_variance_runs)
         n_max = max(n_min, self.cfg.max_variance_runs)
+        poisoned = False
         for i in range(n_max):
+            # randomized timed window (defeats fixed-call-index bench sniffing)
+            w = _random.randint(max(4, self.cfg.warmup_iters - 3), self.cfg.warmup_iters + 4)
+            it = _random.randint(max(8, self.cfg.bench_iters - 5), self.cfg.bench_iters + 6)
+            cmd = [sys.executable, str(driver), "--bench-mode", "--impl", impl,
+                   "--warmup", str(w), "--iters", str(it), *sh.as_args()]
             with _LOG.timer("bench_exec", task=self.task.task_id, shape=sh.name,
                             impl=impl, run=i):
                 rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
             if timed or rc != 0:
                 break
+            # post-timing correctness verdict (candidate driver only): a False
+            # allclose or a sub-threshold SNR AFTER the timed loop is a hack.
+            if impl == "candidate":
+                ac = _last(_ALLCLOSE, out)
+                snr = _last(_SNR, out)
+                if (ac and ac.group(1).lower() == "false") or \
+                   (snr and float(snr.group(1)) < self._snr_threshold):
+                    poisoned = True
+                    break
             m = _last(_MEDIAN, out)
             if m:
                 samples.append(float(m.group(1)))
             if i + 1 >= n_min and len(samples) >= n_min and _cv_pct(samples) <= self.cfg.cv_threshold_pct:
                 break
+        if poisoned:
+            return None, float("inf"), True
         if not samples:
             _ev("DEBUG", "bench_shape", task=self.task.task_id, shape=sh.name, impl=impl,
                 median_ms=None, cv_pct=None, runs=0)
-            return None, float("inf")
+            return None, float("inf"), False
         med, cv = _median(samples), _cv_pct(samples)
         _ev("DEBUG", "bench_shape", task=self.task.task_id, shape=sh.name, impl=impl,
             median_ms=round(med, 4), cv_pct=round(cv, 3), runs=len(samples))
-        return med, cv
+        return med, cv, False
+
+
+def _determinism_stable(snr1: Optional[float], snr2: Optional[float],
+                        ok2: bool, tol_db: float) -> tuple[bool, str]:
+    """Anti-hack determinism verdict: is a second correctness run consistent?
+
+    A kernel that passes the SNR gate by LUCK (partly random output) will fail or
+    swing wildly on a re-run. Returns ``(stable, reason)``. Stable requires the
+    re-run to still be correct AND its SNR to stay within ``tol_db`` of the first
+    run. ``tol_db`` is generous enough to spare legitimate atomic-reduction jitter.
+    """
+    if not ok2:
+        return False, "non-deterministic: 2nd correctness run failed the SNR gate"
+    if snr1 is not None and snr2 is not None and abs(snr1 - snr2) > tol_db:
+        return False, (f"non-deterministic: SNR drifted {abs(snr1 - snr2):.1f} dB "
+                       f"(> {tol_db:.1f} dB) between identical runs")
+    return True, ""
 
 
 def _tail(s: str, n: int = 800) -> str:

@@ -11,6 +11,15 @@ Import-safe: AITER (and torch) are imported lazily inside the wrappers so that
 gfx942 (MI325X) fp8 note: AMD CDNA3 uses the **FNUZ** fp8 encoding, so the
 correct e4m3 dtype is ``torch.float8_e4m3fnuz`` (NOT the OCP ``e4m3fn``). Using
 e4m3fn silently changes the numeric range/bias and mismatches AITER/hipBLASLt.
+
+Version-robustness + honest labeling (P0): AITER moved its ops from the top level
+(``aiter.rms_norm``) into submodules (``aiter.ops.rmsnorm.rms_norm``) in newer
+releases, and its gluon kernels require triton >= 3.6 which not every stack has.
+Every wrapper therefore resolves the op via :func:`_aiter_fn` (top level OR
+``aiter.ops.*``), falls back to the torch framework path when AITER is
+unavailable, and emits a one-time :func:`_mark_baseline` sentinel so the P0
+harness can label each check-(a) baseline ``aiter_vendor`` / ``hipblaslt_vendor``
+/ ``framework``.
 """
 
 from __future__ import annotations
@@ -27,8 +36,8 @@ FP8_MAX = float(torch.finfo(FP8_DTYPE).max)  # 240.0
 # try top-level first (old API), then the known ``aiter.ops.*`` submodules.
 _AITER_OP_MODULES = (
     "ops.rmsnorm", "ops.norm", "ops.activation", "ops.gemm_op_a8w8",
-    "ops.rope", "ops.quant", "ops.mha", "ops.attention", "ops.paged_attn",
-    "ops.moe", "ops.moe_op", "ops.topk", "ops",
+    "ops.gemm_op", "ops.rope", "ops.quant", "ops.mha", "ops.attention",
+    "ops.paged_attn", "ops.moe", "ops.moe_op", "ops.topk", "ops",
 )
 
 
@@ -59,11 +68,11 @@ def _mark_baseline(kind: str) -> None:
     """Emit a one-time sentinel identifying which baseline implementation was used.
 
     ``kind`` is ``aiter_vendor`` (real AITER production kernel), ``hipblaslt_vendor``
-    (torch.matmul -> hipBLASLt, the production dense-GEMM library), or ``framework``
-    (torch fused op used because AITER has no standalone kernel or its kernels are
-    unavailable in this stack). The P0 harness parses the LAST such line from the
-    ``--impl reference`` bench output to honestly label check-(a) baselines. Printed
-    once per process to stderr so it never pollutes the driver's ``median_ms`` line.
+    (torch.matmul/bmm -> hipBLASLt, the production dense-GEMM library), or
+    ``framework`` (torch fused op used because AITER has no standalone kernel or its
+    kernels are unavailable in this stack). The P0 harness parses the LAST such line
+    from the ``--impl reference`` bench output to honestly label check-(a) baselines.
+    Printed once per process to stderr so it never pollutes the driver's ``median_ms``.
     """
     if kind in _MARKED_BASELINE:
         return
@@ -115,7 +124,7 @@ def aiter_fused_add_rms_norm(
         return y, new_res
 
 
-# --- Gated MLP activation -------------------------------------------------
+# --- Gated MLP activations ------------------------------------------------
 def aiter_silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     """AITER ``silu_and_mul(out, input)`` (in-place into out).
 
@@ -131,6 +140,25 @@ def aiter_silu_and_mul(x: torch.Tensor) -> torch.Tensor:
         _mark_baseline("framework")
         import torch.nn.functional as F
         return F.silu(x[..., :inter]) * x[..., inter:]
+
+
+def aiter_gelu_tanh_and_mul(x: torch.Tensor) -> torch.Tensor:
+    """AITER ``gelu_tanh_and_mul(out, input)`` (in-place into out): GeGLU.
+
+    Input is (M, 2*inter); returns GELU-tanh(x[:, :inter]) * x[:, inter:] as
+    (M, inter) — the LLM-standard gated activation. Falls back to the torch
+    framework GeGLU when AITER is unavailable.
+    """
+    inter = x.shape[-1] // 2
+    try:
+        out = torch.empty((*x.shape[:-1], inter), dtype=x.dtype, device=x.device)
+        _aiter_fn("gelu_tanh_and_mul")(out, x)
+        _mark_baseline("aiter_vendor")
+        return out
+    except Exception:  # noqa: BLE001 - torch framework GeGLU fallback
+        _mark_baseline("framework")
+        import torch.nn.functional as F
+        return F.gelu(x[..., :inter], approximate="tanh") * x[..., inter:]
 
 
 # --- fp8 GEMM -------------------------------------------------------------
@@ -163,6 +191,26 @@ def aiter_gemm_a8w8(
     return out
 
 
+# --- Batched / grouped GEMM ----------------------------------------------
+def aiter_batched_gemm_bf16(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """AITER batched bf16 GEMM: ``aiter.batched_gemm_bf16(A, B, out)`` (in-place).
+
+    Layout (CK): A [B, M, K], B [B, N, K] (so it computes ``A @ B^T`` per batch),
+    out [B, M, N] bf16, fp32 accumulation. Falls back to ``torch.bmm`` (which on
+    ROCm dispatches to hipBLASLt batched GEMM) when AITER is unavailable.
+    """
+    B, M, _ = a.shape
+    N = b.shape[1]
+    try:
+        out = torch.empty((B, M, N), dtype=torch.bfloat16, device=a.device)
+        _aiter_fn("batched_gemm_bf16")(a, b, out)
+        _mark_baseline("aiter_vendor")
+        return out
+    except Exception:  # noqa: BLE001 - torch batched matmul fallback (hipBLASLt)
+        _mark_baseline("hipblaslt_vendor")
+        return torch.bmm(a, b.transpose(1, 2))
+
+
 # --- Dense bf16 GEMM ------------------------------------------------------
 def hipblaslt_gemm_bf16(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Production dense bf16 GEMM baseline: ``torch.matmul(A, B)``.
@@ -183,7 +231,8 @@ def aiter_layer_norm(
     """AITER CK LayerNorm: ``aiter.layer_norm(input, weight, bias, epsilon)``.
 
     2D row LayerNorm over the last dim (mean + variance subtraction), affine
-    with weight+bias. Returns a tensor of the same shape/dtype.
+    with weight+bias. Falls back to the torch framework LayerNorm when AITER is
+    unavailable. Returns a tensor of the same shape/dtype.
     """
     try:
         out = _aiter_fn("layer_norm")(x, weight, bias, eps)
@@ -193,6 +242,12 @@ def aiter_layer_norm(
         _mark_baseline("framework")
         import torch.nn.functional as F
         return F.layer_norm(x, (x.shape[-1],), weight, bias, eps)
+
+
+def aiter_layer_norm_noaffine_ok(x, weight, bias, eps: float) -> torch.Tensor:
+    """LayerNorm wrapper used by the vendor tasks; delegates to
+    :func:`aiter_layer_norm` (instrumented, with a torch framework fallback)."""
+    return aiter_layer_norm(x, weight, bias, eps)
 
 
 # --- Softmax --------------------------------------------------------------

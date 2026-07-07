@@ -1,0 +1,20 @@
+task_id: genv_batched_gemm_bf16
+operation: batched_gemm
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: vendor_batched_gemm
+baseline_tier: vendor
+generated: true
+shapes:
+  minimal: {B: 2, M: 128, N: 128, K: 256}
+  primary: {B: 8, M: 512, N: 512, K: 512}
+  validation:
+    - {B: 16, M: 256, N: 256, K: 1024}
+    - {B: 4, M: 1024, N: 1024, K: 512}
+    - {B: 8, M: 512, N: 513, K: 512}
+targets:
+  snr_db: 30.0
+  comparison_baseline: aiter_batched_gemm

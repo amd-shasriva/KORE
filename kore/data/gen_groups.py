@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Optional
 
 from kore.config import CONFIG
 from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, extract_kernel

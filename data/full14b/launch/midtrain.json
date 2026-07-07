@@ -1,0 +1,18 @@
+{
+  "model_id": "Qwen/Qwen3-14B",
+  "corpus_path": "data/full14b/midtrain/corpus.jsonl",
+  "output_dir": "runs/full/midtrain",
+  "use_lora": false,
+  "distributed": true,
+  "bf16": true,
+  "gradient_checkpointing": true,
+  "num_train_epochs": 1.0,
+  "learning_rate": 1e-05,
+  "lr_scheduler_type": "cosine",
+  "warmup_ratio": 0.05,
+  "max_seq_length": 8192,
+  "general_replay_frac": 0.15,
+  "fsdp": "full_shard auto_wrap",
+  "fsdp_transformer_layer_cls": null,
+  "fsdp_cpu_offload": false
+}

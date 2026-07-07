@@ -27,7 +27,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 _LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "WARNING": 30, "ERROR": 40}
 _COLORS = {"DEBUG": "\033[2;37m", "INFO": "\033[0;36m", "WARN": "\033[0;33m",

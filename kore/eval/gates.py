@@ -205,7 +205,6 @@ def retention_gate(
     :func:`kore.eval.retention.run_retention_suite`'s ``scores``). Only keys
     present in ``base_scores`` are checked; extra candidate keys are ignored.
     """
-    gate = StageGate(epsilon=epsilon)
     keys = list(base_scores.keys())
     regressions: list[str] = []
     improvements: list[str] = []

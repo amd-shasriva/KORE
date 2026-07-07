@@ -160,10 +160,34 @@ class GRPOConfig(DistributedMixin):
     # the k3 retention anchor ``ref_anchor_coef`` (see below); there was never a
     # second, separate KL coefficient, and the step log used to mislabel the
     # anchor as ``kl_coef``. Kevin's "KL = 0" is expressed by ``ref_anchor_coef``.
-    clip_ratio_low: float = 0.2            # Clip-Higher lower bound (1 - 0.2)
-    clip_ratio_high: float = 0.28          # Clip-Higher upper bound (1 + 0.28)
+    # KORE's importance ratio is length-normalized (token-MEAN logprob), i.e. the
+    # GSPO *sequence* ratio, not DAPO's per-token ratio — so DAPO's 0.2/0.28
+    # token-level clip bounds never bind (a legit sequence ratio sits within ~1%
+    # of 1.0). We therefore (a) run on-policy (ppo_epochs=1) so old_logp==new_logp
+    # and the ratio is ~1 by construction (no off-policy drift to clip), and
+    # (b) set sequence-scale clip bounds as defense-in-depth for any ppo_epochs>1.
+    clip_ratio_low: float = 0.03           # GSPO sequence-ratio lower bound (was 0.2, inert)
+    clip_ratio_high: float = 0.04          # asymmetric clip-higher, sequence scale
     adv_eps: float = 1e-6                  # group-normalization epsilon
-    ppo_epochs: int = 2                    # minibatch passes per rollout batch (reuse old_logp)
+    ppo_epochs: int = 1                    # on-policy (was 2): sequence-ratio clip can't
+                                           # safely protect a 2nd off-policy epoch uncalibrated
+    # DAPO Overlong Filtering: a response within overlong_buffer_len tokens of the
+    # generation cap was (almost certainly) TRUNCATED; its per-token log-probs are
+    # a noisy, biased gradient (the kernel is cut off mid-emit), so it is masked out
+    # of the policy loss. Prevents length-hacking + truncation noise from stalling
+    # the policy. Default on with a 512-token buffer (DAPO recipe).
+    overlong_mask: bool = True
+    overlong_buffer_len: int = 512
+
+    # --- Dynamic training horizon (adaptive steps) --------------------------------
+    # Instead of a fixed step count, keep training WHILE the monitored signal (the
+    # rollout reward / held-out fast_p) is still climbing, and stop early once it
+    # plateaus — so a run neither wastes compute after convergence nor stops before
+    # the policy has actually moved. See kore.policy.dynamic.DynamicStepController.
+    adaptive_steps: bool = False           # off by default (fixed total_steps)
+    min_steps: int = 100                   # never stop before this many steps
+    plateau_patience: int = 40             # stop after this many steps w/o improvement
+    plateau_min_delta: float = 1e-3        # min reward gain that counts as improvement
 
     # --- Optimization (Kevin recipe) ---
     learning_rate: float = 2e-6            # Kevin: 2e-6
@@ -191,8 +215,10 @@ class GRPOConfig(DistributedMixin):
     # path in this loop, so those flags implied capabilities that don't exist.
     # (Distributed FULL-FT is handled by the FSDP fields from DistributedMixin.)
 
-    use_lora: bool = True
-    lora: LoRAConfig = field(default_factory=LoRAConfig)
+    # LoRA path removed from the GRPO trainer (full-parameter FT only); use_lora
+    # defaults OFF and only gates FSDP selection. No `lora` config field: GRPO never
+    # applies PEFT (the LoRAConfig type is still used by SFT/DPO/midtrain).
+    use_lora: bool = False
 
     # --- Sharded FULL-PARAMETER distributed training (best-in-world RL) ---
     # These take effect ONLY for full-FT (``use_lora=False``) launched as a
@@ -224,7 +250,12 @@ class GRPOConfig(DistributedMixin):
     # AVSPO virtual-sample injection: when a group's reward std < variance_floor,
     # inject ``avspo_virtual_k`` virtual samples into the NORMALIZATION stats only
     # (no PG term) to guarantee a variance floor. 0.0 disables (pure GRPO).
-    variance_floor: float = 0.0            # AVSPO tau trigger (0 disables)
+    # AVSPO variance floor. Default 0.1 (not 0) as defense-in-depth against the
+    # (r-mean)/(std+eps) blow-up: a group whose std is tiny but above starpo_min_std
+    # would otherwise get ~1/std (huge) advantages and spike the gradient on a long
+    # run. The floor bounds aug_std >= sqrt(k*tau^2/(n+k)) > 0. (The campaign already
+    # sets 0.1 when anti-collapse is on; this makes standalone GRPO safe too.)
+    variance_floor: float = 0.1            # AVSPO tau trigger (0 disables)
     avspo_virtual_k: int = 2               # #virtual samples injected at +/- tau
     # Real SC-GRPO: for partial-solve groups, re-score other turns' tokens with a
     # correct kernel as an in-context demo (teacher) and weight the per-token PG
@@ -253,6 +284,19 @@ class GRPOConfig(DistributedMixin):
     dynamic_sampling: bool = True           # DAPO: refill non-degenerate groups (not drop-and-shrink)
     target_groups: Optional[int] = None     # #non-degenerate groups to collect (default: tasks_per_step)
     max_sampling_attempts: Optional[int] = None  # bound on oversampling (default: 3x target_groups)
+
+    # --- Open-ended verified co-evolution curriculum ---
+    # When True, task selection is driven by the frontier proposer (learnability
+    # p(1-p) + performance-headroom regret + MAP-Elites novelty) over the archive,
+    # co-evolving the curriculum with the policy, instead of fixed round-robin.
+    # Grounded to the registered task list (only runnable task_ids are proposed).
+    coevolve: bool = False
+    coevolve_batch: Optional[int] = None    # frontier proposals per refill (default: menu size, capped)
+    coevolve_include_vendor: bool = True    # include vendor-baselined ops in the space
+    # Distillation sink: append verified >=min_speedup winning kernels discovered
+    # during co-evolution to this JSONL (WinRecords) for expert-iteration/RFT reuse.
+    coevolve_distill_path: Optional[str] = None
+    coevolve_distill_min_speedup: float = 1.0
 
     # --- Measurement efficiency: value-model bench prefilter ---
     value_prefilter: bool = False
@@ -290,7 +334,11 @@ class MidTrainConfig(DistributedMixin):
     model_id: str = MODEL_14B
     corpus_path: str = "data/midtrain/corpus.jsonl"
     output_dir: str = "runs/midtrain"
-    general_replay_frac: float = 0.15       # 10-15% general shards (strong-shift regime)
+    # CPT replay: Triton/HIP is FAR from the base LM distribution, so the forgetting
+    # literature (Ibrahim et al. 2024; DeepSeek-V2's 30% replay) says a large-shift
+    # domain needs ~30-35% general replay + LR re-warm/re-decay to acquire the domain
+    # WITHOUT wrecking general/chat ability. 0.30 (was 0.15).
+    general_replay_frac: float = 0.30
     learning_rate: float = 1e-5
     lr_scheduler_type: str = "cosine"
     num_train_epochs: float = 1.0
@@ -309,12 +357,17 @@ class MultiCapSFTConfig(SFTConfig):
     backbone; ~10% agentic tool-use trajectories = the orchestration skill.
     """
 
-    frac_kernel_repair_opt: float = 0.35
+    # Dual-capability SFT mix (research-tuned for a model that is SIMULTANEOUSLY a
+    # kernel generator, a chat model, and an orchestrator). ~38% kernel / ~12%
+    # agentic / ~50% general (chat+code+math). The large, co-mixed general plurality
+    # (esp. chat 0.27) is what keeps IFEval/MT-Bench up while the kernel+agentic
+    # slices specialize — the literature-backed guard against specialization collapse.
+    frac_kernel_repair_opt: float = 0.28   # was 0.35
     frac_kernel_qa: float = 0.10
-    frac_agentic_tooluse: float = 0.10
-    frac_general_code: float = 0.20
-    frac_math_reasoning: float = 0.15
-    frac_general_chat: float = 0.10
+    frac_agentic_tooluse: float = 0.12     # was 0.10
+    frac_general_code: float = 0.13        # was 0.20 (now REAL code instruct data)
+    frac_math_reasoning: float = 0.10      # was 0.15 (now REAL CoT math data)
+    frac_general_chat: float = 0.27        # was 0.10 -> the "talk to it" backbone
     use_lora: bool = False                  # full-FT, governed by replay + small LR
     num_train_epochs: float = 3.0
 

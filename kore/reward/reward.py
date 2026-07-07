@@ -56,13 +56,14 @@ class Observation:
     snr_by_shape: dict[str, float] = field(default_factory=dict)
     validation_passed: bool = False
     error_text: Optional[str] = None
-    registers: Optional[int] = None
-    occupancy: Optional[float] = None
     dtype: str = "fp32"
     cv_pct: Optional[float] = None
     flagged_hack: bool = False
     hack_reason: Optional[str] = None
     infra_error: bool = False   # timeout/OOM/segfault/import — NOT a kernel signal
+    # P5: baseline-relative hardware-counter efficiency in [0,1] (rocprofv3), or
+    # None when profiling is off/unavailable. Consumed as a bounded dense bonus.
+    profile_efficiency: Optional[float] = None
 
 
 # Patterns that indicate the "kernel" is cheating rather than computing.
@@ -71,8 +72,16 @@ _HACK_PATTERNS = [
     (r"\baiter\.", "calls aiter op instead of computing"),
     (r"\bimport\s+rocblas\b|\bhipblaslt\b|\brocblas\b|\bmiopen\b|\brocsolver\b|\bhipblas\b",
      "calls a vendor library instead of computing"),
-    (r"torch\.(matmul|mm|bmm|addmm|einsum|softmax|rms_norm|layer_norm|scaled_dot_product_attention)\s*\(",
+    (r"torch\.(matmul|mm|bmm|addmm|baddbmm|einsum|softmax|rms_norm|layer_norm|scaled_dot_product_attention)\s*\(",
      "delegates to a torch op instead of a kernel"),
+    # extended matmul family (all contract to a vendor GEMM/BLAS call).
+    (r"torch\.(tensordot|chain_matmul|mv|inner|vdot|dot|kron)\s*\(",
+     "delegates to a torch matmul-family op instead of computing"),
+    (r"torch\.linalg\.(multi_dot|matmul)\s*\(", "delegates to torch.linalg matmul"),
+    (r"\b(?!tl\.)(?!triton\.)[A-Za-z_]\w*\.(?:tensordot|chain_matmul|mv|inner|vdot|kron)\s*\(",
+     "delegates a matmul-family op via a handle"),
+    # augmented matmul assignment `c @= b` (the non-augmented form is caught below).
+    (r"[\w\)\]][^\S\n]*@=", "uses the @= matmul-assign operator (delegates to the vendor GEMM)"),
     (r"torch\.nn\.functional\.\w+\s*\(", "delegates to torch.nn.functional"),
     (r"\bF\.(scaled_dot_product_attention|linear|softmax|rms_norm|layer_norm|gelu|silu|conv\w*)\s*\(",
      "delegates to torch.nn.functional"),
@@ -110,12 +119,40 @@ _HACK_PATTERNS = [
     # dynamic import / code exec — an escape hatch to reach vendor libs / the oracle.
     (r"\bimportlib\b|__import__\s*\(|\bexec\s*\(|\beval\s*\(", "uses dynamic import/exec to escape"),
     (r"\bctypes\b|\bcffi\b|\bCDLL\b|dlopen|LoadLibrary", "loads a native lib via ctypes/cffi"),
-    # forging the verifier verdict on stdout.
-    (r"(?:SNR|allclose|median_ms)\s*:", "prints a forged verifier verdict line"),
+    # forging the verifier verdict on stdout (incl. the bench timing line).
+    (r"(?:SNR|allclose|median_ms|wall_ms)\s*:", "prints a forged verifier verdict line"),
+    # MODE-SNIFFING: the driver runs the SAME kernel for correctness (--impl ...)
+    # and timing (--bench-mode); a kernel that inspects argv / the bench flags can
+    # compute correctly when checked and skip work when timed (fake speedup). A
+    # kernel has no legitimate reason to read the driver's CLI.
+    (r"\bsys\.argv\b|\bargparse\b|\bgetopt\b",
+     "reads the driver CLI (mode-sniffing: cheat the bench-vs-correctness split)"),
+    (r"['\"]--?(?:bench[-_]?mode|impl|warmup|iters|reference|candidate)['\"]",
+     "references the driver's benchmark flags (mode-sniffing channel)"),
+    # TIMING MANIPULATION: sleeping / stalling only warmup, or busy-loop skew.
+    (r"\btime\.sleep\s*\(|\basyncio\.sleep\s*\(", "calls sleep (benchmark timing manipulation)"),
+    # tampering with GPU synchronization so the timed region under-measures.
+    (r"set_sync_debug_mode|cudaProfilerStart|hipDeviceSetLimit",
+     "tampers with GPU sync/profiling state (timing manipulation)"),
     # process/thread/file escape (fork-bomb, background verdict-overwrite, fs escape).
     (r"\bsubprocess\b|\bmultiprocessing\b|\bthreading\b|os\.system|os\.popen|os\.fork",
      "spawns processes/threads (isolation escape)"),
     (r"open\s*\([^)]*['\"][waxr]?[wax]\+?['\"]", "opens a file for writing (filesystem escape)"),
+    # filesystem escape beyond open(): pathlib write, chmod (defeat 0o444 staging),
+    # process spawn.
+    (r"\.write_text\s*\(|\.write_bytes\s*\(", "writes a file via pathlib (filesystem escape)"),
+    (r"\bos\.(chmod|replace|rename|remove|unlink|spawn\w*|posix_spawn)\b",
+     "mutates the filesystem / spawns a process (isolation escape)"),
+    # matmul OPERATOR delegation: `return a @ b` lowers to aten::matmul -> hipBLASLt
+    # (pure vendor delegation). `@decorator` lines start with @ (no operand before),
+    # so requiring an operand char before @ excludes decorators.
+    # NB: horizontal-whitespace only ([^\S\n]) so a decorator stack (`)\n@triton.jit`
+    # / `tl\n@triton.jit`) is NOT matched — only an operand `@` operand on ONE line.
+    (r"[\w\)\]][^\S\n]*@[^\S\n]*[\w\(]", "uses the @ matmul operator (delegates to the vendor GEMM)"),
+    # module-table access to reach torch/vendor/oracle while dodging import scans.
+    (r"\bsys\.modules\b", "reaches libraries via sys.modules (delegation/escape channel)"),
+    # reading the environment: a mode-sniff / escape channel a pure kernel never needs.
+    (r"\bos\.environ\b|\bos\.getenv\b|\bgetenv\s*\(", "reads the environment (mode-sniff/escape channel)"),
 ]
 _SILENT_FALLBACK = re.compile(r"except\s*[\w. ,()]*:\s*(?:\n\s*)*(?:return|pass|out\s*=)", re.MULTILINE)
 
@@ -144,19 +181,65 @@ def _strip_comments_and_docstrings(src: str) -> str:
     return src
 
 
-def _worst_speedup(obs: Observation) -> Optional[float]:
-    """Speedup on the worst shape: min over shapes of baseline/candidate."""
+def _shape_ratios(obs: Observation) -> list[float]:
+    """Per-shape speedup ratios base_ms/cand_ms (a gain; higher is better)."""
+    out: list[float] = []
     if obs.baseline_by_shape and obs.wall_by_shape:
-        ratios = []
         for k, cand in obs.wall_by_shape.items():
             base = obs.baseline_by_shape.get(k)
             if base and cand and cand > 0:
-                ratios.append(base / cand)
-        if ratios:
-            return min(ratios)
+                out.append(base / cand)
+    return out
+
+
+def _worst_speedup(obs: Observation) -> Optional[float]:
+    """Speedup on the worst shape: min over shapes of baseline/candidate.
+
+    This is the diagnostic + eval metric (always worst-shape) and the CVaR_{a->0}
+    endpoint of :func:`_aggregate_speedup`."""
+    ratios = _shape_ratios(obs)
+    if ratios:
+        return min(ratios)
     if obs.baseline_ms and obs.wall_ms and obs.wall_ms > 0:
         return obs.baseline_ms / obs.wall_ms
     return None
+
+
+def _aggregate_speedup(obs: Observation, cfg) -> Optional[float]:
+    """Distributionally-robust speed aggregation over the per-shape speedup sweep.
+
+    KORE's contribution is a *distributionally-robust* speed objective against the
+    PRODUCTION vendor baseline: rather than the average-case speedup, it optimizes
+    the worst shapes, so the policy must be fast on the hardest shape a practitioner
+    hits — not just on average. This exposes the whole CVaR_alpha family (worst =
+    CVaR_{a->0}, mean = CVaR_1) at a single point; all downstream shaping (log term,
+    fast_p bonuses, significance) then applies to the chosen aggregate.
+
+      "worst" : min over shapes (current behavior; the robust objective / default).
+      "cvar"  : geometric mean of the worst ceil(alpha*N) shapes (CVaR_alpha).
+      "mean"  : geometric-mean speedup over all shapes (average-case ablation arm).
+
+    Geometric mean (mean-of-logs) is used for cvar/mean so the family is linear in
+    ln(ratio) — consistent with the log-speedup shaping — and scale-correct for
+    ratios. Degrades to the single-shape / scalar case identically to _worst_speedup,
+    so the default ("worst") is byte-identical to the previous reward.
+    """
+    ratios = _shape_ratios(obs)
+    if not ratios:
+        if obs.baseline_ms and obs.wall_ms and obs.wall_ms > 0:
+            return obs.baseline_ms / obs.wall_ms
+        return None
+    mode = (getattr(cfg, "speed_aggregation", "worst") or "worst").lower()
+    n = len(ratios)
+    if mode == "worst" or n == 1:
+        return min(ratios)                       # CVaR_{alpha->0}
+    if mode == "mean":
+        k = n
+    else:  # "cvar"
+        alpha = float(getattr(cfg, "cvar_alpha", 0.5) or 0.5)
+        k = max(1, min(n, math.ceil(alpha * n)))
+    worst_logs = sorted(math.log(r) for r in ratios)[:k]  # k worst (smallest) ratios
+    return math.exp(sum(worst_logs) / k)
 
 
 def _worst_snr(obs: Observation) -> Optional[float]:
@@ -228,6 +311,47 @@ class RewardResult:
     tier: str
     flags: list[str] = field(default_factory=list)
     detail: str = ""
+
+
+def _speedup_term(su_scored: float, su_raw: float, obs: Observation, cfg,
+                  flags: list[str]) -> float:
+    """P4 speed reward: log-shaped speedup + significance-gated fast_p bonuses.
+
+    ``su_scored`` is the (excessive-capped / high-variance-damped) speedup used for
+    the continuous term; ``su_raw`` is the measured speedup used for the discrete
+    threshold checks. Returns a NON-NEGATIVE speed contribution, so a correct
+    kernel always scores >= ``correctness_weight`` (lexicographic dominance holds).
+
+    Continuous term (breaks the linear plateau, steeper at the 1x crossover):
+        speedup_log=True  ->  w*su           (su <= 1, linear, non-negative)
+                              w*(1 + ln(su))  (su >  1, emphasized)
+        speedup_log=False ->  w*max(su, 0)    (legacy linear)
+    Discrete term (the strong ">1x" signal): cumulative ``fast_p_bonus`` for each
+    threshold met, awarded ONLY when the speedup is statistically trustworthy
+    (cv <= cv_threshold_pct) and not an excessive-speedup measurement outlier.
+    """
+    w = float(getattr(cfg, "speedup_weight", 1.0) or 0.0)
+    if getattr(cfg, "speedup_log", False) and su_scored > 1.0:
+        term = w * (1.0 + math.log(su_scored))
+    else:
+        term = w * max(su_scored, 0.0)
+
+    bonuses = getattr(cfg, "fast_p_bonus", ()) or ()
+    if bonuses:
+        sig_only = bool(getattr(cfg, "fast_p_significant_only", True))
+        trustworthy = (obs.cv_pct is None) or (obs.cv_pct <= cfg.cv_threshold_pct)
+        excessive = "excessive_speedup" in flags
+        # Require the speedup to clear the threshold by the measurement noise floor
+        # (not just tie it): a kernel that merely PARITIES the baseline (1.00x) — or
+        # beats it only within combined timing noise — must not farm the crossover
+        # bonus. margin = 1 + noise_floor_pct/100 (e.g. 1.0x threshold -> need 1.02x).
+        margin = 1.0 + float(getattr(cfg, "noise_floor_pct", 0.0) or 0.0) / 100.0
+        if (not sig_only) or (trustworthy and not excessive):
+            for thr, bonus in bonuses:
+                if su_raw >= thr * margin:
+                    term += float(bonus)
+                    flags.append(f"fast_p>={thr}")
+    return term
 
 
 def _all_shapes_pass(obs: Observation, dtype: str, cfg, snr_threshold: Optional[float] = None) -> bool:
@@ -320,7 +444,7 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     # (never a penalty) — correct-fast vs correct-slow stays a pure speed ordering.
     base = cfg.correctness_weight
     fmt = _format_component(response, cfg)
-    su = _worst_speedup(obs)
+    su = _aggregate_speedup(obs, cfg)  # distributionally-robust (default: worst-shape)
     if su is None:
         rr = RewardResult(base + fmt, True, None, "correct_no_bench", flags,
                           "correct; no timing")
@@ -341,7 +465,15 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
         flags.append("phase:correctness")
         speed_term = 0.0
     else:
-        speed_term = max(su_scored, 0.0)
+        speed_term = _speedup_term(su_scored, su, obs, cfg, flags)
+        # P5: bounded, baseline-relative hardware-counter dense bonus (flagship
+        # novelty). Only on the correct tier; strictly below the fast_p bonuses so
+        # real wall-clock wins always dominate. Inert when weight==0 / no profile.
+        pw = float(getattr(cfg, "profile_reward_weight", 0.0) or 0.0)
+        if pw > 0.0 and obs.profile_efficiency is not None:
+            prof_term = pw * max(0.0, min(1.0, obs.profile_efficiency))
+            speed_term += prof_term
+            flags.append(f"profile+{prof_term:.3f}")
     reward = base + speed_term + fmt
     rr = RewardResult(reward, True, su, "correct_timed", flags,
                       f"worst-shape speedup {su:.3f}x vs baseline"

@@ -1,4 +1,7 @@
-{"ts": 1783023814.461085, "stage": "datagen", "status": "start", "elapsed_s": 0.0, "artifact": null}
-{"ts": 1783026173.2477064, "stage": "datagen", "status": "start", "elapsed_s": 0.0, "artifact": null}
-{"ts": 1783027545.7732487, "stage": "datagen", "status": "error", "elapsed_s": 1372.5255, "artifact": "TypeError(\"KoreLogger.event() got multiple values for argument 'kind'\")"}
-{"ts": 1783027938.3177233, "stage": "datagen", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783152022.3518846, "stage": "midtrain", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783152770.4190564, "stage": "midtrain", "status": "gate_passed", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783152770.4694834, "stage": "midtrain", "status": "done", "elapsed_s": 748.1162, "artifact": "runs/midtrain"}
+{"ts": 1783152770.4705815, "stage": "datagen", "status": "start", "elapsed_s": 0.0, "artifact": null}
+{"ts": 1783153748.058178, "stage": "datagen", "status": "error", "elapsed_s": 977.5876, "artifact": "RuntimeError('ClaudeTeacher.generate failed after 4 attempts')"}
+{"ts": 1783154317.009212, "stage": "midtrain", "status": "skipped", "elapsed_s": 0.0, "artifact": "runs/midtrain"}
+{"ts": 1783154317.009261, "stage": "datagen", "status": "start", "elapsed_s": 0.0, "artifact": null}

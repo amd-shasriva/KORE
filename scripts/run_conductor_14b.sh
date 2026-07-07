@@ -29,6 +29,11 @@ PY="${KORE_PY:-$HOME/kore-venv/bin/python}"
 [ -x "$PY" ] || PY="$(command -v python3)"
 echo "[run_conductor] repo=$REPO_ROOT python=$PY"
 
+# Put the venv's bin on PATH so console scripts resolve to the venv — critically
+# `accelerate`, which scripts/launch_distributed.sh invokes by bare name to drive
+# FSDP for midtrain/sft/dpo. Without this the distributed stages die with exit 127.
+export PATH="$(dirname "$PY"):$PATH"
+
 export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
 # Load gitignored secrets (AMD_LLM_API_KEY / AMD_NTID for the Claude teacher used
@@ -54,9 +59,13 @@ export TORCHINDUCTOR_CACHE_DIR="$REPO_ROOT/.inductor_cache"
 # agentic needs the Claude teacher; include it only if a key is present so the
 # campaign "just runs" without one. Override the whole list via KORE_STAGES.
 if [ -n "${AMD_LLM_API_KEY:-}" ]; then
-  # teacher available -> RESUME datagen (additive: only missing shards) + agentic.
-  DEFAULT_STAGES="datagen,agentic,build,midtrain,sft,dpo,grpo,soup,eval"
-  echo "[run_conductor] teacher key present -> datagen(resume) + agentic included."
+  # teacher available -> full pipeline. Order matches run_campaign.DEFAULT_STAGES:
+  # midtrain FIRST (it's independent + fail-fasts the 28GB full-FT FSDP setup),
+  # then the teacher-bound data stages, then build -> sft(base=midtrain ckpt) ->
+  # dpo -> grpo -> soup -> eval. datagen still resumes additively; sft only needs
+  # midtrain + build done before it, both of which precede it here.
+  DEFAULT_STAGES="midtrain,datagen,agentic,build,sft,dpo,grpo,soup,eval"
+  echo "[run_conductor] teacher key present -> full pipeline (midtrain-first, code default)."
 else
   # no teacher -> cannot finish datagen/agentic; train on existing on-disk data only.
   DEFAULT_STAGES="midtrain,build,sft,dpo,grpo,soup,eval"

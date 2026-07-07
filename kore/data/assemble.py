@@ -13,7 +13,7 @@ and general replay always falls back to bundled samples, so this runs offline
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from kore.data import build_datasets as bd
 from kore.data.general_replay import load_general_replay
@@ -86,7 +86,15 @@ def assemble_multicap_sources(
         krecs = krecs + list(extra_records)
     kernel_repair_opt = bd.build_sft(krecs) if krecs else []
 
+    # Agentic slice = KORE-native tool trajectories (real build/test/bench/pmc on our
+    # tools) + a "generic layer" of real public function-calling data (ToolACE via the
+    # tool_use replay) so the slice teaches the general tool-use skill AND our schema,
+    # and is never starved when native trajectories are sparse. ~40% generic / rest native.
     agentic_rows = _agentic_rows(data_root)
+    agentic_n = max(1, int(round(config.frac_agentic_tooluse * total)))
+    n_generic = max(1, int(round(0.4 * agentic_n)))
+    generic_agentic = load_general_replay("tool_use", n_generic, seed + 40, use_hf)
+    agentic_rows = agentic_rows + generic_agentic
 
     qa_n = max(1, int(round(config.frac_kernel_qa * total)))
     qa_rows = generate_kernel_qa(tasks, teacher, n=qa_n, seed=seed) if teacher and tasks else []

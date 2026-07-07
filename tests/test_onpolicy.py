@@ -268,38 +268,6 @@ def test_dpo_reference_refresh_field():
     assert cfg.ref_model_id == "round0_ckpt"
 
 
-# --------------------------------------------------------------------------- #
-# 5. rft consumes on-policy wins
-# --------------------------------------------------------------------------- #
-def test_rft_consumes_onpolicy_wins():
-    from kore.policy.rft import collect_onpolicy_wins
-
-    group = RankedGroupRecord(
-        task_id="gemm_bf16", parent_id="p",
-        candidates=[
-            {"source": "def a():\n    return 1", "wall_us": 100.0, "snr_db": 40.0, "rank": 0},
-            {"source": "def b():\n    return 2", "wall_us": 200.0, "snr_db": 39.0, "rank": 1},
-        ],
-        preferences=[[0, 1]],
-    )
-    win = WinRecord(
-        task_id="gemm_bf16",
-        trajectory=[{"role": "user", "content": "x"},
-                    {"role": "assistant", "content": _wrap("def c():\n    return 3")}],
-        initial_wall_us=200.0, final_wall_us=100.0, speedup=2.0,
-        final_source="def c():\n    return 3",
-    )
-    slow_win = WinRecord(
-        task_id="gemm_bf16",
-        trajectory=[{"role": "assistant", "content": _wrap("def d(): pass")}],
-        initial_wall_us=100.0, final_wall_us=200.0, speedup=0.5,  # slower -> dropped
-        final_source="def d(): pass",
-    )
-    raw = {"correct": True, "speedup": 1.5,
-           "messages": [{"role": "user", "content": "y"}]}
-
-    rows = collect_onpolicy_wins([group, win, slow_win, raw], min_speedup=1.0)
-    # group (best candidate) + win + raw = 3; slow_win dropped
-    assert len(rows) == 3
-    for row in rows:
-        assert "messages" in row and row["messages"]
+# NB: on-policy >1x win selection for RFT now lives in kore.data.rejection
+# (stratified_rft_select), tested in tests/test_rejection.py. The old
+# kore.policy.rft module was removed as superseded dead code.

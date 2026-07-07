@@ -40,6 +40,25 @@ class KoreConfig:
     cv_threshold_pct: float = 3.0
     noise_floor_pct: float = 2.0
 
+    # anti-hack: determinism re-check on the RL correctness path. A reward-hacking
+    # kernel that emits (partly) random output can pass the SNR gate by LUCK on a
+    # single run. We re-run the primary shape once and require the verdict to be
+    # stable: still correct, and SNR within determinism_snr_tol_db of the first run.
+    # A kernel whose SNR swings more than the tolerance (or flips to incorrect) is
+    # non-deterministic and dropped to the incorrect tier (never rewarded). The
+    # tolerance is generous enough to spare legitimate atomic-reduction jitter
+    # (which perturbs SNR by <~1 dB) while catching a lucky-pass hack (which swings
+    # tens of dB, often to negative SNR).
+    verifier_determinism_check: bool = True
+    determinism_snr_tol_db: float = 10.0
+
+    # data scale: expand each task's shapes into a diverse (small/medium/large +
+    # non-aligned) set so the policy must learn shape-robust kernels, not memorize
+    # one tile config. Opt-in (changes eval cost + difficulty). See tasks/augment.py.
+    shape_augment: bool = field(
+        default_factory=lambda: os.environ.get("KORE_SHAPE_AUGMENT", "0") == "1")
+    shape_augment_max: int = 6
+
     # reward shaping
     correctness_weight: float = 0.3
     excessive_speedup_flag: float = 10.0
@@ -75,6 +94,60 @@ class KoreConfig:
     #   "latency"     : full correctness_weight + speedup (same as "full")
     reward_phase: str = "full"
 
+    # --- P4: speedup shaping to break the "correct-but-slow" (lazy-optimization)
+    # plateau and give real GROUP-RELATIVE gradient at the >1x crossover ----------
+    # Diagnosis (Dr.Kernel 2026 "lazy optimization"): a purely LINEAR speed term
+    # (reward = correctness_weight + su) gives almost no reward *contrast* in the
+    # 0.7-1.1x band the policy stalls in, so GRPO's group-relative advantage barely
+    # distinguishes a 0.95x kernel from a 1.05x one — the model learns "be correct"
+    # and stops. Two fixes (both preserve lexicographic dominance: every correct
+    # kernel still scores >= correctness_weight > any incorrect kernel):
+    #   1. speedup_log: shape the speed term as w*su for su<=1 (linear, non-negative)
+    #      and w*(1+ln(su)) for su>1 — continuous at su=1, monotonic, but with a
+    #      steeper effective slope right at the baseline crossover.
+    #   2. fast_p_bonus: significance-gated DISCRETE bonuses for actually BEATING the
+    #      baseline at 1.0x / 1.2x / 1.5x. This is the strong signal that makes ">1x"
+    #      a distinct, high-value outcome (large positive group-relative advantage
+    #      for the kernels that cross the baseline), instead of a marginal linear
+    #      increment. Only awarded when the timing is statistically trustworthy
+    #      (cv <= cv_threshold_pct) and not flagged as a measurement-error outlier,
+    #      so the policy cannot farm the bonus with noisy/lucky timings.
+    speedup_weight: float = 1.0
+    speedup_log: bool = True
+    # cumulative (threshold, bonus) pairs; awarded for every threshold the (worst-
+    # shape) speedup meets when significant. Sum kept modest vs correctness_weight
+    # so it never inverts the correctness gate.
+    fast_p_bonus: tuple = ((1.0, 0.30), (1.2, 0.30), (1.5, 0.40))
+    fast_p_significant_only: bool = True
+
+    # --- P5: hardware-counter-grounded DENSE reward (flagship novelty) ----------
+    # A bounded, baseline-relative roofline-attainment bonus (see
+    # kore.reward.profile_reward) added ONLY on the correct tier. It gives gradient
+    # in the correct-but-slow band where wall-clock speedup is flat, by rewarding
+    # the causes of speed (fewer pipeline stalls / less memory traffic than the
+    # vendor baseline). Kept STRICTLY below the fast_p bonuses so actually beating
+    # the baseline always dominates a merely counter-efficient kernel. Weight 0.0
+    # => fully inert (feature-flagged); enabled via --profile-reward once the
+    # rocprofv3 path is GPU-validated, then ablated as the novel contribution.
+    # Env-overridable so it propagates to the accelerate-launched training subprocs.
+    profile_reward_weight: float = field(
+        default_factory=lambda: float(os.environ.get("KORE_PROFILE_REWARD_WEIGHT", "0.0")))
+
+    # --- P6: distributionally-robust speed aggregation (the method contribution) --
+    # How the per-shape speedup sweep is reduced to the scalar the speed reward
+    # optimizes. KORE optimizes the WORST shapes vs the production vendor baseline
+    # (AITER/hipBLASLt), not the average — so a kernel must be fast on the hardest
+    # shape, not just on average. This is the CVaR_alpha family:
+    #   "worst" : min over shapes (CVaR_{alpha->0}); the robust objective (DEFAULT,
+    #             byte-identical to the previous reward).
+    #   "cvar"  : geometric mean of the worst ceil(cvar_alpha*N) shapes (CVaR_alpha)
+    #             — a softer, denser-gradient robust objective for the trained arm.
+    #   "mean"  : geometric-mean speedup over all shapes (average-case ablation arm).
+    # Env-overridable so it propagates to the accelerate-launched training subprocs.
+    speed_aggregation: str = field(
+        default_factory=lambda: os.environ.get("KORE_SPEED_AGG", "worst"))
+    cvar_alpha: float = 0.5   # tail fraction for "cvar" (0<alpha<=1; ->0==worst, ==1==mean)
+
     # multi-turn credit
     gamma: float = 0.4
 
@@ -99,6 +172,34 @@ class KoreConfig:
     def __post_init__(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self._check_reward_invariants()
+
+    def _check_reward_invariants(self) -> None:
+        """Fail fast if a (possibly env-overridden) config would break the
+        lexicographic reward ladder or let a shaping term lead the objective.
+
+        These are the invariants the reward code documents but previously never
+        enforced — a bad KORE_PROFILE_REWARD_WEIGHT or an edited weight could
+        silently invert tiers or let the profiler bonus outweigh a real speed win.
+        """
+        assert self.speed_aggregation.lower() in ("worst", "mean", "cvar"), (
+            f"speed_aggregation must be worst|mean|cvar (got {self.speed_aggregation!r})")
+        assert 0.0 < self.cvar_alpha <= 1.0, "cvar_alpha must be in (0, 1]"
+        # anti-hack floor is the unique minimum: hack < compile_fail < incorrect.
+        assert self.reward_hack < self.reward_compile_fail < self.reward_incorrect, (
+            "reward tiers must satisfy reward_hack < reward_compile_fail < reward_incorrect")
+        # a shaped-incorrect kernel (<= eps_shape + format_weight) can never reach
+        # the correct tier (>= correctness_weight).
+        assert self.eps_shape + self.format_weight < self.correctness_weight, (
+            "eps_shape + format_weight must stay below correctness_weight "
+            "(else an incorrect kernel could reach the correct tier)")
+        # the profiler dense bonus SHAPES, never LEADS: it must be strictly below the
+        # smallest fast_p threshold bonus so a genuinely faster kernel always wins.
+        if self.profile_reward_weight and self.fast_p_bonus:
+            min_bonus = min(b for _, b in self.fast_p_bonus)
+            assert self.profile_reward_weight < min_bonus, (
+                f"profile_reward_weight ({self.profile_reward_weight}) must be < the "
+                f"smallest fast_p bonus ({min_bonus}) so the profiler never leads")
 
 
 CONFIG = KoreConfig()

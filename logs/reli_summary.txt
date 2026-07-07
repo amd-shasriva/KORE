@@ -1,0 +1,2 @@
+run 1: exit=0 shards=13 sdpa_warns=0 checkpoint_errors=0
+run 2: exit=143 shards=0 sdpa_warns=0 checkpoint_errors=0

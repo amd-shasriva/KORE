@@ -25,10 +25,19 @@ from kore.tasks.aiter_ref import torch_softmax_lastdim  # noqa: E402
 
 
 def _load_candidate():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernel.py")
-    spec = importlib.util.spec_from_file_location("candidate_kernel", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # Cache the loaded candidate MODULE for the life of the process so a stateful
+    # kernel's module globals (e.g. an invocation counter) PERSIST across the bench
+    # timing loop and the post-timing correctness re-verification. Without this,
+    # run_correctness would reload the module and reset the counter, letting a
+    # "correct-for-first-N-calls, garbage-after" kernel evade the anti-hack check.
+    if getattr(_load_candidate, "_mod", None) is not None:
+        mod = _load_candidate._mod
+    else:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernel.py")
+        spec = importlib.util.spec_from_file_location("candidate_kernel", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _load_candidate._mod = mod
     return mod.softmax
 
 
@@ -138,7 +147,16 @@ def main() -> int:
     p.add_argument("--impl", default="candidate", choices=["candidate", "reference", "torch"])
     a = p.parse_args()
     shape = ref.parse_shape(a.shape)
-    return run_bench(shape, a.impl, a.warmup, a.iters) if a.bench_mode else run_correctness(shape, a.mode)
+    if a.bench_mode:
+        rc = run_bench(shape, a.impl, a.warmup, a.iters)
+        # Anti-hack post-timing correctness: a stateful kernel that returns correct
+        # output for the correctness calls but garbage during timing is caught here
+        # (the verify runs on LATE invocations; the env invalidates the bench on a
+        # False verdict).
+        if a.impl == "candidate":
+            run_correctness(shape, a.mode)
+        return rc
+    return run_correctness(shape, a.mode)
 
 
 if __name__ == "__main__":

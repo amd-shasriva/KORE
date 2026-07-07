@@ -26,9 +26,7 @@ from kore.config import CONFIG, KoreConfig
 from kore.reward.reward import Observation, compute_reward
 from kore.eval.fastp import (
     DEFAULT_PS,
-    fast_p_at_k,
     fast_p_curve,
-    fastp,
     geometric_mean_speedup,
     mean_ci,
     pass_at_k,

@@ -237,6 +237,70 @@ def _messages_to_text(messages: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _load_kernelbook_pairs(n: int, max_chars: int) -> list:
+    """Stream real (PyTorch module -> Triton) pairs from GPUMODE/KernelBook (HF).
+
+    Returns ``[(pseudo_path, doc_text), ...]`` formatted like the local task pairs.
+    Fully fail-safe: any error (missing datasets dep / offline / schema drift)
+    returns [] so the corpus build never breaks. Used as corpus text only.
+    """
+    try:
+        from datasets import load_dataset
+    except Exception:
+        return []
+    out: list = []
+    try:
+        ds = load_dataset("GPUMODE/KernelBook", split="train", streaming=True)
+        for i, ex in enumerate(ds):
+            if len(out) >= n or i >= n * 8:
+                break
+            py = ex.get("python_code") or ex.get("pytorch_code")
+            tri = ex.get("triton_code") or ex.get("original_triton_code")
+            if not (isinstance(py, str) and isinstance(tri, str) and py.strip() and tri.strip()):
+                continue
+            doc = (f"# PyTorch module\n\n{py.strip()[:max_chars]}\n\n"
+                   f"# Equivalent Triton kernel\n\n{tri.strip()[:max_chars]}\n")
+            out.append((Path(f"kernelbook/pair_{i}.py"), doc))
+    except Exception:
+        return out  # partial results are fine; never raise
+    return out
+
+
+def _load_amd_kernels(n: int, max_chars: int) -> list:
+    """Stream REAL AMD MI300 passing kernels from GPUMODE/kernelbot-data (HF).
+
+    The ``amd_successful_submissions`` subset holds ~60k competition kernels that
+    PASSED correctness on real MI300 hardware (fp8-gemm, MoE, MLA-decode, all2all,
+    mxfp4, ...) — the highest-signal AMD-native (gfx942) kernel corpus available.
+    Unlike KernelBook (NVIDIA/Inductor Triton), these are hand-optimized for AMD
+    and carry the ``#!POPCORN`` problem header, so the model sees real gfx942
+    idioms. ``code`` is stored as raw bytes; we decode + keep only passing rows.
+    Fully fail-safe: any error returns partial/empty so the build never breaks.
+    """
+    try:
+        from datasets import load_dataset
+    except Exception:
+        return []
+    out: list = []
+    try:
+        ds = load_dataset("GPUMODE/kernelbot-data", "amd_successful_submissions",
+                          split="train", streaming=True)
+        for i, ex in enumerate(ds):
+            if len(out) >= n or i >= n * 8:
+                break
+            if ex.get("run_passed") is False:   # subset is passing, but be strict
+                continue
+            code = ex.get("code")
+            if isinstance(code, (bytes, bytearray)):
+                code = code.decode("utf-8", errors="ignore")
+            if not (isinstance(code, str) and code.strip()):
+                continue
+            out.append((Path(f"amd_kernels/sub_{i}.py"), code.strip()[:max_chars]))
+    except Exception:
+        return out  # partial results are fine; never raise
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
@@ -315,6 +379,26 @@ def build_midtrain_corpus(
             )
             pairs.append((task_dir / "pair.py", doc))
     collected.append(("pytorch_triton_pairs", pairs))
+
+    # 2b. REAL PyTorch->Triton pairs from KernelBook (HF, use_hf only). ~18k verified
+    # (nn.Module -> Triton) pairs from torch.compile/Inductor — the best supervised
+    # translate-and-fuse corpus. Used as CORPUS TEXT only (not executed), so the
+    # NVIDIA/libdevice flavor of the Triton is fine for teaching the pattern.
+    kb_pairs: list[tuple[Path, str]] = []
+    if use_hf:
+        kb_pairs = _load_kernelbook_pairs(
+            n=max_files_per_source, max_chars=max_chars_per_file)
+    collected.append(("kernelbook", kb_pairs))
+
+    # 2c. REAL AMD MI300 passing kernels from GPUMODE/kernelbot-data (HF, use_hf
+    # only). ~60k gfx942-native competition kernels (fp8-gemm/MoE/MLA/mxfp4/...) that
+    # passed correctness on real MI300 — the highest-signal AMD-native corpus, which
+    # KernelBook (NVIDIA/Inductor Triton) does not cover.
+    amd_kernels: list[tuple[Path, str]] = []
+    if use_hf:
+        amd_kernels = _load_amd_kernels(
+            n=max_files_per_source, max_chars=max_chars_per_file)
+    collected.append(("amd_kernels", amd_kernels))
 
     # 3. Triton kernel Python files across the repos.
     triton_files: list[tuple[Path, str]] = []

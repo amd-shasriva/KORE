@@ -83,7 +83,6 @@ def moe_ref(hidden, w1, w2, topk_weight, topk_ids) -> torch.Tensor:
     M, D = hidden.shape
     E = w1.shape[0]
     I = w2.shape[2]
-    topk = topk_ids.shape[1]
     x = hidden.float()
     w1f = w1.float()
     w2f = w2.float()

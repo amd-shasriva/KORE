@@ -34,7 +34,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from kore.config import CONFIG
 from kore.data.gen_groups import build_preferences

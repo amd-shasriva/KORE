@@ -1,5 +1,5 @@
-# SMOKE SUBSET — IFEval-style instruction-following prompts with programmatically checkable constraints. NOT the full bench.
-# TODO: load the full IFEval set (HF: google/IFEval) and its official instruction registry for a real run.
+# SMOKE SUBSET (offline/CI fallback). A REAL run pulls the full IFEval set from HF
+# (google/IFEval) automatically via --use-hf / KORE_EVAL_FULL=1. Only used offline.
 # Fields: prompt (shown to model), instructions (list of {type, ...args}). Supported types are in retention.py IFEVAL_CHECKS.
 {"id": "if-0", "prompt": "Write a one-line note about GPU kernels. Respond in all lowercase letters and make sure to include the word kernel.", "instructions": [{"type": "all_lowercase"}, {"type": "keyword_include", "keyword": "kernel"}]}
 {"id": "if-1", "prompt": "List exactly three short bullet points about matrix multiplication. Use '* ' at the start of each bullet.", "instructions": [{"type": "num_bullets", "n": 3}]}

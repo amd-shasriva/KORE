@@ -1,5 +1,6 @@
-# SMOKE SUBSET — canonical HumanEval-style problems (real signatures + tests). NOT the full bench.
-# TODO: load the full HumanEval / HumanEval+ set (HF: openai_humaneval, evalplus/humanevalplus) for a real run.
+# SMOKE SUBSET (offline/CI fallback). A REAL run pulls the full HumanEval test set
+# from HF (openai_humaneval) automatically via --use-hf / KORE_EVAL_FULL=1. This
+# file is only used when HF is unavailable.
 # Fields: prompt (signature+docstring shown to model), entry_point, canonical_solution (reference body), test (asserts).
 {"task_id": "HE/2", "entry_point": "truncate_number", "prompt": "def truncate_number(number: float) -> float:\n    \"\"\" Given a positive floating point number, decompose it into an integer\n    part (largest integer smaller than the number) and decimals (the leftover\n    part, always smaller than 1). Return the decimal part of the number.\n    >>> truncate_number(3.5)\n    0.5\n    \"\"\"\n", "canonical_solution": "    return number % 1.0\n", "test": "assert truncate_number(3.5) == 0.5\nassert abs(truncate_number(1.33) - 0.33) < 1e-6\nassert abs(truncate_number(123.456) - 0.456) < 1e-6\n"}
 {"task_id": "HE/53", "entry_point": "add", "prompt": "def add(x: int, y: int) -> int:\n    \"\"\"Add two numbers x and y.\n    >>> add(2, 3)\n    5\n    >>> add(5, 7)\n    12\n    \"\"\"\n", "canonical_solution": "    return x + y\n", "test": "assert add(2, 3) == 5\nassert add(5, 7) == 12\nassert add(-1, 1) == 0\nassert add(0, 0) == 0\n"}

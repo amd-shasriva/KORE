@@ -64,7 +64,6 @@ def get_inputs(shape: dict, dtype=torch.bfloat16, device="cuda", seed: int = 0):
 
 def _gather_kv(key_cache, value_cache, block_table, ctx, kv_h, bs):
     """Gather K,V [ctx, D] in fp32 for one (sequence, kv-head)."""
-    x = key_cache.shape[-1]
     D = value_cache.shape[2]
     ks, vs = [], []
     n_pages = (ctx + bs - 1) // bs

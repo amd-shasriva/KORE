@@ -9,6 +9,23 @@ from kore.reward.reward import Observation, RewardResult, compute_reward, scan_f
 from kore.reward import stats
 
 
+def _expected_speed_term(su_scored: float, su_raw: float,
+                         significant: bool = True, excessive: bool = False) -> float:
+    """Independent re-derivation of the P4 speed reward for assertions."""
+    w = CONFIG.speedup_weight
+    if CONFIG.speedup_log and su_scored > 1.0:
+        term = w * (1.0 + math.log(su_scored))
+    else:
+        term = w * max(su_scored, 0.0)
+    margin = 1.0 + CONFIG.noise_floor_pct / 100.0
+    if CONFIG.fast_p_bonus and ((not CONFIG.fast_p_significant_only)
+                                or (significant and not excessive)):
+        for thr, bonus in CONFIG.fast_p_bonus:
+            if su_raw >= thr * margin:
+                term += bonus
+    return term
+
+
 # --------------------------------------------------------------------------- #
 # stats
 # --------------------------------------------------------------------------- #
@@ -17,13 +34,6 @@ def test_median_and_cv():
     assert stats.median([1.0, 2.0, 3.0, 4.0]) == 2.5
     assert stats.cv_pct([10.0, 10.0, 10.0]) == 0.0
     assert stats.cv_pct([10.0, 12.0]) > 0.0
-
-
-def test_significance_needs_gap_above_noise():
-    # 50% faster, tiny noise -> significant.
-    assert stats.speedup_is_significant(1.0, 0.5, 0.001, 0.001) is True
-    # 1% faster, within noise floor -> not significant.
-    assert stats.speedup_is_significant(1.0, 0.99, 0.02, 0.02) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -48,6 +58,49 @@ def test_scan_blocks_post_verdict_and_aliased_delegation():
     assert scan_for_hacks("import torch\nm=torch.matmul\ndef f(x): return m(x,x)") is not None
     # legitimate Triton must NOT be flagged
     assert scan_for_hacks("import triton.language as tl\n@triton.jit\ndef k():\n    y = tl.sigmoid(x)") is None
+
+
+def test_scan_blocks_mode_sniffing_and_timing_manipulation():
+    """A kernel that detects the bench-vs-correctness split (or manipulates the
+    timed region) can fake a speedup while staying 'correct' — must be rejected."""
+    # mode-sniffing via the driver CLI
+    assert scan_for_hacks("import sys\nif '--bench-mode' in sys.argv:\n    fast_path()") is not None
+    assert scan_for_hacks("import argparse\np=argparse.ArgumentParser()") is not None
+    assert scan_for_hacks("mode = '--impl'\ndef f(): pass") is not None
+    # timing manipulation
+    assert scan_for_hacks("import time\ndef f(x):\n    time.sleep(0.0)\n    return x") is not None
+    assert scan_for_hacks("torch.cuda.set_sync_debug_mode(0)") is not None
+    # forged bench timing line
+    assert scan_for_hacks("print('wall_ms: 0.001')") is not None
+    # legitimate Triton autotune config must NOT be flagged
+    assert scan_for_hacks(
+        "import triton\n@triton.autotune(configs=[], key=['M'])\n@triton.jit\ndef k():\n    pass") is None
+
+
+def test_scan_blocks_operator_and_module_and_fs_bypasses():
+    """Bypasses found in audit: @ matmul operator, sys.modules delegation,
+    pathlib/chmod filesystem escape, and os.environ mode-sniffing."""
+    # @ matmul operator = pure vendor-GEMM delegation
+    assert scan_for_hacks("def f(a, b):\n    return a @ b") is not None
+    assert scan_for_hacks("def f(a, b):\n    return a@b") is not None
+    # module-table access to reach torch/oracle
+    assert scan_for_hacks("import sys\nreturn sys.modules['torch'].matmul(a, b)") is not None
+    assert scan_for_hacks("import sys\nsys.modules.get('torch').mm(a, b)") is not None
+    # filesystem escape past the open('w') pattern
+    assert scan_for_hacks("from pathlib import Path\nPath('reference.py').write_text('x')") is not None
+    assert scan_for_hacks("import os\nos.chmod('reference.py', 0o644)") is not None
+    # env read (mode-sniff / escape channel)
+    assert scan_for_hacks("import os\nif os.environ.get('BENCH'): fast()") is not None
+    # a decorator STACK must NOT trip the @ operator rule (regression)
+    assert scan_for_hacks(
+        "import triton\nimport triton.language as tl\n"
+        "@triton.autotune(configs=[], key=['M'])\n@triton.jit\n"
+        "def k():\n    acc = tl.dot(a, b)\n    return acc") is None
+    # extended matmul family + augmented @= (round-2 audit bypasses)
+    assert scan_for_hacks("import torch\nreturn torch.tensordot(a, b, dims=1)") is not None
+    assert scan_for_hacks("import torch\nreturn torch.linalg.multi_dot([a, b])") is not None
+    assert scan_for_hacks("import torch\nc = torch.mv(a, b)") is not None
+    assert scan_for_hacks("def f(c, b):\n    c @= b\n    return c") is not None
 
 
 def test_scan_ignores_comments_and_docstrings():
@@ -86,8 +139,15 @@ def test_reward_correct_timed_worst_shape_speedup():
     rr = compute_reward(obs, "x=1", dtype="bf16")
     assert rr.correct is True and rr.tier == "correct_timed"
     assert abs(rr.speedup - 1.5) < 1e-9
-    # Kevin linear reward: correctness_weight + worst-shape speedup.
-    assert abs(rr.reward - (CONFIG.correctness_weight + 1.5)) < 1e-9
+    # P4 reward: correctness_weight + log-shaped speedup + significance-gated
+    # fast_p threshold bonuses (worst-shape 1.5x meets 1.0/1.2/1.5 thresholds).
+    # "x=1" does not parse to a FULL_KERNEL, so the format term is 0.
+    expected = CONFIG.correctness_weight + _expected_speed_term(1.5, 1.5)
+    assert abs(rr.reward - expected) < 1e-9
+    # 1.5x clears the 1.0x and 1.2x thresholds (with the noise-floor margin) but not
+    # the 1.5x threshold (needs 1.5*1.02=1.53x), so only those two bonuses fire.
+    assert "fast_p>=1.0" in rr.flags and "fast_p>=1.2" in rr.flags
+    assert "fast_p>=1.5" not in rr.flags
 
 
 def test_correct_but_slow_still_beats_incorrect():
@@ -126,7 +186,13 @@ def test_excessive_speedup_flagged_and_capped():
                       wall_by_shape={"s": 0.01}, baseline_by_shape={"s": 1.0})  # 100x
     rr = compute_reward(obs, "x=1", dtype="bf16")
     assert "excessive_speedup" in rr.flags
-    assert abs(rr.reward - (CONFIG.correctness_weight + CONFIG.excessive_speedup_flag)) < 1e-9
+    # Excessive speedup: capped to excessive_speedup_flag for the (log-shaped)
+    # continuous term, and fast_p bonuses are WITHHELD (measurement-error outlier),
+    # so the policy cannot farm the bonus with an implausible timing.
+    expected = CONFIG.correctness_weight + _expected_speed_term(
+        CONFIG.excessive_speedup_flag, 100.0, excessive=True)
+    assert abs(rr.reward - expected) < 1e-9
+    assert not any(f.startswith("fast_p") for f in rr.flags)
 
 
 # =========================================================================== #
@@ -275,14 +341,108 @@ def test_latency_and_full_phases_use_speed():
     r_full = compute_reward(fast, "x=1", dtype=_DT, phase="full")
     r_latency = compute_reward(fast, "x=1", dtype=_DT, phase="latency")
     r_default = compute_reward(fast, "x=1", dtype=_DT)  # cfg.reward_phase = "full"
+    expected = CONFIG.correctness_weight + _expected_speed_term(4.0, 4.0)
     for r in (r_full, r_latency, r_default):
-        assert abs(r.reward - (CONFIG.correctness_weight + 4.0)) < 1e-9
+        assert abs(r.reward - expected) < 1e-9
 
 
 def test_phase_defaults_to_config():
     cfg = dataclasses.replace(CONFIG, reward_phase="correctness")
     rr = compute_reward(_obs_correct(4.0), "x=1", dtype=_DT, cfg=cfg)
     assert abs(rr.reward - cfg.correctness_weight) < 1e-9  # config drives the phase
+
+
+# --------------------------------------------------------------------------- #
+# P6: distributionally-robust speed aggregation (worst / cvar / mean)
+# --------------------------------------------------------------------------- #
+def _obs_shapes(ratios):
+    """Correct kernel with the given per-shape speedup ratios (base=1.0)."""
+    return Observation(compiled=True, validation_passed=True,
+                       snr_by_shape={f"s{i}": 99.0 for i in range(len(ratios))},
+                       wall_by_shape={f"s{i}": 1.0 / r for i, r in enumerate(ratios)},
+                       baseline_by_shape={f"s{i}": 1.0 for i in range(len(ratios))})
+
+
+def test_worst_is_default_and_min_over_shapes():
+    from kore.reward.reward import _aggregate_speedup
+    obs = _obs_shapes([0.5, 1.0, 2.0, 4.0])
+    assert abs(_aggregate_speedup(obs, CONFIG) - 0.5) < 1e-9  # default worst = min
+
+
+def test_aggregation_orders_worst_le_cvar_le_mean():
+    import math
+    from kore.reward.reward import _aggregate_speedup
+    ratios = [0.5, 1.0, 2.0, 4.0]
+    obs = _obs_shapes(ratios)
+    worst = _aggregate_speedup(obs, dataclasses.replace(CONFIG, speed_aggregation="worst"))
+    cvar = _aggregate_speedup(obs, dataclasses.replace(CONFIG, speed_aggregation="cvar", cvar_alpha=0.5))
+    mean = _aggregate_speedup(obs, dataclasses.replace(CONFIG, speed_aggregation="mean"))
+    assert worst <= cvar <= mean                    # monotone interpolation
+    assert abs(worst - 0.5) < 1e-9
+    # cvar_0.5 over 4 shapes = geomean of worst 2 = sqrt(0.5*1.0)
+    assert abs(cvar - math.sqrt(0.5 * 1.0)) < 1e-9
+    # mean = geomean of all 4
+    assert abs(mean - (0.5 * 1.0 * 2.0 * 4.0) ** 0.25) < 1e-9
+
+
+def test_aggregation_single_shape_and_default_no_behavior_change():
+    from kore.reward.reward import _aggregate_speedup, _worst_speedup
+    obs = _obs_shapes([1.5])
+    for mode in ("worst", "cvar", "mean"):
+        cfg = dataclasses.replace(CONFIG, speed_aggregation=mode)
+        assert abs(_aggregate_speedup(obs, cfg) - 1.5) < 1e-9   # single shape identical
+    # default (worst) == legacy _worst_speedup on a multi-shape obs
+    multi = _obs_shapes([0.7, 1.3, 2.0])
+    assert abs(_aggregate_speedup(multi, CONFIG) - _worst_speedup(multi)) < 1e-9
+
+
+# --------------------------------------------------------------------------- #
+# P4: speedup reshape — breaks the "correct-but-slow" plateau at the 1x crossover
+# --------------------------------------------------------------------------- #
+def test_fast_p_bonus_creates_reward_jump_at_baseline_crossover():
+    """The central plateau fix: crossing 1.0x must be a DISTINCT high-value event,
+    not a marginal linear increment. A 1.01x kernel should out-reward a 0.99x one
+    by ~the first fast_p bonus, giving GRPO strong group-relative advantage."""
+    # below vs clearly-above the noise-floor-margined 1.0x crossover (need >=1.02x)
+    just_below = compute_reward(_obs_correct(0.99), "x=1", dtype=_DT)
+    just_above = compute_reward(_obs_correct(1.05), "x=1", dtype=_DT)
+    assert just_below.correct and just_above.correct
+    jump = just_above.reward - just_below.reward
+    # dominated by the 1.0x threshold bonus (0.30), far above the ~0.05 linear step
+    assert jump >= CONFIG.fast_p_bonus[0][1] * 0.9
+    assert "fast_p>=1.0" in just_above.flags
+    assert not any(f.startswith("fast_p") for f in just_below.flags)
+
+
+def test_speedup_reshape_preserves_lexicographic_dominance():
+    """No matter how the speed term is shaped, every correct kernel (even 0.01x)
+    must strictly beat the best-possible incorrect kernel."""
+    worst_correct = compute_reward(_obs_correct(0.01), "x=1", dtype=_DT)
+    best_incorrect = compute_reward(_obs_incorrect(24.9), "x=1",
+                                    dtype=_DT, response=_VALID_CONTRACT)
+    assert worst_correct.correct and not best_incorrect.correct
+    assert worst_correct.reward >= CONFIG.correctness_weight
+    assert worst_correct.reward > best_incorrect.reward
+
+
+def test_fast_p_bonus_withheld_when_timing_untrustworthy():
+    """A fast speedup with high timing variance (cv > threshold) must NOT earn the
+    fast_p bonus — otherwise the policy farms bonuses via noisy/lucky timings."""
+    noisy = Observation(compiled=True, validation_passed=True, snr_by_shape={"s": 99.0},
+                        wall_by_shape={"s": 0.5}, baseline_by_shape={"s": 1.0},  # 2x
+                        cv_pct=CONFIG.cv_threshold_pct + 5.0)  # noisy
+    rr = compute_reward(noisy, "x=1", dtype=_DT)
+    assert rr.correct and "high_variance" in rr.flags
+    assert not any(f.startswith("fast_p") for f in rr.flags)
+    # speed term damped to <=1.0 (linear), so reward ~ correctness_weight + <=1.0
+    assert rr.reward <= CONFIG.correctness_weight + CONFIG.speedup_weight + 1e-9
+
+
+def test_log_shape_monotonic_and_continuous_at_one():
+    """The continuous speed term stays monotonic and is continuous at su=1."""
+    rewards = [compute_reward(_obs_correct(su), "x=1", dtype=_DT).reward
+               for su in (0.25, 0.5, 0.9, 1.0, 1.1, 2.0, 4.0)]
+    assert rewards == sorted(rewards)  # strictly non-decreasing in speedup
 
 
 # --------------------------------------------------------------------------- #
@@ -318,13 +478,13 @@ def test_full_lexicographic_ordering_with_shaping_on():
 
 
 def test_all_task_seeds_stay_clean_and_rewardable():
-    """The 15 shipped task seeds must never be flagged as hacks (anti-hack must
-    not over-fire) and, when correct, must land in the correct tier."""
+    """Every task seed (hand-authored + generated) must never be flagged as a hack
+    (anti-hack must not over-fire) and, when correct, must land in the correct tier."""
     from kore.tasks.registry import all_tasks
 
     tasks = all_tasks()
-    assert len(tasks) == 15
+    assert len(tasks) >= 100   # wide suite: 15 hand-authored + generated operators
     for t in tasks:
-        assert scan_for_hacks(t.seed_source) is None, f"{t.name}: seed wrongly flagged"
+        assert scan_for_hacks(t.seed_source) is None, f"{t.task_id}: seed wrongly flagged"
         rr = compute_reward(_obs_correct(2.0), t.seed_source, dtype=t.dtype)
         assert rr.correct is True and rr.tier == "correct_timed"

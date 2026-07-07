@@ -62,6 +62,7 @@ import argparse
 import importlib
 import inspect
 import json
+import os
 import subprocess
 import threading
 import time
@@ -451,6 +452,23 @@ def _artifact_ok(ctx, stage: str) -> bool:
 def run(args) -> int:
     from kore.tasks.registry import all_tasks, get_task
 
+    # P5: propagate the hardware-counter dense-reward weight to every stage
+    # subprocess (env + training run under their own processes) BEFORE anything
+    # imports CONFIG, so the reward path picks it up consistently.
+    if getattr(args, "profile_reward", 0.0):
+        os.environ["KORE_PROFILE_REWARD_WEIGHT"] = str(args.profile_reward)
+    if getattr(args, "shape_augment", False):
+        os.environ["KORE_SHAPE_AUGMENT"] = "1"
+    if getattr(args, "speed_aggregation", None):
+        os.environ["KORE_SPEED_AGG"] = str(args.speed_aggregation)
+    # Real retention eval: with --use-hf, measure general-capability retention on the
+    # REAL public benchmark splits (MMLU/HumanEval/IFEval/BFCL/LiveCodeBench/MTBench)
+    # via HuggingFace, capped to KORE_EVAL_N items/bench so the gate stays fast. The
+    # bundled smoke JSONLs remain the offline/CI fallback.
+    if getattr(args, "use_hf", False):
+        os.environ.setdefault("KORE_EVAL_FULL", "1")
+        os.environ.setdefault("KORE_EVAL_N", str(getattr(args, "eval_n", 300)))
+
     tasks = [get_task(t) for t in args.tasks.split(",")] if args.tasks else all_tasks()
     if args.stages:
         stages = args.stages.split(",")
@@ -609,9 +627,38 @@ def _eval_tasks(ctx) -> list:
     return out or ctx["tasks"]
 
 
+def _datagen_counts(ctx) -> dict:
+    a = ctx["args"]
+    return {"n_repair": a.n_repair, "n_parents": a.n_parents, "k": a.k,
+            "wins_gens": a.wins_gens, "n_agentic": a.n_agentic,
+            "max_tool_turns": a.max_tool_turns}
+
+
+def _datagen_plan(ctx):
+    """(workers, n_gpus) for parallel datagen; workers<=1 -> sequential path."""
+    from kore.data.parallel_datagen import detect_gpus
+    n_gpus = detect_gpus()
+    req = int(getattr(ctx["args"], "datagen_workers", 0) or 0)
+    workers = req if req > 0 else n_gpus   # 0 = auto (one per GPU)
+    return workers, n_gpus
+
+
 def _stage_datagen(ctx):
     if ctx["dry"]:
-        _log("datagen", "would generate repair/groups/wins per task (teacher + GPU env)")
+        _log("datagen", "would generate repair/groups/wins per task (teacher + GPU env), "
+                        "parallel-sharded across GPUs when --datagen-workers != 1")
+        return
+    # Parallel path: shard tasks across GPUs with concurrent teacher streams (resumable).
+    workers, n_gpus = _datagen_plan(ctx)
+    if workers > 1:
+        from kore.data.parallel_datagen import DATAGEN_KINDS, run_parallel_datagen
+        train = _train_tasks(ctx)
+        summary = run_parallel_datagen(
+            [t.task_id for t in train], DATAGEN_KINDS, ctx["data_root"],
+            _datagen_counts(ctx), n_workers=workers, n_gpus=n_gpus,
+            teacher_kind=ctx["args"].teacher, model_teacher=ctx["args"].model_teacher,
+            log=lambda m: _log("datagen", m))
+        LOG.event("datagen_parallel", workers=workers, n_gpus=n_gpus, **summary)
         return
     from kore.data.gen_groups import generate_groups
     from kore.data.gen_repair import generate_repairs
@@ -638,7 +685,20 @@ def _stage_datagen(ctx):
 
 def _stage_agentic(ctx):
     if ctx["dry"]:
-        _log("agentic", "would generate build/test/bench/pmc tool-use trajectories per task")
+        _log("agentic", "would generate build/test/bench/pmc tool-use trajectories per task "
+                        "(parallel-sharded across GPUs when --datagen-workers != 1)")
+        return
+    # Parallel path: shard agentic trajectory generation across GPUs (resumable).
+    workers, n_gpus = _datagen_plan(ctx)
+    if workers > 1:
+        from kore.data.parallel_datagen import AGENTIC_KINDS, run_parallel_datagen
+        train = _train_tasks(ctx)
+        summary = run_parallel_datagen(
+            [t.task_id for t in train], AGENTIC_KINDS, ctx["data_root"],
+            _datagen_counts(ctx), n_workers=workers, n_gpus=n_gpus,
+            teacher_kind=ctx["args"].teacher, model_teacher=ctx["args"].model_teacher,
+            log=lambda m: _log("agentic", m))
+        LOG.event("agentic_parallel", workers=workers, n_gpus=n_gpus, **summary)
         return
     from kore.data.gen_agentic import generate_agentic_trajectories
     from kore.data.schemas import write_jsonl
@@ -795,6 +855,29 @@ def _stage_build(ctx):
     train_tasks = _train_tasks(ctx)
     kernel_records = [r for r in train if _rec_type(r) in ("repair", "win")]
     group_records = [r for r in train if _rec_type(r) == "ranked_group"]
+
+    # RFT / rejection sampling (ReST-EM): train SFT on the policy's HIGH-reward
+    # kernels only — keep all repair turns (they teach correctness) but REJECT the
+    # sub-tau (slower-than-baseline) wins, keeping only the stratified, deduped >tau
+    # wins. This concentrates mass on the >1x region by EXCLUSION (robust to the
+    # mixer's content-hash dedup, unlike row duplication). rft_oversample>0 enables;
+    # 0 keeps every win. See kore.data.rejection.
+    from kore.data.rejection import stratified_rft_select
+    if getattr(ctx["args"], "rft", True):
+        repairs = [r for r in kernel_records if _rec_type(r) == "repair"]
+        wins = [r for r in kernel_records if _rec_type(r) == "win"]
+        kept_wins, rft_report = stratified_rft_select(
+            wins, tau=float(getattr(ctx["args"], "rft_tau", 1.0)),
+            per_task_frac_cap=0.34, seed=ctx["args"].split_seed)
+        rejected = len(wins) - rft_report.n_kept
+        kernel_records = repairs + list(kept_wins)
+        _log("build", f"RFT rejection: kept {rft_report.n_kept}/{len(wins)} wins "
+                      f">={rft_report.tau}x (rejected {rejected} slow/dup), "
+                      f"+{len(repairs)} repairs, task-entropy {rft_report.task_entropy}")
+        LOG.event("rft_select", tau=rft_report.tau, n_wins=len(wins),
+                  n_pass=rft_report.n_pass_filter, n_kept=rft_report.n_kept,
+                  n_rejected=rejected, task_entropy=rft_report.task_entropy,
+                  per_task=rft_report.per_task)
 
     cfg = MultiCapSFTConfig()
     rows = build_multicap_dataset(ctx["data_root"], train_tasks, teacher, cfg,
@@ -1120,6 +1203,8 @@ def _stage_grpo(ctx):
             kw.update(num_trajectories=8, tasks_per_step=2, num_turns=3)
         if ctx["args"].grpo_steps:
             kw["total_steps"] = ctx["args"].grpo_steps
+        if getattr(ctx["args"], "adaptive_steps", False):
+            kw["adaptive_steps"] = True
         return kw
 
     def _run_grpo(*, model_id, output_dir, reward_phase="all", run_name=None):
@@ -1332,7 +1417,7 @@ def build_parser() -> argparse.ArgumentParser:
     # a single node without FSDP/DeepSpeed. Pass --full-ft for the locked full-FT
     # recipe, which REQUIRES a sharded multi-GPU launch (see docs/DISTRIBUTED.md).
     p.add_argument("--lora", dest="lora", action="store_true", default=True,
-                   help="use LoRA on SFT/DPO/GRPO (default; fits the 14B validation run)")
+                   help="use LoRA on SFT/DPO (GRPO is full-FT only); default bring-up mode")
     p.add_argument("--full-ft", dest="lora", action="store_false",
                    help="full fine-tune instead of LoRA (needs an FSDP/DeepSpeed launch)")
     p.add_argument("--no-retention-gate", dest="retention_gate", action="store_false",
@@ -1353,6 +1438,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wins-gens", type=int, default=8, dest="wins_gens")
     p.add_argument("--n-agentic", type=int, default=16, dest="n_agentic")
     p.add_argument("--max-tool-turns", type=int, default=8, dest="max_tool_turns")
+    # Parallel datagen: shard tasks across GPUs with concurrent teacher streams.
+    # 0 = auto (one worker per GPU); 1 = the sequential path. >GPU-count oversubscribes
+    # each GPU to overlap teacher latency (safe: verification runs in short driver
+    # subprocesses). The single highest-leverage speedup for the full-scale run.
+    p.add_argument("--datagen-workers", type=int, default=0, dest="datagen_workers",
+                   help="parallel datagen worker processes (0=auto=one per GPU; 1=sequential)")
     p.add_argument("--sft-total", type=int, default=20000, dest="sft_total")
     p.add_argument("--midtrain-out", default="runs/midtrain", dest="midtrain_out")
     p.add_argument("--sft-out", default="runs/sft", dest="sft_out")
@@ -1390,6 +1481,32 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--evolve-generations", type=int, default=4, dest="evolve_generations")
     p.add_argument("--soup-out", default="runs/soup", dest="soup_out")
     p.add_argument("--eval-budget", type=int, default=5, dest="eval_budget")
+    # P5 flagship novelty: dense hardware-counter (rocprofv3) reward weight. 0 =
+    # off (default). A small value (e.g. 0.15) enables the roofline-attainment
+    # dense bonus; propagated to training subprocs via KORE_PROFILE_REWARD_WEIGHT.
+    p.add_argument("--profile-reward", type=float, default=0.0, dest="profile_reward",
+                   help="hardware-counter dense reward weight (0=off; ~0.15 to enable)")
+    # RFT / rejection sampling: bootstrap SFT on the policy's own >tau wins.
+    p.add_argument("--rft-tau", type=float, default=1.0, dest="rft_tau",
+                   help="min speedup for a win to survive RFT rejection (default 1.0x)")
+    # RFT rejection is ON by default; --no-rft keeps all wins (incl. sub-tau/slow).
+    p.add_argument("--rft", dest="rft", action=argparse.BooleanOptionalAction,
+                   default=True, help="RFT rejection: drop sub-tau (slow) wins from SFT (default on)")
+    # Adaptive GRPO horizon: stop when the reward mean plateaus (bounded by
+    # total_steps). Ensures the policy trains long enough to actually move.
+    p.add_argument("--adaptive-steps", dest="adaptive_steps",
+                   action="store_true", help="adaptive GRPO horizon (plateau early-stop)")
+    # data scale: expand each op's shapes into a diverse small/med/large+odd set.
+    p.add_argument("--shape-augment", dest="shape_augment", action="store_true",
+                   help="augment per-operator shapes for shape-robust generalization")
+    # distributionally-robust speed objective (the method contribution): worst-shape
+    # (default), CVaR_alpha (softer robust), or mean (average-case ablation arm).
+    p.add_argument("--speed-aggregation", dest="speed_aggregation",
+                   choices=["worst", "cvar", "mean"], default="worst",
+                   help="per-shape speedup aggregation for the reward (default worst)")
+    # real retention eval size cap per benchmark (with --use-hf); 0 = whole split.
+    p.add_argument("--eval-n", type=int, default=300, dest="eval_n",
+                   help="items per retention benchmark when --use-hf pulls real splits")
     return p
 
 

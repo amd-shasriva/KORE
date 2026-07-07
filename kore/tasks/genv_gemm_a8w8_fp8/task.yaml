@@ -1,0 +1,20 @@
+task_id: genv_gemm_a8w8_fp8
+operation: gemm_a8w8
+dtype: fp8
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 25.0
+op_family: vendor_gemm_a8w8
+baseline_tier: vendor
+generated: true
+shapes:
+  minimal: {M: 128, N: 128, K: 256}
+  primary: {M: 4096, N: 4096, K: 4096}
+  validation:
+    - {M: 8192, N: 8192, K: 1024}
+    - {M: 2048, N: 14336, K: 8192}
+    - {M: 4096, N: 4096, K: 4095}
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_gemm_a8w8

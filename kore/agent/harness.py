@@ -16,7 +16,7 @@ from __future__ import annotations
 import glob
 import os
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 
 from kore.agent.format import (
     build_agent_system_prompt,
@@ -387,7 +387,10 @@ class AgentHarness:
         else:
             r = 0.0
             c = False
-        turn_rewards.append(round(r, 4))
+        # EXACT reward (no display rounding): turn_rewards is the per-turn GRPO
+        # Kevin-credit signal, so it must match best_reward bit-for-bit. Rounding
+        # here silently discards reward contrast the advantage estimator needs.
+        turn_rewards.append(float(r))
         turn_correct.append(c)
 
 

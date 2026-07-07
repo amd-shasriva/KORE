@@ -48,8 +48,15 @@ def _gemm_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
 
 
 def gemm(a, b):
-    BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M = 128, 128, 64, 8
-    return a @ b
+    import torch
+    M, K = a.shape
+    N = b.shape[1]
+    c = torch.empty((M, N), device=a.device, dtype=torch.bfloat16)
+    grid = (triton.cdiv(M, 128),)
+    _gemm_kernel[grid](a, b, c, M, N, K,
+                       a.stride(0), a.stride(1), b.stride(0), b.stride(1),
+                       BLOCK_M=128, BLOCK_N=128, BLOCK_K=64)
+    return c
 """
 
 NORM_SRC = """
@@ -331,8 +338,8 @@ def test_break_fp8_variant_swaps_fnuz():
 def test_break_k_multiple_of_32_makes_block_k_illegal():
     out, fc = mutate.break_k_multiple_of_32(GEMM_SRC)
     assert out != GEMM_SRC
-    # the K tile (3rd value in the tuple) becomes 48 (non-pow2, non-mult-of-32)
-    assert "128, 128, 48, 8" in out
+    # the K tile becomes 48 (non-pow2, non-mult-of-32)
+    assert "BLOCK_K=48" in out
     assert fc == "compile_fail"
 
 

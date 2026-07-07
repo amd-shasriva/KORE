@@ -21,17 +21,15 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import random
 from typing import Optional
 
 import numpy as np
 
 from kore.value.features import featurize_many
-from kore.value.model import PairwiseRanker, ValueModel
+from kore.value.model import ValueModel
 from kore.value.rerank import (
     benches_to_best,
-    rank_candidates,
     rank_correlation,
     score_candidates,
 )

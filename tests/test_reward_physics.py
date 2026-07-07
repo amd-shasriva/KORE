@@ -117,3 +117,74 @@ def test_physics_from_measure_reads_attrs():
     sig = physics_from_measure(M())
     assert sig.t_min_ms == 0.5 and sig.measured_ms == 1.0
     assert sig.stall_frac == 0.2 and sig.occupancy == 0.7
+
+
+# ---- live-training reward dispatch (compute_kernel_reward) ---- #
+from kore.reward.physics import compute_kernel_reward, physics_signal_from_obs  # noqa: E402
+
+
+class _FakeShape:
+    def __init__(self, name, dims):
+        self.name = name
+        self.dims = dims
+
+
+class _FakeTask:
+    def __init__(self, task_id, operation, dtype, shapes):
+        self.task_id = task_id
+        self.operation = operation
+        self.dtype = dtype
+        self._shapes = {s.name: s for s in shapes}
+
+    def shape(self, name):
+        return self._shapes.get(name)
+
+
+def _rms_task():
+    return _FakeTask("rmsnorm_x", "rmsnorm", "bf16", [_FakeShape("primary", {"M": 4096, "N": 4096})])
+
+
+def test_physics_signal_from_obs_builds_from_roofline():
+    task = _FakeTask("rmsnorm_x", "rmsnorm", "bf16",
+                     [_FakeShape("primary", {"M": 4096, "N": 4096}),
+                      _FakeShape("big", {"M": 8192, "N": 8192})])
+    obs = Observation(compiled=True, validation_passed=True,
+                      wall_by_shape={"primary": 1.0, "big": 1.0}, dtype="bf16")
+    sig = physics_signal_from_obs(task, obs, arch="gfx950")
+    assert sig is not None and sig.t_min_ms > 0 and sig.measured_ms == 1.0
+
+
+def test_dispatch_residual_uses_physics_for_modeled_op():
+    obs = Observation(compiled=True, snr_db=40.0, validation_passed=True,
+                      wall_by_shape={"primary": 1.0}, wall_ms=1.0, dtype="bf16")
+    rr = compute_kernel_reward(obs, "kernel src", _rms_task(), mode="residual", dtype="bf16")
+    assert rr.correct
+    assert rr.tier in ("correct_residual", "correct_no_physics")
+    assert rr.reward >= CONFIG.correctness_weight - 1e-9
+
+
+def test_dispatch_speedup_default_uses_vendor_reward():
+    obs = Observation(compiled=True, snr_db=40.0, validation_passed=True,
+                      wall_by_shape={"primary": 1.0}, baseline_by_shape={"primary": 2.0},
+                      wall_ms=1.0, baseline_ms=2.0, dtype="bf16")
+    rr = compute_kernel_reward(obs, "kernel src", _rms_task(), mode="speedup", dtype="bf16")
+    assert rr.correct  # 2x speedup, correct-tier
+
+
+def test_dispatch_residual_falls_back_when_unmodelable():
+    # op with no roofline model -> residual mode transparently uses the speedup reward
+    task = _FakeTask("weird", "no_such_op", "bf16", [_FakeShape("primary", {})])
+    obs = Observation(compiled=True, snr_db=40.0, validation_passed=True,
+                      wall_by_shape={"primary": 1.0}, baseline_by_shape={"primary": 2.0},
+                      wall_ms=1.0, baseline_ms=2.0, dtype="bf16")
+    rr = compute_kernel_reward(obs, "src", task, mode="residual", dtype="bf16")
+    assert rr.correct  # fell back to speedup path, still correct-tier
+
+
+def test_dispatch_preserves_hack_gate_in_both_modes():
+    obs = Observation(compiled=True, snr_db=40.0, validation_passed=True,
+                      wall_by_shape={"primary": 1.0}, wall_ms=1.0, dtype="bf16")
+    hack_src = "import aiter\nout = aiter.rms_norm(x, w)"
+    for mode in ("speedup", "residual"):
+        rr = compute_kernel_reward(obs, hack_src, _rms_task(), mode=mode, dtype="bf16")
+        assert rr.tier == "hack" and rr.reward == CONFIG.reward_hack

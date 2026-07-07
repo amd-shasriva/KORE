@@ -21,10 +21,11 @@ Nothing here imports torch/vllm; the only GPU contact is the injected env.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Optional
 
-from kore.reward.reward import compute_reward
+from kore.reward.physics import compute_kernel_reward
 
 # --------------------------------------------------------------------------- #
 # Tool schemas (OpenAI function-calling JSON; also rendered into a Hermes
@@ -225,7 +226,10 @@ class ToolExecutor:
     def _evaluate(self, src: str, do_bench: bool, multi_shape: bool):
         """Run the env and compute the reward; update candidate + best state."""
         obs = self.env.step(src, full_validation=do_bench, multi_shape=multi_shape)
-        rr = compute_reward(obs, src, dtype=self.dtype)
+        # Reward mode honors KORE_REWARD_MODE ("residual" -> physics residual reward,
+        # else vendor speedup); the non-agentic GRPO path is driven by config.reward_mode.
+        _mode = os.environ.get("KORE_REWARD_MODE", "speedup")
+        rr = compute_kernel_reward(obs, src, self.task, mode=_mode, dtype=self.dtype)
         self.candidate_src = src
         self.candidate_reward = rr.reward
         self.candidate_correct = rr.correct

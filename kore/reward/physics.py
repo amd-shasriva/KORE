@@ -180,3 +180,72 @@ def physics_from_measure(m) -> PhysicsSignal:
         stall_frac=getattr(m, "stall_frac", None),
         occupancy=getattr(m, "occupancy", None),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Live-training bridge: build a PhysicsSignal from a KoreEnv Observation using the
+# task's roofline T_min (eta-based, PMC-free), and a single dispatch entry point so
+# the GRPO/agentic reward path can select the physics residual reward via config.
+# --------------------------------------------------------------------------- #
+def physics_signal_from_obs(task, obs, arch: Optional[str] = None) -> Optional[PhysicsSignal]:
+    """Worst-shape :class:`PhysicsSignal` (eta-based, PMC-free) from a KoreEnv
+    Observation + the task's roofline ``T_min``.
+
+    Iterates the benched shapes (``obs.wall_by_shape``; falls back to ``obs.wall_ms``
+    on the task's primary shape), computes the roofline lower bound per shape, and
+    keeps the WORST (min eta) shape -- matching the reward's worst-shape discipline.
+    Returns None if no shape is roofline-modelable (caller then uses the speedup
+    reward). Uses only T_min + measured wall time, so it needs no PMC pass.
+    """
+    try:
+        from kore.analysis.rooflines import (
+            detect_arch, resolve_peaks, roofline, shape_to_str,
+        )
+    except Exception:  # noqa: BLE001 - analysis deps unavailable -> no physics signal
+        return None
+    a = arch or detect_arch()
+    peaks = resolve_peaks(a)
+    walls = dict(getattr(obs, "wall_by_shape", None) or {})
+    if not walls and getattr(obs, "wall_ms", None):
+        prim = task.shape("primary") if hasattr(task, "shape") else None
+        walls = {(prim.name if prim else "primary"): obs.wall_ms}
+    worst = None  # (eta, t_min_ms, wall_ms)
+    for name, wall in walls.items():
+        if not wall or wall <= 0:
+            continue
+        sh = task.shape(name) if hasattr(task, "shape") else None
+        dims = getattr(sh, "dims", None)
+        if not dims:
+            continue
+        rf = roofline(task.task_id, task.operation, task.dtype, shape_to_str(dims), dims, peaks, a)
+        if rf is None or not (rf.t_min_ms > 0):
+            continue
+        eta = rf.t_min_ms / wall
+        if worst is None or eta < worst[0]:
+            worst = (eta, rf.t_min_ms, wall)
+    if worst is None:
+        return None
+    return PhysicsSignal(t_min_ms=worst[1], measured_ms=worst[2])
+
+
+def compute_kernel_reward(obs: Observation, source: str, task, *, mode: str = "speedup",
+                          dtype: str = "fp32", cfg=CONFIG, snr_threshold: Optional[float] = None,
+                          physics_weight: float = DEFAULT_PHYSICS_WEIGHT,
+                          response: Optional[str] = None) -> RewardResult:
+    """Single dispatch point for the kernel reward used by the live training loop.
+
+    ``mode="residual"`` scores with the physics residual-descent reward (roofline
+    ``T_min``-grounded, PMC-free eta), transparently falling back to the classic
+    speedup reward when the operator is not roofline-modelable. ``mode="speedup"``
+    (default) is the vendor-relative reward. BOTH share identical anti-hack /
+    compile / correctness gating (``compute_residual_reward`` delegates to
+    ``compute_reward``), so the tier ordering is byte-identical either way.
+    """
+    if mode == "residual":
+        sig = physics_signal_from_obs(task, obs)
+        if sig is not None:
+            return compute_residual_reward(
+                obs, sig, source=source, dtype=dtype, cfg=cfg,
+                physics_weight=physics_weight, snr_threshold=snr_threshold, response=response)
+    return compute_reward(obs, source, dtype=dtype, cfg=cfg,
+                          snr_threshold=snr_threshold, response=response)

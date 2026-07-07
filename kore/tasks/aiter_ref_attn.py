@@ -35,6 +35,8 @@ from typing import Optional
 
 import torch
 
+from kore.tasks.aiter_ref import _mark_baseline
+
 # ROCm custom paged-attention partition size (see aiter/paged_attn.py).
 PARTITION_SIZE_ROCM = 256
 
@@ -54,7 +56,9 @@ def aiter_flash_attn(
     """
     import aiter
 
-    return aiter.flash_attn_func(q, k, v, causal=causal, softmax_scale=softmax_scale)
+    out = aiter.flash_attn_func(q, k, v, causal=causal, softmax_scale=softmax_scale)
+    _mark_baseline("aiter_vendor")
+    return out
 
 
 # --- Paged-KV decode attention (ROCm custom PA) --------------------------
@@ -92,6 +96,7 @@ def aiter_paged_attention_decode(
         block_size, max_seq_len, None, "auto",
         one, one, None, PARTITION_SIZE_ROCM, 1,
     )
+    _mark_baseline("aiter_vendor")
     return out
 
 
@@ -118,10 +123,12 @@ def aiter_fused_moe(
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
 
-    return fused_moe(
+    out = fused_moe(
         hidden_states, w1_shuffled, w2_shuffled, topk_weight, topk_ids,
         activation=ActivationType.Silu, quant_type=QuantType.No,
     )
+    _mark_baseline("aiter_vendor")
+    return out
 
 
 # --- Router: softmax + top-k select (+ renormalize) ----------------------
@@ -139,4 +146,5 @@ def aiter_topk_softmax(gating_output: torch.Tensor, topk: int, renormalize: bool
     topk_ids = torch.empty(M, topk, dtype=dtypes.i32, device=gating_output.device)
     token_expert_idx = torch.empty(M, topk, dtype=dtypes.i32, device=gating_output.device)
     aiter.topk_softmax(topk_weights, topk_ids, token_expert_idx, gating_output, renormalize)
+    _mark_baseline("aiter_vendor")
     return topk_weights, topk_ids

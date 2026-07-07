@@ -26,6 +26,8 @@
   "gtpo_codesim": true,
   "value_prefilter": true,
   "reward_phase": "all",
+  "reward_mode": "residual",
+  "physics_weight": 1.0,
   "ref_anchor_coef": 1e-3,
   "bf16": true,
   "gradient_checkpointing": true,

@@ -368,6 +368,12 @@ def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inproc
     """
     log.info("grpo backend: native in-process (transformers+PEFT on AMD)",
              backend=backend, model=getattr(config, "model_id", None))
+    # Bridge the reward mode to the agentic tool path (tools.ToolExecutor reads
+    # KORE_REWARD_MODE); the non-agentic _rollout reads config.reward_mode directly.
+    # This keeps both rollout paths on ONE reward setting and propagates into any
+    # accelerate-launched distributed subprocess (which inherits the environment).
+    import os as _os
+    _os.environ["KORE_REWARD_MODE"] = str(getattr(config, "reward_mode", "speedup"))
     return _train_grpo_inprocess(config, tasks)
 
 
@@ -1889,7 +1895,7 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
 
     from kore.policy import anticollapse as ac
     from kore.policy.format import build_transcript, parse_response, build_turn_feedback
-    from kore.reward.reward import compute_reward
+    from kore.reward.physics import compute_kernel_reward
 
     prompt = _task_prompt(task)
     if reward_token:
@@ -1936,7 +1942,12 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
             seq, text, code = cands[ci]
             obs = env.step(code, full_validation=True, multi_shape=True)
             rr = apply_reward_phase(
-                compute_reward(obs, code, dtype=task.dtype, snr_threshold=snr_threshold), config)
+                compute_kernel_reward(
+                    obs, code, task,
+                    mode=getattr(config, "reward_mode", "speedup"),
+                    dtype=task.dtype, snr_threshold=snr_threshold,
+                    physics_weight=getattr(config, "physics_weight", 1.0)),
+                config)
             if best is None or (bool(rr.correct), rr.reward) > (bool(best[4].correct), best[4].reward):
                 best = (seq, text, code, obs, rr)
 

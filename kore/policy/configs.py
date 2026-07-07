@@ -310,6 +310,17 @@ class GRPOConfig(DistributedMixin):
     # twice (correctness phase, then latency phase) by flipping this flag.
     reward_phase: str = "all"
 
+    # --- Physics residual-descent reward (P0 paradigm) ---
+    # "speedup" (default): classic vendor-relative reward. "residual": score a
+    # correct kernel by the physics residual to the roofline T_min (dense, ABSOLUTE,
+    # arch-normalized eta = T_min/T_measured) via kore.reward.physics -- the P0
+    # paradigm signal that keeps intra-group advantage non-zero where the flat
+    # speedup reward collapses. Anti-hack/correctness gating is identical; ops with
+    # no roofline model transparently fall back to the speedup reward. physics_weight
+    # scales the residual credit on the correct tier.
+    reward_mode: str = "speedup"
+    physics_weight: float = 1.0
+
     # --- Agentic tool-use RL (ToolRL reward shaping) ---
     agentic: bool = False                   # rollouts drive build/test/bench/pmc tools
     tool_reward_weight: float = 0.2         # weight on ToolRL-style shaping term

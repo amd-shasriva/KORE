@@ -52,14 +52,40 @@ def _aiter_fn(name: str):
     raise AttributeError(f"aiter has no callable '{name}' (checked top-level + ops.*)")
 
 
+_MARKED_BASELINE: set = set()
+
+
+def _mark_baseline(kind: str) -> None:
+    """Emit a one-time sentinel identifying which baseline implementation was used.
+
+    ``kind`` is ``aiter_vendor`` (real AITER production kernel), ``hipblaslt_vendor``
+    (torch.matmul -> hipBLASLt, the production dense-GEMM library), or ``framework``
+    (torch fused op used because AITER has no standalone kernel or its kernels are
+    unavailable in this stack). The P0 harness parses the LAST such line from the
+    ``--impl reference`` bench output to honestly label check-(a) baselines. Printed
+    once per process to stderr so it never pollutes the driver's ``median_ms`` line.
+    """
+    if kind in _MARKED_BASELINE:
+        return
+    _MARKED_BASELINE.add(kind)
+    try:
+        import sys
+        print(f"KORE_BASELINE_IMPL:{kind}", file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # --- RMSNorm family -------------------------------------------------------
 def aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """Production RMSNorm baseline: AITER CK ``rms_norm`` if its kernels load, else
     the torch framework RMSNorm (``F.rms_norm``), which on ROCm is a real fused
     kernel — the documented framework production bar when AITER is unavailable."""
     try:
-        return _aiter_fn("rms_norm")(x, weight, eps)
+        out = _aiter_fn("rms_norm")(x, weight, eps)
+        _mark_baseline("aiter_vendor")
+        return out
     except Exception:  # noqa: BLE001 - aiter absent / gluon triton mismatch
+        _mark_baseline("framework")
         import torch.nn.functional as F
         return F.rms_norm(x, (x.shape[-1],), weight, eps)
 
@@ -79,8 +105,10 @@ def aiter_fused_add_rms_norm(
     """
     try:
         _aiter_fn("fused_add_rms_norm_cu")(x, residual, weight, eps)
+        _mark_baseline("aiter_vendor")
         return x, residual
     except Exception:  # noqa: BLE001 - fall back to the torch framework path
+        _mark_baseline("framework")
         import torch.nn.functional as F
         new_res = x + residual
         y = F.rms_norm(new_res, (new_res.shape[-1],), weight, eps)
@@ -97,8 +125,10 @@ def aiter_silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     try:
         out = torch.empty((*x.shape[:-1], inter), dtype=x.dtype, device=x.device)
         _aiter_fn("silu_and_mul")(out, x)
+        _mark_baseline("aiter_vendor")
         return out
     except Exception:  # noqa: BLE001 - torch framework SiLU-gate fallback
+        _mark_baseline("framework")
         import torch.nn.functional as F
         return F.silu(x[..., :inter]) * x[..., inter:]
 
@@ -128,7 +158,9 @@ def aiter_gemm_a8w8(
     Layout (CK): XQ [M, K], WQ [N, K] (computes ``X @ W^T``), x_scale [M, 1],
     w_scale [1, N], both fp32. Returns [M, N] in ``out_dtype``.
     """
-    return _aiter_fn("gemm_a8w8")(xq, wq, x_scale, w_scale, dtype=out_dtype)
+    out = _aiter_fn("gemm_a8w8")(xq, wq, x_scale, w_scale, dtype=out_dtype)
+    _mark_baseline("aiter_vendor")
+    return out
 
 
 # --- Dense bf16 GEMM ------------------------------------------------------
@@ -140,6 +172,7 @@ def hipblaslt_gemm_bf16(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     so this *is* the real production bar — not an unfused torch loop. A[M,K] @
     B[K,N] -> [M,N], fp32 accumulate, bf16 output.
     """
+    _mark_baseline("hipblaslt_vendor")
     return torch.matmul(a, b)
 
 
@@ -153,8 +186,11 @@ def aiter_layer_norm(
     with weight+bias. Returns a tensor of the same shape/dtype.
     """
     try:
-        return _aiter_fn("layer_norm")(x, weight, bias, eps)
+        out = _aiter_fn("layer_norm")(x, weight, bias, eps)
+        _mark_baseline("aiter_vendor")
+        return out
     except Exception:  # noqa: BLE001 - torch framework LayerNorm fallback
+        _mark_baseline("framework")
         import torch.nn.functional as F
         return F.layer_norm(x, (x.shape[-1],), weight, bias, eps)
 
@@ -168,6 +204,7 @@ def torch_softmax_lastdim(x: torch.Tensor) -> torch.Tensor:
     ``torch.softmax`` lowers to a fused MIOpen/rocm softmax kernel. Documented as
     the framework production baseline per the KORE ABI.
     """
+    _mark_baseline("framework")
     return torch.softmax(x, dim=-1)
 
 
@@ -182,6 +219,7 @@ def torch_gelu_tanh(x: torch.Tensor) -> torch.Tensor:
     """
     import torch.nn.functional as F
 
+    _mark_baseline("framework")
     return F.gelu(x, approximate="tanh")
 
 
@@ -195,7 +233,9 @@ def aiter_rope_neox(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     nope_first=False)`` -> rotated tensor (S, B, H, D). This is the vendor HIP
     rope kernel used by the serving stack.
     """
-    return _aiter_fn("rope_fwd")(x, freqs, 0, True, False, False)
+    out = _aiter_fn("rope_fwd")(x, freqs, 0, True, False, False)
+    _mark_baseline("aiter_vendor")
+    return out
 
 
 # --- Dynamic per-token fp8 quantization ----------------------------------
@@ -211,4 +251,5 @@ def aiter_dynamic_per_token_quant(x: torch.Tensor):
     out = torch.empty((M, N), dtype=FP8_DTYPE, device=x.device)
     scales = torch.empty((M, 1), dtype=torch.float32, device=x.device)
     _aiter_fn("dynamic_per_token_scaled_quant")(out, x, scales)
+    _mark_baseline("aiter_vendor")
     return out, scales

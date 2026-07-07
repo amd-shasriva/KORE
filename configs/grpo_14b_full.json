@@ -25,6 +25,8 @@
   "sc_grpo": true,
   "gtpo_codesim": true,
   "value_prefilter": true,
+  "coevolve": true,
+  "coevolve_include_vendor": true,
   "reward_phase": "all",
   "reward_mode": "residual",
   "physics_weight": 1.0,

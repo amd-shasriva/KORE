@@ -813,7 +813,11 @@ def _adversarial_fills(inputs):
         "large": lambda t: torch.full_like(t, 1.0e3),
         "neg_large": lambda t: torch.full_like(t, -1.0e3),
         "small": lambda t: torch.full_like(t, 1.0e-3),
-        "sign_alt": lambda t: (torch.ones_like(t.reshape(-1)).cumsum(0) % 2 * 2 - 1)
+        # Alternating ±1. Build the parity in int64 (torch.arange) — NOT via a
+        # cumsum in the tensor's own dtype: an fp16/bf16 cumsum over a large tensor
+        # overflows (fp16 caps at 65504) to inf, and inf % 2 == nan, which silently
+        # poisoned the input with NaNs and false-rejected correct fp16 kernels.
+        "sign_alt": lambda t: ((torch.arange(t.numel(), device=t.device) % 2) * 2 - 1)
                                 .to(t.dtype).reshape(t.shape),
     }
     def _fill(fill, t):
@@ -851,14 +855,41 @@ def _compare_outputs(out, ref_out):
     """SNR/max_diff/allclose over single-tensor OR multi-output (tuple) results.
 
     Returns ``(worst_snr_db, max_abs_diff, allclose_all)`` — the worst SNR and the
-    logical-AND of allclose across every output tensor."""
+    logical-AND of allclose across every output tensor.
+
+    NON-FINITE-AWARE: a correct kernel must reproduce the reference's NaN/Inf
+    STRUCTURE exactly (same non-finite positions, same inf sign), and match
+    closely on the FINITE elements. This is essential for the adversarial battery:
+    hard fills legitimately drive an op out of its finite range (rsqrt/log/sqrt of
+    a negative -> NaN, 1/0 -> Inf) in BOTH the reference and a correct candidate.
+    The old code compared with plain ``allclose`` (NaN != NaN -> False) and
+    ``_snr_db`` (ref norm inf/nan -> -999), so it FALSE-REJECTED correct kernels on
+    those regimes. Matching the non-finite structure is correctness, not a hack: a
+    kernel that is wrong anywhere still fails on the finite elements or the
+    structure check, and on the many finite adversarial regimes."""
     import torch
     outs, refs = _as_tuple(out), _as_tuple(ref_out)
     worst, maxd, ok = 999.0, 0.0, True
     for o, r in zip(outs, refs):
-        worst = min(worst, _snr_db(o, r))
-        maxd = max(maxd, (o.float() - r.float()).abs().max().item())
-        ok = ok and bool(torch.allclose(o.float(), r.float(), atol=1e-2, rtol=1e-2))
+        of, rf = o.float(), r.float()
+        rfin, ofin = torch.isfinite(rf), torch.isfinite(of)
+        # (1) non-finite positions must match exactly (NaN/Inf where ref has them).
+        if not torch.equal(rfin, ofin):
+            return -999.0, float("inf"), False
+        # (2) where both are inf, the sign must agree (+inf vs -inf is a real error).
+        rinf = torch.isinf(rf)
+        if bool(rinf.any()) and not torch.equal(torch.sign(rf[rinf]), torch.sign(of[rinf])):
+            return -999.0, float("inf"), False
+        # (3) compare magnitudes on the FINITE subset only.
+        if bool(rfin.all()):
+            of_c, rf_c = of, rf
+        else:
+            of_c, rf_c = of[rfin], rf[rfin]
+        if rf_c.numel() == 0:
+            continue  # entirely non-finite and structurally matched -> agreement
+        worst = min(worst, _snr_db(of_c, rf_c))
+        maxd = max(maxd, (of_c - rf_c).abs().max().item())
+        ok = ok and bool(torch.allclose(of_c, rf_c, atol=1e-2, rtol=1e-2))
     return worst, maxd, ok
 
 

@@ -52,7 +52,9 @@ The returned `Observation` (defined in [`kore/reward`](../reward/README.md)) car
 | Stateful timing | post-timing correctness poison → whole eval flagged as hack |
 | One-easy-shape win | `wall_ms = max` over shapes, `snr_db = min` over shapes |
 | Filesystem escape | staged in a temp workdir; reference/driver copied read-only (chmod 444) |
-| Fork bomb | `RLIMIT_NPROC` cap (no `RLIMIT_AS` — ROCm needs a huge VA space) |
+| Runaway process | `timeout` + process-group `killpg` in `_exec` (no `RLIMIT_AS` — ROCm needs a huge VA space) |
+
+> **Concurrency gotcha (fixed):** `RLIMIT_NPROC` is **per-UID**, so a low per-subprocess cap throttles the *whole user*. An earlier 512 cap made OpenBLAS `blas_thread_init` fail (→ `import numpy` died) inside the driver under concurrent datagen, silently marking **every** candidate `compiled=False`. `_preexec` now raises the soft limit to the hard cap, and `_env` caps `OPENBLAS/OMP/MKL/NUMEXPR_NUM_THREADS=4` so the driver doesn't spawn one BLAS thread per core (×96) per subprocess.
 
 **Infra vs. kernel classification** (`_classify`): timeouts, OOM, and HIP flakes are `infra_error=True` and are **never cached** and **never scored as incorrect** — a transient node problem must not poison the replay cache or punish a good kernel.
 

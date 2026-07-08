@@ -1,0 +1,95 @@
+# `kore/env` — the verified GPU environment
+
+`KoreEnv` is where a candidate kernel meets real silicon. It compiles the kernel, checks correctness on every shape against the fp32 oracle, benchmarks it cold-cache against the production baseline with variance control, optionally collects rocprofv3 counters, and caches the result. It is hardened against verdict forgery, mode-sniffing, stateful-timing hacks, and filesystem escape, and it distinguishes **infra** failures (timeout/OOM/HIP flake) from **kernel** failures.
+
+---
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `kore_env.py` | `KoreEnv` — `step` / `evaluate` / `_run`, correctness + bench + profile |
+| `replay.py` | `ReplayCache` — JSONL-backed `(task_id, source) → Observation` |
+
+---
+
+## The evaluation path
+
+```mermaid
+flowchart TD
+  S[candidate source] --> H{scan_for_hacks?}
+  H -->|yes| OH[Observation flagged_hack]
+  H -->|no| C{replay cache hit?}
+  C -->|yes| RET[return cached Observation]
+  C -->|no| RUN[stage driver+reference read-only, write kernel.py]
+  RUN --> COR[correctness on ALL shapes vs fp32 oracle]
+  COR --> DET{determinism re-check?}
+  DET --> BENCH[cold-cache bench candidate + reference per shape]
+  BENCH --> PROF{"profile_reward_weight > 0?"}
+  PROF --> OBS[Observation]
+  OBS --> CACHE{cacheable? not infra_error}
+  CACHE --> RC[(replay_taskid.jsonl)]
+```
+
+Key API:
+
+```python
+class KoreEnv:
+    def step(self, source, full_validation=True, multi_shape=True) -> Observation
+    def evaluate(self, task, source, shapes=None, do_bench=True) -> Observation
+```
+
+The returned `Observation` (defined in [`kore/reward`](../reward/README.md)) carries `compiled`, `snr_by_shape`, `wall_by_shape`, `baseline_by_shape`, `cv_pct`, `flagged_hack`, `infra_error`, and optional `profile_efficiency`.
+
+---
+
+## Anti-hack hardening
+
+| Attack | Defense |
+| --- | --- |
+| Verdict forgery (print fake `SNR:`) | parse the **last** regex match; re-check correctness *after* the timed loop |
+| Mode sniffing (behave differently when benched) | randomized warmup/iters per bench run |
+| Stateful timing | post-timing correctness poison → whole eval flagged as hack |
+| One-easy-shape win | `wall_ms = max` over shapes, `snr_db = min` over shapes |
+| Filesystem escape | staged in a temp workdir; reference/driver copied read-only (chmod 444) |
+| Fork bomb | `RLIMIT_NPROC` cap (no `RLIMIT_AS` — ROCm needs a huge VA space) |
+
+**Infra vs. kernel classification** (`_classify`): timeouts, OOM, and HIP flakes are `infra_error=True` and are **never cached** and **never scored as incorrect** — a transient node problem must not poison the replay cache or punish a good kernel.
+
+---
+
+## Determinism gate
+
+When `CONFIG.verifier_determinism_check` is on, the primary shape is re-run; if SNR drifts by more than `determinism_snr_tol_db` (10 dB) the kernel is judged non-deterministic (incorrect). An infra flake on the re-run is treated as *inconclusive*, preserving the original correct verdict.
+
+---
+
+## Replay cache
+
+```python
+def source_key(task_id, source) -> str      # SHA256(task_id + NUL + source)
+class ReplayCache:
+    def get(self, task_id, source) -> Optional[Observation]
+    def put(self, task_id, source, obs) -> None
+```
+
+JSONL records are filtered to the current `Observation` field set on load, so schema evolution (e.g. removing a field) never causes a silent cache miss. Cacheability rule: `(compiled or error_text) and not infra_error`.
+
+---
+
+## Profiling
+
+When `profile_reward_weight > 0`, `_collect_profile` runs rocprofv3 with `--bench-mode` on the primary shape and produces a `profile_efficiency ∈ [0,1]` (see [`kore/verifier`](../verifier/README.md) for counter sets and [`kore/reward`](../reward/README.md) for how it shapes reward). rocprof requires `--bench-mode`; without it candidate/reference profiles are degenerate.
+
+---
+
+## Config knobs (from `kore/config.py`)
+
+| Knob | Effect |
+| --- | --- |
+| `verifier_determinism_check` | re-run primary shape; drift → incorrect |
+| `min_variance_runs` / `max_variance_runs` / `cv_threshold_pct` | early-stop benching when CV is low enough |
+| `warmup_iters` / `bench_iters` | base warmup/measure counts (randomized per run) |
+| `profile_reward_weight` | trigger PMC collection + dense shaping |
+
+See also: [`tasks`](../tasks/README.md), [`reward`](../reward/README.md), [`verifier`](../verifier/README.md).

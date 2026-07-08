@@ -85,14 +85,14 @@ fi
 STAGES="${KORE_STAGES:-$DEFAULT_STAGES}"
 echo "[run_conductor] stages=$STAGES"
 
-# Datagen/agentic are TEACHER-API-bound (each worker mostly waits on a ~1-7s Claude
-# call; the GPUs sit idle in between), so throughput scales with concurrency, not
-# GPU count. Verified on this node: 3TB RAM / 384 CPUs and the gateway serves 64
-# concurrent calls with zero throttling. Oversubscribe the 8 GPUs (workers %% n_gpus
-# pins each worker to a GPU) to ~4x for a 4x-faster datagen; benchmark timing stays
-# usable because most evals are cached + win detection is ratio-based. Override with
-# KORE_DATAGEN_WORKERS (e.g. 8 for pristine timing, 48 for max speed).
-DATAGEN_WORKERS="${KORE_DATAGEN_WORKERS:-32}"
+# Datagen/agentic are TEACHER-API-bound (each worker mostly waits on a ~6-13s Claude
+# call; the GPUs sit idle at ~10% in between), so throughput scales with concurrency,
+# not GPU count. Verified on this node: 3TB RAM / 384 CPUs and the gateway serves 64
+# concurrent calls with zero throttling. Default 64 workers (8 per GPU) ~doubles
+# throughput vs 32 with negligible quality impact (GPU eval bursts stay brief; groups
+# ranking has a noise-margin gate). Override with KORE_DATAGEN_WORKERS (e.g. 8 for
+# pristine bench timing, 32 for a balance).
+DATAGEN_WORKERS="${KORE_DATAGEN_WORKERS:-64}"
 echo "[run_conductor] datagen/agentic workers=$DATAGEN_WORKERS (teacher-bound; oversubscribing 8 GPUs)"
 
 # No --tasks -> ALL registered tasks (train = non-held-out; eval = attention family).

@@ -22,11 +22,16 @@ _IMPROVE_FACTOR = 0.98  # a kept step must beat best wall by >= 2%
 
 
 def _feedback(obs, rr) -> str:
+    # error_text is Optional[str]: it is None for a compiled-but-incorrect kernel
+    # (an SNR failure carries no error string), so guard before slicing — otherwise
+    # a correctness miss (common on the tighter fp16 SNR thresholds) crashes the
+    # whole wins shard with 'NoneType' is not subscriptable.
+    err = obs.error_text or ""
     if not obs.compiled:
-        return f"FAILED to compile: {obs.error_text[:400]}"
+        return f"FAILED to compile: {err[:400]}"
     if not rr.correct:
         return (
-            f"Correct? NO. snr_db={obs.snr_db}. {obs.error_text[:200]}\n"
+            f"Correct? NO. snr_db={obs.snr_db}. {err[:200]}\n"
             "Fix correctness before optimizing further."
         )
     wall_us = obs.wall_ms * 1000.0 if obs.wall_ms is not None else None

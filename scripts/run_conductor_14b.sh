@@ -55,6 +55,16 @@ export KORE_GENERAL_REPLAY_HF=1        # real SOTA replay (AMD kernels/reasoning
 export KORE_BENCH_COLD=1               # cold-cache (L2-flushed) timing
 export TORCHINDUCTOR_CACHE_DIR="$REPO_ROOT/.inductor_cache"
 
+# --- ON-NODE-CALIBRATED gfx950 (MI350X) roofline peaks ----------------------
+# Measured on THIS node via `python -m kore.analysis.calibrate_peaks` (matches the
+# P0 study within ~1%): HBM 4.64 TB/s (58% of the 8.0 datasheet) and bf16 1.29
+# PF/s (52% of 2.5). The GRPO physics-residual reward (reward_mode=residual)
+# needs the ATTAINABLE peak, not the datasheet — datasheet peaks make T_min ~2x
+# too small and η ~2x too optimistic. fp8 is left at datasheet (not measurable on
+# this stack). Override by re-running calibrate_peaks on a fully idle node.
+export KORE_PEAK_HBM_BW="${KORE_PEAK_HBM_BW:-4.638812e+12}"
+export KORE_PEAK_BF16="${KORE_PEAK_BF16:-1.290287e+15}"
+
 # --- stage selection --------------------------------------------------------
 # agentic needs the Claude teacher; include it only if a key is present so the
 # campaign "just runs" without one. Override the whole list via KORE_STAGES.

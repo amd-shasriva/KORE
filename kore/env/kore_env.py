@@ -85,9 +85,19 @@ def _last(pattern: re.Pattern, text: str):
 
 def _preexec():  # pragma: no cover - runs in child only
     # NB: session is created via Popen(start_new_session=True); do NOT setsid
-    # again here (would EPERM). Cap process count to contain fork-bombs.
+    # again here (would EPERM).
+    #
+    # Do NOT *lower* RLIMIT_NPROC. It is PER-UID (it counts EVERY process/thread the
+    # user owns, not just this child), so a small per-subprocess soft cap throttles
+    # the entire user. Under concurrent datagen (32 workers spawn thousands of
+    # torch/OpenBLAS threads) an old 512 cap made OpenBLAS `blas_thread_init` fail
+    # and `import numpy` die inside the driver, so EVERY eval falsely reported
+    # compiled=False -> 100% silent datagen failure on a busy node. Raise the soft
+    # limit to the hard cap; runaway containment is the timeout + killpg in _exec
+    # and the system hard limit, not a per-child nproc cap.
     try:
-        resource.setrlimit(resource.RLIMIT_NPROC, (512, 512))
+        _soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+        resource.setrlimit(resource.RLIMIT_NPROC, (hard, hard))
     except (ValueError, OSError):
         pass
     # Deliberately NOT setting RLIMIT_AS — ROCm/HIP reserve huge virtual address
@@ -183,6 +193,15 @@ class KoreEnv:
         env["HIP_VISIBLE_DEVICES"] = env.get("HIP_VISIBLE_DEVICES", "0")
         env["GPU_TARGET"] = self.cfg.gpu_target
         env["HOME"] = str(Path(env.get("TMPDIR", "/tmp")))
+        # Cap CPU BLAS/OMP threads in the driver. By default OpenBLAS spawns one
+        # thread PER CORE (96 here); across 32 concurrent datagen workers that is a
+        # thread explosion that both wastes CPU and pushes the per-UID thread count
+        # sky-high. The driver's numpy use is tiny (output comparison) and the real
+        # work is on the GPU, so a few threads is plenty. Defense-in-depth alongside
+        # the RLIMIT_NPROC fix in _preexec.
+        for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                   "NUMEXPR_NUM_THREADS"):
+            env.setdefault(_v, "4")
         return env
 
     def _exec(self, cmd, workdir, env, timeout):

@@ -10,12 +10,16 @@
 # already-completed stage whose on-disk artifact is present is skipped, and the
 # run continues from where it stopped (files persist under your account).
 #
-# STAGE PLAN (datagen is only ~74% done, so RESUME it; everything else re-runs):
-#   datagen  -> RESUMES additively (shard_done skips the finished task-shards and
+# STAGE PLAN (resume-safe; skips whatever already has an on-disk artifact):
+#   midtrain -> SKIPS when runs/full/midtrain checkpoint is present (it is).
+#   datagen  -> RESUMES additively (shard_done skips finished task-shards and
 #               generates only the missing repair/groups/wins) — needs the teacher
-#   agentic  -> RUNS (on-policy tool-use trajectories) — needs the teacher
-#   build    -> RUNS (assembles SFT/DPO from datagen + agentic)
-#   midtrain -> RE-RUNS (no checkpoint was transferred)
+#   agentic  -> SYNTH (--agentic synth): CPU-only reconstruction of native tool-use
+#               trajectories from the verified repair/wins/groups (minutes, no GPU/
+#               teacher) INSTEAD of the tens-of-GPU-hours live harness. See
+#               kore/data/synth_agentic.py.
+#   build    -> RUNS: also mints gold-wins (from ranked groups) + repair->DPO pairs
+#               (both ON by default) before assembling the SFT/DPO mix.
 #   sft,dpo,grpo,soup,eval -> RUN
 set -euo pipefail
 
@@ -97,12 +101,19 @@ echo "[run_conductor] datagen/agentic workers=$DATAGEN_WORKERS (teacher-bound; o
 
 # No --tasks -> ALL registered tasks (train = non-held-out; eval = attention family).
 # --adaptive-steps -> GRPO plateau early-stop. Full campaign defaults otherwise.
+# --agentic synth : fill the agentic SFT slice from ALREADY-verified records on CPU
+#   (skips the tens-of-GPU-hours live harness). --gold-wins / --repair-dpo default ON
+#   in run_campaign, so the build stage mints them automatically; override with
+#   KORE_AGENTIC (live|synth|both) if you ever want the live rollouts.
+AGENTIC_MODE="${KORE_AGENTIC:-synth}"
+echo "[run_conductor] agentic mode=$AGENTIC_MODE (synth = CPU reconstruction, no 15-30h live rollouts)"
 exec "$PY" scripts/run_campaign.py \
   --model Qwen/Qwen3-14B \
   --full-ft --use-hf --teacher claude \
   --adaptive-steps \
   --datagen-workers "$DATAGEN_WORKERS" \
   --stages "$STAGES" \
+  --agentic "$AGENTIC_MODE" \
   --data-root data/full14b \
   --midtrain-out runs/full/midtrain \
   --sft-out runs/full/sft \

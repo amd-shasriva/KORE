@@ -257,19 +257,46 @@ def _episode_messages(episode: Any) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # System prompt (Hermes tool advertisement)
 # --------------------------------------------------------------------------- #
-_HERMES_HEADER = """\
-You are KORE, an expert AMD MI325X (gfx942 / CDNA3) kernel engineer operating as \
-an autonomous agent. You optimize a Triton kernel by ORCHESTRATING your own loop: \
-plan a change, then CALL a tool to build / test / bench / pmc it, read the result, \
-and decide to keep or revert. Correctness first, then speed vs the production \
-baseline. The trajectory is scored by the BEST correct kernel you reach.
+# Arch descriptor for the system prompt. Keeps the SFT data honest about the
+# ACTUAL target (a gfx950 run must not train the policy to say "gfx942").
+_ARCH_DESC: dict[str, str] = {
+    "gfx950": "AMD MI355X (gfx950 / CDNA4)",
+    "gfx942": "AMD MI325X (gfx942 / CDNA3)",
+}
+_DEFAULT_ARCH_DESC = "AMD MI325X (gfx942 / CDNA3)"
 
-You may call these functions. To call one, emit a Hermes tool call:
-<tool_call>
-{"name": <tool-name>, "arguments": <args-json>}
-</tool_call>
-Tool results are returned to you as messages with role "tool". Make ONE focused \
-change per turn, verify it, then keep (commit) or revert (discard) it."""
+
+def arch_desc(arch: Optional[str]) -> str:
+    """Human descriptor for an arch slug ('gfx950' -> 'AMD MI355X (gfx950 / CDNA4)').
+
+    Unknown/empty slugs fall back to the historical default so existing callers
+    (and their golden strings) are byte-for-byte unchanged when ``arch`` is None.
+    """
+    if not arch:
+        return _DEFAULT_ARCH_DESC
+    return _ARCH_DESC.get(str(arch).strip().lower(), str(arch))
+
+
+def _hermes_header(arch: Optional[str] = None) -> str:
+    """The Hermes header, parameterized by target arch (default = legacy gfx942)."""
+    desc = arch_desc(arch)
+    return (
+        f"You are KORE, an expert {desc} kernel engineer operating as "
+        "an autonomous agent. You optimize a Triton kernel by ORCHESTRATING your own loop: "
+        "plan a change, then CALL a tool to build / test / bench / pmc it, read the result, "
+        "and decide to keep or revert. Correctness first, then speed vs the production "
+        "baseline. The trajectory is scored by the BEST correct kernel you reach.\n\n"
+        "You may call these functions. To call one, emit a Hermes tool call:\n"
+        "<tool_call>\n"
+        '{"name": <tool-name>, "arguments": <args-json>}\n'
+        "</tool_call>\n"
+        'Tool results are returned to you as messages with role "tool". Make ONE focused '
+        "change per turn, verify it, then keep (commit) or revert (discard) it."
+    )
+
+
+# Backward-compatible module constant (identical to the historical string).
+_HERMES_HEADER = _hermes_header()
 
 _REFLECT_GUIDE = """\
 After ANY failed build/test/bench, first REFLECT before your next tool call. \
@@ -303,17 +330,19 @@ _PHASE_PROMPTS = {
 
 
 def build_agent_system_prompt(
-    tools: Optional[list[dict]] = None, phase: Optional[str] = None
+    tools: Optional[list[dict]] = None, phase: Optional[str] = None,
+    arch: Optional[str] = None,
 ) -> str:
     """Hermes-style system prompt advertising the tool schemas as JSON.
 
     ``phase`` selects the correctness->optimization sub-phase guidance
     ("correctness" | "optimize"); when ``None`` a neutral both-phases prompt is
     produced. The reflection protocol is always advertised so the policy knows
-    how to introspect after a failure.
+    how to introspect after a failure. ``arch`` (e.g. "gfx950") sets the target
+    descriptor in the header; ``None`` preserves the legacy gfx942 wording.
     """
     tools = tools or TOOL_SCHEMAS
-    lines = [_HERMES_HEADER, "", _REFLECT_GUIDE]
+    lines = [_hermes_header(arch), "", _REFLECT_GUIDE]
     phase_block = _PHASE_PROMPTS.get((phase or "").lower())
     if phase_block:
         lines.extend(["", phase_block])

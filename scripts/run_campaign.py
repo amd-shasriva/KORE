@@ -683,11 +683,41 @@ def _stage_datagen(ctx):
         LOG.progress(i + 1, n_tasks, "datagen", t_start=dg_t0, task=task.task_id)
 
 
+def _stage_agentic_synth(ctx):
+    """CPU-only: reconstruct agentic tool-use trajectories from verified records.
+
+    No teacher, no GPU — reads the already-generated repair/wins/groups shards
+    and writes native Hermes trajectories into ``data/agentic`` (which the SFT
+    build then blends with the web tool-use replay). Turns the tens-of-GPU-hours
+    agentic stage into a minutes-long CPU pass with real measured tool results.
+    """
+    from kore.data.synth_agentic import synthesize_agentic
+    from kore.tasks.registry import TRAIN_ARCH
+
+    cap = int(getattr(ctx["args"], "synth_agentic_cap", 4000))
+    seed = int(getattr(ctx["args"], "seed", 0) or 0)
+    summary = synthesize_agentic(ctx["data_root"], cap=cap, seed=seed, arch=TRAIN_ARCH)
+    _log("agentic", f"synthesized native tool-use from verified records "
+                    f"(repair={summary.get('repair', 0)}, wins={summary.get('wins', 0)}, "
+                    f"groups={summary.get('groups', 0)}, total={summary.get('total', 0)}) "
+                    f"— CPU-only, real measurements, arch={TRAIN_ARCH}")
+    LOG.event("agentic_synth", cap=cap, **summary)
+
+
 def _stage_agentic(ctx):
+    mode = getattr(ctx["args"], "agentic_mode", "live")
     if ctx["dry"]:
-        _log("agentic", "would generate build/test/bench/pmc tool-use trajectories per task "
-                        "(parallel-sharded across GPUs when --datagen-workers != 1)")
+        if mode in ("synth", "both"):
+            _log("agentic", "would SYNTHESIZE tool-use trajectories from verified "
+                            "repair/wins/groups records (CPU-only, no GPU/teacher)")
+        if mode in ("live", "both"):
+            _log("agentic", "would generate build/test/bench/pmc tool-use trajectories per task "
+                            "(parallel-sharded across GPUs when --datagen-workers != 1)")
         return
+    if mode in ("synth", "both"):
+        _stage_agentic_synth(ctx)
+        if mode == "synth":
+            return  # native slice is filled from verified data; skip the GPU path
     # Parallel path: shard agentic trajectory generation across GPUs (resumable).
     workers, n_gpus = _datagen_plan(ctx)
     if workers > 1:
@@ -819,6 +849,33 @@ def _stage_build(ctx):
     from kore.data.build_datasets import dedup_by_source_hash, leakage_split
     from kore.data.schemas import read_jsonl
     from kore.data.teacher import make_teacher
+
+    # 0. Gold-win mining (CPU, no GPU): reconstruct optimization-win demos from the
+    #    verified rank-0 candidates in `groups` and write them alongside the real
+    #    wins, so the raw gather below folds them through the SAME leakage-split +
+    #    RFT speedup gate. Rebalances the thin wins family against repair.
+    if getattr(ctx["args"], "gold_wins", True):
+        from kore.data.gold_wins import mint_gold_wins
+        from kore.tasks.registry import TRAIN_ARCH
+        gw = mint_gold_wins(ctx["data_root"], cap=int(getattr(ctx["args"], "gold_wins_cap", 3000)),
+                            seed=int(getattr(ctx["args"], "split_seed", 0) or 0), arch=TRAIN_ARCH)
+        _log("build", f"gold wins from verified groups: minted {gw['gold_wins']} across "
+                      f"{gw['tasks_covered']} tasks (from {gw['groups_scanned']} groups) "
+                      f"-> wins/_gold_from_groups.jsonl (RFT-gated downstream)")
+        LOG.event("gold_wins", **gw)
+
+    # 0b. Repair->DPO (CPU): package verified repairs as fixed>broken preference
+    #     pairs so the DPO product gets a correctness contrast alongside the
+    #     speed-ranked group prefs and reward-hack hard negatives.
+    if getattr(ctx["args"], "repair_dpo", True):
+        from kore.data.repair_dpo import mint_repair_dpo
+        from kore.tasks.registry import TRAIN_ARCH
+        rd = mint_repair_dpo(ctx["data_root"], cap=int(getattr(ctx["args"], "repair_dpo_cap", 8000)),
+                             seed=int(getattr(ctx["args"], "split_seed", 0) or 0), arch=TRAIN_ARCH)
+        _log("build", f"repair->DPO: minted {rd['repair_pairs']} fixed>broken pairs across "
+                      f"{rd['tasks_covered']} tasks (from {rd['repair_scanned']} repairs) "
+                      f"-> groups/_repair_pairs.jsonl")
+        LOG.event("repair_dpo", **rd)
 
     # 1. gather + dedup all raw generated records (datagen + evolve shards).
     raw: list = []
@@ -1438,6 +1495,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wins-gens", type=int, default=8, dest="wins_gens")
     p.add_argument("--n-agentic", type=int, default=16, dest="n_agentic")
     p.add_argument("--max-tool-turns", type=int, default=8, dest="max_tool_turns")
+    # How to produce the agentic tool-use SFT slice:
+    #   live  = run the teacher+GPU AgentHarness per task (tens of GPU-hours).
+    #   synth = reconstruct trajectories from ALREADY-verified repair/wins/groups
+    #           records (CPU-only, minutes, real measurements) — see synth_agentic.
+    #   both  = synth first, then live on top.
+    p.add_argument("--agentic", choices=["live", "synth", "both"], default="live",
+                   dest="agentic_mode")
+    p.add_argument("--synth-agentic-cap", type=int, default=4000,
+                   dest="synth_agentic_cap")
     # Parallel datagen: shard tasks across GPUs with concurrent teacher streams.
     # 0 = auto (one worker per GPU); 1 = the sequential path. >GPU-count oversubscribes
     # each GPU to overlap teacher latency (safe: verification runs in short driver
@@ -1445,6 +1511,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--datagen-workers", type=int, default=0, dest="datagen_workers",
                    help="parallel datagen worker processes (0=auto=one per GPU; 1=sequential)")
     p.add_argument("--sft-total", type=int, default=20000, dest="sft_total")
+    # Gold-win mining: reconstruct optimization-win SFT demos from the verified
+    # rank-0 candidates in `groups` (CPU-only, quality-gated). Rebalances the thin
+    # wins family (~1/task) against repair. On by default; --no-gold-wins to skip.
+    p.add_argument("--gold-wins", dest="gold_wins", action=argparse.BooleanOptionalAction,
+                   default=True, help="mint gold optimization wins from verified ranked groups")
+    p.add_argument("--gold-wins-cap", type=int, default=3000, dest="gold_wins_cap")
+    # Repair->DPO: package each verified repair (broken->fixed) as a fixed>broken
+    # preference pair, adding a correctness contrast to the speed-ranked group prefs.
+    p.add_argument("--repair-dpo", dest="repair_dpo", action=argparse.BooleanOptionalAction,
+                   default=True, help="mint fixed>broken DPO pairs from verified repair records")
+    p.add_argument("--repair-dpo-cap", type=int, default=8000, dest="repair_dpo_cap")
     p.add_argument("--midtrain-out", default="runs/midtrain", dest="midtrain_out")
     p.add_argument("--sft-out", default="runs/sft", dest="sft_out")
     p.add_argument("--dpo-out", default="runs/dpo", dest="dpo_out")

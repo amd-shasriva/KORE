@@ -56,6 +56,10 @@ flowchart TB
 
 Generators: `gen_repair` (inject breakage → teacher fix → keep only if verified), `gen_groups` (n_parents × k candidates, ranked correct>speed>SNR with a noise-margin gate), `gen_wins` (greedy multi-turn, keep if net >2% faster), `gen_agentic` (tool-use trajectories). `evolve.py` adds a D-MAB bandit (UCB1 + Page-Hinkley) over mutation operators with MAP-Elites islands and a value prefilter.
 
+**Agentic slice — two ways to fill it.** The live `gen_agentic` path drives the teacher + GPU harness per task (tens of GPU-hours). `synth_agentic.py` is the **CPU-only alternative**: it *reconstructs* faithful Hermes tool-use trajectories from the already-verified `repair` / `wins` / `groups` records, so every `role:"tool"` result carries a **real measured** number (verifier SNR, walltime, error text) with **no GPU and no teacher**. It maps 1:1 onto the live curriculum — `repair`→`test(broken)→reflect→test(fixed)→keep`, `wins`→`bench(seed)→bench(optimized)→keep`, `groups`→`bench(candidates)→keep(fastest)` — and writes `agentic/_synth_{repair,wins,groups}.jsonl` which `assemble._agentic_rows` picks up (the SFT mixer then blends the web tool-use replay on top). Select the mode with `run_campaign.py --agentic {live,synth,both}` (`--synth-agentic-cap`, default 4000).
+
+**Gold wins — rebalancing the thinnest family.** `gen_wins` yields ~1 trajectory/task, so pure-optimization demos are scarce next to `repair`. `gold_wins.py` mints extra optimization-win `WinRecord`s from the **rank-0** (robustly-best, correct) candidate in each ranked `group` — code that `build_sft` otherwise sees only via DPO. It frames a slower correct sibling as the parent and emits the real-wins format (`SYSTEM_PROMPT` + `build_turn_prompt` + `ANALYSIS: … FULL_KERNEL:`), writing `wins/_gold_from_groups.jsonl`. The build stage mints these **before** the raw gather, so they pass the SAME dedup + leakage split + **RFT speedup gate** as real wins — only genuinely-faster-than-parent gold survives. On by default (`--gold-wins` / `--no-gold-wins`, `--gold-wins-cap` default 3000). This is rejection-sampling (ReST-EM) on already-verified data: gold *code*, measurement-grounded reasoning, zero new GPU.
+
 ---
 
 ## Assembly & on-policy loop
@@ -84,11 +88,13 @@ flowchart LR
 ## Shard layout (`data/<root>/`)
 
 ```
-repair/{task}.jsonl   groups/{task}.jsonl   wins/{task}.jsonl   agentic/{task}.jsonl
+repair/{task}.jsonl   groups/{task}.jsonl   wins/{task}.jsonl
+wins/_gold_from_groups.jsonl (gold wins minted from ranked groups)
+agentic/{task}.jsonl (live)   agentic/_synth_{repair,wins,groups}.jsonl (synth)
 midtrain/corpus.jsonl   sft/multicap.jsonl   dpo/pairs.jsonl   dagger/round{N}.jsonl
 campaign_manifest.json  campaign_events.jsonl  launch/*.json
 ```
 
-Campaign datagen defaults: `n_repair=50`, `n_parents=20`, `k=6`, `wins_gens=8`, `n_agentic=16`.
+Campaign datagen defaults: `n_repair=50`, `n_parents=20`, `k=6`, `wins_gens=8`, `n_agentic=16`, `--agentic live` (use `--agentic synth` for the GPU-free reconstructed slice).
 
 See also: [`kore/agent`](../agent/README.md), [`kore/openended`](../openended/README.md), [`kore/policy`](../policy/README.md), [`docs/DATASET_SPEC.md`](../../docs/DATASET_SPEC.md).

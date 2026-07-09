@@ -2,6 +2,8 @@
 
 `AgentHarness` drives a Hermes-style tool-use loop over `KoreEnv`: the model calls `build` / `test` / `bench` / `pmc` / `keep` / `revert` across multiple turns, receiving verifier feedback each turn. It powers both agentic datagen ([`kore/data/gen_agentic.py`](../data/README.md)) and the agentic GRPO rollout ([`kore/policy/grpo.py`](../policy/README.md)). CPU-only orchestration; all GPU work is injected via `env`.
 
+The same message contract (`format.py`) is reused **without a GPU** by [`kore/data/synth_agentic.py`](../data/README.md), which reconstructs agentic SFT trajectories from already-verified `repair`/`wins`/`groups` records. `build_agent_system_prompt(..., arch=)` parameterizes the target descriptor (e.g. `gfx950`→"AMD MI355X (gfx950 / CDNA4)"); `arch=None` preserves the legacy `gfx942` wording so existing callers are byte-for-byte unchanged.
+
 ---
 
 ## Files

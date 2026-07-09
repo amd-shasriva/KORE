@@ -18,6 +18,25 @@ def test_registry_has_wide_op_coverage():
     assert {"unary", "binary", "reduce"} <= fams
 
 
+def test_v2_additive_ops_present_and_wellformed():
+    """The v2 additive expansion (reductions incl. RMS, GLU/fused pointwise, GEMM
+    tanh/sigmoid epilogues) must stay in the registry with correct families."""
+    reg = _genops._registry()
+    expected = {
+        "row_rms": "reduce", "row_l1": "reduce", "row_max_abs": "reduce",
+        "row_min": "reduce",
+        "reglu": "fusion", "sub_relu": "fusion", "add_mul_relu": "fusion",
+        "mul_add_tanh": "fusion",
+        "gemm_tanh": "gemm_fusion", "gemm_sigmoid": "gemm_fusion",
+        "gemm_bias_tanh": "gemm_fusion", "gemm_bias_sigmoid": "gemm_fusion",
+    }
+    for op, fam in expected.items():
+        assert op in reg, f"missing v2 op {op}"
+        assert reg[op][0] == fam, f"{op} family {reg[op][0]} != {fam}"
+    # the new GEMM epilogue activations are wired on both sides
+    assert "tanh" in _genops._TL_ACT and "sigmoid" in _genops._TL_ACT
+
+
 @pytest.mark.parametrize("op", _genops.op_names())
 def test_seed_source_parses_and_defines_entry(op):
     family = _genops._registry()[op][0]

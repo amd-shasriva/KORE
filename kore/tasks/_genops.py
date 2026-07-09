@@ -205,6 +205,16 @@ def _reduce_specs() -> dict[str, ReduceSpec]:
                                "tl.max(acc, axis=0)", "v", lambda x: x.amax(-1)),
         "row_l2":   ReduceSpec("0.0", "0.0", "acc + x * x", "tl.sum(acc, axis=0)",
                                "tl.sqrt(v)", lambda x: x.norm(p=2, dim=-1)),
+        # --- v2 additive reductions (single-pass, fp32 accumulate; identity-safe
+        #     masked fills so no engine change is needed) ---
+        "row_rms":     ReduceSpec("0.0", "0.0", "acc + x * x", "tl.sum(acc, axis=0)",
+                                  "tl.sqrt(v / N)", lambda x: x.pow(2).mean(-1).sqrt()),
+        "row_l1":      ReduceSpec("0.0", "0.0", "acc + tl.abs(x)", "tl.sum(acc, axis=0)",
+                                  "v", lambda x: x.abs().sum(-1)),
+        "row_max_abs": ReduceSpec("0.0", "0.0", "tl.maximum(acc, tl.abs(x))",
+                                  "tl.max(acc, axis=0)", "v", lambda x: x.abs().amax(-1)),
+        "row_min":     ReduceSpec("3.0e38", "3.0e38", "tl.minimum(acc, x)",
+                                  "tl.min(acc, axis=0)", "v", lambda x: x.amin(-1)),
     }
 
 
@@ -248,6 +258,14 @@ def _fusion_specs() -> dict[str, FusionSpec]:
         "add_add_relu": FusionSpec("tl.maximum(a + b + c, 0.0)",
                                    lambda a, b, c: torch.relu(a + b + c), 3),
         "add_mul":      FusionSpec("(a + b) * c", lambda a, b, c: (a + b) * c, 3),
+        # --- v2 additive pointwise fusions (real GLU/gated + fused-act chains that
+        #     torch runs as multiple kernels -> genuine fusion headroom) ---
+        "reglu":        FusionSpec("tl.maximum(a, 0.0) * b", lambda a, b: torch.relu(a) * b, 2),
+        "sub_relu":     FusionSpec("tl.maximum(a - b, 0.0)", lambda a, b: torch.relu(a - b), 2),
+        "add_mul_relu": FusionSpec("tl.maximum((a + b) * c, 0.0)",
+                                   lambda a, b, c: torch.relu((a + b) * c), 3),
+        "mul_add_tanh": FusionSpec("2.0 * tl.sigmoid(2.0 * (a * b + c)) - 1.0",
+                                   lambda a, b, c: torch.tanh(a * b + c), 3),
     }
 
 
@@ -261,6 +279,12 @@ def _gemm_fusion_specs() -> dict[str, GemmFusionSpec]:
         "gemm_bias_relu":   GemmFusionSpec(True, "relu"),
         "gemm_bias_gelu":   GemmFusionSpec(True, "gelu"),
         "gemm_bias_silu":   GemmFusionSpec(True, "silu"),
+        # --- v2 additive GEMM epilogues (compute-bound, hipBLASLt-baselined;
+        #     saturating acts are adversarial-safe) ---
+        "gemm_tanh":        GemmFusionSpec(False, "tanh"),
+        "gemm_sigmoid":     GemmFusionSpec(False, "sigmoid"),
+        "gemm_bias_tanh":   GemmFusionSpec(True, "tanh"),
+        "gemm_bias_sigmoid": GemmFusionSpec(True, "sigmoid"),
     }
 
 
@@ -273,6 +297,8 @@ def _torch_act(name: str):
         "relu": torch.relu,
         "gelu": lambda y: F.gelu(y, approximate="tanh"),
         "silu": F.silu,
+        "tanh": torch.tanh,
+        "sigmoid": torch.sigmoid,
     }[name]
 
 
@@ -283,6 +309,8 @@ _TL_ACT = {
     "gelu": ("    _gi = 0.7978845608028654 * (acc + 0.044715 * acc * acc * acc)\n"
              "    acc = 0.5 * acc * (1.0 + (2.0 * tl.sigmoid(2.0 * _gi) - 1.0))\n"),
     "silu": "    acc = acc * tl.sigmoid(acc)\n",
+    "tanh": "    acc = 2.0 * tl.sigmoid(2.0 * acc) - 1.0\n",
+    "sigmoid": "    acc = tl.sigmoid(acc)\n",
 }
 
 

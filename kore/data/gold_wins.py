@@ -133,6 +133,10 @@ def mint_gold_wins(
     d = data_root / "groups"
     if d.exists():
         for p in sorted(d.glob("*.jsonl")):
+            # Skip derived shards (e.g. repair-DPO's "_repair_pairs.jsonl") so we
+            # only mint gold wins from real ranked-group datagen shards.
+            if p.name.startswith("_"):
+                continue
             try:
                 if p.stat().st_size == 0:
                     continue

@@ -388,6 +388,12 @@ def _iter_records(d: Path) -> Iterator[dict]:
     if not d.exists():
         return
     for p in sorted(d.glob("*.jsonl")):
+        # Skip synthetic/derived shards ("_gold_from_groups", "_repair_pairs",
+        # "_synth_*") so the synthesizers never re-ingest their own or each other's
+        # outputs (which would, e.g., turn repair-DPO broken kernels into agentic
+        # bench candidates). Only real per-task datagen shards are read.
+        if p.name.startswith("_"):
+            continue
         try:
             if p.stat().st_size == 0:
                 continue

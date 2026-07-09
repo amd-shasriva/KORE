@@ -35,8 +35,12 @@ def _feedback(obs, rr) -> str:
             "Fix correctness before optimizing further."
         )
     wall_us = obs.wall_ms * 1000.0 if obs.wall_ms is not None else None
+    # wall_ms/speedup can be None when timing is unmeasurable on this stack
+    # (e.g. fp8 on ROCm) — format defensively so the wins shard isn't lost.
+    wall_s = f"{wall_us:.1f}us" if wall_us is not None else "n/a"
+    speedup_s = f"{rr.speedup:.3f}x" if rr.speedup is not None else "n/a"
     return (
-        f"Correct? YES. wall={wall_us:.1f}us speedup={rr.speedup:.3f}x. "
+        f"Correct? YES. wall={wall_s} speedup={speedup_s}. "
         "Now make it faster with one more change."
     )
 

@@ -240,34 +240,59 @@ def generate_kernel_qa(
         rng = random.Random(seed)
         rng.shuffle(plan)
 
+        # Build a deterministic, over-provisioned plan (the buffer absorbs the rare
+        # empty answer), construct all prompts up front (pure/deterministic given
+        # ``seed``), then run the network-bound teacher calls CONCURRENTLY. QA rows
+        # are independent, so a thread pool collapses a ~9h sequential pass into
+        # minutes. Rows are assembled in plan order, so the output stays order-stable.
+        import os
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        buf = int(n * 1.15) + 8
+        specs: list[tuple] = []
+        for p in range(buf):
+            vi, qa_type = plan[p % len(plan)]
+            view = views[vi]
+            # Per-row RNG keeps counter choice etc. deterministic and decorrelated.
+            row_rng = random.Random(f"{seed}:{p + 1}:{qa_type}")
+            messages, style = build_qa_messages(view, qa_type, row_rng)
+            specs.append((messages, style, qa_type, view["task_id"]))
+
+        workers = max(1, int(os.environ.get("KORE_QA_WORKERS", "32") or 32))
+        answers: list = [None] * len(specs)
+        t_start = time.time()
+        done = 0
+
+        def _ask(k: int):
+            return k, teacher.generate(specs[k][0])
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for fut in as_completed([ex.submit(_ask, k) for k in range(len(specs))]):
+                k, ans = fut.result()
+                answers[k] = ans
+                done += 1
+                if done % 50 == 0 or done == len(specs):
+                    log.progress(done, len(specs), "kernel_qa", t_start=t_start)
+
         by_type: Counter = Counter()
         by_style: Counter = Counter()
         rows: list[dict] = []
-        i = 0
-        t_start = time.time()
-        while len(rows) < n:
-            vi, qa_type = plan[i % len(plan)]
-            i += 1
-            view = views[vi]
-            # Per-row RNG keeps counter choice etc. deterministic and decorrelated.
-            row_rng = random.Random(f"{seed}:{i}:{qa_type}")
-            messages, style = build_qa_messages(view, qa_type, row_rng)
-            answer = teacher.generate(messages)
+        for k, (messages, style, qa_type, task_id) in enumerate(specs):
+            if len(rows) >= n:
+                break
+            answer = answers[k]
             if not isinstance(answer, str) or not answer.strip():
-                log.debug("empty QA answer; skipping", qa_type=qa_type,
-                          task=view["task_id"])
+                log.debug("empty QA answer; skipping", qa_type=qa_type, task=task_id)
                 continue
-            row = {
+            rows.append({
                 "messages": messages + [{"role": "assistant", "content": answer}],
                 "_source": QA_SOURCE_TAG,
                 "_style": style,
                 "_qa_type": qa_type,
-                "_task_id": view["task_id"],
-            }
-            rows.append(row)
+                "_task_id": task_id,
+            })
             by_type[qa_type] += 1
             by_style[style] += 1
-            log.progress(len(rows), n, "kernel_qa", t_start=t_start)
         log.metric("qa_summary", n=len(rows), by_type=dict(by_type),
-                   by_style=dict(by_style))
+                   by_style=dict(by_style), workers=workers)
         return rows

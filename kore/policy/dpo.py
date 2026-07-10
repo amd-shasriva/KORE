@@ -104,12 +104,39 @@ def build_trl_dpo_kwargs(config) -> dict:
         seed=config.seed,
         report_to=config.report_to,
     )
+    # loss_type may be a STRING ("sigmoid"/"ipo") OR a LIST of components for a
+    # composite loss. ["sigmoid", "sft"] + loss_weights=[1,1] == RPO (DPO + an
+    # NLL-on-chosen anchor). The SFT/NLL anchor is THE fix for the likelihood
+    # displacement that degenerated DPO v1: widening the reward margin by tanking
+    # BOTH chosen and rejected log-probs (entropy collapse -> garbage tokens /
+    # incomplete kernels) is countered by a positive "keep the chosen likely"
+    # gradient. TRL 0.29.1 has no rpo_alpha; the list form + loss_weights is the
+    # supported equivalent (verified: loss_type is list[str], "sft" is a component).
     loss_type = getattr(config, "loss_type", None)
     if loss_type:
-        kwargs["loss_type"] = str(loss_type)
+        kwargs["loss_type"] = (list(loss_type)
+                               if isinstance(loss_type, (list, tuple)) else str(loss_type))
+    loss_weights = getattr(config, "loss_weights", None)
+    if loss_weights:
+        kwargs["loss_weights"] = [float(w) for w in loss_weights]
     label_smoothing = getattr(config, "label_smoothing", None)
     if label_smoothing:
         kwargs["label_smoothing"] = float(label_smoothing)
+    # LD-DPO length desensitization (down-weight the verbose tail) — optional guard
+    # against length-driven degeneration on long code.
+    ld_alpha = getattr(config, "ld_alpha", None)
+    if ld_alpha is not None:
+        kwargs["ld_alpha"] = float(ld_alpha)
+    # Truncation guard: with max_prompt_length gone in trl>=0.29, if a pair ever
+    # exceeds max_length the default "keep_start" cuts the COMPLETION's tail (trains
+    # the model to stop mid-kernel). "keep_end" preserves the kernel tail instead.
+    truncation_mode = getattr(config, "truncation_mode", None)
+    if truncation_mode:
+        kwargs["truncation_mode"] = str(truncation_mode)
+    # Gradient clipping (DPO v1 saw pre-clip grad-norm ~192). Pass explicitly.
+    max_grad_norm = getattr(config, "max_grad_norm", None)
+    if max_grad_norm is not None:
+        kwargs["max_grad_norm"] = float(max_grad_norm)
     kwargs.update(build_fsdp_kwargs(config))
     return kwargs
 
@@ -228,12 +255,21 @@ def train(config: DPOConfig) -> dict:
             logs = logs or {}
             if "loss" not in logs:  # skip eval/summary logs — train-step only
                 return
+            # logps/chosen + rewards/chosen are the LIKELIHOOD-DISPLACEMENT alarms:
+            # if logps_chosen trends DOWN or rewards_chosen goes/stays NEGATIVE while
+            # rewards_margin grows, the policy is degenerating (v1's failure) — stop
+            # and raise beta / lower LR / increase the sft weight.
             log.event("dpo_step", step=int(state.global_step), loss=logs.get("loss"),
                       lr=logs.get("learning_rate"),
                       epoch=round(float(state.epoch), 4) if state.epoch is not None else None,
                       grad_norm=logs.get("grad_norm"),
                       rewards_margin=logs.get("rewards/margins"),
-                      rewards_acc=logs.get("rewards/accuracies"), **gpu_mem_snapshot())
+                      rewards_acc=logs.get("rewards/accuracies"),
+                      logps_chosen=logs.get("logps/chosen"),
+                      logps_rejected=logs.get("logps/rejected"),
+                      rewards_chosen=logs.get("rewards/chosen"),
+                      rewards_rejected=logs.get("rewards/rejected"),
+                      entropy=logs.get("entropy"), **gpu_mem_snapshot())
 
     trainer = DPOTrainer(
         model=model,
@@ -291,15 +327,21 @@ def dpo_config_from_dict(d: dict) -> DPOConfig:
     """
     d = dict(d)
     lora = d.pop("lora", None)
-    loss_type = d.pop("loss_type", None)
-    label_smoothing = d.pop("label_smoothing", None)
+    # Fields that are NOT on the base DPOConfig dataclass (TRL loss knobs / guards):
+    # pop them so DPOConfig(**d) doesn't choke, then attach as attributes that
+    # build_trl_dpo_kwargs reads via getattr. Covers the iterative-DPO + KORE-DPO-v2
+    # anti-degeneration recipe (RPO composite loss, LD-DPO, cDPO, clip, truncation).
+    _extras = {}
+    for k in ("loss_type", "loss_weights", "label_smoothing", "ld_alpha",
+              "truncation_mode", "max_grad_norm"):
+        if k in d:
+            _extras[k] = d.pop(k)
     cfg = DPOConfig(**d)
     if lora is not None:
         cfg.lora = LoRAConfig(**lora)
-    if loss_type is not None:
-        cfg.loss_type = loss_type
-    if label_smoothing is not None:
-        cfg.label_smoothing = label_smoothing
+    for k, v in _extras.items():
+        if v is not None:
+            setattr(cfg, k, v)
     return cfg
 
 

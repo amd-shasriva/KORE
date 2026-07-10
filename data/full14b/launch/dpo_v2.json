@@ -1,7 +1,8 @@
 {
-  "model_id": "Qwen/Qwen3-14B",
-  "dataset_path": "data/dpo/pairs.jsonl",
-  "output_dir": "runs/dpo_14b_full",
+  "model_id": "runs/full/sft",
+  "ref_model_id": "runs/full/sft",
+  "dataset_path": "data/full14b/dpo/pairs.jsonl",
+  "output_dir": "runs/full/dpo_v2",
   "use_lora": false,
   "distributed": true,
 
@@ -12,7 +13,7 @@
   "truncation_mode": "keep_end",
   "max_grad_norm": 0.5,
 
-  "learning_rate": 5e-7,
+  "learning_rate": 5e-07,
   "lr_scheduler_type": "cosine",
   "warmup_ratio": 0.1,
   "num_train_epochs": 1.0,

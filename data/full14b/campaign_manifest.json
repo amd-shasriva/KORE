@@ -1,11 +1,17 @@
 {
   "model": "Qwen/Qwen3-14B",
-  "midtrain_ckpt": null,
-  "sft_ckpt": null,
-  "dpo_ckpt": null,
+  "midtrain_ckpt": "runs/full/midtrain",
+  "sft_ckpt": "runs/full/sft",
+  "dpo_ckpt": "runs/full/dpo",
   "grpo_ckpt": null,
   "final": null,
-  "done_stages": [],
+  "done_stages": [
+    "agentic",
+    "build",
+    "dpo",
+    "midtrain",
+    "sft"
+  ],
   "train_tasks": [
     "fused_add_rmsnorm_bf16",
     "fused_moe_silu_bf16",
@@ -191,5 +197,5 @@
     "flash_attn_prefill_bf16",
     "paged_attn_decode_bf16"
   ],
-  "updated": 1783460285.4816806
+  "updated": 1783642236.5562856
 }

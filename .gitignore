@@ -18,6 +18,8 @@ dist/
 runs/*/
 runs_smoke/
 *.log
+# torch.compile / inductor on-disk cache (machine-local, huge, regenerable)
+.inductor_cache/
 
 # vendored external repos (large; cloned separately)
 ../repos/

@@ -100,6 +100,7 @@ def build_trl_dpo_kwargs(config) -> dict:
         gradient_checkpointing_kwargs={"use_reentrant": True},
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
+        save_total_limit=1,   # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill
         seed=config.seed,
         report_to=config.report_to,
     )

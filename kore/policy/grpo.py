@@ -680,14 +680,25 @@ def _truncate_prompt_ids(ids, config):
 
 
 def _save_grpo_checkpoint(model, tok, config, step):
-    """Fix 3 (save_steps): write a periodic checkpoint (never fatal on failure)."""
-    import os
+    """Fix 3 (save_steps): write a periodic checkpoint (never fatal on failure).
 
-    ckpt = os.path.join(getattr(config, "output_dir", "runs/grpo"), f"checkpoint-{step}")
+    Keeps only the MOST RECENT periodic checkpoint (save_total_limit=1 semantics):
+    a 14B model is ~56GB/ckpt, so a long GRPO run or the 2-phase curriculum would
+    otherwise fill the disk with stale checkpoints (this exact bloat crashed the
+    DPO save). Rotation is per-output_dir, so curriculum phases don't cross-delete,
+    and the stage's FINAL top-level save (save_pretrained(output_dir)) is untouched.
+    """
+    import os, glob, shutil
+
+    out_dir = getattr(config, "output_dir", "runs/grpo")
+    ckpt = os.path.join(out_dir, f"checkpoint-{step}")
     try:
         model.save_pretrained(ckpt)
         tok.save_pretrained(ckpt)
         log.info("grpo periodic checkpoint saved", step=step, path=ckpt)
+        for old in glob.glob(os.path.join(out_dir, "checkpoint-*")):
+            if os.path.isdir(old) and os.path.abspath(old) != os.path.abspath(ckpt):
+                shutil.rmtree(old, ignore_errors=True)
     except Exception as e:  # noqa: BLE001 - a checkpoint failure must not kill training
         log.warn("grpo periodic checkpoint failed", step=step, error=repr(e))
     return ckpt

@@ -108,12 +108,18 @@ class KoreEnv:
     """Task-bound verified environment. One per task; call ``step`` per candidate."""
 
     def __init__(self, task: Task, config=CONFIG, use_replay: bool = True,
-                 correctness_timeout: int = 300, bench_timeout: int = 300):
+                 correctness_timeout: int = 300, bench_timeout: int = 300,
+                 gpu: Optional[str] = None):
         self.task = task
         self.cfg = config
         self.correctness_timeout = correctness_timeout
         self.bench_timeout = bench_timeout
         self.use_replay = use_replay
+        # Physical GPU for the compile/bench SUBPROCESS (HIP_VISIBLE_DEVICES).
+        # Under distributed GRPO every rank must bench on its OWN GPU; otherwise
+        # all ranks default to GPU 0, contend/OOM there, one stalls, and the
+        # cross-rank all_gather deadlocks. None => inherit/legacy default "0".
+        self._gpu = gpu
         self._cache_obj = ReplayCache(self.cfg.runs_dir / f"replay_{task.task_id}.jsonl") \
             if use_replay else None
 
@@ -190,7 +196,15 @@ class KoreEnv:
         env = os.environ.copy()
         project_root = str(Path(__file__).resolve().parents[2])  # /root/Kore-rl/kore
         env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
-        env["HIP_VISIBLE_DEVICES"] = env.get("HIP_VISIBLE_DEVICES", "0")
+        if self._gpu is not None:
+            # ABSOLUTE physical GPU id for the compile/bench subprocess. Set BOTH
+            # HIP_ and CUDA_VISIBLE_DEVICES to it (and drop any inherited list) so the
+            # subprocess sees exactly this one physical GPU as its device 0 — no
+            # double-remap from a restricted parent visible-device list.
+            env["HIP_VISIBLE_DEVICES"] = self._gpu
+            env["CUDA_VISIBLE_DEVICES"] = self._gpu
+        else:
+            env["HIP_VISIBLE_DEVICES"] = env.get("HIP_VISIBLE_DEVICES", "0")
         env["GPU_TARGET"] = self.cfg.gpu_target
         env["HOME"] = str(Path(env.get("TMPDIR", "/tmp")))
         # Cap CPU BLAS/OMP threads in the driver. By default OpenBLAS spawns one

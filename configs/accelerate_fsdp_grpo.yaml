@@ -1,0 +1,66 @@
+# KORE distributed GRPO (online RL) — FSDP SHARD_GRAD_OP (ZeRO-2 equivalent).
+#
+# Used by scripts/launch_distributed.sh for the `grpo` stage ONLY:
+#   accelerate launch --config_file configs/accelerate_fsdp_grpo.yaml \
+#       -m kore.policy.grpo <config.json>
+#
+# WHY A SEPARATE CONFIG FROM accelerate_fsdp.yaml (which SFT/DPO use):
+#   GRPO does on-policy GENERATION inside the training loop (model.generate ->
+#   many forwards per step). Under FULL_SHARD (ZeRO-3) FSDP RESHARDS params to a
+#   sharded 1-D buffer after EVERY forward, so each decode step re-gathers params
+#   with a per-layer all_gather. Ranks generate different-length (ragged)
+#   sequences, so those per-decode all_gathers desync across ranks and DEADLOCK
+#   (all ranks spin at _unshard->synchronize; observed end-to-end).
+#
+#   SHARD_GRAD_OP (ZeRO-2) does NOT reshard params after forward: params stay
+#   replicated on every rank between forwards, so model.generate() runs PURELY
+#   LOCALLY on each rank (no per-decode all_gather, ragged lengths cannot
+#   deadlock). Grads + optimizer state are STILL sharded, so a 14B/32B full-FT
+#   still fits on 8x MI300 (~50GB/rank: 28 replicated bf16 params + sharded
+#   grads + sharded fp32 Adam). This matches kore.policy.grpo.build_fsdp_plugin,
+#   which already requests reshard_after_forward=SHARD_GRAD_OP in-code; this file
+#   makes the accelerate LAUNCHER agree (its FSDP env-vars otherwise override the
+#   in-code plugin back to FULL_SHARD).
+#
+# Everything else is identical to accelerate_fsdp.yaml. For 32B/70B, flip
+# fsdp_offload_params: true (and set the wrap class for a non-Qwen3 base).
+
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: FSDP
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+machine_rank: 0
+main_process_ip: null
+main_process_port: null
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 8            # 8x MI300-class GPUs (gfx942); one process per GPU
+rdzv_backend: static
+same_network: true
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+
+fsdp_config:
+  fsdp_version: 1
+  # BOTH keys must say SHARD_GRAD_OP. accelerate launch (utils/launch.py) exports
+  # FSDP_SHARDING_STRATEGY (deprecated, default FULL_SHARD) AND
+  # FSDP_RESHARD_AFTER_FORWARD. For FSDP1 the plugin reads the deprecated
+  # sharding_strategy FIRST (dataclasses.py __post_init__), so if we set only
+  # reshard_after_forward the FULL_SHARD default silently wins and generation
+  # deadlocks (params reshard every decode step). Setting sharding_strategy here
+  # makes ZeRO-2 actually take effect: params stay replicated between forwards.
+  fsdp_sharding_strategy: SHARD_GRAD_OP             # ZeRO-2 (deprecated key, but authoritative for FSDP1)
+  fsdp_reshard_after_forward: SHARD_GRAD_OP        # ZeRO-2: params stay replicated between forwards -> local generation, no per-decode all_gather deadlock
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer  # 14B/32B Qwen3; use LlamaDecoderLayer for the 70B
+  fsdp_backward_prefetch: BACKWARD_PRE
+  fsdp_forward_prefetch: false
+  fsdp_state_dict_type: FULL_STATE_DICT           # consolidate a plain HF ckpt so soup/eval load it via from_pretrained
+  fsdp_use_orig_params: true
+  fsdp_activation_checkpointing: false            # done via HF gradient_checkpointing (use_reentrant=False)
+  fsdp_cpu_ram_efficient_loading: false           # keep every rank's params on-device (a 14B fits); avoids embed/lm_head landing on CPU in the custom RL loop
+  fsdp_sync_module_states: true
+  fsdp_offload_params: false                      # 14B: keep on GPU. 32B/70B: set true

@@ -205,7 +205,19 @@ def train(config: DPOConfig) -> dict:
 
     peft_config = _peft_config(config) if config.use_lora else None
 
-    trl_args = TRLDPOConfig(**build_trl_dpo_kwargs(config))
+    # Drop any kwargs the INSTALLED trl DPOConfig doesn't accept (TRL renames/removes
+    # fields across versions, e.g. `max_prompt_length` is gone in trl>=0.29 — the
+    # total `max_length` still caps prompt+completion). Keeps us robust to trl drift
+    # instead of hard-failing the whole DPO stage on one unknown kwarg.
+    import inspect
+    _dpo_kwargs = build_trl_dpo_kwargs(config)
+    _valid = set(inspect.signature(TRLDPOConfig.__init__).parameters)
+    _dropped = sorted(set(_dpo_kwargs) - _valid)
+    if _dropped:
+        log.event("dpo_config_kwargs_dropped", dropped=_dropped,
+                  trl_version=getattr(__import__("trl"), "__version__", "?"))
+        _dpo_kwargs = {k: v for k, v in _dpo_kwargs.items() if k in _valid}
+    trl_args = TRLDPOConfig(**_dpo_kwargs)
 
     # Lightweight per-log-step observability callback (guarded transformers import).
     from transformers import TrainerCallback

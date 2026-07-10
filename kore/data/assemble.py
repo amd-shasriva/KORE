@@ -12,6 +12,7 @@ and general replay always falls back to bundled samples, so this runs offline
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Optional
 
@@ -143,7 +144,9 @@ def build_multicap_dataset(
 
 def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
                                   group_records: Optional[list] = None,
-                                  extra_group_records: Optional[list] = None) -> dict:
+                                  extra_group_records: Optional[list] = None,
+                                  hard_target: Optional[float] = None,
+                                  seed: int = 0) -> dict:
     """Stage-2 DPO rows = ranked-group prefs + labeled reward-hack hard negatives.
 
     ``correct_source_fn(task)->str`` supplies the trusted 'chosen' kernel for the
@@ -152,8 +155,17 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
     partition) instead of scanning ``data_root``. ``extra_group_records`` folds in
     additional ranked groups produced on-policy (iterative-DPO relabeling) or by
     the evolutionary loop, so the preference set covers states the policy actually
-    visits. Returns ``{rows, n_hard, n_total, meets_target}`` where meets_target
-    checks the >=8% hard-negative floor.
+    visits.
+
+    ``hard_target`` (e.g. 0.12): when set, the abundant ranked-group ("base")
+    pairs are deterministically SUBSAMPLED (seeded, order-preserving) so the
+    reward-hack hard negatives reach at least this fraction of the total. Every
+    hard-negative pair is kept — only the redundant base pairs are thinned (DPO
+    converges well below the tens-of-thousands of group pairs available), so the
+    crucial anti-reward-hacking signal is not diluted below the spec floor.
+
+    Returns ``{rows, n_hard, n_total, meets_target}`` where meets_target checks
+    the >=8% hard-negative floor.
     """
     data_root = Path(data_root)
     tasks = list(tasks)
@@ -171,13 +183,27 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
         hard_groups = [build_hard_negative_group(correct_source_fn(t), t) for t in tasks]
         hard_rows = bd.build_dpo(hard_groups)
 
+        # Boost the hard-negative fraction to >= hard_target by thinning the
+        # over-abundant base pairs (keep ALL hard negatives). Seeded + order-
+        # preserving so the subsample stays diverse across tasks/families and is
+        # reproducible.
+        n_base_full = len(base_rows)
+        if hard_target and 0.0 < hard_target < 1.0 and hard_rows and base_rows:
+            max_base = int(len(hard_rows) * (1.0 - hard_target) / hard_target)
+            if 0 < max_base < len(base_rows):
+                rng = random.Random(seed)
+                keep = sorted(rng.sample(range(len(base_rows)), max_base))
+                base_rows = [base_rows[i] for i in keep]
+
         rows = base_rows + hard_rows
         meets = meets_hard_negative_target(len(hard_rows), len(rows))
         hard_frac = (len(hard_rows) / len(rows)) if rows else 0.0
         log.metric(
             "dpo_hard_negatives", n_group_records=len(group_records),
-            n_base_pairs=len(base_rows), n_hard=len(hard_rows),
-            n_total=len(rows), hard_fraction=hard_frac, meets_target=meets,
+            n_base_pairs=len(base_rows), n_base_full=n_base_full,
+            n_hard=len(hard_rows), n_total=len(rows),
+            hard_fraction=round(hard_frac, 4), hard_target=hard_target,
+            meets_target=meets,
         )
         return {
             "rows": rows,

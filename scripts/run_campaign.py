@@ -945,10 +945,12 @@ def _stage_build(ctx):
                   f"mix={summarize_multicap(rows)['fractions']}")
 
     dpo = build_dpo_with_hard_negatives(ctx["data_root"], train_tasks,
-                                        group_records=group_records)
+                                        group_records=group_records,
+                                        hard_target=float(getattr(ctx["args"], "dpo_hard_fraction", 0.0) or 0.0) or None,
+                                        seed=int(getattr(ctx["args"], "split_seed", 0) or 0))
     _write_rows(ctx["data_root"] / "dpo" / "pairs.jsonl", dpo["rows"])
     _log("build", f"DPO (train-only): {dpo['n_total']} pairs ({dpo['n_hard']} hard, "
-                  f">=8% target met={dpo['meets_target']})")
+                  f"frac={dpo['n_hard']/max(1,dpo['n_total']):.1%}, >=8% target met={dpo['meets_target']})")
 
 
 def _stage_midtrain(ctx):
@@ -1548,6 +1550,9 @@ def build_parser() -> argparse.ArgumentParser:
     # item 1: seed for the authoritative registry train/held-out split ordering.
     p.add_argument("--split-seed", type=int, default=0, dest="split_seed")
     # item 2: iterative on-policy DPO + DAgger. >1 turns Stage-2 into the loop.
+    p.add_argument("--dpo-hard-fraction", type=float, default=0.12, dest="dpo_hard_fraction",
+                   help="target reward-hack hard-negative fraction of DPO pairs "
+                        "(subsamples abundant base pairs to hit it; 0 disables)")
     p.add_argument("--dpo-rounds", type=int, default=2, dest="dpo_rounds",
                    help="rounds of iterative on-policy DPO (>1 enables the DAgger loop)")
     p.add_argument("--dagger-n", type=int, default=16, dest="dagger_n",

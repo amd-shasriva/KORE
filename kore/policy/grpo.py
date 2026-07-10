@@ -1253,7 +1253,12 @@ def build_fsdp_plugin(config):
         # other tensors on cpu" at the training forward. A 14B fits per-rank RAM on
         # MI300, so keep every rank's params on-device instead.
         cpu_ram_efficient_loading=False,
-        limit_all_gathers=True,
+        # limit_all_gathers=False: the rate limiter inserts per-unit stream
+        # wait_stream/wait_event barriers (seen deadlocked at _pre_forward_unshard:430
+        # in the hung stacks). Under SHARD_GRAD_OP the online-RL rollout materializes
+        # params once (warm-up forward) and keeps them resident, so rate-limiting buys
+        # nothing and its cross-stream waits only add deadlock surface. Disable it.
+        limit_all_gathers=False,
         state_dict_type="FULL_STATE_DICT",          # gather a plain ckpt for soup/serve
     )
 
@@ -1434,6 +1439,39 @@ def _summon_full_params_ctx(*models):
     return _ctx()
 
 
+def _sync_gen_replica(replica, src_module):
+    """Copy ``src_module``'s (summoned, FULL) params into the plain ``replica`` by name.
+
+    Called INSIDE ``_summon_full_params_ctx(policy)`` so ``src_module`` exposes full
+    (un-sharded) weights; this only does tensor copies (NO forward), which is the
+    canonical, deadlock-free use of ``summon_full_params``. Returns ``(n_copied,
+    n_total)``. Strips FSDP/activation-checkpoint name prefixes defensively so it
+    works whether or not ``use_orig_params`` mangles names.
+    """
+    import torch as _torch
+
+    dst = dict(replica.named_parameters())
+    dst_buffers = dict(replica.named_buffers())
+    n_copied = 0
+    n_total = 0
+    with _torch.no_grad():
+        for name, p in src_module.named_parameters():
+            n_total += 1
+            key = name.replace("_fsdp_wrapped_module.", "").replace(
+                "_checkpoint_wrapped_module.", "").replace("_orig_mod.", "")
+            tgt = dst.get(key, dst.get(name))
+            if tgt is not None and tuple(tgt.shape) == tuple(p.shape):
+                tgt.data.copy_(p.data.to(tgt.dtype))
+                n_copied += 1
+        for name, b in src_module.named_buffers():
+            key = name.replace("_fsdp_wrapped_module.", "").replace(
+                "_checkpoint_wrapped_module.", "").replace("_orig_mod.", "")
+            tgt = dst_buffers.get(key, dst_buffers.get(name))
+            if tgt is not None and tuple(tgt.shape) == tuple(b.shape):
+                tgt.data.copy_(b.data.to(tgt.dtype))
+    return n_copied, n_total
+
+
 def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world, seed):
     """This rank's slice of a Kevin group: roll ``G/world`` trajectories.
 
@@ -1451,8 +1489,23 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
     """
     from kore.env.kore_env import KoreEnv
     from kore.policy import anticollapse as ac
+    import os as _os
 
-    env = KoreEnv(task)
+    # Pin THIS rank's compile/bench subprocess to THIS rank's OWN physical GPU.
+    # Without this every rank's bench defaults to physical GPU 0 (KoreEnv._env), so
+    # all `world` ranks contend + OOM there. LOCAL_RANK is the rank's LOGICAL device
+    # index; when the launch restricts GPUs (CUDA/HIP_VISIBLE_DEVICES=1,2,4,5,6,7 to
+    # dodge GPUs busy with a neighbor's job) that logical index must be mapped back
+    # to the ABSOLUTE physical id the bench subprocess needs. Parse the visible list
+    # and index by LOCAL_RANK; with all GPUs visible this is just LOCAL_RANK.
+    _lr = int(_os.environ.get("LOCAL_RANK", str(rank)))
+    _vis = _os.environ.get("CUDA_VISIBLE_DEVICES") or _os.environ.get("HIP_VISIBLE_DEVICES")
+    if _vis:
+        _ids = [x.strip() for x in _vis.split(",") if x.strip() != ""]
+        _bench_gpu = _ids[_lr] if _lr < len(_ids) else str(_lr)
+    else:
+        _bench_gpu = str(_lr)
+    env = KoreEnv(task, gpu=_bench_gpu)
     G = config.num_trajectories
     my = _rank_slice(G, rank, world)
     rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=seed) if config.rc_grpo else [None] * G
@@ -1539,17 +1592,16 @@ def _train_grpo_distributed(config, tasks):
     if is_main:
         configure(run_dir=getattr(config, "output_dir", None))
 
-    # Rollout generation MUST run with synced_gpus=True under sharding. Even though
-    # we summon_full_params for the rollout, the auto-wrapped decoder-layer FSDP
-    # units STILL issue a per-forward all_gather on every decode step (summon only
-    # reliably keeps the ROOT embed/lm_head unsharded; nested units re-gather).
-    # Different ranks generate different-length sequences (ragged), so WITHOUT
-    # synced_gpus they would issue a different NUMBER of per-token all_gathers and
-    # deadlock (7 ranks spinning in NCCL, 1 idle — the classic FSDP desync).
-    # synced_gpus=True keeps every rank stepping in lockstep until all are done.
-    # (Verified end-to-end in scripts/_repro_grpo_step.py.) DeepSpeed ZeRO-3 needs
-    # it for the same reason (params sharded during generate).
-    setattr(config, "_grpo_synced_gpus", bool(getattr(config, "synced_gpus", True)))
+    # Rollout generation runs on the PLAIN full-weight replica (gen_replica), NOT the
+    # FSDP-sharded policy, so there are NO per-decode FSDP all_gathers to keep in
+    # lockstep. synced_gpus is therefore unnecessary AND undesirable: it would add a
+    # per-token dist.all_reduce that forces every rank to generate the same number of
+    # tokens (slowing all ranks to the longest sequence) with no correctness benefit.
+    # Each rank generates fully INDEPENDENTLY (ragged, zero collectives); the per-_roll
+    # _all_gather_object is the only sync point and is symmetric. => synced_gpus=False.
+    # (Historically this was forced True to survive sharded generation, which is what
+    # deadlocked; the replica removes that whole failure class.)
+    setattr(config, "_grpo_synced_gpus", False)
 
     # Equal trajectories per rank: the strided _rank_slice + lockstep generation
     # require the Kevin group size G to be a MULTIPLE of world, else some ranks roll
@@ -1621,6 +1673,25 @@ def _train_grpo_distributed(config, tasks):
             for _p in ref_model.parameters():
                 _p.requires_grad_(False)
 
+    # ---- Plain (non-FSDP) FULL-WEIGHT inference replica for the rollout ---- #
+    # Generating on the FSDP-sharded policy DEADLOCKS: with nested per-layer
+    # auto-wrap, model.generate() runs a per-layer all_gather every decode step, and
+    # on ragged (different-length) sequences those interleave with generate()'s
+    # synced_gpus all_reduce -> ranks split across two collectives and hang. Wrapping
+    # generate() in summon_full_params is ALSO unsafe (FSDP forbids forward inside
+    # summon; the .module path leaves the root embedding sharded -> "'weight' must be
+    # 2-D" / "Padding_idx"). The robust pattern (TRL/OpenRLHF/veRL) is to roll out on
+    # a full-weight replica: each step we sync the policy weights into this plain
+    # model via summon+copy (copies only, no forward -> safe) and generate/logp
+    # PURELY LOCALLY on it. Zero FSDP collectives during generation => ragged decode
+    # can never deadlock, and the embedding/lm_head are always full 2-D tensors.
+    gen_replica = AutoModelForCausalLM.from_pretrained(
+        config.model_id, torch_dtype=_model_dtype(config), attn_implementation="sdpa")
+    gen_replica = gen_replica.to(accelerator.device).eval()
+    gen_replica.config.use_cache = True
+    for _p in gen_replica.parameters():
+        _p.requires_grad_(False)
+
     tasks_per_step = max(1, getattr(config, "tasks_per_step", 1))
     target_groups = getattr(config, "target_groups", None) or tasks_per_step
     dyn = bool(getattr(config, "dynamic_sampling", True)) and bool(config.starpo_s)
@@ -1654,7 +1725,9 @@ def _train_grpo_distributed(config, tasks):
             tid = tasks[task_cursor % len(tasks)]
             task_cursor += 1
         task = get_task(tid)
-        local = _rollout_slice_distributed(model, tok, task, config, ref_model,
+        # Roll out on the full-weight REPLICA (collective-free local generation),
+        # NOT the FSDP-sharded policy (which deadlocks in generate()).
+        local = _rollout_slice_distributed(gen_replica, tok, task, config, ref_model,
                                             rank, world, seed=attempt * 100003 + rank)
         # gather across ranks -> the FULL group (every trajectory on every rank).
         all_scores = _all_gather_object(local["traj_scores"], accelerator)
@@ -1723,11 +1796,22 @@ def _train_grpo_distributed(config, tasks):
             _inner.gradient_checkpointing_disable()
         _inner.config.use_cache = True
         _inner.eval()
-        with _summon_full_params_ctx(model):
-            groups, attempts = dynamic_sampling_refill(
-                _roll, target_groups, min_std=config.starpo_min_std,
-                max_attempts=max_attempts, dynamic=dyn,
-                std_key=lambda g: group_reward_std(g["full_scores"]))
+        # ---- Sync policy weights -> full-weight replica, then roll out LOCALLY ---- #
+        # summon here wraps ONLY tensor copies (no forward/generate), which is the
+        # canonical, SAFE use of summon_full_params (the deadlock only arises when
+        # generate() runs INSIDE summon). After this the replica holds the current
+        # policy and the whole rollout (generate + logp, ragged lengths) runs with
+        # ZERO FSDP collectives -> it cannot deadlock. The sharded policy `model` is
+        # used ONLY for the training forward/backward below.
+        with torch.no_grad(), _summon_full_params_ctx(model):
+            _n_sync, _n_tot = _sync_gen_replica(gen_replica, getattr(model, "module", model))
+        if step == 0 and is_main:
+            log.info("grpo(dist): policy->replica weight sync", synced=_n_sync, total=_n_tot)
+        gen_replica.eval()
+        groups, attempts = dynamic_sampling_refill(
+            _roll, target_groups, min_std=config.starpo_min_std,
+            max_attempts=max_attempts, dynamic=dyn,
+            std_key=lambda g: group_reward_std(g["full_scores"]))
         _inner.config.use_cache = False
         _inner.train()
         if _gc_on:

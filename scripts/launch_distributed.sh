@@ -62,11 +62,29 @@ done
 # Repo root = parent of scripts/ (the package root that holds `kore/`).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ACCEL_CONFIG="$REPO_ROOT/configs/accelerate_fsdp.yaml"
+# GRPO does in-loop generation and MUST use SHARD_GRAD_OP (ZeRO-2) so params stay
+# replicated between forwards (local generate, no per-decode all_gather deadlock).
+# SFT/DPO/midtrain have no generation, so FULL_SHARD (ZeRO-3) is fine + leaner.
+if [ "$STAGE" = "grpo" ]; then
+  ACCEL_CONFIG="$REPO_ROOT/configs/accelerate_fsdp_grpo.yaml"
+else
+  ACCEL_CONFIG="$REPO_ROOT/configs/accelerate_fsdp.yaml"
+fi
 
 # Build the accelerate command. Passing PYTHONPATH keeps `-m kore.policy.<stage>`
 # importable without an editable install.
 ACCEL_ARGS=("launch" "--config_file" "$ACCEL_CONFIG")
+# GPU_IDS=1,2,4,5,6,7 pins the run to specific PHYSICAL GPUs (e.g. to dodge GPUs
+# saturated by a neighbor's job on a shared node). Must go through accelerate's
+# --gpu_ids: it is authoritative and sets the workers' CUDA_VISIBLE_DEVICES to
+# exactly these ids, whereas a bare CUDA/ROCR_VISIBLE_DEVICES in the parent is
+# overwritten by accelerate's own multi_gpu_launcher (workers -> 0..N-1).
+if [ -n "${GPU_IDS:-}" ]; then
+  ACCEL_ARGS+=("--gpu_ids" "$GPU_IDS")
+  if [ -z "$NPROC" ]; then
+    NPROC=$(printf '%s' "$GPU_IDS" | tr ',' '\n' | grep -c .)
+  fi
+fi
 if [ -n "$NPROC" ]; then
   ACCEL_ARGS+=("--num_processes" "$NPROC")
 fi

@@ -154,6 +154,7 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
         gradient_checkpointing_kwargs={"use_reentrant": True},
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
+        save_total_limit=1,   # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill
         report_to=[],
         **fsdp_kwargs,
     )

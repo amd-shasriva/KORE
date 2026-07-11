@@ -33,9 +33,20 @@ You are KORE, an expert AMD GPU kernel engineer. You optimize a single GPU \
 kernel across multiple turns for correctness first and speed second.
 
 TARGET HARDWARE: AMD Instinct MI325X, arch gfx942 (CDNA3), ROCm + Triton.
-Tune for gfx942: 64-lane wavefronts, LDS/shared-memory tiling, MFMA matrix \
-cores, coalesced global loads, and occupancy. Do NOT assume NVIDIA specifics \
-(no warp==32, no cp.async, no tensor-core PTX).
+Do NOT assume NVIDIA specifics (no warp==32, no cp.async, no tensor-core PTX).
+
+GFX942 DISCIPLINE:
+  - Wavefront size is 64 (not 32); reason about occupancy in 64-lane wavefronts.
+  - Make BLOCK_M/BLOCK_N/BLOCK_K multiples of 64 so tiles map cleanly onto \
+wavefronts and the MFMA matrix cores.
+  - Use tl.dot for matrix multiply so Triton emits MFMA instructions; never \
+hand-roll the inner product with scalar FMAs.
+  - Accumulate in fp32 (tl.float32). Inputs/outputs may be bf16/fp16/fp8, but the \
+accumulator MUST be fp32 to hold precision across the reduction/K loop.
+  - Prefer num_warps in {4, 8}; tune num_stages for software pipelining / LDS \
+double-buffering of global loads.
+  - Respect the memory hierarchy VGPR -> LDS -> L2 -> HBM; watch for VGPR spills \
+and LDS overflow when enlarging tiles, and coalesce global loads.
 
 KERNEL DISCIPLINE:
   - Implement a REAL kernel. Never call a vendor/reference library (rocBLAS, \
@@ -43,7 +54,8 @@ hipBLASLt, aiter, ...), never fall back to a framework op (torch.nn.*, \
 torch.matmul as the "kernel"), and never wrap the kernel in a try/except that \
 silently returns a reference result. Such shortcuts score zero.
   - Preserve the reference numerics: your kernel must pass the SNR correctness \
-gate on every validation shape.
+gate on EVERY validation shape.
+  - Keep the public entry-point function signature unchanged.
 
 PER-TURN PROTOCOL:
   - Make exactly ONE focused optimization per turn (e.g. change the block/tile \
@@ -62,6 +74,24 @@ PROPOSED_CHANGE:
 FULL_KERNEL:
 ```python
 <the ENTIRE kernel source, ready to run — not a diff, not a snippet>
+```
+"""
+
+
+# The response-format block, reused verbatim by the data-generation writer
+# prompts (kore/data/prompts.py) so the teacher is asked for EXACTLY the contract
+# the policy is trained to emit. Single source of truth — do not fork this.
+OUTPUT_CONTRACT = """\
+## Output Format (required) — respond with EXACTLY these sections, in order:
+ANALYSIS:
+<2-3 sentences: the current bottleneck, data placement, and the one change you will make>
+
+PROPOSED_CHANGE:
+<one sentence naming the single change (imperative, specific)>
+
+FULL_KERNEL:
+```python
+<the COMPLETE modified kernel source — full file, ready to run, not a diff>
 ```
 """
 
@@ -138,6 +168,60 @@ def _extract_kernel(text: str) -> str:
     # Last resort: any fenced block anywhere in the text.
     any_fence = re.search(r"```(?:python|py)?\s*\n(.*?)```", text, flags=re.DOTALL)
     return any_fence.group(1) if any_fence else ""
+
+
+def format_assistant_turn(analysis: str, proposed_change: str, kernel: str) -> str:
+    """Render the CANONICAL assistant response (single source of truth).
+
+    Every training row and every inference/transcript turn uses this exact shape:
+    ``ANALYSIS: … / PROPOSED_CHANGE: … / FULL_KERNEL: ```python … `````. The
+    PROPOSED_CHANGE section is omitted only when empty (e.g. a first-turn / repair
+    demo may carry just analysis + kernel). This is what `parse_response` reads back.
+    """
+    parts: list[str] = [f"{_ANALYSIS}:\n{(analysis or '').strip()}".rstrip()]
+    if (proposed_change or "").strip():
+        parts.append(f"{_PROPOSED}:\n{proposed_change.strip()}".rstrip())
+    parts.append(f"{_FULL_KERNEL}:\n```python\n{(kernel or '').strip()}\n```")
+    return "\n\n".join(parts)
+
+
+def wrap_full_kernel(source: str) -> str:
+    """Wrap a kernel body in just the FULL_KERNEL block (DPO/RFT completions).
+
+    Preference completions compare kernels, so they carry only the FULL_KERNEL
+    section (a pure, contract-shaped completion) — the canonical single-section form.
+    """
+    return f"{_FULL_KERNEL}:\n```python\n{(source or '').strip()}\n```\n"
+
+
+def normalize_assistant(content: str) -> str:
+    """Re-render ANY legacy assistant content into the canonical contract.
+
+    Handles every historical shape found in the KORE data (so existing shards can
+    be upgraded in place without regeneration):
+      * repair ``<think>…</think><answer>FULL_KERNEL:…</answer>`` (LLM-VeriOpt) —
+        the ``<think>`` reasoning becomes ANALYSIS;
+      * gold-win ``ANALYSIS: … FULL_KERNEL:\\n<src>`` with no PROPOSED_CHANGE and no
+        code fence — the fence is added;
+      * data-gen ``CHANGE:`` — mapped to PROPOSED_CHANGE;
+      * raw teacher text — parsed and re-emitted.
+    Idempotent on already-canonical content. Returns the content unchanged if no
+    kernel can be extracted (nothing safe to normalize).
+    """
+    content = content or ""
+    kernel = _extract_kernel(content).strip()
+    if not kernel:
+        return content
+    think = re.search(r"<think>(.*?)</think>", content, flags=re.DOTALL)
+    if think and think.group(1).strip():
+        analysis = think.group(1).strip()
+    else:
+        analysis = _extract_section(
+            content, _ANALYSIS, (_PROPOSED, "CHANGE", _FULL_KERNEL)).strip()
+    proposed = _extract_section(content, _PROPOSED, (_FULL_KERNEL,)).strip()
+    if not proposed:
+        proposed = _extract_section(content, "CHANGE", (_FULL_KERNEL,)).strip()
+    return format_assistant_turn(analysis, proposed, kernel)
 
 
 def build_turn_feedback(obs: Any, cfg: Any = None) -> str:
@@ -251,15 +335,8 @@ def _assistant_content(turn: dict, max_cot_chars: int) -> str:
         }
 
     analysis = summarize_cot(parsed.get("analysis", ""), max_cot_chars)
-    proposed = parsed.get("proposed_change", "")
-    kernel = parsed.get("kernel", "")
-
-    parts: list[str] = []
-    parts.append(f"{_ANALYSIS}:\n{analysis}".rstrip())
-    if proposed:
-        parts.append(f"{_PROPOSED}:\n{proposed}".rstrip())
-    parts.append(f"{_FULL_KERNEL}:\n```python\n{kernel}\n```")
-    return "\n\n".join(parts)
+    return format_assistant_turn(analysis, parsed.get("proposed_change", ""),
+                                 parsed.get("kernel", ""))
 
 
 def _turn_feedback_text(turn: dict) -> str:

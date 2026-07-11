@@ -426,10 +426,12 @@ def test_make_repair_record_diagnostic_format():
     assert rec.failure_class == "snr_fail"
     content = rec.messages[-1]["content"]
     assert rec.messages[-1]["role"] == "assistant"
-    # well-formed diagnose-then-fix format
-    assert "<think>" in content and "</think>" in content
-    assert "<answer>" in content and "</answer>" in content
-    # the verifier error is folded into the reasoning
+    # CANONICAL diagnose-then-fix contract (ANALYSIS / PROPOSED_CHANGE / FULL_KERNEL) —
+    # NOT the old <think>/<answer> shape (Pillar 0: single contract shared with inference)
+    assert "<think>" not in content and "<answer>" not in content
+    assert content.startswith("ANALYSIS:")
+    assert "PROPOSED_CHANGE:" in content and "FULL_KERNEL:" in content
+    # the verifier error is folded into the ANALYSIS reasoning
     assert "worst SNR 5.0" in content
     # the verified fix is still parseable as a FULL_KERNEL block
     assert extract_kernel(content).strip() == "def k():\n    return 1"

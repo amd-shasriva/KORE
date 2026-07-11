@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from kore.data.prompts import SYSTEM_PROMPT, extract_kernel
+from kore.data.prompts import SYSTEM_PROMPT, extract_kernel, wrap_full_kernel
 from kore.data.schemas import (
     RepairRecord,
     RankedGroupRecord,
@@ -40,9 +40,8 @@ def _as_record(rec: Any):
     return rec
 
 
-def _wrap_full_kernel(source: str) -> str:
-    """Wrap a kernel source in the FULL_KERNEL assistant-response contract."""
-    return "FULL_KERNEL:\n```python\n" + source.strip() + "\n```\n"
+# Canonical FULL_KERNEL completion wrapper (single source of truth: policy.format).
+_wrap_full_kernel = wrap_full_kernel
 
 
 def _generic_prompt(task_id: str, gpu: str = "gfx942") -> list[dict]:

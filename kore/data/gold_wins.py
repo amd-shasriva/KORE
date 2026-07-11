@@ -30,7 +30,7 @@ import random
 from pathlib import Path
 from typing import Any, Optional
 
-from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt
+from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, format_assistant_turn
 from kore.data.schemas import WinRecord, read_jsonl, write_jsonl
 from kore.obs import get_logger
 
@@ -59,8 +59,9 @@ def _best(cands: list[dict]) -> dict:
 
 
 def _analysis(op: str, wall: float, snr: float, speedup: float) -> str:
+    """The ANALYSIS body (no header — format_assistant_turn adds it)."""
     return (
-        f"ANALYSIS: For `{op}`, this is the fastest CORRECT implementation verified for this "
+        f"For `{op}`, this is the fastest CORRECT implementation verified for this "
         f"shape — measured {wall:.1f}us at SNR {snr:.0f} dB, {speedup:.2f}x faster than the "
         f"parent variant below. It keeps fp32 accumulation and the public entry-point signature, "
         f"and uses 64-multiple BLOCK sizes suited to the CDNA wavefront."
@@ -89,9 +90,11 @@ def mint_gold_win(group: dict, arch: Optional[str] = None,
     a = str(arch or group.get("arch") or group.get("gpu") or DEFAULT_ARCH)
     op = str(group.get("operation") or group.get("task_id") or "kernel")
     user = build_turn_prompt(parent_source=baseline["source"], mode="exploit")
-    assistant = (
-        _analysis(op, float(best["wall_us"]), float(best["snr_db"]), float(speedup))
-        + "\n\nFULL_KERNEL:\n" + best["source"]
+    proposed = (f"Adopt the fastest verified implementation for `{op}` "
+                f"({speedup:.2f}x over the parent).")
+    assistant = format_assistant_turn(
+        _analysis(op, float(best["wall_us"]), float(best["snr_db"]), float(speedup)),
+        proposed, best["source"],
     )
     trajectory = [
         {"role": "system", "content": SYSTEM_PROMPT},

@@ -139,6 +139,41 @@ def test_normalize_dpo_row():
     assert parse_response(nrow["chosen"][0]["content"])["kernel"].strip() == "def a():\n    return 1"
 
 
+def test_normalize_raw_repair_and_win_records_preserve_verified_fields():
+    # RAW RepairRecord (legacy <think>/<answer>) -> canonical, scalars untouched
+    repair = {"task_id": "t", "failure_class": "snr_fail", "type": "repair",
+              "child_snr_db": 87.5, "parent_hash": "abc",
+              "messages": [
+                  {"role": "system", "content": "You are KORE, an expert AMD GPU kernel engineer. OLD"},
+                  {"role": "user", "content": "fix"},
+                  {"role": "assistant", "content": "<think>diag</think>\n<answer>\nFULL_KERNEL:\n```python\ndef k():\n    return 1\n```\n</answer>"}]}
+    nr, ch = N.normalize_raw_record_row(repair)
+    assert ch
+    a = nr["messages"][-1]["content"]
+    assert a.startswith("ANALYSIS:") and "<think>" not in a
+    assert nr["messages"][0]["content"] == SYSTEM_PROMPT
+    assert nr["child_snr_db"] == 87.5 and nr["failure_class"] == "snr_fail"  # verified fields intact
+
+    # RAW WinRecord (trajectory, CHANGE:) -> canonical, metrics untouched
+    win = {"task_id": "t", "type": "win", "speedup": 2.0, "snr_db": 99.0,
+           "final_source": "def k(): pass",
+           "trajectory": [
+               {"role": "user", "content": "opt"},
+               {"role": "assistant", "content": "ANALYSIS: mem\nCHANGE: bump\nFULL_KERNEL:\n```python\ndef k():\n    return 2\n```"}]}
+    nw, chw = N.normalize_raw_record_row(win)
+    assert chw
+    aw = nw["trajectory"][-1]["content"]
+    assert "PROPOSED_CHANGE:" in aw and "CHANGE: bump" not in aw
+    assert nw["speedup"] == 2.0 and nw["final_source"] == "def k(): pass"
+
+
+def test_detect_kind_distinguishes_raw_records():
+    assert N._detect_kind({"messages": [], "failure_class": "snr_fail", "type": "repair"}) == "raw"
+    assert N._detect_kind({"trajectory": [], "type": "win"}) == "raw"
+    assert N._detect_kind({"messages": [], "_source": "general_chat"}) == "sft"
+    assert N._detect_kind({"prompt": [], "chosen": [], "rejected": []}) == "dpo"
+
+
 def test_normalize_file_roundtrip(tmp_path):
     f = tmp_path / "sft.jsonl"
     rows = [

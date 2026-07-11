@@ -91,6 +91,7 @@ def build_trl_dpo_kwargs(config) -> dict:
         lr_scheduler_type=config.lr_scheduler_type,
         num_train_epochs=config.num_train_epochs,
         warmup_ratio=config.warmup_ratio,
+        weight_decay=getattr(config, "weight_decay", 0.0),
         per_device_train_batch_size=config.per_device_train_batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         max_length=config.max_length,
@@ -128,11 +129,13 @@ def build_trl_dpo_kwargs(config) -> dict:
     if ld_alpha is not None:
         kwargs["ld_alpha"] = float(ld_alpha)
     # Truncation guard: with max_prompt_length gone in trl>=0.29, if a pair ever
-    # exceeds max_length the default "keep_start" cuts the COMPLETION's tail (trains
-    # the model to stop mid-kernel). "keep_end" preserves the kernel tail instead.
-    truncation_mode = getattr(config, "truncation_mode", None)
-    if truncation_mode:
-        kwargs["truncation_mode"] = str(truncation_mode)
+    # exceeds max_length the TRL default "keep_start" slices input_ids[:, :max_length]
+    # — cutting the COMPLETION's tail (trains the model to stop mid-kernel; verified
+    # against trl 0.29.1 DPOTrainer._truncate_inputs). We DEFAULT to "keep_end", which
+    # keeps input_ids[:, -max_length:] (the kernel body + <|im_end|> stop) and drops
+    # the prompt head instead. A config may still override it explicitly.
+    truncation_mode = getattr(config, "truncation_mode", None) or "keep_end"
+    kwargs["truncation_mode"] = str(truncation_mode)
     # Gradient clipping (DPO v1 saw pre-clip grad-norm ~192). Pass explicitly.
     max_grad_norm = getattr(config, "max_grad_norm", None)
     if max_grad_norm is not None:

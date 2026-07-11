@@ -964,7 +964,7 @@ def _stage_midtrain(ctx):
     if ctx["dry"]:
         _log("midtrain", "would build the ROCm/HIP/Triton corpus (build_midtrain_corpus: "
                          "kore task kernels+refs, PyTorch->Triton pairs, repo Triton/HIP "
-                         "source, rocprof/tuning docs, ~15% general replay) then full-FT "
+                         "source, rocprof/tuning docs, ~30% general replay) then full-FT "
                          "continued-pretrain (train_midtrain) -> SFT base")
         return
     from kore.data.midtrain_corpus import build_midtrain_corpus

@@ -45,6 +45,78 @@ def test_distributed_fields_present_with_safe_defaults():
 
 
 # --------------------------------------------------------------------------- #
+# audit-fix config defaults (completion-only SFT, disk-fill guard, live knobs)
+# --------------------------------------------------------------------------- #
+def test_sft_completion_only_and_knob_defaults():
+    s = SFTConfig()
+    assert s.assistant_only_loss is True          # completion-only loss on by default
+    assert s.max_grad_norm == 1.0                 # explicit clip (was HF-default only)
+    assert s.weight_decay == 0.0
+
+
+def test_dpo_weight_decay_field():
+    assert DPOConfig().weight_decay == 0.0
+
+
+def test_midtrain_has_save_total_limit_and_live_knobs():
+    from kore.policy.configs import MidTrainConfig
+    mt = MidTrainConfig()
+    # HIGH: bounds the 14B full-FT checkpoint count so CPT can't fill disk.
+    assert mt.save_total_limit == 1
+    # Knobs previously hardcoded in midtrain.py are now config-driven.
+    assert mt.per_device_train_batch_size == 1
+    assert mt.gradient_accumulation_steps == 16
+    assert mt.packing is True
+    assert mt.save_steps == 200 and mt.logging_steps == 10
+    assert mt.max_grad_norm == 1.0 and mt.seed == 0
+    # recipe replay fraction matches the dataclass intent (Ibrahim/DeepSeek-V2)
+    assert mt.general_replay_frac == 0.30
+
+
+def test_dpo_truncation_defaults_keep_end():
+    from kore.policy.dpo import build_trl_dpo_kwargs
+    k = build_trl_dpo_kwargs(DPOConfig())
+    # keep_end preserves the completion (kernel) tail + stop; keep_start would cut it.
+    assert k["truncation_mode"] == "keep_end"
+    assert k["weight_decay"] == 0.0
+    # an explicit override is still honored
+    d = DPOConfig()
+    setattr(d, "truncation_mode", "keep_start")
+    assert build_trl_dpo_kwargs(d)["truncation_mode"] == "keep_start"
+
+
+def test_build_assistant_masked_template_injects_and_is_safe():
+    from kore.policy.sft import build_assistant_masked_template
+
+    stub = (
+        '{%- for message in messages %}\n'
+        '    {%- if message.role == "assistant" %}\n'
+        "        {%- if loop.index0 > ns.last_query_index %}\n"
+        "            {%- if loop.last %}\n"
+        "                {{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content.strip('\\n') + '\\n</think>\\n\\n' + content.lstrip('\\n') }}\n"
+        "            {%- else %}\n"
+        "                {{- '<|im_start|>' + message.role + '\\n' + content }}\n"
+        "            {%- endif %}\n"
+        "        {%- else %}\n"
+        "            {{- '<|im_start|>' + message.role + '\\n' + content }}\n"
+        "        {%- endif %}\n"
+        "        {{- '<|im_end|>\\n' }}\n"
+        '    {%- elif message.role == "tool" %}\n'
+        "        {{- content }}\n"
+        "    {%- endif %}\n"
+        "{%- endfor %}"
+    )
+    masked = build_assistant_masked_template(stub)
+    assert "{% generation %}" in masked and "{% endgeneration %}" in masked
+    # header pulled OUT of the body (so it stays masked); body header removed
+    assert "{{- content }}" in masked
+    # idempotent (already tagged) + fails loudly on a non-Qwen3 template
+    assert build_assistant_masked_template(masked) == masked
+    with pytest.raises(ValueError):
+        build_assistant_masked_template("{{ messages[0].content }}")
+
+
+# --------------------------------------------------------------------------- #
 # transformer layer auto-detect (14B/32B/70B bases)
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(

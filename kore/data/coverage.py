@@ -67,6 +67,65 @@ def undercovered_tasks(data_root, task_ids: Optional[Iterable[str]] = None,
             for tid, c in cov.items() if not c["full"]}
 
 
+# The FRONTIER ROCm/AMD inference-kernel capabilities a world-class dataset should
+# cover, grounded in AITER (the default ROCm kernel library for vLLM/SGLang) +
+# Composable Kernel. Each entry: capability -> (substrings that identify a covering
+# task.operation/task_id, note). "Covered" = >=1 registry task matches. This makes
+# frontier holes MEASURABLE (rather than asserted); closing a hole requires authoring
+# + GPU-verifying a seed (offline fabrication of unverified kernels is a shortcut).
+FRONTIER_OPS: dict[str, tuple[tuple[str, ...], str]] = {
+    "gemm_dense":        (("gemm",), "dense GEMM (hipBLASLt/CK)"),
+    "gemm_fp8":          (("gemm_fp8", "a8w8"), "FP8 W8A8 GEMM (CK/ASM)"),
+    "gemm_int8":         (("a8w8_int8", "gemm_a8w8"), "INT8 W8A8 GEMM"),
+    "gemm_blockscale":   (("blockscale",), "block-scale FP8 GEMM (DeepSeek-V3)"),
+    "gemm_batched":      (("batched_gemm",), "batched GEMM (bmm)"),
+    "gemm_mxfp4":        (("mxfp4", "a4w4", "fp4"), "MXFP4 / A4W4 GEMM (MI350)"),
+    "attention_mha":     (("flash_attn", "mha"), "flash / MHA prefill+decode"),
+    "attention_mla":     (("mla",), "multi-head latent attention (DeepSeek)"),
+    "attention_paged":   (("paged_attn", "paged"), "paged KV-cache attention"),
+    "moe_router":        (("topk_softmax", "moe_router", "topk"), "MoE top-k routing"),
+    "moe_fused":         (("fused_moe", "moe_silu", "moe"), "fused MoE expert compute"),
+    "norm_rms":          (("rmsnorm",), "RMSNorm"),
+    "norm_layer":        (("layernorm",), "LayerNorm"),
+    "norm_fused_add":    (("fused_add_rmsnorm",), "fused residual-add RMSNorm"),
+    "rope":              (("rope",), "rotary position embedding"),
+    "quant_fp8":         (("quant_fp8", "quant"), "FP8 per-token/channel quant"),
+    "activation_gated":  (("silu_mul", "gelu_mul", "reglu"), "gated MLP activation"),
+    "softmax":           (("softmax",), "softmax"),
+    "elementwise":       (("relu", "gelu", "add", "mul"), "elementwise/pointwise"),
+    "reduction":         (("row_sum", "row_max", "row_rms"), "row reductions"),
+    # Known frontier gaps that need authoring + GPU verification (no shortcut):
+    "softmax_causal":    (("causal_softmax", "masked_softmax"), "causal/masked softmax"),
+    "kv_cache_ops":      (("kv_cache", "reshape_cache", "append_kv"), "KV-cache write/gather"),
+    "rope_kvcache":      (("rope_kvcache", "rope_cache"), "fused RoPE + KV-cache write"),
+    "quant_int4":        (("int4", "w4a16", "awq", "gptq"), "INT4/MXFP4 weight quant"),
+    "sampling":          (("sampling", "top_p", "top_k_sampl"), "top-p/top-k token sampling"),
+    "collective":        (("allreduce", "all_reduce", "all_gather", "reduce_scatter"),
+                          "multi-GPU collectives (needs multi-GPU harness)"),
+}
+
+
+def frontier_coverage() -> dict:
+    """Which FRONTIER_OPS capabilities the registry currently covers vs the holes."""
+    try:
+        from kore.tasks.registry import all_tasks
+        ops = [f"{getattr(t, 'operation', '') or ''} {t.task_id}".lower() for t in all_tasks()]
+    except Exception:  # noqa: BLE001
+        return {}
+    covered, missing = {}, {}
+    for cap, (subs, note) in FRONTIER_OPS.items():
+        n = sum(1 for o in ops if any(s in o for s in subs))
+        (covered if n else missing)[cap] = {"n_tasks": n, "note": note}
+    return {
+        "n_capabilities": len(FRONTIER_OPS),
+        "n_covered": len(covered),
+        "n_missing": len(missing),
+        "frontier_pct": round(100.0 * len(covered) / len(FRONTIER_OPS), 1),
+        "covered": covered,
+        "missing": missing,
+    }
+
+
 def space_coverage() -> dict:
     """The generated op x dtype frontier (family -> dtypes) + per-dtype gaps."""
     try:
@@ -99,6 +158,7 @@ def coverage_report(data_root, task_ids: Optional[Iterable[str]] = None) -> dict
         "n_undercovered": len(under),
         "undercovered": under,
         "space": space_coverage(),
+        "frontier": frontier_coverage(),
     }
 
 
@@ -122,6 +182,12 @@ def _main(argv: Optional[list[str]] = None) -> int:
               f"undercovered: {rep['n_undercovered']}")
         for k, pct in rep["per_kind_pct"].items():
             print(f"  {k}: {rep['per_kind_covered'][k]}/{rep['n_train_tasks']} ({pct}%)")
+        fr = rep.get("frontier") or {}
+        if fr:
+            print(f"\nfrontier op coverage: {fr['n_covered']}/{fr['n_capabilities']} "
+                  f"({fr['frontier_pct']}%)")
+            for cap, d in sorted(fr.get("missing", {}).items()):
+                print(f"  MISSING {cap}: {d['note']}")
     return 0
 
 

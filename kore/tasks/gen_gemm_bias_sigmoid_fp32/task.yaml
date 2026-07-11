@@ -1,0 +1,20 @@
+task_id: gen_gemm_bias_sigmoid_fp32
+operation: gemm_bias_sigmoid
+dtype: fp32
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 40.0
+op_family: gemm_fusion
+baseline_tier: gemm_fusion
+generated: true
+shapes:
+  minimal: {M: 64, N: 256, K: 256}
+  primary: {M: 512, N: 4096, K: 4096}
+  validation:
+    - {M: 1024, N: 2048, K: 2048}
+    - {M: 256, N: 14336, K: 4096}
+    - {M: 512, N: 4096, K: 4095}
+targets:
+  snr_db: 40.0
+  comparison_baseline: torch_gemm_bias_sigmoid

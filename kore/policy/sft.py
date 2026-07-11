@@ -236,7 +236,7 @@ def _filter_overlong(ds, tok, max_length: int):
     return Dataset.from_list(keep), dropped
 
 
-def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] = None) -> str:
+def train_sft(config: SFTConfig, dataset_path: Path) -> str:
     import torch
     from peft import LoraConfig
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -344,7 +344,7 @@ def train_sft(config: SFTConfig, dataset_path: Path, tasks: Optional[list[str]] 
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         save_total_limit=1,   # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill
-        report_to=[],
+        report_to=config.report_to,
         **fsdp_kwargs,
     )
     # Lightweight per-log-step observability callback (guarded transformers import).

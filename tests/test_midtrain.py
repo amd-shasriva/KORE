@@ -274,12 +274,3 @@ def test_trainer_missing_corpus_raises(tmp_path):
     except FileNotFoundError:
         return
     raise AssertionError("expected FileNotFoundError for a missing corpus")
-
-
-def test_build_launch_command_shape():
-    from kore.policy.midtrain import build_launch_command
-    cfg = MidTrainConfig(model_id="Qwen/Qwen3-14B", output_dir="runs/midtrain")
-    cmd = build_launch_command(cfg, "data/midtrain/corpus.jsonl", nproc_per_node=8)
-    assert cmd[:2] == ["accelerate", "launch"]
-    assert "-m" in cmd and "kore.policy.midtrain" in cmd
-    assert "Qwen/Qwen3-14B" in cmd and "data/midtrain/corpus.jsonl" in cmd

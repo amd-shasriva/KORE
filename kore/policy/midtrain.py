@@ -12,11 +12,10 @@ inside the training function, the dataset is a plain ``{"text": ...}`` JSONL, an
 the trained weights are saved to ``config.output_dir`` (LoRA is merged into the
 base first so every downstream stage loads a plain full model).
 
-Full-FT of a 14B needs a sharded multi-GPU launch (FSDP/DeepSpeed). When
-``config.distributed`` is set and full-FT is requested, ``train_midtrain``
-defers to the distributed launcher path (:func:`build_launch_command` /
-``python -m kore.policy.midtrain``); otherwise it runs single-process (LoRA /
-smoke). See docs/DISTRIBUTED.md for the multi-GPU launch.
+Full-FT of a 14B needs a sharded multi-GPU launch (FSDP). The campaign shells out
+to ``scripts/launch_distributed.sh midtrain <config.json>`` (→ ``accelerate launch
+-m kore.policy.midtrain <config.json>``), exactly like sft/dpo; that runs
+``_train_single_process`` on the FSDP path. LoRA / single-GPU smoke runs in-process.
 """
 
 from __future__ import annotations
@@ -66,31 +65,6 @@ def load_midtrain_dataset(path: Path):
         if text:
             rows.append({"text": text})
     return Dataset.from_list(rows)
-
-
-def build_launch_command(config: MidTrainConfig, corpus_path: str,
-                         nproc_per_node: Optional[int] = None) -> list[str]:
-    """Construct the sharded multi-GPU launch command for full-FT mid-train.
-
-    Returns an ``accelerate launch`` argv that runs this module's ``__main__``
-    entry (``python -m kore.policy.midtrain``) under a distributed launcher. The
-    operator (or docs/DISTRIBUTED.md tooling) executes it; ``train_midtrain`` only
-    builds + logs it so no heavy training is kicked off implicitly.
-    """
-    if nproc_per_node is None:
-        try:
-            import torch
-            nproc_per_node = max(1, torch.cuda.device_count())
-        except Exception:  # noqa: BLE001 - no torch/CUDA -> assume single process
-            nproc_per_node = 1
-    return [
-        "accelerate", "launch",
-        "--num_processes", str(nproc_per_node),
-        "-m", "kore.policy.midtrain",
-        "--model-id", config.model_id,
-        "--corpus-path", str(corpus_path),
-        "--output-dir", config.output_dir,
-    ]
 
 
 def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
@@ -235,8 +209,7 @@ def train_midtrain(config: MidTrainConfig, corpus_path: Optional[str] = None) ->
 # shells out here for --full-ft, exactly like sft/dpo/grpo). Pure-stdlib JSON
 # parsing (no torch at import time); the heavy trainer is only touched when
 # _train_single_process() runs. The JSON is a flat map of MidTrainConfig fields
-# (incl. the DistributedMixin FSDP knobs). A legacy `--model-id ...` flag form is
-# still accepted for the hand-rolled launch documented in docs/DISTRIBUTED.md.
+# (incl. the DistributedMixin FSDP knobs).
 # --------------------------------------------------------------------------- #
 def midtrain_config_from_dict(d: dict) -> MidTrainConfig:
     """Build a :class:`MidTrainConfig` from a plain JSON dict.
@@ -247,52 +220,20 @@ def midtrain_config_from_dict(d: dict) -> MidTrainConfig:
     return MidTrainConfig(**dict(d))
 
 
-def _build_argparser():
-    import argparse
-
-    p = argparse.ArgumentParser(description="KORE Stage-0 continued pretraining")
-    p.add_argument("--model-id", required=True, dest="model_id")
-    p.add_argument("--corpus-path", required=True, dest="corpus_path")
-    p.add_argument("--output-dir", default="runs/midtrain", dest="output_dir")
-    p.add_argument("--learning-rate", type=float, default=1e-5, dest="learning_rate")
-    p.add_argument("--num-train-epochs", type=float, default=1.0, dest="num_train_epochs")
-    p.add_argument("--max-seq-length", type=int, default=8192, dest="max_seq_length")
-    p.add_argument("--lora", action="store_true", dest="use_lora")
-    return p
-
-
-def main(argv: Optional[list[str]] = None) -> str:
-    """Legacy flag entry: ``python -m kore.policy.midtrain --model-id ...``.
-
-    Full-FT under this path defaults ``distributed=True`` so it takes the FSDP
-    branch of :func:`_train_single_process` when run under ``accelerate launch``.
-    """
-    args = _build_argparser().parse_args(argv)
-    cfg = MidTrainConfig(
-        model_id=args.model_id, corpus_path=args.corpus_path,
-        output_dir=args.output_dir, learning_rate=args.learning_rate,
-        num_train_epochs=args.num_train_epochs, max_seq_length=args.max_seq_length,
-        use_lora=args.use_lora, distributed=not args.use_lora)
-    return _train_single_process(cfg, cfg.corpus_path)
-
-
 def _main(argv: Optional[list[str]] = None) -> int:
     import sys
 
     argv = list(sys.argv[1:] if argv is None else argv)
-    # JSON-config form (what scripts/launch_distributed.sh / the campaign invoke):
-    # a single positional pointing at a `.json` file.
-    if len(argv) == 1 and argv[0].endswith(".json"):
-        raw = json.loads(Path(argv[0]).read_text())
-        # Launched via accelerate/FSDP -> default to distributed full-FT unless
-        # the config explicitly opts out.
-        raw.setdefault("distributed", True)
-        cfg = midtrain_config_from_dict(raw)
-        out = _train_single_process(cfg, cfg.corpus_path)
-        print(f"[midtrain] -> {out}")
-        return 0
-    # Legacy flag form.
-    print(main(argv))
+    if not argv:
+        print("usage: python -m kore.policy.midtrain <config.json>", file=sys.stderr)
+        return 2
+    raw = json.loads(Path(argv[0]).read_text())
+    # Launched via accelerate/FSDP -> default to distributed full-FT unless the
+    # config explicitly opts out.
+    raw.setdefault("distributed", True)
+    cfg = midtrain_config_from_dict(raw)
+    out = _train_single_process(cfg, cfg.corpus_path)
+    print(f"[midtrain] -> {out}")
     return 0
 
 

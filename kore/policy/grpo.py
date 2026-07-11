@@ -2240,10 +2240,9 @@ def _seq_logprob(model, tok, prompt_ids, gen_ids, temperature: float = 1.0):
 
 
 def _task_prompt(task) -> str:
-    return (f"Optimize a {task.dtype} {task.operation} kernel for AMD {task.gpu_target} "
-            f"(backend: {task.backend}). Baseline to beat: {task.comparison_baseline}. "
-            f"Return ANALYSIS, PROPOSED_CHANGE, and a complete FULL_KERNEL.\n\n"
-            f"Seed kernel:\n```python\n{task.seed_source}\n```")
+    # Single source of truth (shared with eval + DPO-pair construction).
+    from kore.policy.format import build_task_prompt
+    return build_task_prompt(task)
 
 
 # --------------------------------------------------------------------------- #

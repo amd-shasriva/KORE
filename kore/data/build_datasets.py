@@ -112,8 +112,14 @@ def build_sft(records: Iterable[Any]) -> list[dict]:
 
 
 # --- DPO ---
-def build_dpo(records: Iterable[Any]) -> list[dict]:
+def build_dpo(records: Iterable[Any], prompt_fn=None) -> list[dict]:
     """Preference rows from ranked groups, in trl's *conversational* DPO shape.
+
+    ``prompt_fn(task_id) -> messages`` supplies the DPO prompt. When given (the
+    campaign passes an in-context builder = the GRPO turn-1 transcript with the seed
+    kernel + contract), preferences are learned in the SAME context the policy sees
+    at inference. Falls back to the generic one-shot prompt when ``prompt_fn`` is
+    None or returns falsy (keeps CPU tests + legacy callers working).
 
     Each ``[chosen_idx, rejected_idx]`` preference becomes a DPO row whose
     ``prompt`` is a chat-message list and whose ``chosen``/``rejected`` are each a
@@ -136,7 +142,7 @@ def build_dpo(records: Iterable[Any]) -> list[dict]:
             continue
         n_groups += 1
         cands = rec.candidates
-        prompt = _generic_prompt(rec.task_id, rec.gpu)
+        prompt = (prompt_fn(rec.task_id) if prompt_fn else None) or _generic_prompt(rec.task_id, rec.gpu)
         for pair in rec.preferences:
             if len(pair) != 2:
                 continue

@@ -289,6 +289,21 @@ def build_turn_feedback(obs: Any, cfg: Any = None) -> str:
     return "\n".join(lines)
 
 
+def build_task_prompt(task: Any) -> str:
+    """The canonical INITIAL task prompt (turn-1 user message): seed kernel + contract.
+
+    Single source of truth shared by GRPO rollouts, eval, AND DPO-pair construction,
+    so preferences are learned in the SAME context the policy sees at inference (a
+    seed kernel to improve + the ANALYSIS/PROPOSED_CHANGE/FULL_KERNEL contract) — not
+    a bare "optimize task X" one-shot. ``task`` is any object exposing ``dtype``,
+    ``operation``, ``gpu_target``, ``backend``, ``comparison_baseline``, ``seed_source``.
+    """
+    return (f"Optimize a {task.dtype} {task.operation} kernel for AMD {task.gpu_target} "
+            f"(backend: {task.backend}). Baseline to beat: {task.comparison_baseline}. "
+            f"Return ANALYSIS, PROPOSED_CHANGE, and a complete FULL_KERNEL.\n\n"
+            f"Seed kernel:\n```python\n{task.seed_source}\n```")
+
+
 def build_transcript(
     task_prompt: str,
     turns: list[dict] | None = None,

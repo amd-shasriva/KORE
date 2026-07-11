@@ -160,6 +160,7 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
                                   group_records: Optional[list] = None,
                                   extra_group_records: Optional[list] = None,
                                   hard_target: Optional[float] = None,
+                                  prompt_fn=None,
                                   seed: int = 0) -> dict:
     """Stage-2 DPO rows = ranked-group prefs + labeled reward-hack hard negatives.
 
@@ -192,10 +193,10 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
             group_records = list(group_records)
         if extra_group_records:
             group_records = group_records + list(extra_group_records)
-        base_rows = bd.build_dpo(group_records) if group_records else []
+        base_rows = bd.build_dpo(group_records, prompt_fn=prompt_fn) if group_records else []
 
         hard_groups = [build_hard_negative_group(correct_source_fn(t), t) for t in tasks]
-        hard_rows = bd.build_dpo(hard_groups)
+        hard_rows = bd.build_dpo(hard_groups, prompt_fn=prompt_fn)
 
         # Boost the hard-negative fraction to >= hard_target by thinning the
         # over-abundant base pairs (keep ALL hard negatives). Seeded + order-

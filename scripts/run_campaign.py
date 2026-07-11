@@ -983,9 +983,21 @@ def _stage_build(ctx):
     _log("build", f"multicap SFT (train-only): {len(rows)} rows; "
                   f"mix={summarize_multicap(rows)['fractions']}")
 
+    # Pillar 3: build DPO prompts IN THE INFERENCE CONTEXT — the GRPO turn-1
+    # transcript (system + seed-kernel task prompt) — so preferences are learned in
+    # the same context the policy sees at deployment, not a bare one-shot. Map task
+    # id -> transcript; unknown ids fall back to the generic prompt inside build_dpo.
+    from kore.policy.format import build_task_prompt, build_transcript
+    _task_by_id = {t.task_id: t for t in train_tasks}
+
+    def _dpo_prompt_fn(task_id):
+        t = _task_by_id.get(task_id)
+        return build_transcript(build_task_prompt(t), []) if t is not None else None
+
     dpo = build_dpo_with_hard_negatives(ctx["data_root"], train_tasks,
                                         group_records=group_records,
                                         hard_target=float(getattr(ctx["args"], "dpo_hard_fraction", 0.0) or 0.0) or None,
+                                        prompt_fn=_dpo_prompt_fn,
                                         seed=int(getattr(ctx["args"], "split_seed", 0) or 0))
     _write_rows(ctx["data_root"] / "dpo" / "pairs.jsonl", dpo["rows"])
     _log("build", f"DPO (train-only): {dpo['n_total']} pairs ({dpo['n_hard']} hard, "

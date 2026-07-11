@@ -21,8 +21,6 @@ from typing import Optional
 # --- Base model ids (reasoning+math+code, RL-trainable) ---
 MODEL_14B = "Qwen/Qwen3-14B"                              # bring-up / SFT default
 MODEL_32B = "Qwen/Qwen3-32B"                              # GRPO primary
-MODEL_32B_R1 = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"  # alt 32B primary
-MODEL_70B = "deepseek-ai/DeepSeek-R1-Distill-Llama-70B"    # LoRA scale target
 
 
 @dataclass
@@ -125,8 +123,10 @@ class DPOConfig(DistributedMixin):
 
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 16
+    # NB: no ``max_prompt_length`` — trl>=0.29 removed it (the total ``max_length``
+    # caps prompt+completion, and ``truncation_mode="keep_end"`` (dpo.py) keeps the
+    # completion/kernel tail). GRPO keeps its own live ``max_prompt_length``.
     max_length: int = 16384
-    max_prompt_length: int = 8192
     bf16: bool = True
     gradient_checkpointing: bool = True
 

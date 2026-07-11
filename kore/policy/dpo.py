@@ -95,7 +95,6 @@ def build_trl_dpo_kwargs(config) -> dict:
         per_device_train_batch_size=config.per_device_train_batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         max_length=config.max_length,
-        max_prompt_length=config.max_prompt_length,
         bf16=config.bf16,
         gradient_checkpointing=bool(config.gradient_checkpointing),
         gradient_checkpointing_kwargs={"use_reentrant": True},
@@ -236,10 +235,11 @@ def train(config: DPOConfig) -> dict:
 
     peft_config = _peft_config(config) if config.use_lora else None
 
-    # Drop any kwargs the INSTALLED trl DPOConfig doesn't accept (TRL renames/removes
-    # fields across versions, e.g. `max_prompt_length` is gone in trl>=0.29 — the
-    # total `max_length` still caps prompt+completion). Keeps us robust to trl drift
-    # instead of hard-failing the whole DPO stage on one unknown kwarg.
+    # Drop any kwargs the INSTALLED trl DPOConfig doesn't accept: TRL renames/removes
+    # fields across versions (e.g. it dropped `max_prompt_length` in 0.29, which is why
+    # KORE no longer emits it — `max_length` caps prompt+completion and
+    # truncation_mode="keep_end" preserves the tail). This guard keeps a future trl
+    # bump from hard-failing the whole DPO stage on one unknown kwarg.
     import inspect
     _dpo_kwargs = build_trl_dpo_kwargs(config)
     _valid = set(inspect.signature(TRLDPOConfig.__init__).parameters)

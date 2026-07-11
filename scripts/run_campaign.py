@@ -648,6 +648,14 @@ def _stage_datagen(ctx):
         _log("datagen", "would generate repair/groups/wins per task (teacher + GPU env), "
                         "parallel-sharded across GPUs when --datagen-workers != 1")
         return
+    # Pillar 1: MAXIMUM verification rigor for the data pass — adversarial correctness
+    # battery + shape augmentation + strong torch.compile baseline + cold-L2 timing.
+    # Set here (not globally) so it propagates to every verifier subprocess — incl.
+    # parallel datagen workers, which inherit os.environ — without slowing GRPO rollouts.
+    if getattr(ctx["args"], "rigorous_verify", True):
+        from kore.data.verify_rigor import rigor_status, set_rigorous_verification
+        set_rigorous_verification(True)
+        _log("datagen", f"rigorous verification ON: {rigor_status()}")
     # Parallel path: shard tasks across GPUs with concurrent teacher streams (resumable).
     workers, n_gpus = _datagen_plan(ctx)
     if workers > 1:
@@ -1097,6 +1105,11 @@ def _stage_dpo(ctx):
     DAgger repairs back into the SFT corpus (round>0). Train-split tasks only.
     """
     rounds = int(getattr(ctx["args"], "dpo_rounds", 1) or 1)
+    # Pillar 1: on-policy DPO relabeling re-verifies kernels through KoreEnv, so apply
+    # the same max verification rigor as datagen (adversarial + augment + strong bar).
+    if not ctx["dry"] and getattr(ctx["args"], "rigorous_verify", True):
+        from kore.data.verify_rigor import set_rigorous_verification
+        set_rigorous_verification(True)
     if ctx["dry"]:
         if rounds > 1:
             _log("dpo", f"would run {rounds} rounds of ITERATIVE on-policy DPO "
@@ -1585,6 +1598,12 @@ def build_parser() -> argparse.ArgumentParser:
     # RFT rejection is ON by default; --no-rft keeps all wins (incl. sub-tau/slow).
     p.add_argument("--rft", dest="rft", action=argparse.BooleanOptionalAction,
                    default=True, help="RFT rejection: drop sub-tau (slow) wins from SFT (default on)")
+    # Pillar 1: data-time verification rigor (adversarial correctness + shape augment
+    # + strong compile baseline + cold-L2). ON by default for the data pass; disable
+    # with --no-rigorous-verify for a fast/cheap datagen smoke.
+    p.add_argument("--rigorous-verify", dest="rigorous_verify",
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="max verification rigor during datagen/dpo (default on)")
     # Adaptive GRPO horizon: stop when the reward mean plateaus (bounded by
     # total_steps). Ensures the policy trains long enough to actually move.
     p.add_argument("--adaptive-steps", dest="adaptive_steps",

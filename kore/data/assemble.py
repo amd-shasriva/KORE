@@ -12,6 +12,7 @@ and general replay always falls back to bundled samples, so this runs offline
 
 from __future__ import annotations
 
+import os
 import random
 from pathlib import Path
 from typing import Optional
@@ -86,6 +87,19 @@ def assemble_multicap_sources(
     if extra_records:
         krecs = krecs + list(extra_records)
     kernel_repair_opt = bd.build_sft(krecs) if krecs else []
+
+    # Curation (Pillar 6), applied to the kernel SFT pool BEFORE mixing so the
+    # mixer's fractions are computed on a balanced, high-quality set: drop trivial
+    # (<1.1x) win demos and cap per-op-family over-representation (gemm has many
+    # tasks and would otherwise drown rmsnorm/quant/...). Repairs are never dropped
+    # (they carry correctness lessons). Toggle with KORE_CURATE=0.
+    if kernel_repair_opt and os.environ.get("KORE_CURATE", "1") != "0":
+        from kore.data.curate import balance_by_family, filter_trivial_wins
+        kernel_repair_opt, _ct = filter_trivial_wins(kernel_repair_opt, min_speedup=1.1)
+        kernel_repair_opt, _cb = balance_by_family(kernel_repair_opt, cap_frac=0.30)
+        log.metric("curate_kernel_sft",
+                   dropped_trivial=_ct["n_dropped_trivial_wins"],
+                   family_capped=_cb.get("capped", 0), kept=len(kernel_repair_opt))
 
     # Agentic slice = KORE-native tool trajectories (real build/test/bench/pmc on our
     # tools) + a "generic layer" of real public function-calling data (ToolACE via the

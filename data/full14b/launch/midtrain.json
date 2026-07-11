@@ -11,7 +11,7 @@
   "lr_scheduler_type": "cosine",
   "warmup_ratio": 0.05,
   "max_seq_length": 8192,
-  "general_replay_frac": 0.15,
+  "general_replay_frac": 0.30,
   "fsdp": "full_shard auto_wrap",
   "fsdp_transformer_layer_cls": null,
   "fsdp_cpu_offload": false

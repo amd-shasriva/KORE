@@ -78,6 +78,7 @@ class SFTConfig(DistributedMixin):
     num_train_epochs: float = 3.0          # 2-3 epochs
     warmup_ratio: float = 0.03
     weight_decay: float = 0.0
+    max_grad_norm: float = 1.0             # gradient-norm clip (HF default; now explicit)
 
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 16
@@ -85,6 +86,14 @@ class SFTConfig(DistributedMixin):
     bf16: bool = True
     gradient_checkpointing: bool = True
     packing: bool = False
+    # Completion-only loss: mask prompt/user/system/tool tokens (label -100) and
+    # train ONLY on assistant responses (+ their <|im_end|> stop). Implemented via
+    # a {% generation %}-tagged chat template (built at train time, render-identical
+    # to the base template) + TRL's assistant_only_loss. Standard SFT best-practice;
+    # the base Qwen3 template lacks the marker, so sft.py injects it and self-verifies
+    # (render-identity + non-empty masks) before training, and TRL raises if any
+    # example ends up with no assistant tokens.
+    assistant_only_loss: bool = True
 
     # Repair weighting: up-weight repair (broken -> fixed) turns.
     repair_loss_weight: float = 2.0
@@ -112,6 +121,7 @@ class DPOConfig(DistributedMixin):
     lr_scheduler_type: str = "cosine"
     num_train_epochs: float = 1.0
     warmup_ratio: float = 0.03
+    weight_decay: float = 0.0
 
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 16
@@ -359,6 +369,20 @@ class MidTrainConfig(DistributedMixin):
     gradient_checkpointing: bool = True
     use_lora: bool = False                  # full-FT (large ROCm distribution shift)
 
+    # Batch / optimization / checkpoint knobs (previously hardcoded in midtrain.py).
+    # Exposing them makes a launch JSON authoritative and — critically — bounds the
+    # checkpoint count (``save_total_limit``) so a 14B full-FT CPT run cannot fill
+    # disk (the same guard SFT/DPO already have).
+    per_device_train_batch_size: int = 1
+    gradient_accumulation_steps: int = 16
+    weight_decay: float = 0.0
+    max_grad_norm: float = 1.0
+    packing: bool = True                    # CPT over plain text: pack docs (block-diagonal masked on this stack)
+    logging_steps: int = 10
+    save_steps: int = 200
+    save_total_limit: int = 1              # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill
+    seed: int = 0
+
 
 @dataclass
 class MultiCapSFTConfig(SFTConfig):
@@ -441,12 +465,26 @@ def build_fsdp_kwargs(config) -> dict:
     Notes:
       * Activation (gradient) checkpointing is enabled by the Trainer stage via
         HF's ``TrainingArguments.gradient_checkpointing`` +
-        ``gradient_checkpointing_kwargs={"use_reentrant": False}`` (layer-internal,
+        ``gradient_checkpointing_kwargs={"use_reentrant": True}`` (layer-internal,
         FSDP-safe) — NOT via ``fsdp_config``. The FSDP-plugin (external
         checkpoint_wrapper) path mismatches saved-tensor counts on an
-        FSDP1/``use_orig_params`` unit and raises ``CheckpointError``.
+        FSDP1/``use_orig_params`` unit and raises ``CheckpointError``. REENTRANT is
+        deliberate: the ROCm stack has no ``flash_attn`` wheel so training runs on
+        SDPA, whose fused-kernel choice can differ between the checkpointed forward
+        and its recompute (and across ranks); reentrant checkpointing skips the
+        saved-tensor-count check that non-reentrant enforces and would otherwise
+        raise on that swap. (This is the single source of truth for the choice; the
+        stage entrypoints match it.)
       * ``cpu_ram_efficient_loading`` + ``sync_module_states`` let rank-0 stream
         the checkpoint and broadcast, which is what makes 32B/70B fit.
+      * fp32 MASTER weights are automatic: the model is loaded in bf16 (compute
+        dtype), but with accelerate ``mixed_precision: bf16`` the FSDP prepare step
+        UPCASTS every trainable flat-parameter to fp32 (accelerate mimics
+        DeepSpeed ZeRO's fp32 partition — see ``Accelerator.prepare_model``), so the
+        optimizer steps on an fp32 master while forward/backward run in bf16. Do NOT
+        load the model in fp32 to "get" a master — it is already fp32; fp32 loading
+        only doubles load-time host memory for an identical result. (Gradient
+        reduce-scatter stays bf16, matching the DeepSpeed default.)
     """
     if not fsdp_enabled(config):
         return {}
@@ -463,8 +501,9 @@ def build_fsdp_kwargs(config) -> dict:
         # FSDP1 + use_orig_params unit mismatches the saved-tensor count between
         # forward and recompute (torch.utils.checkpoint CheckpointError "different
         # number of tensors ..."). Instead each Trainer stage enables HF's own
-        # layer-internal gradient checkpointing (use_reentrant=False), which wraps
-        # the decoder block's forward and is FSDP-safe. See build_fsdp_kwargs docs.
+        # layer-internal gradient checkpointing (use_reentrant=True — SDPA-swap
+        # robust; see build_fsdp_kwargs docstring), which wraps the decoder block's
+        # forward and is FSDP-safe. See build_fsdp_kwargs docs.
         "backward_prefetch": "backward_pre",
         "forward_prefetch": False,
         "use_orig_params": True,

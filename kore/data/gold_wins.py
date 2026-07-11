@@ -58,19 +58,32 @@ def _best(cands: list[dict]) -> dict:
     return min(cands, key=lambda c: c["wall_us"])
 
 
-def _analysis(op: str, wall: float, snr: float, speedup: float) -> str:
-    """The ANALYSIS body (no header — format_assistant_turn adds it)."""
-    return (
+def _analysis(op: str, wall: float, snr: float, speedup: float,
+              counters: Optional[dict] = None) -> str:
+    """The ANALYSIS body (no header — format_assistant_turn adds it).
+
+    When rocprofv3 ``counters`` for the parent are available, the reasoning is
+    GROUNDED in the measured bottleneck (Pillar 4) — a PROFILE->DIAGNOSE->FIX chain
+    citing the real counters — instead of the generic measurement template.
+    """
+    base = (
         f"For `{op}`, this is the fastest CORRECT implementation verified for this "
         f"shape — measured {wall:.1f}us at SNR {snr:.0f} dB, {speedup:.2f}x faster than the "
         f"parent variant below. It keeps fp32 accumulation and the public entry-point signature, "
         f"and uses 64-multiple BLOCK sizes suited to the CDNA wavefront."
     )
+    if counters:
+        from kore.data.grounded_reasoning import diagnose_bottleneck
+        label, evidence = diagnose_bottleneck(counters)
+        base += (f" Profiling the parent showed a {label} bottleneck ({evidence}); "
+                 f"this kernel targets exactly that.")
+    return base
 
 
 def mint_gold_win(group: dict, arch: Optional[str] = None,
                   snr_gate: float = DEFAULT_SNR_GATE,
-                  min_speedup: float = DEFAULT_MIN_SPEEDUP) -> Optional[WinRecord]:
+                  min_speedup: float = DEFAULT_MIN_SPEEDUP,
+                  counters: Optional[dict] = None) -> Optional[WinRecord]:
     """One ranked group -> a gold optimization-win WinRecord (or None if it
     lacks a clearly-correct, meaningfully-faster candidate)."""
     cands = _correct(group.get("candidates") or [], snr_gate)
@@ -92,8 +105,13 @@ def mint_gold_win(group: dict, arch: Optional[str] = None,
     user = build_turn_prompt(parent_source=baseline["source"], mode="exploit")
     proposed = (f"Adopt the fastest verified implementation for `{op}` "
                 f"({speedup:.2f}x over the parent).")
+    # Prefer counters attached to the group (from a profiling datagen pass) so the
+    # reasoning is grounded in real hardware evidence (Pillar 4); else the measurement
+    # template. ``counters`` arg overrides the group-attached one.
+    grp_counters = counters if counters is not None else group.get("counters")
     assistant = format_assistant_turn(
-        _analysis(op, float(best["wall_us"]), float(best["snr_db"]), float(speedup)),
+        _analysis(op, float(best["wall_us"]), float(best["snr_db"]), float(speedup),
+                  counters=grp_counters if isinstance(grp_counters, dict) else None),
         proposed, best["source"],
     )
     trajectory = [

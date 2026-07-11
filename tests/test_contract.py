@@ -12,6 +12,8 @@ import json
 from kore.policy.format import (
     OUTPUT_CONTRACT,
     SYSTEM_PROMPT,
+    build_task_prompt,
+    build_transcript,
     format_assistant_turn,
     normalize_assistant,
     parse_response,
@@ -27,6 +29,27 @@ def test_single_source_of_truth():
     assert "PROPOSED_CHANGE" in OUTPUT_CONTRACT
     btp = P.build_turn_prompt(parent_source="def k(): pass", mode="repair", feedback="x")
     assert "PROPOSED_CHANGE" in btp
+
+
+class _Task:
+    task_id = "gen_relu_fp16"
+    dtype = "fp16"
+    operation = "relu"
+    gpu_target = "gfx942"
+    backend = "triton"
+    comparison_baseline = "torch_relu"
+    seed_source = "def k():\n    pass"
+
+
+def test_build_task_prompt_is_inference_context():
+    # Pillar 3: DPO pairs must use the SAME turn-1 prompt as GRPO/eval (seed + contract).
+    tp = build_task_prompt(_Task())
+    assert "Seed kernel:" in tp and "def k():" in tp
+    assert "ANALYSIS" in tp and "PROPOSED_CHANGE" in tp and "FULL_KERNEL" in tp
+    # build_transcript wraps it into [system, user]
+    msgs = build_transcript(tp, [])
+    assert msgs[0]["role"] == "system" and msgs[0]["content"] == SYSTEM_PROMPT
+    assert msgs[1]["role"] == "user" and "Seed kernel:" in msgs[1]["content"]
 
 
 def test_format_assistant_turn_roundtrip():

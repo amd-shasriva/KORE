@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 
 from kore.data.coverage import (
+    FRONTIER_OPS,
     REQUIRED_KINDS,
     coverage_report,
+    frontier_coverage,
     space_coverage,
     task_coverage,
     undercovered_tasks,
@@ -52,6 +54,21 @@ def test_coverage_report_shape(tmp_path):
     assert rep["per_kind_covered"]["repair"] == 2
     assert rep["per_kind_covered"]["wins"] == 1
     assert "t_hole" in rep["undercovered"]
+
+
+def test_frontier_coverage_reports_capabilities():
+    fc = frontier_coverage()
+    if not fc:  # registry unavailable
+        return
+    assert fc["n_capabilities"] == len(FRONTIER_OPS)
+    assert fc["n_covered"] + fc["n_missing"] == fc["n_capabilities"]
+    # core capabilities KORE definitely has
+    for cap in ("gemm_dense", "gemm_fp8", "attention_mha", "moe_router", "norm_rms",
+                "rope", "elementwise", "reduction"):
+        assert cap in fc["covered"], f"{cap} should be covered"
+    # known holes that require GPU-verified authoring (not fabricated offline)
+    for cap in ("attention_mla", "sampling", "collective"):
+        assert cap in fc["missing"], f"{cap} should be a tracked hole"
 
 
 def test_space_coverage_reports_dtype_frontier():

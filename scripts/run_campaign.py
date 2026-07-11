@@ -913,6 +913,17 @@ def _stage_build(ctx):
     kernel_records = [r for r in train if _rec_type(r) in ("repair", "win")]
     group_records = [r for r in train if _rec_type(r) == "ranked_group"]
 
+    # Near-duplicate dedup on WINS only (Pillar 5): collapse winning kernels that
+    # differ solely by renaming/whitespace/comments, keeping the fastest — the
+    # shipped data had ~148 kernels recurring >=50x. Repairs are left intact: each
+    # broken->fixed transition is a distinct lesson even when fixed kernels converge.
+    from kore.data.build_datasets import dedup_near_source
+    _wins = [r for r in kernel_records if _rec_type(r) == "win"]
+    _non_wins = [r for r in kernel_records if _rec_type(r) != "win"]
+    if _wins:
+        _wins = dedup_near_source(_wins, per_fingerprint_cap=1)
+    kernel_records = _non_wins + _wins
+
     # RFT / rejection sampling (ReST-EM): train SFT on the policy's HIGH-reward
     # kernels only — keep all repair turns (they teach correctness) but REJECT the
     # sub-tau (slower-than-baseline) wins, keeping only the stratified, deduped >tau

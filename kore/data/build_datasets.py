@@ -203,6 +203,43 @@ def dedup_by_source_hash(records: Iterable[Any]) -> list:
     return out
 
 
+def _record_score(rec: Any) -> float:
+    """Preference score for near-dup dedup: higher = keep. Fastest win wins."""
+    rec = _as_record(rec)
+    if isinstance(rec, WinRecord):
+        try:
+            return float(getattr(rec, "speedup", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def dedup_near_source(records: Iterable[Any], per_fingerprint_cap: int = 1,
+                      fuzzy_threshold: float = 0.0) -> list:
+    """Near-duplicate dedup on the representative kernel source (STRUCTURAL).
+
+    Complements :func:`dedup_by_source_hash` (exact) by collapsing kernels that
+    differ only by variable renaming, whitespace, or comments (see
+    ``kore.data.dedup``). Keeps the highest-scoring record per structural cluster
+    (fastest :class:`WinRecord`), up to ``per_fingerprint_cap``.
+
+    Apply this to WIN/gold records — NOT to repair records: each broken->fixed
+    transition is a distinct lesson even when the fixed kernels converge, so
+    collapsing repairs by fixed-kernel structure would delete real signal.
+    """
+    from kore.data.dedup import dedup_near
+
+    recs = list(records)
+    items = [{"_rec": r, "source": _record_source(r), "_score": _record_score(r)}
+             for r in recs]
+    kept, stats = dedup_near(items, source_key="source",
+                             scorer=lambda d: d["_score"],
+                             per_fingerprint_cap=per_fingerprint_cap,
+                             fuzzy_threshold=fuzzy_threshold)
+    log.metric("dedup_near_source", **stats)
+    return [it["_rec"] for it in kept]
+
+
 # --- hygiene: leakage-aware split ---
 def _group_key(rec: Any, by: tuple = ("operation", "arch")) -> str:
     """Build a grouping key from ``by`` fields, tolerating missing fields.

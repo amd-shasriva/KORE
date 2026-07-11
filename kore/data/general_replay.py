@@ -67,16 +67,22 @@ HF_SOURCES: dict[str, list[dict]] = {
             # long chain-of-thought (tiling/indexing/numerics reasoning) transfers to
             # kernels AND closes the reasoning-CoT retention gap so domain SFT/RL
             # doesn't erode the base model's chain-of-thought.
+            # max_row_chars caps the CoT so rows FIT the SFT window (16384 tok): the
+            # raw QwQ traces are often >16k tok (they were silently dropped by the SFT
+            # length filter, wasting the whole slice). ~48k chars ~= 12k tok keeps a
+            # LENGTH-DIVERSE tail of traces that survive training.
             "path": "open-thoughts/OpenThoughts3-1.2M",
             "config": None,
             "split": "train",
             "sharegpt_key": "conversations",
+            "max_row_chars": 48000,
         },
         {   # fallback: OpenMathInstruct-2 (NVIDIA) 1M CoT math (cached offline).
             "path": "nvidia/OpenMathInstruct-2",
             "config": None,
             "split": "train_1M",
             "qa_keys": ("problem", "generated_solution"),
+            "max_row_chars": 48000,
         },
     ],
     "chat": [
@@ -131,6 +137,12 @@ def _valid_messages(messages: Any) -> bool:
         if not isinstance(m.get("content"), str):
             return False
     return True
+
+
+def _row_chars(row: dict) -> int:
+    """Total content length of a chat row (used for the length-diversity cap)."""
+    return sum(len(m.get("content", "")) for m in row.get("messages", [])
+               if isinstance(m, dict))
 
 
 def _as_chat_row(obj: Any, kind: str) -> Optional[dict]:
@@ -274,14 +286,20 @@ def _load_one_spec(spec: dict, kind: str, n: int, seed: int) -> list[dict]:
     except Exception:
         pass  # some streaming datasets don't support shuffle; take head order
     fmt = _formatter_for(kind, spec)
+    max_row_chars = spec.get("max_row_chars")
     rows: list[dict] = []
-    budget = max(n * 20, 200)  # bound the scan so a low yield can't loop forever
+    # A char cap needs a bigger scan budget (many long CoT rows are skipped), so
+    # widen the scan when a cap is set to still reach ``n`` length-diverse rows.
+    budget = max(n * (60 if max_row_chars else 20), 400 if max_row_chars else 200)
     for i, ex in enumerate(ds):
         if len(rows) >= n or i >= budget:
             break
         row = fmt(dict(ex), spec, kind)
-        if row is not None:
-            rows.append(row)
+        if row is None:
+            continue
+        if max_row_chars and _row_chars(row) > int(max_row_chars):
+            continue  # drop over-length CoT so the row fits the SFT window
+        rows.append(row)
     if not rows:
         raise RuntimeError(f"HF source {spec.get('path')!r} for {kind!r} yielded no rows")
     return rows

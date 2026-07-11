@@ -494,7 +494,9 @@ def test_build_dpo_wellformed():
     rows = build_dpo([_sample_group()])
     assert len(rows) == 3  # three preference pairs
     for row in rows:
-        assert set(row) == {"prompt", "chosen", "rejected"}
+        # trl reads prompt/chosen/rejected; _provenance is audit/curation metadata
+        assert {"prompt", "chosen", "rejected"} <= set(row)
+        assert "_provenance" in row
         assert isinstance(row["prompt"], list)
         # conversational trl.DPOTrainer shape: chosen/rejected are message lists
         assert isinstance(row["chosen"], list)

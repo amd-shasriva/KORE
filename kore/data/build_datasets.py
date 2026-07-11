@@ -57,9 +57,43 @@ def _generic_prompt(task_id: str, gpu: str = "gfx942") -> list[dict]:
     ]
 
 
+# --- provenance (Pillar 5): auditable per-row metadata for curation ---
+def _prov_common(rec: Any) -> dict:
+    d = rec.to_dict() if hasattr(rec, "to_dict") else {}
+    return {
+        "task_id": getattr(rec, "task_id", None) or d.get("task_id"),
+        "operation": getattr(rec, "operation", None) or d.get("operation"),
+        "arch": (getattr(rec, "arch", None) or d.get("arch")
+                 or getattr(rec, "gpu", None) or d.get("gpu")),
+        "shape": getattr(rec, "shape", None) or d.get("shape"),
+    }
+
+
+def _prov_win(rec: Any) -> dict:
+    p = _prov_common(rec)
+    p.update({"kind": "win", "verified": True, "baseline": "measured",
+              "speedup": getattr(rec, "speedup", None),
+              "snr_db": getattr(rec, "snr_db", None)})
+    return p
+
+
+def _prov_repair(rec: Any) -> dict:
+    p = _prov_common(rec)
+    p.update({"kind": "repair", "verified": True,
+              "failure_class": getattr(rec, "failure_class", None),
+              "snr_db": getattr(rec, "child_snr_db", None)})
+    return p
+
+
 # --- SFT ---
 def build_sft(records: Iterable[Any]) -> list[dict]:
-    """Chat-SFT rows from repair turns and winning trajectories."""
+    """Chat-SFT rows from repair turns and winning trajectories.
+
+    Each row carries a ``_provenance`` block (kind / task / op / arch / measured
+    speedup + snr / verified) — ignored by the trainer but consumed by the curation
+    stage and available for audit. ``mixing._tag`` shallow-copies rows, so it
+    survives into the final multicap shard.
+    """
     out: list[dict] = []
     n_repair = 0
     n_win = 0
@@ -67,11 +101,11 @@ def build_sft(records: Iterable[Any]) -> list[dict]:
         rec = _as_record(raw)
         if isinstance(rec, RepairRecord):
             if rec.messages:
-                out.append({"messages": list(rec.messages)})
+                out.append({"messages": list(rec.messages), "_provenance": _prov_repair(rec)})
                 n_repair += 1
         elif isinstance(rec, WinRecord):
             if rec.trajectory:
-                out.append({"messages": list(rec.trajectory)})
+                out.append({"messages": list(rec.trajectory), "_provenance": _prov_win(rec)})
                 n_win += 1
     log.metric("build_sft", rows=len(out), from_repair=n_repair, from_wins=n_win)
     return out
@@ -110,11 +144,15 @@ def build_dpo(records: Iterable[Any]) -> list[dict]:
             if not (0 <= ci < len(cands) and 0 <= ri < len(cands)):
                 continue
             n_prefs += 1
-            chosen_src = cands[ci].get("source", "")
-            rejected_src = cands[ri].get("source", "")
+            chosen_c, rejected_c = cands[ci], cands[ri]
+            chosen_src = chosen_c.get("source", "")
+            rejected_src = rejected_c.get("source", "")
             if chosen_src == rejected_src:
                 n_degenerate += 1
                 continue  # degenerate: identical sources carry no preference
+            cw, rw = chosen_c.get("wall_us"), rejected_c.get("wall_us")
+            speedup = (rw / cw) if (isinstance(cw, (int, float)) and cw
+                                    and isinstance(rw, (int, float)) and rw) else None
             out.append(
                 {
                     "prompt": prompt,
@@ -124,6 +162,18 @@ def build_dpo(records: Iterable[Any]) -> list[dict]:
                     "rejected": [
                         {"role": "assistant", "content": _wrap_full_kernel(rejected_src)}
                     ],
+                    # Speed-grounding metadata (Pillar 5/3): the preference is a
+                    # verified faster-correct > slower-correct ranking. Ignored by the
+                    # trainer, consumed by curation.
+                    "_provenance": {
+                        "kind": "dpo_group", "task_id": rec.task_id,
+                        "operation": getattr(rec, "operation", None),
+                        "arch": getattr(rec, "gpu", None), "verified": True,
+                        "chosen_wall_us": cw, "rejected_wall_us": rw,
+                        "chosen_snr_db": chosen_c.get("snr_db"),
+                        "rejected_snr_db": rejected_c.get("snr_db"),
+                        "speedup": round(speedup, 4) if speedup else None,
+                    },
                 }
             )
     log.metric("build_dpo", groups=n_groups, pairs_considered=n_prefs,

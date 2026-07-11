@@ -59,6 +59,20 @@ _HIP_EXTS = (".cu", ".cuh", ".hip", ".cpp", ".cc", ".hpp", ".h")
 # Markers that identify a Triton kernel Python file (any one is enough).
 _TRITON_MARKERS = ("import triton", "triton.jit", "triton.language", "tl.")
 
+
+def _is_heldout_task_dir(dir_name: str) -> bool:
+    """True if a ``kore/tasks/<dir_name>`` belongs to a held-out eval family.
+
+    Used to decontaminate the pretrain corpus: the held-out generalization set
+    (attention family) must never enter training as source text. Import is lazy +
+    guarded so the corpus builder still runs if the registry is unavailable.
+    """
+    try:
+        from kore.data.decontam import _family_of, heldout_families
+        return _family_of(dir_name) in heldout_families()
+    except Exception:  # noqa: BLE001 - registry missing -> do not exclude (safe)
+        return False
+
 # Path keywords that keep the ``docs`` slice a ROCm/kernel/perf corpus rather
 # than pulling in every unrelated markdown file in the repos.
 _DOC_KEYWORDS = (
@@ -349,7 +363,11 @@ def build_midtrain_corpus(
     # (source_label, list[(path, text)]) built from local files only.
     collected: list[tuple[str, list[tuple[Path, str]]]] = []
 
-    # 1. KORE task Python (seed kernels, references, drivers).
+    # 1. KORE task Python (seed kernels, references, drivers) — EXCLUDING the
+    # held-out generalization families (attention) + arch-specific tasks, so the
+    # eval set never leaks into pretraining (decontamination, Pillar 5). Task-suite
+    # infrastructure files (_genops.py, base.py, ...) live directly under the root
+    # and are kept; only per-task <task_id>/ dirs of a held-out family are dropped.
     task_py: list[tuple[Path, str]] = []
     if troot is not None and troot.is_dir():
         task_py = _collect_files(
@@ -357,12 +375,15 @@ def build_midtrain_corpus(
             scan_budget=scan_budget, max_chars_per_file=max_chars_per_file,
             content_filter=lambda t: "__pycache__" not in t and len(t) > 20,
         )
+        task_py = [(p, t) for (p, t) in task_py if not _is_heldout_task_dir(p.parent.name)]
     collected.append(("kore_tasks", task_py))
 
     # 2. PyTorch -> Triton pairs from each task's reference.py + seed_triton.py.
     pairs: list[tuple[Path, str]] = []
     if troot is not None and troot.is_dir():
         for task_dir in sorted(p for p in troot.iterdir() if p.is_dir()):
+            if _is_heldout_task_dir(task_dir.name):  # decontamination (Pillar 5)
+                continue
             ref = task_dir / "reference.py"
             seed_k = task_dir / "seed_triton.py"
             if not (ref.is_file() and seed_k.is_file()):
@@ -463,6 +484,23 @@ def build_midtrain_corpus(
                 n_src += 1
         counts[source] = n_src
 
+    # Text-level decontamination backstop (Pillar 5): drop any chunk whose n-grams
+    # overlap the HELD-OUT reference sources. The kore_tasks/pairs dir-filter above
+    # already excludes held-out KORE tasks; this also catches a held-out kernel
+    # (e.g. a flash-attention impl) copied into a mined source (KernelBook /
+    # amd_kernels / repo Triton). Safe no-op if held-out sources can't be loaded.
+    n_decontam = 0
+    if os.environ.get("KORE_DECONTAM", "1") != "0":
+        from kore.data.decontam import decontaminate_corpus
+        rows, _dc = decontaminate_corpus(rows, text_key="text", n=8, threshold=0.10)
+        n_decontam = int(_dc.get("n_dropped_contaminated", 0))
+        if n_decontam:
+            # keep per-source counts honest after the drop
+            kept_by_src: dict[str, int] = {}
+            for r in rows:
+                kept_by_src[r["source"]] = kept_by_src.get(r["source"], 0) + 1
+            counts = {k: kept_by_src.get(k, 0) for k in counts}
+
     n_kernel = len(rows)
 
     # ------------------------------------------------------------------ #
@@ -521,6 +559,7 @@ def build_midtrain_corpus(
         "total": total,
         "counts": counts,
         "n_dropped_dup": n_dropped,
+        "n_dropped_decontam": n_decontam,
         "general_frac": round(general_frac, 4),
         "max_seq_length": int(config.max_seq_length),
         "budget_chars": budget_chars,
@@ -528,6 +567,7 @@ def build_midtrain_corpus(
     }
     log.info("midtrain corpus built", **{
         "out": str(out_path), "total": total, "general_frac": report["general_frac"],
-        "dropped_dup": n_dropped, **{f"n_{k}": v for k, v in counts.items()},
+        "dropped_dup": n_dropped, "dropped_decontam": n_decontam,
+        **{f"n_{k}": v for k, v in counts.items()},
     })
     return report

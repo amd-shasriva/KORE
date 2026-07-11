@@ -19,7 +19,12 @@ import threading
 import time
 from typing import Optional
 
-from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, extract_kernel
+from kore.data.prompts import (
+    SYSTEM_PROMPT,
+    build_turn_prompt,
+    extract_kernel,
+    format_assistant_turn,
+)
 from kore.data.mutate import apply_random_breakage, infer_family
 from kore.data.schemas import RepairRecord
 from kore.data.teacher import TeacherClient
@@ -53,15 +58,15 @@ def _error_text(obs) -> str:
 
 
 def _diagnostic_assistant(failure_class: str, error_text: str, fixed_src: str) -> str:
-    """Fold the verifier's error into a self-diagnose-then-fix assistant turn.
+    """Fold the verifier's error into a self-diagnose-then-fix assistant turn,
+    in the CANONICAL response contract (ANALYSIS / PROPOSED_CHANGE / FULL_KERNEL).
 
-    LLM-VeriOpt format: a ``<think>`` block that reads the exact verifier
-    diagnostic and reasons about the fix class, followed by an ``<answer>`` block
-    carrying ONLY the verified fixed kernel under the FULL_KERNEL contract. SFT on
-    this teaches the model to diagnose the concrete failure before emitting a fix,
-    instead of blindly rewriting. The kernel stays in the standard FULL_KERNEL
-    block so ``extract_kernel`` (and every downstream builder) parses it
-    unchanged."""
+    The exact verifier diagnostic + fix-class reasoning becomes the ANALYSIS
+    (self-diagnosis), the fix class becomes the PROPOSED_CHANGE, and the VERIFIED
+    fixed kernel goes in FULL_KERNEL. SFT on this teaches the model to read the
+    concrete failure and fix it in the SAME response shape it must emit at
+    inference — not a separate ``<think>/<answer>`` format that drifts from the
+    policy contract."""
     guidance = {
         "compile_fail": (
             "This is a COMPILE failure. I will fix the specific syntax/type/shape "
@@ -73,13 +78,17 @@ def _diagnostic_assistant(failure_class: str, error_text: str, fixed_src: str) -
             "alignment rather than change the algorithm."
         ),
     }.get(failure_class, "I will fix the specific failure the verifier reported.")
-    think = (
+    analysis = (
         "The verifier rejected the current kernel. Diagnostic:\n"
         f"{error_text.strip()}\n"
         f"{guidance}"
     )
-    answer = "FULL_KERNEL:\n```python\n" + fixed_src.strip() + "\n```\n"
-    return f"<think>\n{think}\n</think>\n<answer>\n{answer}</answer>"
+    proposed = {
+        "compile_fail": "Fix the reported compile error without changing the kernel structure.",
+        "snr_fail": ("Restore numerical correctness (fp32 accumulation / masking / "
+                     "indexing / block alignment)."),
+    }.get(failure_class, "Fix the specific failure the verifier reported.")
+    return format_assistant_turn(analysis, proposed, fixed_src)
 
 
 def make_repair_record(

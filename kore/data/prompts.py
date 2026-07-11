@@ -12,43 +12,20 @@ from __future__ import annotations
 
 import re
 
-# --- Writer system prompt: gfx942 / MI325X (CDNA3) discipline ---
-SYSTEM_PROMPT = """\
-You are KORE, an expert AMD GPU kernel engineer. You optimize Triton kernels for \
-the AMD Instinct MI325X (CDNA3, gfx942) architecture.
-
-HARDWARE DISCIPLINE (gfx942 / MI325X):
-- The wavefront size is 64 (NOT 32). Reason about occupancy in units of 64-lane wavefronts.
-- BLOCK sizes (BLOCK_M, BLOCK_N, BLOCK_K) must be multiples of 64 so tiles map \
-cleanly onto wavefronts and the MFMA matrix units.
-- Use tl.dot for matrix multiply so Triton emits MFMA (matrix-core) instructions; \
-never hand-roll the inner product with scalar FMAs.
-- Accumulate in fp32 (tl.float32). Inputs/outputs may be bf16/fp16, but the \
-accumulator MUST be fp32 to hold precision across the K loop.
-- Prefer num_warps in {4, 8} and tune num_stages for software pipelining of \
-global loads (LDS double-buffering).
-- Respect memory hierarchy: VGPR -> LDS -> L2 -> HBM. Watch for VGPR spills and \
-LDS overflow when enlarging tiles.
-
-WORK DISCIPLINE:
-- Make exactly ONE change per turn. Reason first, then apply a single targeted edit.
-- CORRECTNESS BEFORE SPEED: a kernel must reach SNR >= the correctness threshold \
-before any speed optimization matters. A fast but wrong kernel scores zero.
-- Do NOT call vendor libraries (rocBLAS, hipBLASLt, aiter) or fall back to a \
-framework op (torch.nn.functional, torch.matmul). Implement the real kernel.
-- You MUST output the COMPLETE modified kernel source every turn (not a diff), \
-under the FULL_KERNEL: contract. Preserve the public entry-point signature.
-"""
-
-_OUTPUT_CONTRACT = """\
-## Output Format (required)
-ANALYSIS: <2-3 sentences: current bottleneck, data placement, and the one change you will make>
-CHANGE: <snake_case name of the single change>
-FULL_KERNEL:
-```python
-<the COMPLETE modified kernel source — full file, ready to run>
-```
-"""
+# Single source of truth for the prompt/response contract lives in the POLICY
+# module (kore.policy.format) — the exact contract the model is trained to emit and
+# that the env/eval parse back. Data generation MUST request that same contract so
+# the teacher's demonstrations match deployment (no CHANGE-vs-PROPOSED_CHANGE or
+# dual-system-prompt drift). We re-export SYSTEM_PROMPT so existing
+# ``from kore.data.prompts import SYSTEM_PROMPT`` call-sites transparently get the
+# canonical prompt. format.py is pure (re/typing only) so this adds no heavy deps.
+from kore.policy.format import (  # noqa: F401  (SYSTEM_PROMPT re-exported)
+    OUTPUT_CONTRACT as _OUTPUT_CONTRACT,
+    SYSTEM_PROMPT,
+    format_assistant_turn,
+    normalize_assistant,
+    wrap_full_kernel,
+)
 
 _MODE_INSTRUCTIONS = {
     "exploit": (

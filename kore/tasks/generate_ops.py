@@ -23,13 +23,20 @@ from kore.tasks import _genops
 
 TASKS_DIR = Path(__file__).resolve().parent
 
-# dtypes to emit per family (kept modest to bound eval cost while staying wide).
+# dtypes to emit per family — the generated op x dtype coverage frontier (Pillar 2).
+# fp32 is emitted for EVERY family (it is the reference dtype: seeds compile + verify
+# by construction, closing the previous binary/reduce/gemm_fusion fp32 holes).
+# fp8/int8 are deliberately NOT emitted for GENERATED ops: they require quantization
+# SCALES (the generic get_inputs casts ~1/sqrt(K) randn values, which int8 truncates
+# to all-zeros and fp8 mangles without a scale) — quantized coverage comes from the
+# hand-wired VENDOR ops (genv_*, kore/tasks/generate_vendor_ops.py) that carry the
+# proper dequant + AITER/hipBLASLt-fp8 baselines.
 FAMILY_DTYPES = {
     "unary": ("bf16", "fp16", "fp32"),
-    "binary": ("bf16", "fp16"),
-    "reduce": ("bf16", "fp16"),
-    "fusion": ("bf16", "fp16", "fp32"),   # the high-headroom class -> all dtypes
-    "gemm_fusion": ("bf16", "fp16"),      # compute-bound; hipBLASLt-baselined
+    "binary": ("bf16", "fp16", "fp32"),
+    "reduce": ("bf16", "fp16", "fp32"),
+    "fusion": ("bf16", "fp16", "fp32"),   # the high-headroom class
+    "gemm_fusion": ("bf16", "fp16", "fp32"),  # compute-bound; hipBLASLt-baselined
 }
 
 # Honest headroom tier per family: gemm_fusion (compute-bound, hipBLASLt baseline)

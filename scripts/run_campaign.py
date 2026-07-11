@@ -667,6 +667,7 @@ def _stage_datagen(ctx):
             teacher_kind=ctx["args"].teacher, model_teacher=ctx["args"].model_teacher,
             log=lambda m: _log("datagen", m))
         LOG.event("datagen_parallel", workers=workers, n_gpus=n_gpus, **summary)
+        _log_datagen_coverage(ctx)
         return
     from kore.data.gen_groups import generate_groups
     from kore.data.gen_repair import generate_repairs
@@ -689,6 +690,25 @@ def _stage_datagen(ctx):
             _log("datagen", f"{task.task_id}:{kind} -> {len(recs)} records")
             LOG.event("datagen_records", task=task.task_id, kind=kind, n=len(recs))
         LOG.progress(i + 1, n_tasks, "datagen", t_start=dg_t0, task=task.task_id)
+    _log_datagen_coverage(ctx)
+
+
+def _log_datagen_coverage(ctx):
+    """Report per-task data coverage after datagen (Pillar 2: make 100% visible)."""
+    try:
+        from kore.data.coverage import coverage_report
+        rep = coverage_report(ctx["data_root"])
+    except Exception as e:  # noqa: BLE001 - coverage report must never fail datagen
+        _log("datagen", f"coverage report skipped ({e})")
+        return
+    _log("datagen", f"DATA COVERAGE: {rep['n_full_coverage']}/{rep['n_train_tasks']} "
+                    f"tasks fully covered ({rep['coverage_pct']}%); "
+                    f"per-kind {rep['per_kind_pct']}; undercovered={rep['n_undercovered']}")
+    if rep["undercovered"]:
+        holes = "; ".join(f"{t}:{'+'.join(m)}" for t, m in sorted(rep["undercovered"].items())[:40])
+        _log("datagen", f"undercovered tasks (regenerate to reach 100%): {holes}")
+    LOG.event("datagen_coverage", **{k: rep[k] for k in
+              ("n_train_tasks", "n_full_coverage", "coverage_pct", "n_undercovered")})
 
 
 def _stage_agentic_synth(ctx):

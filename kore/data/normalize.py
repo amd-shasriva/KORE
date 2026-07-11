@@ -52,6 +52,30 @@ def _is_kore_system(content: str) -> bool:
     return isinstance(content, str) and content.lstrip().startswith(_KORE_SYS_PREFIX)
 
 
+def _normalize_msg_list(messages: list) -> tuple[list, bool]:
+    """Canonicalize a chat message list: KORE system -> canonical, assistant turns
+    -> canonical ANALYSIS/PROPOSED_CHANGE/FULL_KERNEL. Returns (new_messages, changed)."""
+    if not isinstance(messages, list):
+        return messages, False
+    changed = False
+    out = []
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        role, content = m.get("role"), m.get("content", "")
+        if role == "system" and _is_kore_system(content) and content != SYSTEM_PROMPT:
+            m = {**m, "content": SYSTEM_PROMPT}
+            changed = True
+        elif role == "assistant":
+            nc = normalize_assistant(content)
+            if nc != content:
+                m = {**m, "content": nc}
+                changed = True
+        out.append(m)
+    return out, changed
+
+
 def _extract_kernel_only(content: str) -> str:
     """Re-wrap a DPO completion as a canonical kernel-only FULL_KERNEL block."""
     from kore.policy.format import _extract_kernel  # local: keep module import surface small
@@ -73,6 +97,8 @@ def normalize_sft_row(row: dict) -> tuple[dict, bool]:
         return row, False
     do_assistant = src in _KERNEL_SOURCES
     do_system = src in _KERNEL_SOURCES or src in _KERNEL_NL_SOURCES
+    if not (do_assistant or do_system):
+        return row, False
     changed = False
     new_msgs = []
     for m in msgs:
@@ -92,6 +118,27 @@ def normalize_sft_row(row: dict) -> tuple[dict, bool]:
         new_msgs.append(m)
     if changed:
         row = {**row, "messages": new_msgs}
+    return row, changed
+
+
+def normalize_raw_record_row(row: dict) -> tuple[dict, bool]:
+    """Canonicalize a RAW datagen record (RepairRecord / WinRecord) in place.
+
+    RepairRecord carries ``messages`` (legacy ``<think>/<answer>`` assistant) and
+    WinRecord carries ``trajectory`` (raw teacher ``CHANGE:``/etc.); both are
+    upgraded to the canonical contract so that re-running the (CPU) build stage
+    emits canonical SFT rows WITHOUT regenerating the GPU-verified records. All
+    verified scalar fields (snr/wall/speedup/preferences/...) are untouched.
+    """
+    if not isinstance(row, dict):
+        return row, False
+    key = "messages" if isinstance(row.get("messages"), list) else (
+        "trajectory" if isinstance(row.get("trajectory"), list) else None)
+    if key is None:
+        return row, False
+    new_msgs, changed = _normalize_msg_list(row[key])
+    if changed:
+        row = {**row, key: new_msgs}
     return row, changed
 
 
@@ -126,10 +173,19 @@ def normalize_dpo_row(row: dict) -> tuple[dict, bool]:
 
 
 def _detect_kind(first_row: dict) -> str:
-    if isinstance(first_row, dict) and "messages" in first_row:
+    if not isinstance(first_row, dict):
         return "sft"
-    if isinstance(first_row, dict) and {"prompt", "chosen", "rejected"} <= set(first_row):
+    if {"prompt", "chosen", "rejected"} <= set(first_row):
         return "dpo"
+    # raw datagen records: WinRecord (trajectory) or RepairRecord (messages + record markers)
+    if "trajectory" in first_row:
+        return "raw"
+    if "messages" in first_row and (
+            first_row.get("type") in ("repair", "win")
+            or "failure_class" in first_row or "child_snr_db" in first_row):
+        return "raw"
+    if "messages" in first_row:
+        return "sft"
     return "sft"
 
 
@@ -144,7 +200,8 @@ def normalize_file(in_path: str | Path, out_path: Optional[str | Path] = None,
     if not rows:
         return {"path": str(in_path), "rows": 0, "changed": 0, "kind": "empty"}
     kind = _detect_kind(rows[0])
-    fn = normalize_sft_row if kind == "sft" else normalize_dpo_row
+    fn = {"sft": normalize_sft_row, "dpo": normalize_dpo_row,
+          "raw": normalize_raw_record_row}[kind]
 
     changed = 0
     out_rows = []

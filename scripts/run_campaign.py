@@ -672,6 +672,7 @@ def _stage_datagen(ctx):
     from kore.data.gen_groups import generate_groups
     from kore.data.gen_repair import generate_repairs
     from kore.data.gen_wins import generate_wins
+    from kore.data.parallel_datagen import shard_done
     from kore.data.schemas import write_jsonl
     from kore.env.kore_env import KoreEnv
 
@@ -680,10 +681,22 @@ def _stage_datagen(ctx):
     n_tasks = len(train)
     dg_t0 = time.time()
     for i, task in enumerate(train):
-        env = KoreEnv(task)
-        for kind, recs in (("repair", generate_repairs(task, t, env, n=ctx["args"].n_repair)),
-                           ("groups", generate_groups(task, t, env, n_parents=ctx["args"].n_parents, k=ctx["args"].k)),
-                           ("wins", generate_wins(task, t, env, gens=ctx["args"].wins_gens))):
+        # RESUMABLE (matches the parallel path): skip any (task, kind) whose shard
+        # already exists non-empty, so a rerun only fills holes / new tasks and never
+        # redoes verified work. Delete a shard to force its regeneration.
+        env = None
+        for kind in ("repair", "groups", "wins"):
+            if shard_done(ctx["data_root"], task.task_id, kind):
+                _log("datagen", f"{task.task_id}:{kind} skip (resume)")
+                continue
+            if env is None:
+                env = KoreEnv(task)
+            if kind == "repair":
+                recs = generate_repairs(task, t, env, n=ctx["args"].n_repair)
+            elif kind == "groups":
+                recs = generate_groups(task, t, env, n_parents=ctx["args"].n_parents, k=ctx["args"].k)
+            else:
+                recs = generate_wins(task, t, env, gens=ctx["args"].wins_gens)
             out = ctx["data_root"] / kind / f"{task.task_id}.jsonl"
             out.parent.mkdir(parents=True, exist_ok=True)
             write_jsonl(out, recs)

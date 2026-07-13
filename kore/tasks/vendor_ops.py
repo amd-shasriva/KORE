@@ -24,7 +24,7 @@ VENDOR_OPS: tuple[str, ...] = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul",
                                "softmax", "gemm_a8w8", "fused_add_rmsnorm", "rope",
                                "topk_softmax", "batched_gemm", "gemm_a8w8_blockscale",
                                # v3 frontier additions (RoPE variants; torch.compile bar)
-                               "rope_gptj", "rope_partial")
+                               "rope_gptj", "rope_partial", "embedding_gather")
 
 # ops whose vendor BASELINE mutates its inputs in place (so the bench loop must
 # feed a fresh clone each timed call — see _genops._run_bench mutates_input path).
@@ -88,13 +88,22 @@ _BATCHED_GEMM_SHAPES = {  # A[B,M,K] @ B[B,N,K]^T -> [B,M,N] bf16 (batched attn/
                    {"B": 8, "M": 512, "N": 513, "K": 512}],  # batched, wide, non-pow2 N
 }
 
+_EMBED_SHAPES = {  # weight[V, Dim] gathered by ids[T] -> out[T, Dim] (token embedding / LM head)
+    "minimal": {"V": 2048, "Dim": 256, "T": 128},
+    "primary": {"V": 128256, "Dim": 4096, "T": 4096},          # Llama-3 vocab x hidden
+    "validation": [{"V": 32000, "Dim": 4096, "T": 8192},        # Llama-2 vocab, wide batch
+                   {"V": 151936, "Dim": 3584, "T": 2048},       # Qwen3 vocab/hidden
+                   {"V": 49152, "Dim": 2048, "T": 4095}],       # small vocab, non-pow2 tokens
+}
+
 VENDOR_SHAPES = {"rmsnorm": _NORM_SHAPES, "layernorm": _NORM_SHAPES,
                  "silu_mul": _GATE_SHAPES, "gelu_mul": _GATE_SHAPES,
                  "softmax": _SOFTMAX_SHAPES, "gemm_a8w8": _FP8_GEMM_SHAPES,
                  "fused_add_rmsnorm": _NORM_SHAPES, "rope": _ROPE_SHAPES,
                  "topk_softmax": _TOPK_SHAPES, "batched_gemm": _BATCHED_GEMM_SHAPES,
                  "gemm_a8w8_blockscale": _BLOCKSCALE_SHAPES,
-                 "rope_gptj": _ROPE_SHAPES, "rope_partial": _ROPE_SHAPES}
+                 "rope_gptj": _ROPE_SHAPES, "rope_partial": _ROPE_SHAPES,
+                 "embedding_gather": _EMBED_SHAPES}
 VENDOR_DTYPES = ("bf16", "fp16")
 ROPE_BASE = 10000.0
 # Per-op dtype override (defaults to VENDOR_DTYPES). a8w8 GEMM sweeps fp8 + int8
@@ -452,6 +461,25 @@ def make_vendor_reference(op: str, dtype: str) -> dict:
 
         def baseline_fn(x, freqs):
             return ref_fn(x, freqs)
+
+        arity = 2
+
+    elif op == "embedding_gather":
+        # Token embedding / LM-head gather: out[t] = weight[ids[t]]. The input +
+        # output boundary of the transformer (the suite covered the block interior
+        # but neither embedding nor sampling). Baseline = torch F.embedding.
+        def get_inputs(shape, device="cuda", seed=0):
+            V, Dim, T = shape["V"], shape["Dim"], shape["T"]
+            g = torch.Generator(device=device).manual_seed(seed)
+            weight = torch.randn((V, Dim), generator=g, device=device, dtype=torch.float32).to(tdt)
+            ids = torch.randint(0, V, (T,), generator=g, device=device, dtype=torch.int64)
+            return (weight, ids)
+
+        def ref_fn(weight, ids):
+            return weight[ids.long()].to(weight.dtype)
+
+        def baseline_fn(weight, ids):
+            return F.embedding(ids.long(), weight)
 
         arity = 2
 
@@ -1029,12 +1057,41 @@ def rope_partial(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
 '''
 
 
+_EMBED_SEED = '''"""GENERATED embedding-gather seed ({dtype}). weight[V,Dim], ids[T] -> out[T,Dim].
+One program per token; copies weight[ids[t]] into out[t] in BLOCK-wide chunks. {tldt}."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _embed_kernel(w_ptr, id_ptr, o_ptr, Dim, sw, so, BLOCK: tl.constexpr):
+    t = tl.program_id(0)
+    idx = tl.load(id_ptr + t)
+    for start in range(0, Dim, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < Dim
+        x = tl.load(w_ptr + idx * sw + offs, mask=mask, other=0.0)
+        tl.store(o_ptr + t * so + offs, x, mask=mask)
+
+
+def embedding_gather(weight: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
+    T = ids.shape[0]
+    V, Dim = weight.shape
+    o = torch.empty((T, Dim), device=weight.device, dtype=weight.dtype)
+    _embed_kernel[(T,)](weight, ids, o, Dim, weight.stride(0), o.stride(0),
+                        BLOCK=1024, num_warps=4)
+    return o
+'''
+
+
 def vendor_seed_source(op: str, dtype: str) -> str:
     tldt = DTYPES[dtype][1]
     if op == "rope_gptj":
         return _ROPE_GPTJ_SEED.format(dtype=dtype, tldt=tldt)
     if op == "rope_partial":
         return _ROPE_PARTIAL_SEED.format(dtype=dtype, tldt=tldt)
+    if op == "embedding_gather":
+        return _EMBED_SEED.format(dtype=dtype, tldt=tldt)
     if op == "gemm_a8w8_blockscale":
         return _BLOCKSCALE_SEED.format(dtype=dtype)
     if op == "batched_gemm":

@@ -1,0 +1,21 @@
+task_id: rmsnorm_backward
+operation: rmsnorm_backward
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0   # bf16 gradient fidelity vs the autograd oracle
+shapes:
+  minimal: {M: 64, N: 512}
+  primary: {M: 4096, N: 4096}       # training-step RMSNorm backward, Llama-3-8B hidden
+  validation:
+    - {M: 8192, N: 5120}            # wide batch x Qwen3-ish hidden
+    - {M: 2048, N: 8192}            # long-context training row
+    - {M: 4096, N: 8191}            # non-pow2 N tail (edge, masking)
+# RMSNorm backward: (x, w, dy) -> (dx[M,N], dw[N]). dx analytic per row; dw reduces
+# over the token axis (atomics or a two-stage reduction). Correctness = SNR of both
+# gradients vs the torch AUTOGRAD oracle. Baseline (--impl reference) = torch
+# autograd backward. Adds the missing backward/training-kernel category.
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_autograd_backward

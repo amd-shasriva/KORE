@@ -254,7 +254,7 @@ def build_rft(records: Iterable[Any]) -> list[dict]:
                 )
         elif isinstance(rec, WinRecord):
             if rec.trajectory:
-                out.append({"messages": list(rec.trajectory)})
+                out.append({"messages": _canonicalize_chat(rec.trajectory)})  # parity with build_sft
                 n_win += 1
     log.metric("build_rft", rows=len(out), from_groups=n_group, from_wins=n_win)
     return out

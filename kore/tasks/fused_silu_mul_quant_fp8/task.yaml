@@ -1,0 +1,21 @@
+task_id: fused_silu_mul_quant_fp8
+operation: fused_silu_mul_quant_fp8
+dtype: fp8_e4m3fnuz
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 22.0   # fp8 e4m3fnuz gate on dequant vs the TRUE fp32 silu_mul value
+shapes:
+  minimal: {M: 64, N: 1024}         # inter = 512
+  primary: {M: 4096, N: 8192}       # inter = 4096: FFN/MoE down-proj prologue
+  validation:
+    - {M: 8192, N: 28672}           # inter = 14336 (Llama-3-8B FFN)
+    - {M: 1, N: 8192}               # decode single-token (edge S2)
+    - {M: 4096, N: 8190}            # inter = 4095, non-pow2 tail (edge S1, masking)
+# Fused silu(gate)*up -> dynamic per-token fp8 quant: in [M,2*inter] -> out[M,inter]
+# fp8 + scales[M,1] fp32. Correctness = SNR of dequant (out*scale) vs the TRUE fp32
+# silu_mul AND scale/code match vs the fp32 oracle. Baseline (--impl reference) =
+# AITER silu_and_mul + dynamic_per_token quant (two kernels + an HBM round trip).
+targets:
+  snr_db: 22.0
+  comparison_baseline: aiter_silumul_then_quant

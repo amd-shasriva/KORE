@@ -1030,6 +1030,30 @@ def _run_bench_both(ref, task_dir, shape, warmup, iters, repeat) -> int:
     return 0
 
 
+def _run_bench_all_shapes(ref, task_dir, shape_specs, warmup, iters, repeat) -> int:
+    """Time candidate+reference for ALL shapes in ONE process (one torch import).
+
+    Emits a ``SHAPE_BEGIN <spec>`` marker before each shape's CAND_/REF_median_ms
+    block (blocks are in the given order). This collapses the per-shape process
+    spawns into one, so under the per-GPU timing lock the exclusive window shrinks to
+    a single import + the tiny GPU timing — max throughput with clean, honest
+    measurements. Timing math per shape is identical to :func:`_run_bench_both`."""
+    import random
+    for spec in shape_specs:
+        shape = ref.parse_shape(spec)
+        cand = _build_bench_fn(ref, task_dir, shape, "candidate")
+        refr = _build_bench_fn(ref, task_dir, shape, "reference")
+        print(f"SHAPE_BEGIN {spec}")
+        for _ in range(max(1, repeat)):
+            w = random.randint(max(4, warmup - 3), warmup + 4)
+            it = random.randint(max(8, iters - 5), iters + 6)
+            cm = _time_median(cand, w, it)
+            rm = _time_median(refr, w, it)
+            print(f"CAND_median_ms: {cm:.4f}")
+            print(f"REF_median_ms: {rm:.4f}")
+    return 0
+
+
 def driver_main(ref, task_dir: str, argv=None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--shape", default="default")
@@ -1039,6 +1063,8 @@ def driver_main(ref, task_dir: str, argv=None) -> int:
     p.add_argument("--bench-mode", action="store_true")
     p.add_argument("--bench-both", action="store_true",
                    help="time candidate+reference back-to-back, --repeat runs, in ONE process")
+    p.add_argument("--shapes", default=None,
+                   help="semicolon-separated shape specs: bench ALL of them in one process")
     p.add_argument("--repeat", type=int, default=1,
                    help="in-process timed runs (used with --bench-both)")
     p.add_argument("--impl", default="candidate", choices=["candidate", "reference", "torch"])
@@ -1047,8 +1073,13 @@ def driver_main(ref, task_dir: str, argv=None) -> int:
     if a.bench_both:
         # fast + contention-fair timing of BOTH impls in one process, then the
         # post-timing anti-hack correctness re-verification on the (cached) candidate.
-        rc = _run_bench_both(ref, task_dir, shape, a.warmup, a.iters, a.repeat)
-        _run_correctness(ref, task_dir, shape)
+        if a.shapes:
+            specs = [s for s in a.shapes.split(";") if s != ""] or [a.shape]
+            rc = _run_bench_all_shapes(ref, task_dir, specs, a.warmup, a.iters, a.repeat)
+            _run_correctness(ref, task_dir, ref.parse_shape(specs[0]))
+        else:
+            rc = _run_bench_both(ref, task_dir, shape, a.warmup, a.iters, a.repeat)
+            _run_correctness(ref, task_dir, shape)
         return rc
     if a.bench_mode:
         rc = _run_bench(ref, task_dir, shape, a.impl, a.warmup, a.iters)

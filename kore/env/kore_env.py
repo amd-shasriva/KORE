@@ -357,35 +357,43 @@ class KoreEnv:
         wall_by_shape: dict[str, float] = {}
         base_by_shape: dict[str, float] = {}
         cvs: list[float] = []
-        use_pair = self._batch_bench_ok(driver)
-        for sh in shapes:
-            if use_pair:
-                # Fast + contention-fair: one process times BOTH impls back-to-back,
-                # n_max in-process repeats (kills ~40 per-run torch re-imports/eval).
-                cand_s, ref_s, poisoned = self._bench_pair(driver, sh, workdir, env)
-                cand = _median(cand_s) if cand_s else None
-                cand_cv = _cv_pct(cand_s) if cand_s else float("inf")
-                ref = _median(ref_s) if ref_s else None
-            else:
-                cand, cand_cv, poisoned = self._bench_multi(driver, sh, "candidate", workdir, env)
-                ref = None if poisoned else \
-                    self._bench_multi(driver, sh, "reference", workdir, env)[0]
-            # Anti-hack: the candidate bench re-verifies correctness AFTER timing.
-            # A False post-timing verdict means the kernel produced correct output
-            # for the correctness calls but garbage while timed (invocation-count
-            # timing hack) -> reject the whole eval as a hack, never reward it.
+        if self._batch_bench_ok(driver):
+            # Fast + accurate: ALL shapes timed (both impls, n_max repeats) in ONE
+            # process under a single per-GPU timing-lock hold. Contention-fair ratio +
+            # minimal exclusive window -> honest speedups at high throughput.
+            per_shape, poisoned = self._bench_all(driver, shapes, workdir, env)
             if poisoned:
-                _ev("WARN", "eval_bench_hack", task=task.task_id, shape=sh.name,
-                    source_sha=_sha12(source),
+                _ev("WARN", "eval_bench_hack", task=task.task_id, source_sha=_sha12(source),
                     reason="post-timing correctness failed (bench-time reward hack)")
                 return Observation(compiled=False, dtype=task.dtype, validation_passed=False,
                                    flagged_hack=True, hack_reason="bench-time output mismatch",
                                    error_text="reward-hack: kernel incorrect under timing")
-            if cand is not None:
-                wall_by_shape[sh.name] = cand
-                cvs.append(cand_cv)
-            if ref is not None:
-                base_by_shape[sh.name] = ref
+            for sh in shapes:
+                cand_s, ref_s = per_shape.get(sh.name, ([], []))
+                if cand_s:
+                    wall_by_shape[sh.name] = _median(cand_s)
+                    cvs.append(_cv_pct(cand_s))
+                if ref_s:
+                    base_by_shape[sh.name] = _median(ref_s)
+        else:
+            for sh in shapes:
+                cand, cand_cv, poisoned = self._bench_multi(driver, sh, "candidate", workdir, env)
+                # Anti-hack: candidate bench re-verifies correctness AFTER timing. A False
+                # post-timing verdict => correct during checks but garbage while timed
+                # (invocation-count hack) -> reject the whole eval, never reward it.
+                if poisoned:
+                    _ev("WARN", "eval_bench_hack", task=task.task_id, shape=sh.name,
+                        source_sha=_sha12(source),
+                        reason="post-timing correctness failed (bench-time reward hack)")
+                    return Observation(compiled=False, dtype=task.dtype, validation_passed=False,
+                                       flagged_hack=True, hack_reason="bench-time output mismatch",
+                                       error_text="reward-hack: kernel incorrect under timing")
+                ref = self._bench_multi(driver, sh, "reference", workdir, env)[0]
+                if cand is not None:
+                    wall_by_shape[sh.name] = cand
+                    cvs.append(cand_cv)
+                if ref is not None:
+                    base_by_shape[sh.name] = ref
         obs.wall_by_shape = wall_by_shape
         obs.baseline_by_shape = base_by_shape
         obs.cv_pct = max(cvs) if cvs else None
@@ -595,6 +603,42 @@ class KoreEnv:
             cand_med=round(_median(cand), 4) if cand else None,
             ref_med=round(_median(ref), 4) if ref else None)
         return cand, ref, False
+
+    @staticmethod
+    def _shape_spec(sh: Shape) -> str:
+        return ",".join(f"{k}={v}" for k, v in sh.dims.items()) if sh.dims else "default"
+
+    def _bench_all(self, driver: Path, shapes, workdir: Path, env: dict):
+        """Time ALL shapes (candidate+reference, ``max_variance_runs`` repeats each) in
+        ONE ``--bench-both --shapes`` process, under a SINGLE per-GPU timing-lock hold.
+
+        Collapsing the per-shape spawns to one import means the exclusive (locked)
+        window is ~one torch import + the tiny GPU timing, so oversubscribed workers
+        barely wait -> max throughput with clean, contention-free measurements.
+        Returns ``({shape_name: (cand_samples, ref_samples)}, poisoned)``."""
+        n_max = max(1, self.cfg.max_variance_runs)
+        specs = [self._shape_spec(sh) for sh in shapes]
+        cmd = [sys.executable, str(driver), "--bench-both", "--shapes", ";".join(specs),
+               "--warmup", str(self.cfg.warmup_iters), "--iters", str(self.cfg.bench_iters),
+               "--repeat", str(n_max)]
+        with self._timing_lock(), _LOG.timer("bench_all", task=self.task.task_id,
+                                             n_shapes=len(shapes)):
+            rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
+        if timed or rc != 0:
+            _ev("DEBUG", "bench_all", task=self.task.task_id, ok=False, rc=rc)
+            return {}, False
+        ac = _last(_ALLCLOSE, out)
+        snr = _last(_SNR, out)
+        if (ac and ac.group(1).lower() == "false") or \
+           (snr and float(snr.group(1)) < self._snr_threshold):
+            return {}, True
+        blocks = out.split("SHAPE_BEGIN")[1:]  # per-shape, in the order we passed them
+        result: dict[str, tuple] = {}
+        for sh, block in zip(shapes, blocks):
+            cand = [float(m.group(1)) for m in _CAND_MED.finditer(block)]
+            ref = [float(m.group(1)) for m in _REF_MED.finditer(block)]
+            result[sh.name] = (cand, ref)
+        return result, False
 
     def _bench_multi(self, driver: Path, sh: Shape, impl: str, workdir: Path, env: dict):
         """Bench a (shape, impl) ``min..max_variance_runs`` times; return

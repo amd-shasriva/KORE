@@ -22,7 +22,9 @@ from kore.tasks._genops import DTYPES, _parse_shape
 # op -> family metadata; each op has a bespoke oracle/baseline/seed (below).
 VENDOR_OPS: tuple[str, ...] = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul",
                                "softmax", "gemm_a8w8", "fused_add_rmsnorm", "rope",
-                               "topk_softmax", "batched_gemm", "gemm_a8w8_blockscale")
+                               "topk_softmax", "batched_gemm", "gemm_a8w8_blockscale",
+                               # v3 frontier additions (RoPE variants; torch.compile bar)
+                               "rope_gptj", "rope_partial")
 
 # ops whose vendor BASELINE mutates its inputs in place (so the bench loop must
 # feed a fresh clone each timed call — see _genops._run_bench mutates_input path).
@@ -91,7 +93,8 @@ VENDOR_SHAPES = {"rmsnorm": _NORM_SHAPES, "layernorm": _NORM_SHAPES,
                  "softmax": _SOFTMAX_SHAPES, "gemm_a8w8": _FP8_GEMM_SHAPES,
                  "fused_add_rmsnorm": _NORM_SHAPES, "rope": _ROPE_SHAPES,
                  "topk_softmax": _TOPK_SHAPES, "batched_gemm": _BATCHED_GEMM_SHAPES,
-                 "gemm_a8w8_blockscale": _BLOCKSCALE_SHAPES}
+                 "gemm_a8w8_blockscale": _BLOCKSCALE_SHAPES,
+                 "rope_gptj": _ROPE_SHAPES, "rope_partial": _ROPE_SHAPES}
 VENDOR_DTYPES = ("bf16", "fp16")
 ROPE_BASE = 10000.0
 # Per-op dtype override (defaults to VENDOR_DTYPES). a8w8 GEMM sweeps fp8 + int8
@@ -384,6 +387,74 @@ def make_vendor_reference(op: str, dtype: str) -> dict:
             return aiter.gemm_a8w8_blockscale(xq, wq, xs, ws, dtype=torch.bfloat16)
 
         arity = 4
+
+    elif op == "rope_gptj":
+        # GPT-J / interleaved RoPE: rotate adjacent pairs (x[2i], x[2i+1]) by angle[i]
+        # (vs NEOX which rotates x[i] with x[i+D/2]). Many models (GPT-J/NeoX-interleaved)
+        # use this layout. No dedicated aiter kernel -> torch is the honest bar.
+        def get_inputs(shape, device="cuda", seed=0):
+            S, B, H, D = shape["S"], shape["B"], shape["H"], shape["D"]
+            g = torch.Generator(device=device).manual_seed(seed)
+            x = torch.randn((S, B, H, D), generator=g, device=device, dtype=torch.float32).to(tdt)
+            inv_freq = 1.0 / (ROPE_BASE ** (torch.arange(0, D, 2, device=device,
+                                                         dtype=torch.float32) / D))
+            t = torch.arange(S, device=device, dtype=torch.float32)
+            freqs = torch.einsum("i,j->ij", t, inv_freq).view(S, 1, 1, D // 2).contiguous()
+            return (x, freqs)
+
+        def ref_fn(x, freqs):
+            xf = x.float()
+            cos = torch.cos(freqs).float()   # [S,1,1,D//2]
+            sin = torch.sin(freqs).float()
+            x1 = xf[..., 0::2]               # even lanes
+            x2 = xf[..., 1::2]               # odd lanes
+            o1 = x1 * cos - x2 * sin
+            o2 = x2 * cos + x1 * sin
+            out = torch.empty_like(xf)
+            out[..., 0::2] = o1
+            out[..., 1::2] = o2
+            return out.to(x.dtype)
+
+        def baseline_fn(x, freqs):
+            return ref_fn(x, freqs)          # torch bar (no vendor gptj kernel)
+
+        arity = 2
+
+    elif op == "rope_partial":
+        # Partial-rotary RoPE (GPT-NeoX partial / Phi-style): rotate only the first
+        # rotary_dim = D//2 lanes (NEOX half-split within that band), pass the rest
+        # through unchanged. Common in models that keep part of the head-dim un-rotated.
+        def get_inputs(shape, device="cuda", seed=0):
+            S, B, H, D = shape["S"], shape["B"], shape["H"], shape["D"]
+            rot = D // 2                     # rotary_dim
+            g = torch.Generator(device=device).manual_seed(seed)
+            x = torch.randn((S, B, H, D), generator=g, device=device, dtype=torch.float32).to(tdt)
+            inv_freq = 1.0 / (ROPE_BASE ** (torch.arange(0, rot, 2, device=device,
+                                                         dtype=torch.float32) / rot))
+            t = torch.arange(S, device=device, dtype=torch.float32)
+            freqs = torch.einsum("i,j->ij", t, inv_freq).view(S, 1, 1, rot // 2).contiguous()
+            return (x, freqs)
+
+        def ref_fn(x, freqs):
+            xf = x.float()
+            D = xf.shape[-1]
+            rot = D // 2
+            cos = torch.cos(freqs).float()
+            sin = torch.sin(freqs).float()
+            cos = torch.cat([cos, cos], dim=-1)   # [S,1,1,rot]
+            sin = torch.cat([sin, sin], dim=-1)
+            xr = xf[..., :rot]
+            xp = xf[..., rot:]                     # pass-through (un-rotated) band
+            x1, x2 = xr[..., : rot // 2], xr[..., rot // 2:]
+            rotd = torch.cat([-x2, x1], dim=-1)
+            out_r = xr * cos + rotd * sin
+            return torch.cat([out_r, xp], dim=-1).to(x.dtype)
+
+        def baseline_fn(x, freqs):
+            return ref_fn(x, freqs)
+
+        arity = 2
+
     else:
         raise ValueError(f"unknown vendor op {op!r}")
 
@@ -878,8 +949,92 @@ def gemm_a8w8_blockscale(xq, wq, x_scale, w_scale) -> torch.Tensor:
 '''
 
 
+_ROPE_GPTJ_SEED = '''"""GENERATED GPT-J (interleaved) RoPE seed ({dtype}).
+x[S,B,H,D], freqs[S,1,1,D//2] angles. Rotates interleaved pairs (x[2i], x[2i+1])
+by angle[i]: o[2i]=x1*cos-x2*sin, o[2i+1]=x2*cos+x1*sin. fp32 math, {tldt} store.
+Regenerate via generate_vendor_ops.py."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _rope_gptj_kernel(x_ptr, f_ptr, y_ptr, B, H, D,
+                      sxs, sxb, sxh, sxd, sfs, HALF: tl.constexpr):
+    pid = tl.program_id(0)
+    h = pid % H
+    tmp = pid // H
+    b = tmp % B
+    s = tmp // B
+    base = s * sxs + b * sxb + h * sxh
+    offs = tl.arange(0, HALF)
+    x1 = tl.load(x_ptr + base + (2 * offs) * sxd).to(tl.float32)
+    x2 = tl.load(x_ptr + base + (2 * offs + 1) * sxd).to(tl.float32)
+    theta = tl.load(f_ptr + s * sfs + offs).to(tl.float32)
+    cos = tl.cos(theta)
+    sin = tl.sin(theta)
+    tl.store(y_ptr + base + (2 * offs) * sxd, (x1 * cos - x2 * sin).to({tldt}))
+    tl.store(y_ptr + base + (2 * offs + 1) * sxd, (x2 * cos + x1 * sin).to({tldt}))
+
+
+def rope_gptj(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    S, B, H, D = x.shape
+    y = torch.empty_like(x)
+    f = freqs.reshape(S, D // 2)
+    _rope_gptj_kernel[(S * B * H,)](x, f, y, B, H, D,
+                                    x.stride(0), x.stride(1), x.stride(2), x.stride(3),
+                                    f.stride(0), HALF=D // 2, num_warps=4)
+    return y
+'''
+
+
+_ROPE_PARTIAL_SEED = '''"""GENERATED partial-rotary RoPE seed ({dtype}).
+x[S,B,H,D]; rotate only the first rotary_dim = D//2 lanes (NEOX half-split within
+that band: pair i with i+rot/2), pass the remaining lanes through unchanged.
+freqs[S,1,1,rot//2]. fp32 math, {tldt} store. Regenerate via generate_vendor_ops.py."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _rope_partial_kernel(x_ptr, f_ptr, y_ptr, B, H, D,
+                         sxs, sxb, sxh, sxd, sfs, ROT: tl.constexpr, QUART: tl.constexpr):
+    pid = tl.program_id(0)
+    h = pid % H
+    tmp = pid // H
+    b = tmp % B
+    s = tmp // B
+    base = s * sxs + b * sxb + h * sxh
+    offs = tl.arange(0, QUART)                       # rot//2 rotation angles
+    x1 = tl.load(x_ptr + base + offs * sxd).to(tl.float32)
+    x2 = tl.load(x_ptr + base + (offs + QUART) * sxd).to(tl.float32)
+    theta = tl.load(f_ptr + s * sfs + offs).to(tl.float32)
+    cos = tl.cos(theta)
+    sin = tl.sin(theta)
+    tl.store(y_ptr + base + offs * sxd, (x1 * cos - x2 * sin).to({tldt}))
+    tl.store(y_ptr + base + (offs + QUART) * sxd, (x2 * cos + x1 * sin).to({tldt}))
+    poffs = ROT + tl.arange(0, ROT)                  # pass-through lanes [rot, D)
+    xp = tl.load(x_ptr + base + poffs * sxd, mask=poffs < D, other=0.0)
+    tl.store(y_ptr + base + poffs * sxd, xp, mask=poffs < D)
+
+
+def rope_partial(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    S, B, H, D = x.shape
+    rot = D // 2
+    y = torch.empty_like(x)
+    f = freqs.reshape(S, rot // 2)
+    _rope_partial_kernel[(S * B * H,)](x, f, y, B, H, D,
+                                       x.stride(0), x.stride(1), x.stride(2), x.stride(3),
+                                       f.stride(0), ROT=rot, QUART=rot // 2, num_warps=4)
+    return y
+'''
+
+
 def vendor_seed_source(op: str, dtype: str) -> str:
     tldt = DTYPES[dtype][1]
+    if op == "rope_gptj":
+        return _ROPE_GPTJ_SEED.format(dtype=dtype, tldt=tldt)
+    if op == "rope_partial":
+        return _ROPE_PARTIAL_SEED.format(dtype=dtype, tldt=tldt)
     if op == "gemm_a8w8_blockscale":
         return _BLOCKSCALE_SEED.format(dtype=dtype)
     if op == "batched_gemm":

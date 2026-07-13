@@ -156,9 +156,15 @@ def run_parallel_datagen(task_ids, kinds, data_root, counts, *, n_workers: int,
     n_gpus = max(1, int(n_gpus))
     if gpu_ids:
         gpu_ids = [int(g) for g in gpu_ids]
-        shards = shard_tasks(task_ids, len(gpu_ids))
+        # Datagen is TEACHER-bound (API latency), not GPU-bound, so allow MORE workers
+        # than pinned GPUs (teacher-parallel): round-robin the extra workers onto the
+        # SAME pinned (free) GPUs. Verification oversubscribes those GPUs but the
+        # per-GPU timing lock keeps measurements clean, and we NEVER touch a GPU
+        # outside gpu_ids (so a neighbor's GPU0 job is never disturbed).
+        nw = max(int(n_workers) if n_workers else len(gpu_ids), len(gpu_ids))
+        shards = shard_tasks(task_ids, nw)
         payloads = [{
-            "gpu_id": gpu_ids[w], "task_ids": shards[w], "kinds": list(kinds),
+            "gpu_id": gpu_ids[w % len(gpu_ids)], "task_ids": shards[w], "kinds": list(kinds),
             "data_root": str(data_root), "counts": counts,
             "teacher_kind": teacher_kind, "model_teacher": model_teacher,
         } for w in range(len(shards))]

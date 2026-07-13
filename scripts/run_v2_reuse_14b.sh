@@ -50,12 +50,19 @@ export KORE_REVERIFY_WORKERS_PER_GPU="${KORE_REVERIFY_WORKERS_PER_GPU:-6}"
 # corrupt wall-clock measurements — clean CV + honest speedups (set 0 to disable).
 export KORE_TIMING_LOCK="${KORE_TIMING_LOCK:-1}"
 
-# Optional: attach rocprof counters for grounded reasoning (adds profiling cost).
-GROUND_FLAG=""
-[ "${GROUND_REASONING:-0}" = "1" ] && GROUND_FLAG="--ground-reasoning"
+# PMC-grounded reasoning (Pillar 4): profile winner+parent per group (rocprofv3) so
+# gold-win CoT is grounded in REAL measured bottlenecks/deltas. ON by default (frontier,
+# no shortcuts); set GROUND_REASONING=0 to skip its rocprof cost.
+GROUND_FLAG="--ground-reasoning"
+[ "${GROUND_REASONING:-1}" = "0" ] && GROUND_FLAG=""
+
+# Datagen is TEACHER-bound (~22s/Claude call, ~260 calls/task), not GPU-bound. Run
+# many more teacher streams than GPUs (verification oversubscribes the GPUs, but the
+# per-GPU timing lock keeps measurements clean). Default 3x the GPU count.
+DGW="${KORE_DATAGEN_WORKERS:-15}"
 
 GPUS="${GPU_IDS:-}"   # empty -> campaign auto-detects FREE GPUs via rocm-smi
-echo "[run_v2_reuse_14b] repo=$REPO_ROOT  gpu-ids='${GPUS:-auto-free}'  ground=${GROUND_REASONING:-0}"
+echo "[run_v2_reuse_14b] repo=$REPO_ROOT  gpu-ids='${GPUS:-auto-free}'  ground=${GROUND_REASONING:-1}  datagen-workers=$DGW"
 
 python scripts/run_campaign.py \
   --model Qwen/Qwen3-14B \
@@ -63,6 +70,7 @@ python scripts/run_campaign.py \
   --adaptive-steps \
   --stages reverify,datagen,build,midtrain,sft,dpo,grpo,soup,eval \
   --gpu-ids "$GPUS" \
+  --datagen-workers "$DGW" \
   $GROUND_FLAG \
   --data-root data/full14b \
   --midtrain-out runs/full/midtrain \

@@ -427,6 +427,11 @@ class KoreEnv:
         try:
             from kore.verifier.parsers.rocprofv3 import parse_rocprofv3_csv
             from kore.verifier.pmc import COUNTER_SETS
+            try:
+                from kore.verifier.pmc import counter_passes
+                passes = counter_passes("grounding")   # real gfx942 BW/L2/occupancy set
+            except Exception:  # noqa: BLE001 - older pmc: single-pass fallback
+                passes = [COUNTER_SETS["full"]]
         except Exception:  # noqa: BLE001
             return None
         sh = shape or self.task.shape("primary") or self.task.shape("minimal") or (
@@ -441,26 +446,35 @@ class KoreEnv:
             os.chmod(workdir / "kernel.py", 0o444)
             driver = workdir / "driver.py"
             env = self._env()
-            outdir = _tmp.mkdtemp(prefix="pmc_cand_", dir=str(workdir))
-            cmd = ["rocprofv3", "--pmc", *COUNTER_SETS["full"], "-d", outdir,
-                   "--output-format", "csv", "--", sys.executable, str(driver),
-                   "--bench-mode", "--impl", "candidate", "--warmup", "2", "--iters", "3",
-                   *sh.as_args()]
-            rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
-            if timed or rc != 0:
-                return None
-            csvs = _glob.glob(os.path.join(outdir, "**", "*counter_collection.csv"),
-                              recursive=True) or [
-                c for c in _glob.glob(os.path.join(outdir, "**", "*.csv"), recursive=True)
-                if "agent_info" not in os.path.basename(c)]
-            agg: dict[str, int] = {}
-            for c in csvs:
-                try:
-                    for k in parse_rocprofv3_csv(c):
-                        for name, val in k.counters.items():
-                            agg[name] = agg.get(name, 0) + int(val)
-                except Exception:  # noqa: BLE001
-                    pass
+            agg: dict = {}
+            # The grounding set spans SQ+GRBM+TCC and cannot be one --pmc pass, so run
+            # one rocprofv3 invocation per pass and merge the disjoint counter dicts.
+            for pcounters in passes:
+                outdir = _tmp.mkdtemp(prefix="pmc_cand_", dir=str(workdir))
+                cmd = ["rocprofv3", "--pmc", *pcounters, "-d", outdir,
+                       "--output-format", "csv", "--", sys.executable, str(driver),
+                       "--bench-mode", "--impl", "candidate", "--warmup", "2", "--iters", "3",
+                       *sh.as_args()]
+                rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
+                if timed or rc != 0:
+                    continue  # a failed pass never aborts grounding; keep what we got
+                csvs = _glob.glob(os.path.join(outdir, "**", "*counter_collection.csv"),
+                                  recursive=True) or [
+                    c for c in _glob.glob(os.path.join(outdir, "**", "*.csv"), recursive=True)
+                    if "agent_info" not in os.path.basename(c)]
+                for c in csvs:
+                    try:
+                        for k in parse_rocprofv3_csv(c):
+                            for name, val in k.counters.items():
+                                agg[name] = agg.get(name, 0) + int(val)
+                            # Capture resource fields (VGPR/LDS/warps) so grounded
+                            # reasoning + roofline can compute occupancy.
+                            for attr in ("vgpr_count", "lds_bytes", "num_warps"):
+                                v = getattr(k, attr, None)
+                                if v is not None and attr not in agg:
+                                    agg[attr] = v
+                    except Exception:  # noqa: BLE001
+                        pass
             return agg or None
         except Exception:  # noqa: BLE001
             return None

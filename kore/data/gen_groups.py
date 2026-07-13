@@ -216,6 +216,10 @@ def generate_groups(
                     "wall_us": r["wall_us"],
                     "snr_db": r["snr_db"],
                     "rank": rank_of[i],
+                    # Absolute speedup vs the production baseline (enables DPO
+                    # baseline-anchoring + margin/family up-weighting on real data).
+                    "speedup": r.get("speedup"),
+                    "baseline_wall_us": r.get("baseline_wall_us"),
                 }
                 for i, r in enumerate(results)
             ]

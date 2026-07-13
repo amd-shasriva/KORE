@@ -1,0 +1,22 @@
+task_id: fused_rmsnorm_quant_fp8
+operation: fused_rmsnorm_quant_fp8
+dtype: fp8_e4m3fnuz
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 22.0   # fp8 e4m3fnuz gate on dequant vs the TRUE fp32 normed value
+shapes:
+  minimal: {M: 64, N: 512}
+  primary: {M: 4096, N: 4096}       # Llama-3-8B hidden: RMSNorm -> fp8 GEMM prologue
+  validation:
+    - {M: 8192, N: 5120}            # wide batch x Qwen3-ish hidden
+    - {M: 1, N: 8192}               # decode single-token (edge S2)
+    - {M: 4096, N: 8191}            # non-pow2 N tail (edge S1, masking)
+# Fused RMSNorm -> dynamic per-token fp8 quant: out[M,N] fp8 + scales[M,1] fp32.
+# Correctness = SNR of dequant (out*scale) vs the TRUE fp32 RMSNorm activation
+# AND scale/code match vs the fp32 oracle. Baseline (--impl reference) = AITER
+# rms_norm + dynamic_per_token quant (two kernels + an HBM round trip); the fused
+# kernel wins by doing it in one pass.
+targets:
+  snr_db: 22.0
+  comparison_baseline: aiter_rmsnorm_then_quant

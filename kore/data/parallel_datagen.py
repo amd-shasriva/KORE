@@ -142,22 +142,36 @@ def _worker(payload: dict) -> list[tuple]:
 # --------------------------------------------------------------------------- #
 def run_parallel_datagen(task_ids, kinds, data_root, counts, *, n_workers: int,
                          n_gpus: int, teacher_kind: str = "claude",
-                         model_teacher=None, log=print) -> dict:
+                         model_teacher=None, gpu_ids=None, log=print) -> dict:
     """Run datagen for ``kinds`` over ``task_ids`` across ``n_workers`` GPU-pinned
-    processes. Resumable (existing shards skipped). Returns a summary dict."""
+    processes. Resumable (existing shards skipped). Returns a summary dict.
+
+    ``gpu_ids``: explicit PHYSICAL GPU ids to pin to (e.g. the free ones on a shared
+    node); when given, one worker per id and tasks are round-robined across exactly
+    those devices. When None, falls back to ``w % n_gpus`` over ``0..n_gpus-1``.
+    """
     import multiprocessing as mp
 
     task_ids = list(task_ids)
     n_gpus = max(1, int(n_gpus))
-    shards = shard_tasks(task_ids, n_workers)
-    payloads = [{
-        "gpu_id": w % n_gpus, "task_ids": shards[w], "kinds": list(kinds),
-        "data_root": str(data_root), "counts": counts,
-        "teacher_kind": teacher_kind, "model_teacher": model_teacher,
-    } for w in range(len(shards))]
+    if gpu_ids:
+        gpu_ids = [int(g) for g in gpu_ids]
+        shards = shard_tasks(task_ids, len(gpu_ids))
+        payloads = [{
+            "gpu_id": gpu_ids[w], "task_ids": shards[w], "kinds": list(kinds),
+            "data_root": str(data_root), "counts": counts,
+            "teacher_kind": teacher_kind, "model_teacher": model_teacher,
+        } for w in range(len(shards))]
+    else:
+        shards = shard_tasks(task_ids, n_workers)
+        payloads = [{
+            "gpu_id": w % n_gpus, "task_ids": shards[w], "kinds": list(kinds),
+            "data_root": str(data_root), "counts": counts,
+            "teacher_kind": teacher_kind, "model_teacher": model_teacher,
+        } for w in range(len(shards))]
 
     log(f"parallel datagen: {len(task_ids)} tasks x {list(kinds)} across "
-        f"{len(payloads)} workers on {n_gpus} GPUs")
+        f"{len(payloads)} workers on GPUs {gpu_ids or list(range(n_gpus))}")
     summary = {"done": 0, "skip": 0, "error": 0, "records": 0, "tasks": len(task_ids)}
     ctxmp = mp.get_context("spawn")
     with ctxmp.Pool(len(payloads)) as pool:

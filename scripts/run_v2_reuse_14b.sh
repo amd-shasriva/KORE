@@ -20,6 +20,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
+# Use the KORE venv for python/accelerate/torchrun (bare `python` may be the system
+# one without torch). Override with KORE_VENV=/path/to/venv if different.
+KORE_VENV="${KORE_VENV:-/home/shasriva/kore-venv}"
+if [ -x "$KORE_VENV/bin/python" ]; then
+  export PATH="$KORE_VENV/bin:$PATH"
+fi
+echo "[run_v2_reuse_14b] python=$(command -v python)"
+
 # Clear any stale device pin from the calling shell; per-stage pinning is done via
 # --gpu-ids (datagen/reverify re-pin per worker; FSDP training pins via GPU_IDS).
 unset HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES

@@ -723,10 +723,20 @@ def _stage_reverify(ctx):
     if not task_ids:
         _log("reverify", "no existing shards to re-verify (fresh run) — skipping")
         return
-    gpus = _gpu_ids(ctx) or [0]
+    phys = _gpu_ids(ctx) or [0]
+    # Oversubscribe: reverify is compile/CPU-bound with ~idle GPUs, so run K workers
+    # per physical GPU (K = KORE_REVERIFY_WORKERS_PER_GPU) to use the many CPU cores.
+    # Timing stays honest because the genops --bench-both path measures candidate +
+    # reference back-to-back in one process (contention-fair ratio).
+    try:
+        per = max(1, int(os.environ.get("KORE_REVERIFY_WORKERS_PER_GPU", "1")))
+    except ValueError:
+        per = 1
+    gpus = phys * per
     ground = bool(getattr(ctx["args"], "ground_reasoning", False))
-    _log("reverify", f"re-verifying {len(task_ids)} tasks on GPUs {gpus} "
-                     f"(reuse v1 kernels; strong baseline + adversarial; ground={ground})")
+    _log("reverify", f"re-verifying {len(task_ids)} tasks on {len(gpus)} workers "
+                     f"({per}/GPU x physical {phys}); strong baseline + adversarial; "
+                     f"ground={ground}")
     summary = run_reverify(data_root, task_ids, gpus, ground=ground,
                            rigorous=True, log_fn=lambda m: _log("reverify", m))
     LOG.event("reverify_done", **summary)

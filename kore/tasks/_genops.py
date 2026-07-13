@@ -789,6 +789,28 @@ def _flush_l2() -> None:
     _flush_l2._buf.zero_()
 
 
+def _time_median(fn, warmup: int, iters: int) -> float:
+    """Warmup, then time ``iters`` cold-cache iterations; return the median ms.
+
+    Same protocol as :func:`_time_fn` (L2 flush per iter under KORE_BENCH_COLD,
+    CUDA-event timing, median of sorted samples) but RETURNS the median instead of
+    printing — so a single process can time several impls/runs back-to-back."""
+    import torch
+    cold = os.environ.get("KORE_BENCH_COLD", "1") != "0"
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    st = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    en = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    for i in range(iters):
+        if cold:
+            _flush_l2()
+        st[i].record(); fn(); en[i].record()
+    torch.cuda.synchronize()
+    times = sorted(s.elapsed_time(e) for s, e in zip(st, en))
+    return times[len(times) // 2]
+
+
 def _time_fn(fn, warmup: int, iters: int) -> int:
     import torch
     cold = os.environ.get("KORE_BENCH_COLD", "1") != "0"
@@ -965,18 +987,47 @@ def _run_correctness(ref, task_dir, shape) -> int:
     return 0
 
 
-def _run_bench(ref, task_dir, shape, impl, warmup, iters) -> int:
+def _build_bench_fn(ref, task_dir, shape, impl):
+    """Build the no-arg callable timed for ``impl`` (candidate|reference).
+
+    Inputs are drawn once (seed=0) and shared, so candidate and reference are timed
+    on the SAME data. In-place ops (``mutates_input``) get a fresh clone per call,
+    applied identically to both impls so the speedup ratio stays fair."""
     inputs = ref.get_inputs(shape, device="cuda", seed=0)
     base = ref.baseline_fn if impl in ("reference", "torch") else \
         _load_candidate(task_dir, ref.entry_name)
     if getattr(ref, "mutates_input", False):
-        # In-place ops (e.g. fused_add_rmsnorm) mutate their inputs, so a repeated
-        # timing loop must feed a fresh clone each call. The clone cost is applied
-        # IDENTICALLY to candidate + baseline, so the speedup ratio stays fair.
-        fn = lambda: base(*_clone_inputs(inputs))
-    else:
-        fn = lambda: base(*inputs)
-    return _time_fn(fn, warmup, iters)
+        return lambda: base(*_clone_inputs(inputs))
+    return lambda: base(*inputs)
+
+
+def _run_bench(ref, task_dir, shape, impl, warmup, iters) -> int:
+    return _time_fn(_build_bench_fn(ref, task_dir, shape, impl), warmup, iters)
+
+
+def _run_bench_both(ref, task_dir, shape, warmup, iters, repeat) -> int:
+    """Time candidate AND reference in ONE process, ``repeat`` runs, interleaved.
+
+    This is the fast + rigorous timing path: a single ``python driver.py`` invocation
+    (one torch import) does all ``repeat`` timed runs for BOTH impls, printing
+    ``CAND_median_ms:`` / ``REF_median_ms:`` per run. Because candidate and reference
+    are timed BACK-TO-BACK within each run, any machine load (GPU oversubscription)
+    hits both equally, so the speedup RATIO stays fair even under heavy concurrency —
+    unlike separate per-impl processes whose windows can see different contention.
+    Warmup/iters are randomized per run (same window for both impls in a run) to
+    defeat fixed-call-index bench sniffing. Median-of-medians + CV are computed by
+    the caller from the emitted samples."""
+    import random
+    cand = _build_bench_fn(ref, task_dir, shape, "candidate")
+    refr = _build_bench_fn(ref, task_dir, shape, "reference")
+    for _ in range(max(1, repeat)):
+        w = random.randint(max(4, warmup - 3), warmup + 4)
+        it = random.randint(max(8, iters - 5), iters + 6)
+        cm = _time_median(cand, w, it)
+        rm = _time_median(refr, w, it)
+        print(f"CAND_median_ms: {cm:.4f}")
+        print(f"REF_median_ms: {rm:.4f}")
+    return 0
 
 
 def driver_main(ref, task_dir: str, argv=None) -> int:
@@ -986,9 +1037,19 @@ def driver_main(ref, task_dir: str, argv=None) -> int:
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--iters", type=int, default=30)
     p.add_argument("--bench-mode", action="store_true")
+    p.add_argument("--bench-both", action="store_true",
+                   help="time candidate+reference back-to-back, --repeat runs, in ONE process")
+    p.add_argument("--repeat", type=int, default=1,
+                   help="in-process timed runs (used with --bench-both)")
     p.add_argument("--impl", default="candidate", choices=["candidate", "reference", "torch"])
     a = p.parse_args(argv)
     shape = ref.parse_shape(a.shape)
+    if a.bench_both:
+        # fast + contention-fair timing of BOTH impls in one process, then the
+        # post-timing anti-hack correctness re-verification on the (cached) candidate.
+        rc = _run_bench_both(ref, task_dir, shape, a.warmup, a.iters, a.repeat)
+        _run_correctness(ref, task_dir, shape)
+        return rc
     if a.bench_mode:
         rc = _run_bench(ref, task_dir, shape, a.impl, a.warmup, a.iters)
         # post-timing correctness re-verification (anti stateful timing hack): runs

@@ -62,6 +62,9 @@ def _sha12(source: str) -> str:
 _SNR = re.compile(r"SNR:\s*([-\d.eE]+)")
 _ALLCLOSE = re.compile(r"allclose:\s*(True|False)", re.IGNORECASE)
 _MEDIAN = re.compile(r"median_ms:\s*([-\d.eE]+)")
+# Batched (--bench-both) per-impl medians: candidate + reference timed in ONE process.
+_CAND_MED = re.compile(r"CAND_median_ms:\s*([-\d.eE]+)")
+_REF_MED = re.compile(r"REF_median_ms:\s*([-\d.eE]+)")
 # Candidate import/compile failure (the kernel's fault).
 _COMPILE_ERR = re.compile(
     r"(SyntaxError|CompilationError|triton\..*Error|IndentationError|"
@@ -352,8 +355,19 @@ class KoreEnv:
         wall_by_shape: dict[str, float] = {}
         base_by_shape: dict[str, float] = {}
         cvs: list[float] = []
+        use_pair = self._batch_bench_ok(driver)
         for sh in shapes:
-            cand, cand_cv, poisoned = self._bench_multi(driver, sh, "candidate", workdir, env)
+            if use_pair:
+                # Fast + contention-fair: one process times BOTH impls back-to-back,
+                # n_max in-process repeats (kills ~40 per-run torch re-imports/eval).
+                cand_s, ref_s, poisoned = self._bench_pair(driver, sh, workdir, env)
+                cand = _median(cand_s) if cand_s else None
+                cand_cv = _cv_pct(cand_s) if cand_s else float("inf")
+                ref = _median(ref_s) if ref_s else None
+            else:
+                cand, cand_cv, poisoned = self._bench_multi(driver, sh, "candidate", workdir, env)
+                ref = None if poisoned else \
+                    self._bench_multi(driver, sh, "reference", workdir, env)[0]
             # Anti-hack: the candidate bench re-verifies correctness AFTER timing.
             # A False post-timing verdict means the kernel produced correct output
             # for the correctness calls but garbage while timed (invocation-count
@@ -365,7 +379,6 @@ class KoreEnv:
                 return Observation(compiled=False, dtype=task.dtype, validation_passed=False,
                                    flagged_hack=True, hack_reason="bench-time output mismatch",
                                    error_text="reward-hack: kernel incorrect under timing")
-            ref, _, _ = self._bench_multi(driver, sh, "reference", workdir, env)
             if cand is not None:
                 wall_by_shape[sh.name] = cand
                 cvs.append(cand_cv)
@@ -504,6 +517,55 @@ class KoreEnv:
         score = _pr.profile_efficiency_score(cand, ref)
         _ev("DEBUG", "profile_score", task=self.task.task_id, score=score)
         return score
+
+    def _batch_bench_ok(self, driver: Path) -> bool:
+        """True iff this task uses the shared genops driver (supports ``--bench-both``).
+
+        Detected once by scanning the driver for ``driver_main`` (all generated
+        ``gen_*``/``genv_*`` tasks route through it). Bespoke drivers fall back to the
+        proven per-impl path. Set ``KORE_NO_BENCH_BOTH=1`` to force the legacy path
+        (used for the head-to-head timing-parity validation)."""
+        if os.environ.get("KORE_NO_BENCH_BOTH", "").strip().lower() in ("1", "true", "yes"):
+            return False
+        v = getattr(self, "_batch_ok_cache", None)
+        if v is None:
+            try:
+                v = "driver_main" in Path(driver).read_text()
+            except Exception:  # noqa: BLE001
+                v = False
+            self._batch_ok_cache = v
+        return v
+
+    def _bench_pair(self, driver: Path, sh: Shape, workdir: Path, env: dict):
+        """Time candidate AND reference in ONE ``--bench-both`` process (``max_variance_runs``
+        in-process repeats). Returns ``(cand_samples, ref_samples, poisoned)``.
+
+        Because both impls are timed back-to-back in the same process, external GPU
+        load hits them equally -> the speedup RATIO stays fair under oversubscription,
+        while collapsing ~10 per-shape subprocess spawns (2 impls x ~5 runs) into one.
+        ``poisoned`` mirrors the per-impl path: a False/low post-timing candidate
+        verdict is a bench-time reward hack."""
+        n_max = max(1, self.cfg.max_variance_runs)
+        cmd = [sys.executable, str(driver), "--bench-both",
+               "--warmup", str(self.cfg.warmup_iters), "--iters", str(self.cfg.bench_iters),
+               "--repeat", str(n_max), *sh.as_args()]
+        with _LOG.timer("bench_pair", task=self.task.task_id, shape=sh.name):
+            rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
+        if timed or rc != 0:
+            _ev("DEBUG", "bench_pair", task=self.task.task_id, shape=sh.name, ok=False, rc=rc)
+            return [], [], False
+        ac = _last(_ALLCLOSE, out)
+        snr = _last(_SNR, out)
+        if (ac and ac.group(1).lower() == "false") or \
+           (snr and float(snr.group(1)) < self._snr_threshold):
+            return None, None, True
+        cand = [float(m.group(1)) for m in _CAND_MED.finditer(out)]
+        ref = [float(m.group(1)) for m in _REF_MED.finditer(out)]
+        _ev("DEBUG", "bench_pair", task=self.task.task_id, shape=sh.name,
+            cand_runs=len(cand), ref_runs=len(ref),
+            cand_med=round(_median(cand), 4) if cand else None,
+            ref_med=round(_median(ref), 4) if ref else None)
+        return cand, ref, False
 
     def _bench_multi(self, driver: Path, sh: Shape, impl: str, workdir: Path, env: dict):
         """Bench a (shape, impl) ``min..max_variance_runs`` times; return

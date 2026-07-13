@@ -22,6 +22,10 @@ Derived shards (``_gold_*`` / ``_repair_*``) are skipped — the build stage re-
 them from the re-verified groups. Rigor is supplied by the environment
 (``verify_rigor.set_rigorous_verification`` sets KORE_VERIFIED_CORRECTNESS /
 KORE_COMPILE_BASELINE / KORE_SHAPE_AUGMENT, inherited by the verifier subprocess).
+
+The env is built with ``use_replay=False`` so every eval is MEASURED fresh: the
+persistent ``runs/replay_*.jsonl`` cache holds v1 WEAK-baseline observations, and
+serving those would silently turn the re-baseline into a no-op.
 """
 
 from __future__ import annotations
@@ -202,7 +206,13 @@ def _worker(payload: dict) -> list[tuple]:
             continue
         try:
             task = get_task(tid)
-            env = KoreEnv(task, gpu=int(gpu))
+            # Pinning mirrors parallel_datagen's PROVEN pattern: HIP_VISIBLE_DEVICES is
+            # already set on os.environ above, so build KoreEnv WITHOUT a gpu arg and let
+            # the verifier subprocess inherit that (absolute physical id) string.
+            # use_replay=False is ESSENTIAL: the persistent v1 cache holds WEAK-baseline
+            # (torch-eager, no adversarial) numbers. Re-verify must MEASURE fresh under
+            # rigor, never serve stale cached obs, or the re-baseline is a no-op.
+            env = KoreEnv(task, use_replay=False)
             reverify_task(data_root, task, env, CONFIG, ground=ground)
             m = _marker(data_root, tid)
             m.parent.mkdir(parents=True, exist_ok=True)

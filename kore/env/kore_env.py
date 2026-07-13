@@ -201,8 +201,10 @@ class KoreEnv:
             # HIP_ and CUDA_VISIBLE_DEVICES to it (and drop any inherited list) so the
             # subprocess sees exactly this one physical GPU as its device 0 — no
             # double-remap from a restricted parent visible-device list.
-            env["HIP_VISIBLE_DEVICES"] = self._gpu
-            env["CUDA_VISIBLE_DEVICES"] = self._gpu
+            # str(): subprocess env values MUST be strings — an int gpu id (e.g.
+            # KoreEnv(gpu=5)) would make subprocess.Popen raise inside os.fsencode.
+            env["HIP_VISIBLE_DEVICES"] = str(self._gpu)
+            env["CUDA_VISIBLE_DEVICES"] = str(self._gpu)
         else:
             env["HIP_VISIBLE_DEVICES"] = env.get("HIP_VISIBLE_DEVICES", "0")
         env["GPU_TARGET"] = self.cfg.gpu_target

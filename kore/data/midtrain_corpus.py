@@ -147,9 +147,11 @@ def discover_repo_roots() -> list[Path]:
     for c in candidates:
         try:
             rc = c.resolve()
+            # is_dir() stats the path, which raises PermissionError (an OSError) for
+            # e.g. /root on a non-root box — must be inside the guard, not after it.
+            if rc in seen or not rc.is_dir():
+                continue
         except OSError:
-            continue
-        if rc in seen or not rc.is_dir():
             continue
         seen.add(rc)
         out.append(rc)

@@ -158,8 +158,13 @@ def test_generate_kernel_qa_is_grounded_in_task_dtype():
 def test_generate_kernel_qa_uses_teacher_answer():
     teacher = StubTeacher(fn=lambda msgs: "MY_CUSTOM_ANSWER")
     rows = generate_kernel_qa(_qa_tasks(), teacher, 3, seed=1)
+    # Core invariant: every QA row carries the TEACHER's answer (not a template).
     assert all(r["messages"][-1]["content"] == "MY_CUSTOM_ANSWER" for r in rows)
-    assert len(teacher.calls) == 3
+    assert len(rows) == 3
+    # gen_qa over-provisions a small buffer (n*1.15 + 8) to absorb empty teacher
+    # answers, so it makes >= n concurrent teacher calls (exact count is an impl
+    # detail; ~15% overhead at production scale). Just require at least n.
+    assert len(teacher.calls) >= 3
 
 
 def test_generate_kernel_qa_determinism():

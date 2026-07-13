@@ -10,7 +10,9 @@ truth is :mod:`kore.policy.format`; this module only rewrites message *content*:
     ``CHANGE:`` data-gen shape, raw teacher text) -> the canonical
     ``ANALYSIS / PROPOSED_CHANGE / FULL_KERNEL`` via ``normalize_assistant``;
   * DPO ``chosen``/``rejected`` kernel completions -> the canonical
-    ``wrap_full_kernel`` (kernel-only completion).
+    ``wrap_full_kernel`` (kernel-only completion), while PRESERVING the pair's
+    ``_provenance`` and lifting its baseline-anchored ``margin`` / ``weight`` /
+    ``anchor`` to the top level for the trainer (the margin is never stripped).
 
 It is PURE (stdlib + kore.policy.format), deterministic, idempotent, and NEVER
 touches non-kernel retention rows (general chat/code/math) or agentic tool
@@ -142,10 +144,50 @@ def normalize_raw_record_row(row: dict) -> tuple[dict, bool]:
     return row, changed
 
 
-def normalize_dpo_row(row: dict) -> tuple[dict, bool]:
-    """Canonicalize a DPO pair's system prompt + kernel completions."""
+def _preserve_and_backfill_margin(row: dict, out: dict) -> bool:
+    """Carry the speed-grounding curation signals through normalization.
+
+    Contract fix: normalization must NEVER strip a DPO pair's ``_provenance`` (it
+    carries the baseline-anchored margin/weight/anchor that the trainer margin-weights
+    and filters on, and that curation audits). We keep it verbatim AND, for shards
+    written before the trainer-facing top-level fields existed, we UPGRADE the row by
+    lifting ``margin`` / ``weight`` / ``anchor`` out of ``_provenance`` to the top
+    level (``_provenance.speedup`` is the legacy chosen-vs-rejected ratio == margin).
+    Returns True iff a field was backfilled. Rows without any provenance/margin signal
+    are left byte-for-byte unchanged (never fabricate a preference weight).
+    """
+    prov = row.get("_provenance")
+    prov = prov if isinstance(prov, dict) else {}
     changed = False
-    out = dict(row)
+    # margin: prefer an explicit top-level value, else provenance margin, else the
+    # legacy provenance ``speedup`` (chosen-vs-rejected ratio, which IS the margin).
+    if "margin" not in out:
+        margin = prov.get("margin", prov.get("speedup"))
+        if margin is not None:
+            out["margin"] = margin
+            changed = True
+    if "weight" not in out:
+        w = prov.get("weight")
+        if w is not None:
+            out["weight"] = w
+            changed = True
+    if "anchor" not in out:
+        a = prov.get("anchor")
+        if a is not None:
+            out["anchor"] = a
+            changed = True
+    return changed
+
+
+def normalize_dpo_row(row: dict) -> tuple[dict, bool]:
+    """Canonicalize a DPO pair's system prompt + kernel completions.
+
+    Preserves the row's ``_provenance`` (and lifts its baseline-anchored margin /
+    weight / anchor to the top level for the trainer; see
+    :func:`_preserve_and_backfill_margin`) — the margin is NOT discarded.
+    """
+    changed = False
+    out = dict(row)  # shallow copy carries _provenance, margin, weight, anchor verbatim
     prompt = row.get("prompt")
     if isinstance(prompt, list):
         new_prompt = []
@@ -169,6 +211,7 @@ def normalize_dpo_row(row: dict) -> tuple[dict, bool]:
                         changed = True
                 new_side.append(m)
             out[side] = new_side
+    changed = _preserve_and_backfill_margin(row, out) or changed
     return out, changed
 
 

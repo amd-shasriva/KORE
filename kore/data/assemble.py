@@ -179,6 +179,13 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
                                   extra_group_records: Optional[list] = None,
                                   hard_target: Optional[float] = None,
                                   prompt_fn=None,
+                                  pref_policy=None,
+                                  anchor_baseline: Optional[bool] = None,
+                                  anchor_min: Optional[float] = None,
+                                  margin_min: Optional[float] = None,
+                                  subbaseline_mode: Optional[str] = None,
+                                  weighting: Optional[bool] = None,
+                                  baseline_speedup_fn=None,
                                   seed: int = 0) -> dict:
     """Stage-2 DPO rows = ranked-group prefs + labeled reward-hack hard negatives.
 
@@ -189,6 +196,17 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
     additional ranked groups produced on-policy (iterative-DPO relabeling) or by
     the evolutionary loop, so the preference set covers states the policy actually
     visits.
+
+    Preference quality (audit fix): the ranked-group ("base") pairs are built through
+    the baseline-anchored, margin-weighted :func:`build_datasets.build_dpo` policy —
+    sub-baseline "wins" (chosen slower than production) are relabelled/dropped,
+    noise-band near-ties are dropped, and high-margin compute-bound pairs are
+    up-weighted. Pass ``pref_policy`` (a :class:`build_datasets.DPOPrefPolicy`) or the
+    individual ``anchor_baseline`` / ``anchor_min`` / ``margin_min`` /
+    ``subbaseline_mode`` / ``weighting`` / ``baseline_speedup_fn`` overrides (all
+    default to the ``KORE_PREF_*`` env, frontier defaults ON). The hard negatives are
+    built with the SAME policy but are correctness pairs, so anchoring is a safe no-op
+    on them — every hard-negative pair is preserved at neutral weight.
 
     ``hard_target`` (e.g. 0.12): when set, the abundant ranked-group ("base")
     pairs are deterministically SUBSAMPLED (seeded, order-preserving) so the
@@ -202,6 +220,9 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
     """
     data_root = Path(data_root)
     tasks = list(tasks)
+    _pref = dict(policy=pref_policy, anchor_baseline=anchor_baseline, anchor_min=anchor_min,
+                 margin_min=margin_min, subbaseline_mode=subbaseline_mode,
+                 weighting=weighting, baseline_speedup_fn=baseline_speedup_fn)
     with log.stage("build_dpo_with_hard_negatives", n_tasks=len(tasks)):
         correct_source_fn = correct_source_fn or (lambda t: t.seed_source)
 
@@ -211,10 +232,10 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
             group_records = list(group_records)
         if extra_group_records:
             group_records = group_records + list(extra_group_records)
-        base_rows = bd.build_dpo(group_records, prompt_fn=prompt_fn) if group_records else []
+        base_rows = bd.build_dpo(group_records, prompt_fn=prompt_fn, **_pref) if group_records else []
 
         hard_groups = [build_hard_negative_group(correct_source_fn(t), t) for t in tasks]
-        hard_rows = bd.build_dpo(hard_groups, prompt_fn=prompt_fn)
+        hard_rows = bd.build_dpo(hard_groups, prompt_fn=prompt_fn, **_pref)
 
         # Boost the hard-negative fraction to >= hard_target by thinning the
         # over-abundant base pairs (keep ALL hard negatives). Seeded + order-

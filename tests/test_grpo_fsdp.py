@@ -347,11 +347,22 @@ def _smoke_worker(rank: int, world: int, port: int, q):
 def test_two_process_gloo_smoke_gather_and_step():
     pytest.importorskip("torch")
     if sys.platform == "win32":
-        pytest.skip("fork-based multiprocess smoke is POSIX-only")
-    try:
-        ctx = mp.get_context("fork")
-    except ValueError:
-        pytest.skip("fork start method unavailable")
+        pytest.skip("multiprocess gloo smoke is POSIX-only")
+    # Prefer 'spawn': fork is fundamentally incompatible with a process that has
+    # already touched autograd (PyTorch raises "Unable to handle autograd's
+    # threading in combination with fork-based multiprocessing"), which happens
+    # whenever an earlier test in the session ran a backward pass. The real GRPO
+    # launcher uses spawn/torchrun too, so spawn is the faithful path; fall back
+    # to fork only if spawn is unavailable.
+    ctx = None
+    for method in ("spawn", "fork"):
+        try:
+            ctx = mp.get_context(method)
+            break
+        except ValueError:
+            continue
+    if ctx is None:
+        pytest.skip("no multiprocess start method available")
 
     import socket
 

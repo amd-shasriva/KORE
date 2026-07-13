@@ -199,10 +199,29 @@ def _launch_distributed(ctx, stage: str, overrides: dict, *, run_name: str | Non
     pinned = _gpu_ids(ctx)
     if pinned:
         env = {**os.environ, "GPU_IDS": ",".join(str(g) for g in pinned)}
+    # Fail-fast preflight with a CLEAR message (a bare CalledProcessError from the
+    # launcher is undebuggable). Verify the training dataset + base model dir exist.
+    ds = cfg.get("dataset_path")
+    if ds and not Path(ds).exists() and stage in ("sft", "dpo"):
+        raise FileNotFoundError(
+            f"[{stage}] training dataset missing: {ds} — the build stage must run first "
+            f"(check the 'build' stage completed and wrote {ds}).")
     _log(stage, f"full-FT: engaging FSDP under the hood (ONE command) -> {' '.join(cmd)} "
                 f"(config: model={cfg.get('model_id')} out={cfg.get('output_dir')}"
                 f"{'; GPU_IDS=' + env['GPU_IDS'] if env else ''})")
-    subprocess.run(cmd, check=True, env=env)
+    try:
+        subprocess.run(cmd, check=True, env=env)
+    except subprocess.CalledProcessError as e:
+        # The child's traceback streamed to our stdout (-> the run log). Surface a
+        # loud, actionable marker + the EXACT command to reproduce/debug standalone.
+        _log(stage, f"ERROR: FSDP {stage} launch FAILED (exit {e.returncode}). "
+                    f"Resolved config: {run_cfg}. Reproduce standalone with:\n"
+                    f"  {'GPU_IDS=' + env['GPU_IDS'] + ' ' if env else ''}bash "
+                    f"{launcher} {stage} {run_cfg}\n"
+                    f"Common 14B-FSDP causes: OOM at max_length={cfg.get('max_length')} "
+                    f"(lower it or enable fsdp_cpu_offload), a duplicated full ref_model "
+                    f"(iterative DPO), or a missing fsdp_transformer_layer_cls.")
+        raise
     return overrides["output_dir"]
 
 

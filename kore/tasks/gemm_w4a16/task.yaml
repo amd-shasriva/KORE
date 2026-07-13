@@ -1,0 +1,22 @@
+task_id: gemm_w4a16
+operation: gemm_w4a16
+dtype: int4_w4a16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0   # bf16 MFMA fidelity on shared-int4 weights (not quant error)
+shapes:
+  minimal: {M: 64, N: 128, K: 256}
+  primary: {M: 16, N: 4096, K: 4096}      # decode (small M) weight-bound: int4 shines
+  validation:
+    - {M: 1, N: 4096, K: 14336}           # single-token decode, Llama FFN down
+    - {M: 4096, N: 4096, K: 4096}         # prefill (large M), still weight-bound-ish
+    - {M: 32, N: 5120, K: 3584}           # Qwen3-ish, non-square, even K
+# Weight-only int4 GEMM (bf16 activation): a[M,K] bf16 @ dequant(int4 W[N,K])^T.
+# W packed 2 nibbles/byte along K + per-row fp32 scale. Correctness = SNR vs the
+# fp32 dequant-matmul oracle (int4 rounding shared by candidate + reference).
+# Baseline (--impl reference) = materialize weight to bf16 + hipBLASLt matmul; the
+# int4 kernel wins on decode by moving ~4x less weight through HBM.
+targets:
+  snr_db: 30.0
+  comparison_baseline: bf16_dequant_matmul

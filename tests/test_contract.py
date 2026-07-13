@@ -139,6 +139,30 @@ def test_normalize_dpo_row():
     assert parse_response(nrow["chosen"][0]["content"])["kernel"].strip() == "def a():\n    return 1"
 
 
+def test_build_sft_canonicalizes_win_and_repair_at_boundary():
+    # BUG 1/2/3: build_sft must canonicalize assistant turns (fresh wins + reused v1)
+    from kore.data.build_datasets import build_sft
+    from kore.data.schemas import RepairRecord, WinRecord
+
+    win = WinRecord(task_id="t", trajectory=[
+        {"role": "system", "content": "You are KORE, an expert AMD GPU kernel engineer. OLD"},
+        {"role": "user", "content": "opt"},
+        {"role": "assistant", "content": "ANALYSIS: mem\nCHANGE: bump\nFULL_KERNEL:\n```python\ndef k():\n    return 1\n```"}],
+        initial_wall_us=10.0, final_wall_us=5.0, speedup=2.0, final_source="def k(): pass",
+        snr_db=99.0, type="win", gpu="gfx942", operation="gemm", arch="gfx942")
+    repair = RepairRecord(task_id="t", failure_class="snr_fail", parent_hash="h",
+        error_text="snr low", messages=[
+            {"role": "system", "content": "You are KORE, an expert AMD GPU kernel engineer. OLD"},
+            {"role": "user", "content": "fix"},
+            {"role": "assistant", "content": "<think>diag</think>\n<answer>\nFULL_KERNEL:\n```python\ndef k():\n    return 2\n```\n</answer>"}],
+        child_snr_db=99.0, type="repair", gpu="gfx942", operation="gemm", arch="gfx942")
+    rows = build_sft([win, repair])
+    for r in rows:
+        assert r["messages"][0]["content"] == SYSTEM_PROMPT           # system canonicalized
+        a = r["messages"][-1]["content"]
+        assert a.startswith("ANALYSIS:") and "<think>" not in a and "CHANGE: bump" not in a
+
+
 def test_normalize_raw_repair_and_win_records_preserve_verified_fields():
     # RAW RepairRecord (legacy <think>/<answer>) -> canonical, scalars untouched
     repair = {"task_id": "t", "failure_class": "snr_fail", "type": "repair",

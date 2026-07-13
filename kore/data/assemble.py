@@ -118,6 +118,24 @@ def assemble_multicap_sources(
     gm = load_general_replay("math", max(1, int(round(config.frac_math_reasoning * total))), seed + 20, use_hf)
     gch = load_general_replay("chat", max(1, int(round(config.frac_general_chat * total))), seed + 30, use_hf)
 
+    # Decontaminate the general-replay + generic-agentic slices against the held-out
+    # eval sources (Pillar 5): a mined code/math row could carry a held-out attention
+    # kernel. One shared held-out n-gram set; safe no-op if sources unavailable.
+    if os.environ.get("KORE_DECONTAM", "1") != "0":
+        from kore.data.decontam import build_heldout_ngrams, decontaminate_chat_rows
+        _hn = build_heldout_ngrams(8)
+        _dropped = 0
+        _slices = {"general_code": gc, "math_reasoning": gm, "general_chat": gch,
+                   "agentic_tooluse": agentic_rows}
+        for _name, _rows in list(_slices.items()):
+            _clean, _st = decontaminate_chat_rows(_rows, heldout_ngrams=_hn)
+            _slices[_name] = _clean
+            _dropped += _st["n_dropped_contaminated"]
+        gc, gm, gch, agentic_rows = (_slices["general_code"], _slices["math_reasoning"],
+                                     _slices["general_chat"], _slices["agentic_tooluse"])
+        if _dropped:
+            log.metric("general_replay_decontam", dropped=_dropped)
+
     out = {
         "kernel_repair_opt": kernel_repair_opt,
         "kernel_qa": qa_rows,

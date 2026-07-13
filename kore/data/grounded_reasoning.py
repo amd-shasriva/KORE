@@ -102,6 +102,12 @@ def diagnose_bottleneck_rich(counters: dict, *, vgpr=None, lds=None, num_warps=N
     L2 hit-rate / HBM bytes / occupancy) and falls back to :func:`diagnose_bottleneck`.
 
     Returns ``(label, evidence)`` where evidence cites measured signal."""
+    # collect_counters stores resource fields inside the counters dict; use them for
+    # occupancy if the caller didn't pass them explicitly.
+    if isinstance(counters, dict):
+        vgpr = vgpr if vgpr is not None else counters.get("vgpr_count")
+        lds = lds if lds is not None else counters.get("lds_bytes")
+        num_warps = num_warps if num_warps is not None else counters.get("num_warps")
     rf = _roofline()
     if rf is not None:
         try:

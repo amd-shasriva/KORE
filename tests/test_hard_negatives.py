@@ -242,7 +242,10 @@ def test_build_hard_negative_group_is_dpo_ready():
     rows = build_dpo([grp])
     assert len(rows) == 9
     for row in rows:
-        assert set(row) == {"prompt", "chosen", "rejected"}
+        # trl needs at least prompt/chosen/rejected; KORE also carries provenance +
+        # preference-quality fields (margin/weight/anchor), so assert a SUBSET
+        # (matches test_data::test_build_dpo_wellformed, which requires _provenance).
+        assert {"prompt", "chosen", "rejected"} <= set(row)
         assert row["chosen"] != row["rejected"]
         # conversational trl.DPOTrainer shape: chosen/rejected are message lists
         assert isinstance(row["chosen"], list)

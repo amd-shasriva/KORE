@@ -161,12 +161,50 @@ def load_preference_jsonl(path: str) -> list[dict]:
                 continue
             d = json.loads(line)
             if "prompt" in d and "chosen" in d and "rejected" in d:
+                # Keep the preference-quality signal (weight/margin/anchor) so training
+                # can concentrate gradient on real production wins. Falls back to
+                # weight 1.0 for legacy rows. Stripped to trl's schema in
+                # :func:`apply_pref_weights` before the Dataset is built.
+                prov = d.get("_provenance") or {}
                 rows.append({
                     "prompt": d["prompt"],
                     "chosen": d["chosen"],
                     "rejected": d["rejected"],
+                    "weight": float(d.get("weight", prov.get("weight", 1.0)) or 1.0),
+                    "margin": d.get("margin", prov.get("margin")),
+                    "anchor": d.get("anchor", prov.get("anchor")),
                 })
     return rows
+
+
+def apply_pref_weights(rows: list[dict], *, enabled: bool = True, seed: int = 0) -> list[dict]:
+    """Consume per-pair ``weight`` by deterministic multiplicity, then strip to trl's
+    ``{prompt, chosen, rejected}`` schema.
+
+    This is how the preference-quality weighting actually reaches the optimizer
+    without a trl-version-specific custom loss: a pair with ``weight >= 1`` is
+    included ``round(weight)`` times (compute-bound / beats-baseline wins get more
+    gradient), a pair with ``0 < weight < 1`` (relabeled sub-baseline) is kept with
+    probability ``weight`` (seeded, reproducible), and ``weight <= 0`` is dropped.
+    Disabled -> every pair once (plain behavior). Never returns empty."""
+    import random
+    rng = random.Random(seed)
+
+    def _strip(r: dict) -> dict:
+        return {"prompt": r["prompt"], "chosen": r["chosen"], "rejected": r["rejected"]}
+
+    if not enabled:
+        return [_strip(r) for r in rows]
+    out: list[dict] = []
+    for r in rows:
+        w = float(r.get("weight", 1.0) or 1.0)
+        if w <= 0.0:
+            continue
+        if w >= 1.0:
+            out.extend(_strip(r) for _ in range(int(round(w))))
+        elif rng.random() < w:
+            out.append(_strip(r))
+    return out or [_strip(r) for r in rows]
 
 
 def train(config: DPOConfig) -> dict:
@@ -199,7 +237,16 @@ def train(config: DPOConfig) -> dict:
              label_smoothing=getattr(config, "label_smoothing", None),
              **_pair_token_stats(rows, tokenizer))
 
-    dataset = Dataset.from_list(rows)
+    # Consume the preference-quality weighting: concentrate gradient on real
+    # production wins (compute-bound beats-baseline pairs up-weighted; relabeled
+    # sub-baseline pairs down-sampled). Strips extras to trl's schema. Toggle via
+    # KORE_PREF_TRAIN_WEIGHTING=0.
+    import os as _os
+    _wt = _os.environ.get("KORE_PREF_TRAIN_WEIGHTING", "1").strip().lower() not in ("0", "false", "no")
+    train_rows = apply_pref_weights(rows, enabled=_wt)
+    log.info("dpo: preference weighting", pairs_in=len(rows),
+             pairs_effective=len(train_rows), weighting=_wt)
+    dataset = Dataset.from_list(train_rows)
 
     dtype = torch.bfloat16 if config.bf16 else torch.float32
     # DPO uses SDPA, NOT flash_attention_2. DPO concatenates chosen+rejected into a

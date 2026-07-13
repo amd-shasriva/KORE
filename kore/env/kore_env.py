@@ -20,6 +20,7 @@ that returns a reward :class:`Observation`. Hardening (see audits):
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import re
@@ -30,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -518,6 +520,33 @@ class KoreEnv:
         _ev("DEBUG", "profile_score", task=self.task.task_id, score=score)
         return score
 
+    @contextmanager
+    def _timing_lock(self):
+        """Serialize the TIMING phase per physical GPU (advisory flock).
+
+        Compilation + correctness are deterministic, so many workers can share a GPU
+        for them (oversubscription uses the idle cores). But wall-clock TIMING needs
+        the GPU to itself — concurrent kernels/L2-flushes inflate and destabilize the
+        measurement (CV blows up). Workers pinned to the same physical GPU take an
+        exclusive lock on ``/tmp/kore_timing_gpu_<id>.lock`` around timing only, so
+        speedups stay clean while compiles keep running in parallel. Disable with
+        KORE_TIMING_LOCK=0."""
+        if os.environ.get("KORE_TIMING_LOCK", "1").strip().lower() in ("0", "false", "no"):
+            yield
+            return
+        physid = str(self._gpu if self._gpu is not None
+                     else os.environ.get("HIP_VISIBLE_DEVICES", "0")).split(",")[0].strip() or "0"
+        lp = Path(tempfile.gettempdir()) / f"kore_timing_gpu_{physid}.lock"
+        f = open(lp, "w")
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(f, fcntl.LOCK_UN)
+            finally:
+                f.close()
+
     def _batch_bench_ok(self, driver: Path) -> bool:
         """True iff this task uses the shared genops driver (supports ``--bench-both``).
 
@@ -549,7 +578,7 @@ class KoreEnv:
         cmd = [sys.executable, str(driver), "--bench-both",
                "--warmup", str(self.cfg.warmup_iters), "--iters", str(self.cfg.bench_iters),
                "--repeat", str(n_max), *sh.as_args()]
-        with _LOG.timer("bench_pair", task=self.task.task_id, shape=sh.name):
+        with self._timing_lock(), _LOG.timer("bench_pair", task=self.task.task_id, shape=sh.name):
             rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
         if timed or rc != 0:
             _ev("DEBUG", "bench_pair", task=self.task.task_id, shape=sh.name, ok=False, rc=rc)
@@ -588,8 +617,8 @@ class KoreEnv:
             it = _random.randint(max(8, self.cfg.bench_iters - 5), self.cfg.bench_iters + 6)
             cmd = [sys.executable, str(driver), "--bench-mode", "--impl", impl,
                    "--warmup", str(w), "--iters", str(it), *sh.as_args()]
-            with _LOG.timer("bench_exec", task=self.task.task_id, shape=sh.name,
-                            impl=impl, run=i):
+            with self._timing_lock(), _LOG.timer("bench_exec", task=self.task.task_id,
+                                                 shape=sh.name, impl=impl, run=i):
                 rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
             if timed or rc != 0:
                 break

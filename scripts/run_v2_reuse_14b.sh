@@ -45,7 +45,10 @@ export TORCHINDUCTOR_CACHE_DIR="$REPO_ROOT/.inductor_cache"
 # its time importing torch + JIT-compiling, ~2% GPU). This box has 384 cores + 3TB RAM,
 # so run K workers PER physical GPU. Timing stays honest because the genops --bench-both
 # path measures candidate+reference back-to-back in one process (contention-fair ratio).
-export KORE_REVERIFY_WORKERS_PER_GPU="${KORE_REVERIFY_WORKERS_PER_GPU:-8}"
+export KORE_REVERIFY_WORKERS_PER_GPU="${KORE_REVERIFY_WORKERS_PER_GPU:-6}"
+# Timing is serialized PER physical GPU (flock) so oversubscribed compiles never
+# corrupt wall-clock measurements — clean CV + honest speedups (set 0 to disable).
+export KORE_TIMING_LOCK="${KORE_TIMING_LOCK:-1}"
 
 # Optional: attach rocprof counters for grounded reasoning (adds profiling cost).
 GROUND_FLAG=""

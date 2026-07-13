@@ -379,8 +379,13 @@ def _capture_subprocess(monkeypatch):
     calls = []
 
     def fake_run(cmd, check=False, **kw):
-        calls.append({"cmd": list(cmd), "check": check})
-        return SimpleNamespace(returncode=0)
+        cmdl = list(cmd)
+        # Capture only the DISTRIBUTED LAUNCHER invocations. Ignore incidental
+        # subprocess calls (e.g. the `rocm-smi` free-GPU auto-detection), which are
+        # correct behavior but not what these launcher-wiring tests assert.
+        if cmdl and cmdl[0] == "bash" and any("launch_distributed" in str(c) for c in cmdl):
+            calls.append({"cmd": cmdl, "check": check})
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(rc.subprocess, "run", fake_run)
     return calls

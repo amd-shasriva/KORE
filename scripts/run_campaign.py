@@ -756,6 +756,14 @@ def _stage_datagen(ctx):
         from kore.data.verify_rigor import rigor_status, set_rigorous_verification
         set_rigorous_verification(True)
         _log("datagen", f"rigorous verification ON: {rigor_status()}")
+    # Pillar 4: PMC-grounded reasoning. Propagate --ground-reasoning into the datagen
+    # env so gen_groups profiles the winner + a slower parent (rocprofv3) and gold-win
+    # reasoning is grounded in REAL measured bottlenecks/deltas. Parallel workers (mp
+    # spawn) inherit os.environ, so setting it here reaches every datagen subprocess.
+    if bool(getattr(ctx["args"], "ground_reasoning", False)):
+        os.environ["KORE_GROUND_REASONING"] = "1"
+        _log("datagen", "PMC-grounded reasoning ON: profiling winner+parent per group "
+                        "(rocprofv3) for counter-grounded gold-win CoT")
     # Parallel path: shard tasks across GPUs with concurrent teacher streams (resumable).
     # Pinned GPU ids (free ones on a shared node) force the parallel path onto exactly
     # those devices so datagen never contends with other users' jobs.

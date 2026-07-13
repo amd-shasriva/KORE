@@ -225,14 +225,31 @@ def generate_groups(
             # rocprofv3 counters. Best-effort + guarded (needs rocprof); off by default so
             # it never slows normal datagen.
             counters = None
-            if os.environ.get("KORE_GROUND_REASONING", "0") != "0":
+            parent_counters = None
+            parent_wall_us = None
+            if os.environ.get("KORE_GROUND_REASONING", "0") != "0" \
+                    and hasattr(env, "collect_counters"):
                 _best = order[0] if order else None
-                if _best is not None and results[_best].get("correct") \
-                        and hasattr(env, "collect_counters"):
+                if _best is not None and results[_best].get("correct"):
                     try:
                         counters = env.collect_counters(results[_best]["source"])
                     except Exception:  # noqa: BLE001 - profiling is advisory
                         counters = None
+                    # Profile a representative SLOWER-correct sibling as the "parent"
+                    # so gold-win reasoning narrates a REAL measured delta (PROFILE the
+                    # parent -> MEASURE the winner), not the winner's own counters.
+                    bw = results[_best].get("wall_us")
+                    slower = [r for i, r in enumerate(results)
+                              if i != _best and r.get("correct") and r.get("wall_us")
+                              and bw and r["wall_us"] > bw]
+                    if slower:
+                        slower.sort(key=lambda r: r["wall_us"])
+                        rep = slower[(len(slower) - 1) // 2]
+                        try:
+                            parent_counters = env.collect_counters(rep["source"])
+                            parent_wall_us = float(rep["wall_us"])
+                        except Exception:  # noqa: BLE001
+                            parent_counters = None
             records.append(
                 RankedGroupRecord(
                     task_id=task.task_id,
@@ -243,6 +260,8 @@ def generate_groups(
                     operation=getattr(task, "operation", None),
                     arch=getattr(task, "gpu_target", None),
                     counters=counters,
+                    parent_counters=parent_counters,
+                    parent_wall_us=parent_wall_us,
                 )
             )
             tot_candidates += len(results)

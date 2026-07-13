@@ -84,6 +84,126 @@ def diagnose_bottleneck(counters: dict) -> tuple[str, str]:
     return "unknown", "counters inconclusive"
 
 
+def _roofline():
+    """Import the roofline module if present (built by the analysis workstream).
+
+    Returns the module or None so grounded reasoning works before/without it and
+    gets RICHER (L2 hit-rate, HBM bytes, occupancy, %-of-peak) once it lands."""
+    try:
+        from kore.analysis import roofline as _rf
+        return _rf
+    except Exception:  # noqa: BLE001 - optional, forward-compatible
+        return None
+
+
+def diagnose_bottleneck_rich(counters: dict, *, vgpr=None, lds=None, num_warps=None,
+                             flops=None, bytes=None, measured_ms=None, dtype=None):
+    """Bottleneck diagnosis that prefers the roofline module's counter model (real
+    L2 hit-rate / HBM bytes / occupancy) and falls back to :func:`diagnose_bottleneck`.
+
+    Returns ``(label, evidence)`` where evidence cites measured signal."""
+    rf = _roofline()
+    if rf is not None:
+        try:
+            fn = getattr(rf, "bottleneck_from_counters", None)
+            if fn is not None:
+                label, evidence = fn(counters, vgpr=vgpr, lds=lds, num_warps=num_warps)
+                # augment with roofline attainment when we can compute it
+                if flops and bytes and measured_ms:
+                    try:
+                        frac = rf.attained_fraction(measured_ms, flops, bytes, dtype)
+                        evidence = f"{evidence}; ~{frac:.0%} of {label.split('-')[0]} roofline"
+                    except Exception:  # noqa: BLE001
+                        pass
+                return label, evidence
+        except Exception:  # noqa: BLE001 - never fatal; fall back
+            pass
+    return diagnose_bottleneck(counters)
+
+
+def _delta_note(parent: dict, best: dict) -> str:
+    """Human-readable counter DELTAS parent->best (only for counters present in both)."""
+    if not (isinstance(parent, dict) and isinstance(best, dict)):
+        return ""
+    rf = _roofline()
+    parts: list[str] = []
+    if rf is not None:
+        for name, fn in (("L2 hit-rate", getattr(rf, "l2_hit_rate", None)),
+                         ("HBM bytes", getattr(rf, "hbm_bytes", None))):
+            if fn is None:
+                continue
+            try:
+                pv, bv = fn(parent), fn(best)
+                if pv and bv:
+                    unit = "%" if "rate" in name else ""
+                    scale = 100.0 if unit == "%" else 1.0
+                    parts.append(f"{name} {pv*scale:.0f}{unit}->{bv*scale:.0f}{unit}")
+            except Exception:  # noqa: BLE001
+                pass
+    # generic stall-wait delta from the always-present issue/wait counters
+    pv, bv = _get(parent, "SQ_WAIT_INST_VMEM"), _get(best, "SQ_WAIT_INST_VMEM")
+    if pv and bv:
+        parts.append(f"VMEM stall-waits {pv:.0f}->{bv:.0f}")
+    return "; ".join(parts)
+
+
+def build_grounded_analysis(op: str, *, parent_counters: Optional[dict],
+                            best_counters: Optional[dict] = None,
+                            parent_wall_us: Optional[float] = None,
+                            best_wall_us: Optional[float] = None,
+                            snr_db: Optional[float] = None,
+                            speedup: Optional[float] = None,
+                            flops: Optional[float] = None, bytes: Optional[float] = None,
+                            dtype: Optional[str] = None) -> Optional[str]:
+    """Frontier PROFILE->DIAGNOSE->TRANSFORM->MEASURE analysis grounded in REAL counters.
+
+    Uses the PARENT's counters to diagnose the bottleneck the optimization targets
+    (fixing the old bug that narrated the winner's counters as the parent's), the
+    BEST kernel's counters + measured speedup for the MEASURE step, and the roofline
+    module (when present) for %-of-peak attainment + L2/HBM deltas. Returns ``None``
+    when no parent counters are available (caller falls back to the measurement note)."""
+    if not isinstance(parent_counters, dict) or not parent_counters:
+        return None
+    p_ms = (parent_wall_us / 1000.0) if parent_wall_us else None
+    b_ms = (best_wall_us / 1000.0) if best_wall_us else None
+    p_label, p_ev = diagnose_bottleneck_rich(
+        parent_counters, flops=flops, bytes=bytes, measured_ms=p_ms, dtype=dtype)
+    profile = (f"PROFILE: the parent kernel"
+               + (f" ({parent_wall_us:.1f}us)" if parent_wall_us else "")
+               + f" profiled as {p_label} ({p_ev}).")
+    diagnose = (f"DIAGNOSE: the dominant cost is the {p_label.replace('-', ' ')} regime above, "
+                f"so the highest-impact change targets exactly that (not micro-tuning).")
+    transform = f"TRANSFORM: {_transform_hint(p_label)}."
+    measure_bits = []
+    if speedup:
+        measure_bits.append(f"{speedup:.2f}x faster")
+    if best_wall_us:
+        measure_bits.append(f"{best_wall_us:.1f}us")
+    if snr_db is not None:
+        measure_bits.append(f"SNR {snr_db:.0f} dB")
+    delta = _delta_note(parent_counters, best_counters or {})
+    measure = ("MEASURE: the optimized kernel is " + ", ".join(measure_bits)
+               + (f" ({delta})" if delta else "") + ".") if measure_bits else ""
+    return " ".join(x for x in (profile, diagnose, transform, measure) if x)
+
+
+_TRANSFORM_HINTS = {
+    "memory-bound": ("coalesce global loads into 128-bit (global_load_dwordx4) and reuse "
+                     "operands in LDS to cut redundant HBM traffic"),
+    "lds-bound": ("remove LDS bank conflicts (XOR-swizzle / pad) and widen LDS access to "
+                  "ds_read_b128 to cut shared-memory stalls"),
+    "no-matrix-cores": ("route the inner product through tl.dot so the MFMA matrix cores do "
+                        "the multiply-accumulate instead of scalar VALU FMAs"),
+    "compute-bound": ("raise MFMA utilization/occupancy (matrix_instr_nonkdim=16, tune "
+                      "num_warps/num_stages, waves_per_eu) to approach the compute roofline"),
+}
+
+
+def _transform_hint(label: str) -> str:
+    return _TRANSFORM_HINTS.get(label,
+                                "address the measured bottleneck with the minimal structural change")
+
+
 def _fmt_counters(counters: dict) -> str:
     return "\n".join(f"  {k} = {counters[k]}" for k in sorted(counters)) or "  (none)"
 
@@ -147,6 +267,8 @@ def collect_counters(env: Any, source: str, shape: Any = None) -> Optional[dict]
 
 __all__ = [
     "diagnose_bottleneck",
+    "diagnose_bottleneck_rich",
+    "build_grounded_analysis",
     "counter_grounded_prompt",
     "verify_reasoning_grounding",
     "collect_counters",

@@ -59,12 +59,15 @@ def _best(cands: list[dict]) -> dict:
 
 
 def _analysis(op: str, wall: float, snr: float, speedup: float,
-              counters: Optional[dict] = None) -> str:
+              counters: Optional[dict] = None, parent_counters: Optional[dict] = None,
+              parent_wall_us: Optional[float] = None, dtype: Optional[str] = None) -> str:
     """The ANALYSIS body (no header — format_assistant_turn adds it).
 
-    When rocprofv3 ``counters`` for the parent are available, the reasoning is
-    GROUNDED in the measured bottleneck (Pillar 4) — a PROFILE->DIAGNOSE->FIX chain
-    citing the real counters — instead of the generic measurement template.
+    When rocprofv3 counters were collected for BOTH the parent and the winner, the
+    reasoning is a GROUNDED PROFILE(parent)->DIAGNOSE->TRANSFORM->MEASURE(winner) chain
+    citing the real measured deltas (Pillar 4). Otherwise it falls back to a
+    correctly-attributed note (fixing the old bug that narrated the WINNER's counters
+    as the parent's).
     """
     base = (
         f"For `{op}`, this is the fastest CORRECT implementation verified for this "
@@ -72,11 +75,19 @@ def _analysis(op: str, wall: float, snr: float, speedup: float,
         f"parent variant below. It keeps fp32 accumulation and the public entry-point signature, "
         f"and uses 64-multiple BLOCK sizes suited to the CDNA wavefront."
     )
-    if counters:
+    if isinstance(parent_counters, dict) and parent_counters:
+        from kore.data.grounded_reasoning import build_grounded_analysis
+        g = build_grounded_analysis(
+            op, parent_counters=parent_counters, best_counters=counters,
+            parent_wall_us=parent_wall_us, best_wall_us=wall, snr_db=snr,
+            speedup=speedup, dtype=dtype)
+        if g:
+            return base + " " + g
+    if isinstance(counters, dict) and counters:
+        # Correct attribution: these counters are the WINNER's, so narrate THIS kernel.
         from kore.data.grounded_reasoning import diagnose_bottleneck
         label, evidence = diagnose_bottleneck(counters)
-        base += (f" Profiling the parent showed a {label} bottleneck ({evidence}); "
-                 f"this kernel targets exactly that.")
+        base += f" Profiling this kernel shows a {label} profile ({evidence})."
     return base
 
 
@@ -107,11 +118,19 @@ def mint_gold_win(group: dict, arch: Optional[str] = None,
                 f"({speedup:.2f}x over the parent).")
     # Prefer counters attached to the group (from a profiling datagen pass) so the
     # reasoning is grounded in real hardware evidence (Pillar 4); else the measurement
-    # template. ``counters`` arg overrides the group-attached one.
+    # template. ``counters`` arg overrides the group-attached one. The PARENT counters
+    # (a real profiled slower sibling) enable a measured PROFILE->...->MEASURE delta.
     grp_counters = counters if counters is not None else group.get("counters")
+    parent_counters = group.get("parent_counters")
+    parent_wall_us = group.get("parent_wall_us")
+    _dt = str(op).rsplit("_", 1)[-1] if str(op).rsplit("_", 1)[-1] in (
+        "bf16", "fp16", "fp32", "fp8", "int8", "int4") else None
     assistant = format_assistant_turn(
         _analysis(op, float(best["wall_us"]), float(best["snr_db"]), float(speedup),
-                  counters=grp_counters if isinstance(grp_counters, dict) else None),
+                  counters=grp_counters if isinstance(grp_counters, dict) else None,
+                  parent_counters=parent_counters if isinstance(parent_counters, dict) else None,
+                  parent_wall_us=float(parent_wall_us) if parent_wall_us else None,
+                  dtype=_dt),
         proposed, best["source"],
     )
     trajectory = [

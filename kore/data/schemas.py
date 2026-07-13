@@ -82,6 +82,11 @@ class RankedGroupRecord:
     # rocprofv3 counters for the rank-0 (best) candidate, when collected at datagen
     # (Pillar 4, KORE_GROUND_REASONING=1). Enables profiler-grounded gold-win reasoning.
     counters: dict | None = None
+    # rocprofv3 counters + wall for a representative SLOWER-correct candidate (the
+    # "parent" the win improves on), so gold-win reasoning can narrate a real
+    # PROFILE(parent)->...->MEASURE(best) delta instead of misattributing the winner's.
+    parent_counters: dict | None = None
+    parent_wall_us: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -99,6 +104,8 @@ class RankedGroupRecord:
             arch=d.get("arch"),
             shape=d.get("shape"),
             counters=d.get("counters"),
+            parent_counters=d.get("parent_counters"),
+            parent_wall_us=d.get("parent_wall_us"),
         )
 
 

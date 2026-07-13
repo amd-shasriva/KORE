@@ -357,6 +357,53 @@ def break_block_m_to_64(src: str) -> tuple[str, FailureHint]:
     return src, "snr_fail"
 
 
+def break_nibble_unpack(src: str) -> tuple[str, FailureHint]:
+    """Swap the hi/lo int4 nibble or corrupt the zero-point (W4A16 dequant).
+
+    int4 weights pack two nibbles per byte: low = ``(b & 0xF)``, high =
+    ``((b >> 4) & 0xF)``, dequant subtracts the zero-point 8. Collapsing the
+    high-nibble shift (``>> 4`` -> ``>> 0``) makes hi==lo, and shifting the
+    zero-point (``- 8`` -> ``- 7``) biases every weight: both compile and run but
+    return a numerically wrong GEMM (SNR fail). A frontier w4a16-specific bug.
+    """
+    out, ok = _first_sub(src, r"(>>\s*)4\b", lambda m: m.group(1) + "0")
+    if ok:
+        return out, "snr_fail"
+    out, ok = _first_sub(src, r"(0xF\s*\)?\s*)-\s*8\b", lambda m: m.group(1) + "- 7")
+    if ok:
+        return out, "snr_fail"
+    return src, "snr_fail"
+
+
+def break_amax_abs(src: str) -> tuple[str, FailureHint]:
+    """Drop the ``abs()`` in an amax reduction used for a quant scale.
+
+    Per-token/tensor fp8/int quant uses ``scale = amax(|x|)/MAX``. Reducing the
+    signed max instead of the absolute max under-scales any row whose largest-
+    magnitude element is negative -> clipped codes + wrong dequant (SNR fail) that
+    still compiles. A frontier quant-fusion-specific bug."""
+    out, ok = _first_sub(src, r"tl\.abs\(([^()]*)\)", lambda m: m.group(1))
+    if ok:
+        return out, "snr_fail"
+    out, ok = _first_sub(src, r"\.abs\(\)", "")
+    if ok:
+        return out, "snr_fail"
+    return src, "snr_fail"
+
+
+def break_atomic_to_store(src: str) -> tuple[str, FailureHint]:
+    """Downgrade an atomic accumulation to a plain store -> lost cross-program reduction.
+
+    Backward/reduction kernels accumulate a shared gradient (e.g. ``dw`` over the
+    token axis) with ``tl.atomic_add`` across programs. Replacing it with
+    ``tl.store`` keeps only the last program's contribution -> wrong gradient
+    (SNR fail). A frontier backward/training-kernel-specific bug."""
+    out, ok = _first_sub(src, r"tl\.atomic_add\(", "tl.store(")
+    if ok:
+        return out, "snr_fail"
+    return src, "snr_fail"
+
+
 # --------------------------------------------------------------------------- #
 # OPTIMIZATION operators (for the evolutionary datagen loop, evolve.py).
 #
@@ -449,6 +496,7 @@ OP_FAMILY_MUTATORS: dict[str, list] = {
         break_k_multiple_of_32,
         break_block_m_to_64,
         break_scale,
+        break_nibble_unpack,   # W4A16 int4 dequant
     ],
     "norm": [
         break_reduction_axis,
@@ -458,6 +506,8 @@ OP_FAMILY_MUTATORS: dict[str, list] = {
         break_mask,
         break_block_size,
         break_index_offset,
+        break_atomic_to_store,  # rmsnorm backward dw reduction
+        break_amax_abs,         # rmsnorm->fp8 quant-fusion scale
     ],
     "activation": [
         break_missing_mask,
@@ -476,6 +526,7 @@ OP_FAMILY_MUTATORS: dict[str, list] = {
         break_index_offset,
         break_missing_barrier,
         break_block_m_to_64,
+        break_atomic_to_store,  # split-K / online-softmax accumulation
     ],
     "moe": [
         break_scale,
@@ -494,6 +545,8 @@ OP_FAMILY_MUTATORS: dict[str, list] = {
         break_dtype_cast,
         break_scale,
         break_missing_mask,
+        break_amax_abs,        # dynamic per-token quant scale
+        break_nibble_unpack,   # int4/W4A16 dequant
     ],
     "generic": [
         break_missing_mask,
@@ -597,6 +650,7 @@ _ALL_BREAKERS = (
     break_reduction_axis, break_mask, break_eps, break_dtype_cast, break_scale,
     break_missing_mask, break_fp8_variant, break_k_multiple_of_32,
     break_transpose_operand, break_missing_barrier, break_block_m_to_64,
+    break_nibble_unpack, break_amax_abs, break_atomic_to_store,
 )
 BREAKAGE_OPERATORS: dict[str, "callable"] = {fn.__name__: fn for fn in _ALL_BREAKERS}
 

@@ -1,0 +1,20 @@
+task_id: genv_embedding_gather_bf16
+operation: embedding_gather
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: vendor_embedding_gather
+baseline_tier: vendor
+generated: true
+shapes:
+  minimal: {V: 2048, Dim: 256, T: 128}
+  primary: {V: 128256, Dim: 4096, T: 4096}
+  validation:
+    - {V: 32000, Dim: 4096, T: 8192}
+    - {V: 151936, Dim: 3584, T: 2048}
+    - {V: 49152, Dim: 2048, T: 4095}
+targets:
+  snr_db: 30.0
+  comparison_baseline: aiter_embedding_gather

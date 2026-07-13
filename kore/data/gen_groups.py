@@ -13,6 +13,7 @@ operate on lightweight result dicts, not on the GPU.
 
 from __future__ import annotations
 
+import os
 import random
 import time
 
@@ -219,6 +220,19 @@ def generate_groups(
                 for i, r in enumerate(results)
             ]
             prefs = build_preferences(results, speed_band, snr_band)
+            # Pillar 4 (opt-in, KORE_GROUND_REASONING=1): profile the rank-0 correct
+            # candidate so gold-win reasoning minted from this group is grounded in real
+            # rocprofv3 counters. Best-effort + guarded (needs rocprof); off by default so
+            # it never slows normal datagen.
+            counters = None
+            if os.environ.get("KORE_GROUND_REASONING", "0") != "0":
+                _best = order[0] if order else None
+                if _best is not None and results[_best].get("correct") \
+                        and hasattr(env, "collect_counters"):
+                    try:
+                        counters = env.collect_counters(results[_best]["source"])
+                    except Exception:  # noqa: BLE001 - profiling is advisory
+                        counters = None
             records.append(
                 RankedGroupRecord(
                     task_id=task.task_id,
@@ -228,6 +242,7 @@ def generate_groups(
                     gpu=task.gpu_target,
                     operation=getattr(task, "operation", None),
                     arch=getattr(task, "gpu_target", None),
+                    counters=counters,
                 )
             )
             tot_candidates += len(results)

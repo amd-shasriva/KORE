@@ -389,6 +389,59 @@ class KoreEnv:
                 obs.profile_efficiency = None
         return obs
 
+    def collect_counters(self, source: str, shape: Optional["Shape"] = None) -> Optional[dict]:
+        """PUBLIC: rocprofv3 PMC counters for a kernel (Pillar 4 grounded reasoning).
+
+        Stages an isolated workdir (like ``evaluate``), profiles the CANDIDATE on one
+        shape (``primary`` by default), and returns aggregated ``{counter: value}`` or
+        ``None`` if the profiler is unavailable / fails. Fully fail-safe (never raises)
+        so grounded-reasoning datagen degrades gracefully to the templated path.
+        """
+        import glob as _glob
+        import tempfile as _tmp
+        try:
+            from kore.verifier.parsers.rocprofv3 import parse_rocprofv3_csv
+            from kore.verifier.pmc import COUNTER_SETS
+        except Exception:  # noqa: BLE001
+            return None
+        sh = shape or self.task.shape("primary") or self.task.shape("minimal") or (
+            self.task.shapes[0] if self.task.shapes else Shape("default", {}))
+        workdir = Path(tempfile.mkdtemp(prefix=f"pmc_{self.task.task_id}_"))
+        try:
+            for p in self.task.dir.glob("*.py"):
+                dst = workdir / p.name
+                shutil.copy(p, dst)
+                os.chmod(dst, 0o444)
+            (workdir / "kernel.py").write_text(source)
+            os.chmod(workdir / "kernel.py", 0o444)
+            driver = workdir / "driver.py"
+            env = self._env()
+            outdir = _tmp.mkdtemp(prefix="pmc_cand_", dir=str(workdir))
+            cmd = ["rocprofv3", "--pmc", *COUNTER_SETS["full"], "-d", outdir,
+                   "--output-format", "csv", "--", sys.executable, str(driver),
+                   "--bench-mode", "--impl", "candidate", "--warmup", "2", "--iters", "3",
+                   *sh.as_args()]
+            rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
+            if timed or rc != 0:
+                return None
+            csvs = _glob.glob(os.path.join(outdir, "**", "*counter_collection.csv"),
+                              recursive=True) or [
+                c for c in _glob.glob(os.path.join(outdir, "**", "*.csv"), recursive=True)
+                if "agent_info" not in os.path.basename(c)]
+            agg: dict[str, int] = {}
+            for c in csvs:
+                try:
+                    for k in parse_rocprofv3_csv(c):
+                        for name, val in k.counters.items():
+                            agg[name] = agg.get(name, 0) + int(val)
+                except Exception:  # noqa: BLE001
+                    pass
+            return agg or None
+        except Exception:  # noqa: BLE001
+            return None
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
     def _collect_profile(self, driver: Path, sh: Shape, workdir: Path,
                          env: dict) -> Optional[float]:
         """rocprofv3 PMC on candidate + reference -> baseline-relative efficiency.

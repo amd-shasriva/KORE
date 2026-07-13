@@ -48,3 +48,22 @@ def test_verify_reasoning_grounding_accepts_grounded_rejects_fabricated():
 def test_no_matrix_cores_grounding_terms():
     r = verify_reasoning_grounding("MFMA issues are zero; switch to tl.dot for the matrix cores.", NOMM)
     assert r["bottleneck"] == "no-matrix-cores" and r["grounded"]
+
+
+def test_gold_win_reasoning_grounded_when_group_carries_counters():
+    # BUG 7: gold_wins grounds the ANALYSIS in real counters when present on the group
+    from kore.data.gold_wins import mint_gold_win
+    group = {
+        "task_id": "t", "operation": "gemm_bias", "arch": "gfx942",
+        "candidates": [{"source": "def a(): pass", "rank": 0, "snr_db": 99, "wall_us": 5.0},
+                       {"source": "def b(): pass", "rank": 1, "snr_db": 99, "wall_us": 10.0}],
+        "preferences": [[0, 1]], "counters": MEM,
+    }
+    wr = mint_gold_win(group, snr_gate=30.0, min_speedup=1.02)
+    assert wr is not None
+    analysis = wr.trajectory[-1]["content"]
+    assert "memory-bound" in analysis  # grounded in the measured bottleneck
+    # without counters -> templated (no bottleneck claim)
+    group_no = dict(group); group_no.pop("counters")
+    wr2 = mint_gold_win(group_no, snr_gate=30.0, min_speedup=1.02)
+    assert wr2 is not None and "bottleneck" not in wr2.trajectory[-1]["content"]

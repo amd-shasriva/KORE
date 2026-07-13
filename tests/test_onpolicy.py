@@ -136,8 +136,10 @@ def test_dagger_repairs_collects_policy_failures():
     for r in recs:
         assert isinstance(r, RepairRecord)
         assert r.failure_class in ("snr_fail", "compile_fail")
-        # verified fix stored in the diagnose-then-fix format
-        assert "<answer>" in r.messages[-1]["content"]
+        # verified fix stored in the CANONICAL diagnose-then-fix contract (Pillar 0)
+        content = r.messages[-1]["content"]
+        assert content.startswith("ANALYSIS:") and "FULL_KERNEL:" in content
+        assert "<answer>" not in content and "<think>" not in content
         classes.add(r.failure_class)
     # both a compile fail (__BAD__) and an snr fail (__WRONG__) get repaired
     assert classes == {"snr_fail", "compile_fail"}

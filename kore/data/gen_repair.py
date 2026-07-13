@@ -107,11 +107,11 @@ def make_repair_record(
     broken kernel as a correct SFT target. Returns None if the teacher produced
     no kernel, the fix crashed, or the fix did not pass validation.
 
-    When ``diagnostic`` is True (default), the stored assistant turn is rewritten
-    into the diagnose-then-fix ``<think>...</think><answer>FULL_KERNEL:...</answer>``
-    format (LLM-VeriOpt), folding the verifier's ``error_text`` into the reasoning
-    so SFT learns to self-diagnose. The emitted fix is always the VERIFIED kernel
-    only — the "only emit verified fixes" rule is unchanged."""
+    When ``diagnostic`` is True (default), the stored assistant turn is rendered in
+    the canonical diagnose-then-fix contract (ANALYSIS / PROPOSED_CHANGE / FULL_KERNEL
+    via :func:`format_assistant_turn`), folding the verifier's ``error_text`` into the
+    ANALYSIS so SFT learns to self-diagnose. The emitted fix is always the VERIFIED
+    kernel only — the "only emit verified fixes" rule is unchanged."""
     failure_class = _failure_class(broken_obs)
     if failure_class is None:
         return None

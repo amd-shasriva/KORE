@@ -105,6 +105,7 @@ def iterative_dpo(
     cfg=CONFIG,
     train_fn: Optional[Callable[["IterativeDPORound"], Optional[str]]] = None,
     aggregate: bool = True,
+    prompt_fn: Optional[Callable[[str], Any]] = None,
 ) -> list[IterativeDPORound]:
     """Run ``rounds`` of iterative on-policy DPO.
 
@@ -145,7 +146,10 @@ def iterative_dpo(
                     seed=seed + r * 100_003 + i, cfg=cfg,
                 )
             agg_groups = (agg_groups + new_groups) if aggregate else list(new_groups)
-            dpo_pairs = build_dpo(agg_groups)
+            # Pillar 3: in-context DPO prompts (seed-kernel transcript) so iterative
+            # on-policy preferences match the deployment context, exactly like the
+            # first-round build stage. Falls back to the generic prompt if None.
+            dpo_pairs = build_dpo(agg_groups, prompt_fn=prompt_fn)
             rd = IterativeDPORound(
                 round=r,
                 ref_model_id=prev_ckpt,

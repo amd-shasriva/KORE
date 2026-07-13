@@ -79,6 +79,9 @@ class RankedGroupRecord:
     operation: str | None = None
     arch: str | None = None
     shape: str | None = None
+    # rocprofv3 counters for the rank-0 (best) candidate's PARENT, when collected at
+    # datagen (Pillar 4). Enables profiler-grounded gold-win reasoning downstream.
+    counters: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -95,6 +98,7 @@ class RankedGroupRecord:
             operation=d.get("operation"),
             arch=d.get("arch"),
             shape=d.get("shape"),
+            counters=d.get("counters"),
         )
 
 

@@ -56,6 +56,16 @@ def test_coverage_report_shape(tmp_path):
     assert "t_hole" in rep["undercovered"]
 
 
+def test_registry_task_count_after_fp32_expansion():
+    # Pillar 2 regression guard: fp32 materialization -> 236 tasks (was 209)
+    try:
+        from kore.tasks.registry import all_tasks
+    except Exception:
+        return
+    n = len(all_tasks())
+    assert n >= 236, f"expected >=236 tasks after fp32 expansion, got {n}"
+
+
 def test_frontier_coverage_reports_capabilities():
     fc = frontier_coverage()
     if not fc:  # registry unavailable

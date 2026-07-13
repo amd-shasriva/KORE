@@ -11,7 +11,12 @@ from __future__ import annotations
 
 
 from kore.config import CONFIG
-from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, extract_kernel
+from kore.data.prompts import (
+    SYSTEM_PROMPT,
+    build_turn_prompt,
+    extract_kernel,
+    normalize_assistant,
+)
 from kore.data.schemas import WinRecord
 from kore.obs import get_logger
 from kore.reward.reward import compute_reward
@@ -86,7 +91,11 @@ def generate_wins(
             prompt = build_turn_prompt(parent_source=best_src, feedback=feedback, mode=mode)
             trajectory.append({"role": "user", "content": prompt})
             response = teacher.generate(trajectory)
-            trajectory.append({"role": "assistant", "content": response})
+            # Store the assistant turn in the CANONICAL contract (Pillar 0): the raw
+            # teacher text may be loosely shaped; normalize_assistant re-renders it to
+            # ANALYSIS/PROPOSED_CHANGE/FULL_KERNEL (no-op if it carries no kernel) so
+            # the win trajectory that feeds SFT never leaks a non-canonical shape.
+            trajectory.append({"role": "assistant", "content": normalize_assistant(response)})
 
             cand_src = extract_kernel(response)
             if not cand_src:

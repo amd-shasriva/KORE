@@ -154,6 +154,30 @@ def contaminated_by_text(text: str, heldout_ngrams: set[str], n: int = 8,
     return overlap >= threshold
 
 
+def decontaminate_chat_rows(rows: Iterable[dict], n: int = 8,
+                            threshold: float = 0.10,
+                            heldout_ngrams: Optional[set] = None) -> tuple[list[dict], dict]:
+    """Drop chat rows ({"messages": [...]}) whose combined text overlaps held-out src.
+
+    For the general-replay slices (code/math/chat/tool) — a KernelBook/OpenCode row
+    could carry a held-out attention kernel. Pass a prebuilt ``heldout_ngrams`` to
+    avoid recomputing it per slice. Safe no-op when held-out sources can't be loaded.
+    """
+    heldout = heldout_ngrams if heldout_ngrams is not None else build_heldout_ngrams(n)
+    if not heldout:
+        rows = list(rows)
+        return rows, {"n_dropped_contaminated": 0, "n_kept": len(rows)}
+    clean, dropped = [], 0
+    for r in rows:
+        text = " ".join(m.get("content", "") for m in r.get("messages", [])
+                        if isinstance(m, dict))
+        if contaminated_by_text(text, heldout, n, threshold):
+            dropped += 1
+            continue
+        clean.append(r)
+    return clean, {"n_dropped_contaminated": dropped, "n_kept": len(clean)}
+
+
 def decontaminate_corpus(rows: Iterable[dict], text_key: str = "text",
                          n: int = 8, threshold: float = 0.10) -> tuple[list[dict], dict]:
     """Drop corpus rows whose text overlaps the held-out reference sources.
@@ -176,5 +200,5 @@ __all__ = [
     "heldout_task_ids", "heldout_families", "record_family",
     "is_contaminated_record", "decontaminate_records",
     "ngram_set", "build_heldout_ngrams", "contaminated_by_text",
-    "decontaminate_corpus",
+    "decontaminate_corpus", "decontaminate_chat_rows",
 ]

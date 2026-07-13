@@ -18,7 +18,12 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from kore.data.prompts import SYSTEM_PROMPT, extract_kernel, wrap_full_kernel
+from kore.data.prompts import (
+    SYSTEM_PROMPT,
+    extract_kernel,
+    normalize_assistant,
+    wrap_full_kernel,
+)
 from kore.data.schemas import (
     RepairRecord,
     RankedGroupRecord,
@@ -86,13 +91,42 @@ def _prov_repair(rec: Any) -> dict:
 
 
 # --- SFT ---
+def _canonicalize_chat(messages: list) -> list:
+    """Re-render a chat's KORE system + assistant turns into the canonical contract.
+
+    The build boundary is the single choke point for contract unification (Pillar 0):
+    normalizing here canonicalizes fresh datagen wins AND reused v1 shards (legacy
+    ``<think>/<answer>`` repairs, raw-teacher ``CHANGE:`` wins) with NO disk mutation,
+    so training never sees a non-canonical kernel turn. No-op on already-canonical or
+    non-kernel (retention) content.
+    """
+    out = []
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        role, content = m.get("role"), m.get("content", "")
+        if role == "system" and isinstance(content, str) \
+                and content.lstrip().startswith("You are KORE, an expert AMD GPU kernel engineer") \
+                and content != SYSTEM_PROMPT:
+            m = {**m, "content": SYSTEM_PROMPT}
+        elif role == "assistant":
+            nc = normalize_assistant(content)
+            if nc != content:
+                m = {**m, "content": nc}
+        out.append(m)
+    return out
+
+
 def build_sft(records: Iterable[Any]) -> list[dict]:
     """Chat-SFT rows from repair turns and winning trajectories.
 
-    Each row carries a ``_provenance`` block (kind / task / op / arch / measured
-    speedup + snr / verified) — ignored by the trainer but consumed by the curation
-    stage and available for audit. ``mixing._tag`` shallow-copies rows, so it
-    survives into the final multicap shard.
+    Assistant turns are canonicalized at this boundary (:func:`_canonicalize_chat`)
+    so both fresh datagen and reused v1 shards emit the single ANALYSIS/PROPOSED_CHANGE/
+    FULL_KERNEL contract. Each row carries a ``_provenance`` block (kind / task / op /
+    arch / measured speedup + snr / verified) — ignored by the trainer, consumed by
+    curation, available for audit. ``mixing._tag`` shallow-copies rows, so it survives
+    into the final multicap shard.
     """
     out: list[dict] = []
     n_repair = 0
@@ -101,11 +135,13 @@ def build_sft(records: Iterable[Any]) -> list[dict]:
         rec = _as_record(raw)
         if isinstance(rec, RepairRecord):
             if rec.messages:
-                out.append({"messages": list(rec.messages), "_provenance": _prov_repair(rec)})
+                out.append({"messages": _canonicalize_chat(rec.messages),
+                            "_provenance": _prov_repair(rec)})
                 n_repair += 1
         elif isinstance(rec, WinRecord):
             if rec.trajectory:
-                out.append({"messages": list(rec.trajectory), "_provenance": _prov_win(rec)})
+                out.append({"messages": _canonicalize_chat(rec.trajectory),
+                            "_provenance": _prov_win(rec)})
                 n_win += 1
     log.metric("build_sft", rows=len(out), from_repair=n_repair, from_wins=n_win)
     return out

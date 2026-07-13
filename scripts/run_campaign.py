@@ -1209,6 +1209,15 @@ def _stage_dpo_iterative(ctx, sft, rounds: int) -> str:
     teacher = _teacher(ctx["args"])
     train_tasks = _train_tasks(ctx)
 
+    # Pillar 3: in-context DPO prompts for the iterative on-policy rounds too (the
+    # seed-kernel transcript = deployment context), matching the first-round build.
+    from kore.policy.format import build_task_prompt, build_transcript
+    _task_by_id = {t.task_id: t for t in train_tasks}
+
+    def _dpo_prompt_fn(task_id):
+        t = _task_by_id.get(task_id)
+        return build_transcript(build_task_prompt(t), []) if t is not None else None
+
     def policy_factory(round_idx, prev_ckpt):
         ckpt = prev_ckpt or sft
         _log("dpo", f"round {round_idx}: loading on-policy generator from {ckpt}")
@@ -1242,7 +1251,7 @@ def _stage_dpo_iterative(ctx, sft, rounds: int) -> str:
     results = iterative_dpo(
         rounds, policy_factory, train_tasks, lambda t: KoreEnv(t),
         n_parents=ctx["args"].n_parents, k=ctx["args"].k, seed=0, cfg=CONFIG,
-        train_fn=train_fn, aggregate=True,
+        train_fn=train_fn, aggregate=True, prompt_fn=_dpo_prompt_fn,
     )
     return results[-1].policy_ckpt or ctx["args"].dpo_out
 

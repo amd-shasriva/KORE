@@ -40,7 +40,12 @@ from kore.config import CONFIG
 from kore.data.gen_groups import build_preferences
 from kore.data.gen_groups import rank_candidates as _rank_results
 from kore.data.mutate import apply_operator, infer_family, list_operators
-from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, extract_kernel
+from kore.data.prompts import (
+    SYSTEM_PROMPT,
+    build_turn_prompt,
+    extract_kernel,
+    normalize_assistant,
+)
 from kore.data.schemas import RankedGroupRecord, WinRecord
 from kore.env.replay import kernel_hash
 from kore.obs import get_logger
@@ -403,7 +408,9 @@ def evolve_task(
             msgs = _fewshot_messages(task, elites, parent_src, feedback, mode, cfg.max_shots)
             trajectory.append(msgs[-1])
             resp = generator.generate(msgs)
-            trajectory.append({"role": "assistant", "content": resp})
+            # store the canonical contract (Pillar 0) — raw teacher text may be loosely
+            # shaped; build_sft also canonicalizes at the boundary as a backstop.
+            trajectory.append({"role": "assistant", "content": normalize_assistant(resp)})
             gsrc = extract_kernel(resp)
             if gsrc:
                 candidates.append((gsrc, "generator"))

@@ -70,7 +70,7 @@ from pathlib import Path
 
 from kore.obs import configure, get_logger, gpu_mem_snapshot
 
-ALL_STAGES = ["datagen", "evolve", "agentic", "build", "midtrain", "sft", "dpo",
+ALL_STAGES = ["reverify", "datagen", "evolve", "agentic", "build", "midtrain", "sft", "dpo",
               "grpo", "soup", "eval"]
 # Stage-0 mid-train (continued pretraining) runs FIRST so its checkpoint becomes
 # the base for Stage-1 SFT (see ctx["midtrain_ckpt"] -> _stage_sft). ``evolve`` is
@@ -193,9 +193,16 @@ def _launch_distributed(ctx, stage: str, overrides: dict, *, run_name: str | Non
     run_cfg.write_text(json.dumps(cfg, indent=2))
     launcher = _repo_root() / "scripts" / "launch_distributed.sh"
     cmd = ["bash", str(launcher), stage, str(run_cfg)]
+    # Pin FSDP training to the same physical GPUs as the rest of the run (free GPUs on
+    # a shared node). launch_distributed.sh reads GPU_IDS and derives num_processes.
+    env = None
+    pinned = _gpu_ids(ctx)
+    if pinned:
+        env = {**os.environ, "GPU_IDS": ",".join(str(g) for g in pinned)}
     _log(stage, f"full-FT: engaging FSDP under the hood (ONE command) -> {' '.join(cmd)} "
-                f"(config: model={cfg.get('model_id')} out={cfg.get('output_dir')})")
-    subprocess.run(cmd, check=True)
+                f"(config: model={cfg.get('model_id')} out={cfg.get('output_dir')}"
+                f"{'; GPU_IDS=' + env['GPU_IDS'] if env else ''})")
+    subprocess.run(cmd, check=True, env=env)
     return overrides["output_dir"]
 
 
@@ -515,6 +522,7 @@ def run(args) -> int:
                  f"held-out(eval)={ctx['eval_task_ids']}")
 
     dispatch = {
+        "reverify": _stage_reverify,
         "datagen": _stage_datagen, "evolve": _stage_evolve, "agentic": _stage_agentic,
         "build": _stage_build, "midtrain": _stage_midtrain, "sft": _stage_sft,
         "dpo": _stage_dpo, "grpo": _stage_grpo, "soup": _stage_soup, "eval": _stage_eval,
@@ -643,6 +651,88 @@ def _datagen_plan(ctx):
     return workers, n_gpus
 
 
+def _detect_free_gpus(mem_free_frac: float = 0.9, busy_use_pct: int = 20) -> list[int]:
+    """Best-effort: physical GPU ids that are idle (low VRAM + low utilization).
+
+    Parses ``rocm-smi``; returns [] on any failure (caller falls back). A GPU counts
+    as free if it uses < (1-mem_free_frac) of VRAM AND < busy_use_pct%% compute.
+    """
+    import re
+    import subprocess
+    try:
+        out = subprocess.run(["rocm-smi", "--showuse", "--showmeminfo", "vram"],
+                             capture_output=True, text=True, timeout=60).stdout
+    except Exception:  # noqa: BLE001
+        return []
+    use, used, total = {}, {}, {}
+    for ln in out.splitlines():
+        m = re.search(r"GPU\[(\d+)\].*GPU use \(%\):\s*(\d+)", ln)
+        if m:
+            use[int(m.group(1))] = int(m.group(2))
+        m = re.search(r"GPU\[(\d+)\].*Total Memory \(B\):\s*(\d+)", ln)
+        if m:
+            total[int(m.group(1))] = int(m.group(2))
+        m = re.search(r"GPU\[(\d+)\].*Total Used Memory \(B\):\s*(\d+)", ln)
+        if m:
+            used[int(m.group(1))] = int(m.group(2))
+    free = []
+    for g in sorted(total):
+        u = used.get(g, 0) / total[g] if total.get(g) else 1.0
+        if u < (1.0 - mem_free_frac) and use.get(g, 100) < busy_use_pct:
+            free.append(g)
+    return free
+
+
+def _gpu_ids(ctx) -> list[int]:
+    """Physical GPU ids to pin work to: explicit --gpu-ids, else auto-detected free."""
+    raw = getattr(ctx["args"], "gpu_ids", "") or ""
+    if raw.strip():
+        return [int(g) for g in raw.split(",") if g.strip() != ""]
+    free = _detect_free_gpus()
+    if free:
+        _log("plan", f"auto-detected free GPUs for pinning: {free}")
+        return free
+    return []
+
+
+def _stage_reverify(ctx):
+    """Re-verify + re-baseline EXISTING kernels with v2 rigor (reuse, no teacher).
+
+    Runs the strong-baseline + adversarial re-measurement over every task that
+    already has repair/wins/groups shards (Pillar 1 rigor applied to v1 data), pinned
+    to the free GPUs. Resumable. This is the 'reuse, don't regenerate' path: only the
+    coverage HOLES need a subsequent (teacher) datagen.
+    """
+    if ctx["dry"]:
+        _log("reverify", "would re-verify existing repair/wins/groups against the strong "
+                         "baseline + adversarial battery (reuse v1 kernels, no teacher)")
+        return
+    from kore.data.reverify import run_reverify
+
+    data_root = ctx["data_root"]
+    seen: set[str] = set()
+    for sub in ("groups", "wins", "repair"):
+        d = data_root / sub
+        if d.exists():
+            for p in d.glob("*.jsonl"):
+                if not p.stem.startswith("_"):
+                    seen.add(p.stem)
+    # only re-verify TRAIN tasks (never touch held-out) that have data
+    heldout = set(ctx.get("eval_task_ids") or [])
+    task_ids = sorted(t for t in seen if t not in heldout)
+    if not task_ids:
+        _log("reverify", "no existing shards to re-verify (fresh run) — skipping")
+        return
+    gpus = _gpu_ids(ctx) or [0]
+    ground = bool(getattr(ctx["args"], "ground_reasoning", False))
+    _log("reverify", f"re-verifying {len(task_ids)} tasks on GPUs {gpus} "
+                     f"(reuse v1 kernels; strong baseline + adversarial; ground={ground})")
+    summary = run_reverify(data_root, task_ids, gpus, ground=ground,
+                           rigorous=True, log_fn=lambda m: _log("reverify", m))
+    LOG.event("reverify_done", **summary)
+    _log_datagen_coverage(ctx)
+
+
 def _stage_datagen(ctx):
     if ctx["dry"]:
         _log("datagen", "would generate repair/groups/wins per task (teacher + GPU env), "
@@ -657,16 +747,19 @@ def _stage_datagen(ctx):
         set_rigorous_verification(True)
         _log("datagen", f"rigorous verification ON: {rigor_status()}")
     # Parallel path: shard tasks across GPUs with concurrent teacher streams (resumable).
+    # Pinned GPU ids (free ones on a shared node) force the parallel path onto exactly
+    # those devices so datagen never contends with other users' jobs.
+    pinned = _gpu_ids(ctx)
     workers, n_gpus = _datagen_plan(ctx)
-    if workers > 1:
+    if pinned or workers > 1:
         from kore.data.parallel_datagen import DATAGEN_KINDS, run_parallel_datagen
         train = _train_tasks(ctx)
         summary = run_parallel_datagen(
             [t.task_id for t in train], DATAGEN_KINDS, ctx["data_root"],
-            _datagen_counts(ctx), n_workers=workers, n_gpus=n_gpus,
+            _datagen_counts(ctx), n_workers=(workers or len(pinned) or 1), n_gpus=n_gpus,
             teacher_kind=ctx["args"].teacher, model_teacher=ctx["args"].model_teacher,
-            log=lambda m: _log("datagen", m))
-        LOG.event("datagen_parallel", workers=workers, n_gpus=n_gpus, **summary)
+            gpu_ids=pinned or None, log=lambda m: _log("datagen", m))
+        LOG.event("datagen_parallel", workers=workers, n_gpus=n_gpus, pinned=pinned, **summary)
         _log_datagen_coverage(ctx)
         return
     from kore.data.gen_groups import generate_groups
@@ -1658,6 +1751,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rigorous-verify", dest="rigorous_verify",
                    action=argparse.BooleanOptionalAction, default=True,
                    help="max verification rigor during datagen/dpo (default on)")
+    # Pin all GPU work (reverify / datagen / training) to specific PHYSICAL GPU ids so
+    # a shared node's other jobs are never contended. Empty = auto-detect free GPUs.
+    p.add_argument("--gpu-ids", dest="gpu_ids", default="",
+                   help="comma-separated physical GPU ids to pin to (e.g. 1,3,5); empty=auto-free")
+    # Attach rocprof counters during reverify/datagen so gold-win reasoning is grounded.
+    p.add_argument("--ground-reasoning", dest="ground_reasoning",
+                   action="store_true", help="collect rocprof counters for grounded reasoning")
     # Adaptive GRPO horizon: stop when the reward mean plateaus (bounded by
     # total_steps). Ensures the policy trains long enough to actually move.
     p.add_argument("--adaptive-steps", dest="adaptive_steps",

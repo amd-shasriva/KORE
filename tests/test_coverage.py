@@ -72,12 +72,13 @@ def test_frontier_coverage_reports_capabilities():
         return
     assert fc["n_capabilities"] == len(FRONTIER_OPS)
     assert fc["n_covered"] + fc["n_missing"] == fc["n_capabilities"]
-    # core capabilities KORE definitely has
-    for cap in ("gemm_dense", "gemm_fp8", "attention_mha", "moe_router", "norm_rms",
-                "rope", "elementwise", "reduction"):
+    # core capabilities KORE definitely has (attention_mla + quant_int4 now authored
+    # + GPU-proven; MLA is held out for the generalization eval but still "covered")
+    for cap in ("gemm_dense", "gemm_fp8", "attention_mha", "attention_mla", "moe_router",
+                "norm_rms", "rope", "elementwise", "reduction", "quant_int4"):
         assert cap in fc["covered"], f"{cap} should be covered"
-    # known holes that require GPU-verified authoring (not fabricated offline)
-    for cap in ("attention_mla", "sampling", "collective"):
+    # remaining holes that require GPU-verified authoring (not fabricated offline)
+    for cap in ("sampling", "collective"):
         assert cap in fc["missing"], f"{cap} should be a tracked hole"
 
 

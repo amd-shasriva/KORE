@@ -61,15 +61,19 @@ _TRITON_MARKERS = ("import triton", "triton.jit", "triton.language", "tl.")
 
 
 def _is_heldout_task_dir(dir_name: str) -> bool:
-    """True if a ``kore/tasks/<dir_name>`` belongs to a held-out eval family.
+    """True if ``kore/tasks/<dir_name>`` is a held-out eval task (or family).
 
     Used to decontaminate the pretrain corpus: the held-out generalization set
-    (attention family) must never enter training as source text. Import is lazy +
-    guarded so the corpus builder still runs if the registry is unavailable.
+    (task-level: paged-KV decode + MLA; plus any reserved family) must never enter
+    training as source text. Core attention (prefill/decode/sliding/varlen/fp8) now
+    TRAINS, so it is intentionally NOT excluded. Import is lazy + guarded so the
+    corpus builder still runs if the registry is unavailable.
     """
     try:
-        from kore.data.decontam import _family_of, heldout_families
-        return _family_of(dir_name) in heldout_families()
+        from kore.data.decontam import _family_of, heldout_families, heldout_task_ids
+        if dir_name in heldout_task_ids():           # task-level holdout (paged / MLA)
+            return True
+        return _family_of(dir_name) in heldout_families()   # family-level holdout (if any)
     except Exception:  # noqa: BLE001 - registry missing -> do not exclude (safe)
         return False
 

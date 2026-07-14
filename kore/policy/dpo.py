@@ -330,7 +330,11 @@ def train(config: DPOConfig) -> dict:
         peft_config=peft_config,
         callbacks=[_ObsCallback()],
     )
-    trainer.train()
+    from kore.policy.configs import latest_checkpoint
+    _resume = latest_checkpoint(config.output_dir)
+    if _resume:
+        log.info("dpo: resuming from checkpoint", ckpt=_resume)
+    trainer.train(resume_from_checkpoint=_resume)
 
     # Merge the LoRA adapter into the base before saving so downstream stages
     # (GRPO, soup) load a plain full model; full-FT saves weights directly.

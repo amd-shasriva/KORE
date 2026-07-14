@@ -1,13 +1,13 @@
 """Reference + inputs for the dynamic per-token fp8 quantization task.
 
 Dynamic (activation) per-token quant used before fp8 W8A8 GEMM: each row of a
-bf16 activation is quantized to fp8 e4m3fnuz with its own scale
+bf16 activation is quantized to fp8 (arch ``FP8_DTYPE``) with its own scale
     scale[m] = rowamax[m] / FP8_MAX
     xq[m]    = round(x[m] / scale[m])  (clamped to +/-FP8_MAX)
 so that ``x[m] ~= xq[m] * scale[m]``.
 
-gfx942 / CDNA3 fp8 e4m3 is the **FNUZ** variant (``torch.float8_e4m3fnuz``),
-NOT the OCP ``e4m3fn`` — the wrong variant silently mismatches AITER.
+The fp8 e4m3 encoding is arch-selected: OCP ``e4m3fn`` on gfx950/CDNA4
+(MI350X/MI355X — native), FNUZ ``e4m3fnuz`` on gfx942/CDNA3.
 
 Correctness oracle: the exact torch quant above (codes + scales). The gate
 checks (a) SNR of the dequantized activation vs the original, and (b) that the

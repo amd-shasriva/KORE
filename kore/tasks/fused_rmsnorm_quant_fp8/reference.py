@@ -2,9 +2,9 @@
 
 The serving prologue for an fp8 (W8A8) GEMM: ``RMSNorm(x) * w`` followed by a
 dynamic per-token fp8 quant, fused into ONE kernel instead of two AITER kernels
-plus a full-tensor HBM round trip. gfx942 / CDNA3 fp8 e4m3 is the **FNUZ**
-variant (``torch.float8_e4m3fnuz``); the OCP ``e4m3fn`` variant silently
-mismatches AITER.
+plus a full-tensor HBM round trip. The fp8 e4m3 encoding is arch-selected via
+``FP8_DTYPE`` (OCP ``e4m3fn`` on gfx950/CDNA4 MI350X/MI355X — the native format;
+FNUZ ``e4m3fnuz`` on gfx942/CDNA3).
 
 Oracle: fp32 RMSNorm, then the exact torch per-token quant (codes + scales)
     scale[m] = rowamax(y[m]) / FP8_MAX,  xq[m] = round(y[m]/scale[m])  (clamped)

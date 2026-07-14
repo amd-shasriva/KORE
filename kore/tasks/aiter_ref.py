@@ -8,9 +8,14 @@ so each task's driver measures the honest bar.
 Import-safe: AITER (and torch) are imported lazily inside the wrappers so that
 `kore tasks` / registry discovery never require a GPU or the aiter runtime.
 
-gfx942 (MI325X) fp8 note: AMD CDNA3 uses the **FNUZ** fp8 encoding, so the
-correct e4m3 dtype is ``torch.float8_e4m3fnuz`` (NOT the OCP ``e4m3fn``). Using
-e4m3fn silently changes the numeric range/bias and mismatches AITER/hipBLASLt.
+fp8 e4m3 encoding is ARCH-DEPENDENT and auto-selected (see :func:`_fp8_e4m3_dtype`):
+  * gfx950 / CDNA4 (MI350X / MI355X, THIS node): **OCP** ``torch.float8_e4m3fn``
+    (range +/-448, standard bias) -- the native format the CDNA4 matrix cores and
+    AITER/hipBLASLt use. This is the KORE target hardware, so it is the default.
+  * gfx942 / CDNA3 (MI300X / MI325X): the **FNUZ** ``torch.float8_e4m3fnuz``
+    (range +/-240) -- CDNA3's fp8; using OCP there mismatches AITER/hipBLASLt.
+Override with ``KORE_FP8_ENCODING=ocp|fnuz``. The reference oracle AND the candidate
+kernel both consume ``FP8_DTYPE``, so the quant is self-consistent per arch.
 
 Version-robustness + honest labeling (P0): AITER moved its ops from the top level
 (``aiter.rms_norm``) into submodules (``aiter.ops.rmsnorm.rms_norm``) in newer
@@ -24,11 +29,37 @@ harness can label each check-(a) baseline ``aiter_vendor`` / ``hipblaslt_vendor`
 
 from __future__ import annotations
 
+import os
+
 import torch
 
-# gfx942 / CDNA3 fp8 e4m3 is the FNUZ variant.
-FP8_DTYPE = torch.float8_e4m3fnuz
-FP8_MAX = float(torch.finfo(FP8_DTYPE).max)  # 240.0
+
+def _fp8_e4m3_dtype():
+    """e4m3 fp8 dtype for the active arch (import-safe; no CUDA init required).
+
+    OCP ``e4m3fn`` on gfx950/CDNA4 (MI350X/MI355X) and newer; FNUZ ``e4m3fnuz`` on
+    gfx942/CDNA3 (MI300X/MI325X) / gfx90a. Order: ``KORE_FP8_ENCODING`` override,
+    then the running GPU's gfx target, then OCP (the KORE target hardware).
+    """
+    enc = os.environ.get("KORE_FP8_ENCODING", "").strip().lower()
+    if enc in ("ocp", "fn", "e4m3fn"):
+        return torch.float8_e4m3fn
+    if enc in ("fnuz", "e4m3fnuz"):
+        return torch.float8_e4m3fnuz
+    try:  # pragma: no cover - hardware dependent
+        if torch.cuda.is_available():
+            arch = (torch.cuda.get_device_properties(0).gcnArchName or "").lower()
+            if "gfx942" in arch or "gfx90a" in arch or "gfx908" in arch:
+                return torch.float8_e4m3fnuz   # CDNA2/CDNA3 -> FNUZ
+            return torch.float8_e4m3fn         # gfx950/CDNA4+ -> OCP
+    except Exception:
+        pass
+    return torch.float8_e4m3fn  # default: OCP (KORE target = gfx950/CDNA4)
+
+
+# Arch-selected e4m3 fp8 dtype + its finite max (gfx950 OCP: 448.0; gfx942 FNUZ: 240.0).
+FP8_DTYPE = _fp8_e4m3_dtype()
+FP8_MAX = float(torch.finfo(FP8_DTYPE).max)
 
 
 # AITER moved its ops from top-level (``aiter.rms_norm``) into submodules

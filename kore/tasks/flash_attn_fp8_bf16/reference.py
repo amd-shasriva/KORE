@@ -1,13 +1,15 @@
 """Reference + inputs for fp8 causal (GQA) flash attention (fp8 QKV -> bf16 out).
 
-fp8 attention for high-throughput serving: q/k/v are fp8 e4m3fnuz with per-tensor
-fp32 scales; the kernel dequantizes in-register and runs online-softmax flash,
+fp8 attention for high-throughput serving: q/k/v are fp8 (arch ``FP8_DTYPE``)
+with per-tensor fp32 scales; the kernel dequantizes in-register and runs
+online-softmax flash,
 moving ~half the QKV bytes of bf16. Correctness oracle: exact fp32 SDPA on the
 DEQUANTIZED fp8 q/k/v (the fp8 rounding is shared by candidate + reference, so the
 SNR gate measures the kernel's online-softmax fidelity, not the fp8 quantization).
 
 Layout: q ``[B,S,H,D]`` fp8, k/v ``[B,S,KV,D]`` fp8, per-tensor scales
-``sq/sk/sv`` (fp32 scalars). gfx942 fp8 is FNUZ (``torch.float8_e4m3fnuz``).
+``sq/sk/sv`` (fp32 scalars). fp8 e4m3 is arch-selected: OCP ``e4m3fn`` on
+gfx950/CDNA4 (MI350X/MI355X), FNUZ ``e4m3fnuz`` on gfx942/CDNA3.
 """
 
 from __future__ import annotations

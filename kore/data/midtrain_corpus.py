@@ -471,8 +471,8 @@ def build_midtrain_corpus(
     # NVIDIA/libdevice flavor of the Triton is fine for teaching the pattern.
     kb_pairs: list[tuple[Path, str]] = []
     if use_hf:
-        kb_pairs = _load_kernelbook_pairs(
-            n=max_files_per_source, max_chars=max_chars_per_file)
+        kb_max = int(os.environ.get("KORE_MIDTRAIN_KERNELBOOK_MAX", str(max_files_per_source)))
+        kb_pairs = _load_kernelbook_pairs(n=kb_max, max_chars=max_chars_per_file)
     collected.append(("kernelbook", kb_pairs))
 
     # 2c. REAL AMD MI300 passing kernels from GPUMODE/kernelbot-data (HF, use_hf
@@ -481,8 +481,13 @@ def build_midtrain_corpus(
     # KernelBook (NVIDIA/Inductor Triton) does not cover.
     amd_kernels: list[tuple[Path, str]] = []
     if use_hf:
-        amd_kernels = _load_amd_kernels(
-            n=max_files_per_source, max_chars=max_chars_per_file)
+        # The ~60k gfx942/MI300-native passing kernels are the HIGHEST-signal source,
+        # so pull MANY more than other sources (up-weight); the MinHash near-dedup
+        # below collapses the redundant competition submissions (many per problem)
+        # into a diverse, deduped set of real AMD kernels. Env-tunable.
+        amd_max = int(os.environ.get("KORE_MIDTRAIN_AMD_MAX",
+                                     str(max(max_files_per_source, 25000))))
+        amd_kernels = _load_amd_kernels(n=amd_max, max_chars=max_chars_per_file)
     collected.append(("amd_kernels", amd_kernels))
 
     # 3. Triton kernel Python files across the repos.

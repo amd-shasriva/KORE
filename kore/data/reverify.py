@@ -225,30 +225,99 @@ def _worker(payload: dict) -> list[tuple]:
     return out
 
 
+def _queue_worker(gpu, task_q, result_q, data_root, ground, rigorous):
+    """Persistent GPU-pinned worker: pull tasks from a shared queue until drained.
+
+    DYNAMIC load balancing (vs static pre-sharding): every worker grabs the NEXT
+    task the instant it finishes its current one, so no worker sits idle while a
+    few others grind the heavy shards (attention/moe/gemm). All workers stay busy
+    until the queue is empty. GPU is pinned ONCE (before torch import) for the
+    worker's whole life, so it is safe to reuse the process across many tasks.
+    """
+    os.environ["HIP_VISIBLE_DEVICES"] = str(gpu)
+    os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    if rigorous:
+        from kore.data.verify_rigor import set_rigorous_verification
+        set_rigorous_verification(True)
+    if ground:
+        os.environ.setdefault("KORE_GROUND_REASONING", "1")
+
+    from kore.config import CONFIG
+    from kore.env.kore_env import KoreEnv
+    from kore.tasks.registry import get_task
+
+    data_root = Path(data_root)
+    while True:
+        tid = task_q.get()
+        if tid is None:  # sentinel: queue drained for this worker
+            break
+        if reverify_done(data_root, tid):
+            print(f"[reverify w{gpu}] {tid} skip (resume)", flush=True)
+            result_q.put((tid, "skip"))
+            continue
+        try:
+            task = get_task(tid)
+            env = KoreEnv(task, use_replay=False)
+            reverify_task(data_root, task, env, CONFIG, ground=ground)
+            m = _marker(data_root, tid)
+            m.parent.mkdir(parents=True, exist_ok=True)
+            m.write_text("ok\n")
+            print(f"[reverify w{gpu}] {tid} done", flush=True)
+            result_q.put((tid, "done"))
+        except Exception as e:  # noqa: BLE001 - one task never aborts the worker
+            print(f"[reverify w{gpu}] {tid} ERROR {type(e).__name__}: {e}", flush=True)
+            result_q.put((tid, "error"))
+    result_q.put(None)  # worker-finished sentinel
+
+
 def run_reverify(data_root, task_ids, gpu_ids, *, ground: bool = False,
                  rigorous: bool = True, log_fn=print) -> dict:
     """Re-verify ``task_ids`` across the given ``gpu_ids`` (pinned, resumable).
 
-    ``gpu_ids`` are ABSOLUTE physical GPU indices to use (e.g. the free ones,
-    ``[1, 3, 5]``); one worker per gpu id, tasks round-robined across them.
+    ``gpu_ids`` is the list of per-worker device ids (e.g. ``[0..7]`` repeated
+    ``workers_per_gpu`` times = one entry per worker). Uses a SHARED task queue so
+    every worker stays busy pulling the next task until all are done — no tail
+    draining where light-task workers idle while heavy shards finish.
     """
     import multiprocessing as mp
 
-    from kore.data.parallel_datagen import shard_tasks
-
     task_ids = list(task_ids)
     gpu_ids = list(gpu_ids) or [0]
-    shards = shard_tasks(task_ids, len(gpu_ids))
-    payloads = [{"gpu_id": gpu_ids[w], "task_ids": shards[w], "data_root": str(data_root),
-                 "ground": ground, "rigorous": rigorous} for w in range(len(shards))]
-    log_fn(f"reverify: {len(task_ids)} tasks across GPUs {gpu_ids} "
-           f"(rigor={rigorous}, ground={ground})")
-    summary = {"done": 0, "skip": 0, "error": 0, "tasks": len(task_ids)}
+    n_workers = len(gpu_ids)
+    log_fn(f"reverify: {len(task_ids)} tasks across {n_workers} workers on GPUs "
+           f"{sorted(set(gpu_ids))} (dynamic queue; rigor={rigorous}, ground={ground})")
+
     ctxmp = mp.get_context("spawn")
-    with ctxmp.Pool(len(payloads)) as pool:
-        for res in pool.imap_unordered(_worker, payloads):
-            for _tid, status in res:
-                summary[status] = summary.get(status, 0) + 1
+    task_q: "mp.Queue" = ctxmp.Queue()
+    result_q: "mp.Queue" = ctxmp.Queue()
+    for tid in task_ids:
+        task_q.put(tid)
+    for _ in range(n_workers):
+        task_q.put(None)  # one drain-sentinel per worker
+
+    procs = [ctxmp.Process(target=_queue_worker,
+                           args=(gpu_ids[w], task_q, result_q, str(data_root), ground, rigorous))
+             for w in range(n_workers)]
+    for p in procs:
+        p.start()
+
+    summary = {"done": 0, "skip": 0, "error": 0, "tasks": len(task_ids)}
+    finished = 0
+    completed = 0
+    while finished < n_workers:
+        item = result_q.get()
+        if item is None:
+            finished += 1
+            continue
+        _tid, status = item
+        summary[status] = summary.get(status, 0) + 1
+        completed += 1
+        if completed % 10 == 0:
+            log_fn(f"reverify progress: {completed}/{len(task_ids)} "
+                   f"(done={summary['done']} skip={summary['skip']} error={summary['error']})")
+    for p in procs:
+        p.join()
     log_fn(f"reverify done: {summary}")
     return summary
 

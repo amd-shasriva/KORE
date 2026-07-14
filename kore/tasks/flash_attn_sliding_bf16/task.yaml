@@ -2,7 +2,7 @@ task_id: flash_attn_sliding_bf16
 operation: flash_attn_sliding
 dtype: bf16
 backend: triton
-gpu_target: gfx942
+gpu_target: gfx950
 seed_kernel_name: seed_triton.py
 # bf16 sliding-window causal-GQA attention vs fp32 windowed-SDPA oracle. Online-
 # softmax bf16 accumulation lands well above the 25 dB low-precision attention bar;

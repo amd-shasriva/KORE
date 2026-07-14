@@ -2,7 +2,7 @@ task_id: genv_gemm_a8w8_blockscale_fp8
 operation: gemm_a8w8_blockscale
 dtype: fp8
 backend: triton
-gpu_target: gfx942
+gpu_target: gfx950
 seed_kernel_name: seed_triton.py
 snr_threshold: 25.0
 op_family: vendor_gemm_a8w8_blockscale

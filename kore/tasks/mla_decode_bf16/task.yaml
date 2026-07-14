@@ -2,7 +2,7 @@ task_id: mla_decode_bf16
 operation: mla_decode
 dtype: bf16
 backend: triton
-gpu_target: gfx942
+gpu_target: gfx950
 seed_kernel_name: seed_triton.py
 # bf16 MLA (Multi-head Latent Attention, DeepSeek-V2/V3) decode vs the exact fp32
 # MLA oracle. Absorbed-form: project q into the latent, attend the compressed KV

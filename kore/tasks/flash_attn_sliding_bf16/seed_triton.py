@@ -1,4 +1,4 @@
-"""Seed Triton bf16 sliding-window causal (GQA) flash attention for gfx942.
+"""Seed Triton bf16 sliding-window causal (GQA) flash attention for gfx950 (CDNA4).
 
 Exposes ``flash_attn(q, k, v, window=1024)`` with q ``[B,S,H,D]``, k/v
 ``[B,S,KV,D]``. Online-softmax (max-subtraction + running rescale), fp32

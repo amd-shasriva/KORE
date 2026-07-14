@@ -86,7 +86,7 @@ class Task:
             operation=meta.get("operation", meta["task_id"]),
             dtype=meta.get("dtype", "fp32"),
             backend=meta.get("backend", "triton"),
-            gpu_target=meta.get("gpu_target", "gfx942"),
+            gpu_target=meta.get("gpu_target", "gfx950"),  # KORE target = CDNA4 (MI350X)
             dir=d,
             seed_kernel_name=meta.get("seed_kernel_name", "seed_triton.py"),
             snr_threshold=float(meta.get("snr_threshold", targets.get("snr_db", 30.0))),

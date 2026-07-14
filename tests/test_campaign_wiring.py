@@ -83,17 +83,21 @@ def test_rec_is_heldout_uses_registry_authority():
     # Core attention (flash decode) now TRAINS (product capability); the structurally
     # distinct paged-KV decode is the held-out generalization probe (registry HELDOUT_TASKS).
     attn_train = {"type": "repair", "task_id": "flash_attn_decode_bf16",
-                  "operation": "flash_attn", "arch": "gfx942"}
+                  "operation": "flash_attn", "arch": "gfx950"}
     attn_held = {"type": "repair", "task_id": "paged_attn_decode_bf16",
-                 "operation": "paged_attn", "arch": "gfx942"}
+                 "operation": "paged_attn", "arch": "gfx950"}
     rms = {"type": "repair", "task_id": "rmsnorm_aiter",
-           "operation": "rmsnorm", "arch": "gfx942"}
+           "operation": "rmsnorm", "arch": "gfx950"}
     assert rc._rec_is_heldout(attn_train, set()) is False   # trains now
     assert rc._rec_is_heldout(attn_held, set()) is True     # held-out probe (HELDOUT_TASKS)
     assert rc._rec_is_heldout(rms, set()) is False
-    # non-train arch -> held out (subsumes the old gfx950 special-case)
+    # gfx942 (CDNA3, previous gen) is ACCEPTED into the train set (TRAIN_ARCHS
+    # lineage) so a mid-flight campaign's legacy-tagged records keep training.
     assert rc._rec_is_heldout({"type": "repair", "operation": "rmsnorm",
-                               "arch": "gfx950", "task_id": "x"}, set()) is True
+                               "arch": "gfx942", "task_id": "x"}, set()) is False
+    # a truly FOREIGN arch (e.g. RDNA / NVIDIA) is still held out.
+    assert rc._rec_is_heldout({"type": "repair", "operation": "rmsnorm",
+                               "arch": "gfx1100", "task_id": "x"}, set()) is True
     # explicit reserved id -> held out
     assert rc._rec_is_heldout(rms, {"rmsnorm_aiter"}) is True
 

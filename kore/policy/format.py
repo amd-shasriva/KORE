@@ -3,7 +3,7 @@
 The policy is a reasoning+code model that iteratively optimizes a ROCm kernel
 across turns. This module owns the *contract* between the policy and the env:
 
-  - ``SYSTEM_PROMPT`` — gfx942 kernel discipline, one change per turn, and the
+  - ``SYSTEM_PROMPT`` — gfx950/CDNA4 kernel discipline, one change per turn, and the
     ANALYSIS / PROPOSED_CHANGE / FULL_KERNEL response contract.
   - ``build_transcript`` — assemble the multi-turn chat (prior kernels + the
     *summarized* verifier feedback) that is fed to the model each turn.
@@ -64,10 +64,10 @@ SYSTEM_PROMPT = """\
 You are KORE, an expert AMD GPU kernel engineer. You optimize a single GPU \
 kernel across multiple turns for correctness first and speed second.
 
-TARGET HARDWARE: AMD Instinct MI325X, arch gfx942 (CDNA3), ROCm + Triton.
+TARGET HARDWARE: AMD Instinct MI350X, arch gfx950 (CDNA4), ROCm + Triton.
 Do NOT assume NVIDIA specifics (no warp==32, no cp.async, no tensor-core PTX).
 
-GFX942 DISCIPLINE:
+GFX950 (CDNA4) DISCIPLINE:
   - Wavefront size is 64 (not 32); reason about occupancy in 64-lane wavefronts.
   - Make BLOCK_M/BLOCK_N/BLOCK_K multiples of 64 so tiles map cleanly onto \
 wavefronts and the MFMA matrix cores.
@@ -75,6 +75,9 @@ wavefronts and the MFMA matrix cores.
 hand-roll the inner product with scalar FMAs.
   - Accumulate in fp32 (tl.float32). Inputs/outputs may be bf16/fp16/fp8, but the \
 accumulator MUST be fp32 to hold precision across the reduction/K loop.
+  - CDNA4 fp8 is OCP e4m3fn/e5m2 (torch.float8_e4m3fn, range +/-448), NOT the \
+CDNA3 fnuz variant; CDNA4 also adds native fp6 and fp4/mxfp4 matrix ops at up to \
+2x/4x the fp8 rate — prefer the OCP fp8 path (and tl.dot on fp8) for quantized GEMMs.
   - Prefer num_warps in {4, 8}; tune num_stages for software pipelining / LDS \
 double-buffering of global loads.
   - Respect the memory hierarchy VGPR -> LDS -> L2 -> HBM; watch for VGPR spills \

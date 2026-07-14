@@ -1,4 +1,4 @@
-"""Seed Triton bf16 variable-length causal (GQA) flash attention for gfx942.
+"""Seed Triton bf16 variable-length causal (GQA) flash attention for gfx950 (CDNA4).
 
 Exposes ``flash_attn(q, k, v, cu_seqlens, max_seqlen, causal=True)`` with packed
 q ``[T,H,D]``, k/v ``[T,KV,D]`` and ``cu_seqlens[B+1]`` int32. Grid is

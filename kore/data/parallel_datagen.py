@@ -140,15 +140,64 @@ def _worker(payload: dict) -> list[tuple]:
 # --------------------------------------------------------------------------- #
 # Orchestrator
 # --------------------------------------------------------------------------- #
+def _queue_worker(gpu, task_q, result_q, kinds, data_root, counts,
+                  teacher_kind, model_teacher):
+    """Persistent GPU-pinned datagen worker: pull tasks from a shared queue until
+    drained. DYNAMIC load balancing so no worker idles at the tail while a few grind
+    the heavy shards. The teacher client + GPU pin are set up ONCE per worker."""
+    os.environ["HIP_VISIBLE_DEVICES"] = str(gpu)
+    os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
+    from kore.data.schemas import write_jsonl
+    from kore.data.teacher import load_env_local, make_teacher
+    from kore.env.kore_env import KoreEnv
+    from kore.tasks.registry import get_task
+
+    load_env_local()
+    tkw = {"model": model_teacher} if model_teacher else {}
+    teacher = make_teacher(teacher_kind, resilient=True, **tkw)
+
+    while True:
+        tid = task_q.get()
+        if tid is None:  # drain sentinel
+            break
+        try:
+            task = get_task(tid)
+            env = KoreEnv(task)
+        except Exception as e:  # noqa: BLE001
+            print(f"[datagen w{gpu}] {tid}: setup ERROR {type(e).__name__}: {e}", flush=True)
+            result_q.put((tid, "*", "error", 0))
+            continue
+        for kind in kinds:
+            if shard_done(data_root, tid, kind):
+                print(f"[datagen w{gpu}] {tid}:{kind} skip (resume)", flush=True)
+                result_q.put((tid, kind, "skip", 0))
+                continue
+            try:
+                recs = _generate(kind, task, teacher, env, counts)
+                out = Path(data_root) / kind / f"{tid}.jsonl"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                write_jsonl(out, recs)
+                print(f"[datagen w{gpu}] {tid}:{kind} -> {len(recs)} records", flush=True)
+                result_q.put((tid, kind, "done", len(recs)))
+            except Exception as e:  # noqa: BLE001
+                print(f"[datagen w{gpu}] {tid}:{kind} ERROR {type(e).__name__}: {e}", flush=True)
+                result_q.put((tid, kind, "error", 0))
+    result_q.put(None)  # worker-finished sentinel
+
+
 def run_parallel_datagen(task_ids, kinds, data_root, counts, *, n_workers: int,
                          n_gpus: int, teacher_kind: str = "claude",
                          model_teacher=None, gpu_ids=None, log=print) -> dict:
-    """Run datagen for ``kinds`` over ``task_ids`` across ``n_workers`` GPU-pinned
-    processes. Resumable (existing shards skipped). Returns a summary dict.
+    """Run datagen for ``kinds`` over ``task_ids`` across GPU-pinned worker processes.
+    Resumable (existing shards skipped). Uses a SHARED task queue so every worker
+    stays busy pulling the next task until all are done (no tail draining).
 
     ``gpu_ids``: explicit PHYSICAL GPU ids to pin to (e.g. the free ones on a shared
-    node); when given, one worker per id and tasks are round-robined across exactly
-    those devices. When None, falls back to ``w % n_gpus`` over ``0..n_gpus-1``.
+    node). Datagen is TEACHER-bound, so we run MORE workers than GPUs (teacher-
+    parallel), round-robining workers onto the pinned GPUs; verification
+    oversubscribes those GPUs but the per-GPU timing lock keeps measurements clean.
     """
     import multiprocessing as mp
 
@@ -156,34 +205,43 @@ def run_parallel_datagen(task_ids, kinds, data_root, counts, *, n_workers: int,
     n_gpus = max(1, int(n_gpus))
     if gpu_ids:
         gpu_ids = [int(g) for g in gpu_ids]
-        # Datagen is TEACHER-bound (API latency), not GPU-bound, so allow MORE workers
-        # than pinned GPUs (teacher-parallel): round-robin the extra workers onto the
-        # SAME pinned (free) GPUs. Verification oversubscribes those GPUs but the
-        # per-GPU timing lock keeps measurements clean, and we NEVER touch a GPU
-        # outside gpu_ids (so a neighbor's GPU0 job is never disturbed).
         nw = max(int(n_workers) if n_workers else len(gpu_ids), len(gpu_ids))
-        shards = shard_tasks(task_ids, nw)
-        payloads = [{
-            "gpu_id": gpu_ids[w % len(gpu_ids)], "task_ids": shards[w], "kinds": list(kinds),
-            "data_root": str(data_root), "counts": counts,
-            "teacher_kind": teacher_kind, "model_teacher": model_teacher,
-        } for w in range(len(shards))]
+        worker_gpus = [gpu_ids[w % len(gpu_ids)] for w in range(nw)]
+        dev_list = gpu_ids
     else:
-        shards = shard_tasks(task_ids, n_workers)
-        payloads = [{
-            "gpu_id": w % n_gpus, "task_ids": shards[w], "kinds": list(kinds),
-            "data_root": str(data_root), "counts": counts,
-            "teacher_kind": teacher_kind, "model_teacher": model_teacher,
-        } for w in range(len(shards))]
+        nw = max(1, int(n_workers))
+        worker_gpus = [w % n_gpus for w in range(nw)]
+        dev_list = list(range(n_gpus))
 
     log(f"parallel datagen: {len(task_ids)} tasks x {list(kinds)} across "
-        f"{len(payloads)} workers on GPUs {gpu_ids or list(range(n_gpus))}")
+        f"{nw} workers on GPUs {dev_list} (dynamic queue)")
     summary = {"done": 0, "skip": 0, "error": 0, "records": 0, "tasks": len(task_ids)}
+
     ctxmp = mp.get_context("spawn")
-    with ctxmp.Pool(len(payloads)) as pool:
-        for res in pool.imap_unordered(_worker, payloads):
-            for _tid, _kind, status, n in res:
-                summary[status] = summary.get(status, 0) + 1
-                summary["records"] += n
+    task_q: "mp.Queue" = ctxmp.Queue()
+    result_q: "mp.Queue" = ctxmp.Queue()
+    for tid in task_ids:
+        task_q.put(tid)
+    for _ in range(nw):
+        task_q.put(None)  # one drain-sentinel per worker
+
+    procs = [ctxmp.Process(target=_queue_worker,
+                           args=(worker_gpus[w], task_q, result_q, list(kinds),
+                                 str(data_root), counts, teacher_kind, model_teacher))
+             for w in range(nw)]
+    for p in procs:
+        p.start()
+
+    finished = 0
+    while finished < nw:
+        item = result_q.get()
+        if item is None:
+            finished += 1
+            continue
+        _tid, _kind, status, n = item
+        summary[status] = summary.get(status, 0) + 1
+        summary["records"] += n
+    for p in procs:
+        p.join()
     log(f"parallel datagen done: {summary}")
     return summary

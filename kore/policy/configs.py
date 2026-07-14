@@ -524,6 +524,34 @@ def build_fsdp_kwargs(config) -> dict:
     return {"fsdp": fsdp_str, "fsdp_config": fsdp_config}
 
 
+def latest_checkpoint(output_dir) -> Optional[str]:
+    """Latest resumable HF ``checkpoint-<step>`` dir in ``output_dir``, else None.
+
+    Wired into the Trainer stages so ``trainer.train(resume_from_checkpoint=...)``
+    auto-resumes a crashed mid-stage run (the campaign's stage-skip only resumes
+    *completed* stages; without this a crash at step 40k of SFT or step N of a
+    multi-hour run restarts from zero). Returns None (fresh run) when absent.
+    """
+    import glob
+    import os
+    ckpts = glob.glob(os.path.join(str(output_dir), "checkpoint-*"))
+    ckpts = [c for c in ckpts if os.path.isdir(c)]
+    if not ckpts:
+        return None
+
+    def _step(p: str) -> int:
+        try:
+            return int(os.path.basename(p).rsplit("-", 1)[1])
+        except (ValueError, IndexError):
+            return -1
+
+    latest = max(ckpts, key=_step)
+    # Only resume if the checkpoint actually has trainer state (not a half-written dir).
+    if os.path.exists(os.path.join(latest, "trainer_state.json")):
+        return latest
+    return None
+
+
 def preferred_attn_impl() -> str:
     """Attention backend for training model loads (``from_pretrained``).
 

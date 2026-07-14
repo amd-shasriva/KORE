@@ -166,7 +166,11 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
     trainer = SFTTrainer(model=model, args=args, train_dataset=ds,
                          peft_config=peft_cfg, processing_class=tok,
                          callbacks=[_ObsCallback()])
-    trainer.train()
+    from kore.policy.configs import latest_checkpoint
+    _resume = latest_checkpoint(config.output_dir)
+    if _resume:
+        log.info("midtrain: resuming from checkpoint", ckpt=_resume)
+    trainer.train(resume_from_checkpoint=_resume)
 
     # Merge LoRA into the base before saving so downstream stages load a full
     # model; full-FT just saves the trained weights directly.

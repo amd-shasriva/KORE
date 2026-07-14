@@ -1,4 +1,4 @@
-"""GPU-prove the v3 new-op seeds on gfx942: compile + rigorous correctness
+"""GPU-prove the v3 new-op seeds on gfx950/CDNA4: compile + rigorous correctness
 (5-seed multi-trial + adversarial no-lucky-pass) + speedup vs the real baseline.
 
 Run pinned:  HIP_VISIBLE_DEVICES=3 python scripts/prove_new_ops.py
@@ -27,6 +27,7 @@ NEW_OPS = [
     "fused_rmsnorm_quant_fp8",
     "fused_silu_mul_quant_fp8",
     "gemm_w4a16",
+    "gemm_mxfp4",            # MI350/CDNA4 headline: MXFP4 (e2m1 + e8m0 block scale)
     "rmsnorm_backward",
 ]
 

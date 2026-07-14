@@ -1,0 +1,21 @@
+task_id: flash_attn_sliding_bf16
+operation: flash_attn_sliding
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+# bf16 sliding-window causal-GQA attention vs fp32 windowed-SDPA oracle. Online-
+# softmax bf16 accumulation lands well above the 25 dB low-precision attention bar;
+# the gate still rejects a missing max-subtraction / wrong-rescale / bad-window-mask
+# kernel. The kernel skips key blocks fully outside the (i-W, i] band.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 8, KV: 2, S: 512, D: 128, W: 128}
+  primary: {B: 1, H: 32, KV: 8, S: 8192, D: 128, W: 1024}    # Mistral-style long ctx, 1k window
+  validation:
+    - {B: 1, H: 32, KV: 8, S: 4096, D: 128, W: 512}          # smaller window
+    - {B: 2, H: 16, KV: 16, S: 4096, D: 128, W: 2048}        # MHA, wide window
+    - {B: 1, H: 32, KV: 8, S: 4095, D: 128, W: 1000}         # non-multiple seqlen + window edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn   # dense causal FMHA (window kernel beats it)

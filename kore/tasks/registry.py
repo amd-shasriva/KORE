@@ -20,10 +20,21 @@ TASKS_DIR = Path(__file__).resolve().parent
 # gfx950/CDNA4-only kernel must never leak into the gfx942 training set).
 TRAIN_ARCH = "gfx942"
 
-# Whole operator families reserved for the held-out generalization set. Reserving
-# an ENTIRE family (not a random subset) is what makes this a true generalization
-# test: the policy is trained without ever seeing the attention family.
-HELDOUT_FAMILIES: tuple[str, ...] = ("attention",)
+# Whole operator families reserved for the held-out generalization set. (None by
+# default now: the model TRAINS on core attention for product capability. Kept as a
+# lever for reserving a whole family if desired.)
+HELDOUT_FAMILIES: tuple[str, ...] = ()
+
+# Specific TASKS reserved for the held-out generalization eval (never trained on).
+# The policy trains on core attention (prefill / decode / sliding-window / varlen /
+# fp8) so the product model is strong at attention, but these structurally-distinct
+# variants are withheld to measure TRUE generalization: paged-KV decode (a different
+# KV-cache mechanism) and MLA (DeepSeek latent attention, the hardest novel variant).
+# This is the "best product model AND a frontier generalization eval" split.
+HELDOUT_TASKS: frozenset = frozenset({
+    "paged_attn_decode_bf16",
+    "mla_decode_bf16",
+})
 
 
 def operator_family(task: Task) -> str:
@@ -53,7 +64,10 @@ def operator_family(task: Task) -> str:
 
 
 def is_heldout(task: Task) -> bool:
-    """A task is held out if its family is reserved OR it is arch-specific."""
+    """Held out if the task is individually reserved, its family is reserved, OR it
+    is arch-specific (a non-gfx942 kernel must never leak into the gfx942 train set)."""
+    if getattr(task, "task_id", "") in HELDOUT_TASKS:
+        return True
     if operator_family(task) in HELDOUT_FAMILIES:
         return True
     if (getattr(task, "gpu_target", None) or TRAIN_ARCH) != TRAIN_ARCH:

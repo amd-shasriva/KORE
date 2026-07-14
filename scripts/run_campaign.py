@@ -994,11 +994,15 @@ def _rec_is_heldout(rec, heldout_ids: set) -> bool:
     """
     from types import SimpleNamespace
 
-    from kore.tasks.registry import HELDOUT_FAMILIES, TRAIN_ARCH, operator_family
+    from kore.tasks.registry import (
+        HELDOUT_FAMILIES, HELDOUT_TASKS, TRAIN_ARCH, operator_family,
+    )
 
     d = _rec_dict(rec)
     tid = d.get("task_id")
     if tid and tid in heldout_ids:
+        return True
+    if tid and tid in HELDOUT_TASKS:   # registry task-level holdout (paged-KV / MLA)
         return True
     arch = _rec_arch(rec)
     if arch not in (None, TRAIN_ARCH):

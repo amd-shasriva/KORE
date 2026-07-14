@@ -80,12 +80,16 @@ def test_manifest_threads_train_and_eval_ids(tmp_path):
 
 
 def test_rec_is_heldout_uses_registry_authority():
-    # attention family -> held out; rmsnorm -> train
-    attn = {"type": "repair", "task_id": "flash_attn_decode_bf16",
-            "operation": "flash_attn", "arch": "gfx942"}
+    # Core attention (flash decode) now TRAINS (product capability); the structurally
+    # distinct paged-KV decode is the held-out generalization probe (registry HELDOUT_TASKS).
+    attn_train = {"type": "repair", "task_id": "flash_attn_decode_bf16",
+                  "operation": "flash_attn", "arch": "gfx942"}
+    attn_held = {"type": "repair", "task_id": "paged_attn_decode_bf16",
+                 "operation": "paged_attn", "arch": "gfx942"}
     rms = {"type": "repair", "task_id": "rmsnorm_aiter",
            "operation": "rmsnorm", "arch": "gfx942"}
-    assert rc._rec_is_heldout(attn, set()) is True
+    assert rc._rec_is_heldout(attn_train, set()) is False   # trains now
+    assert rc._rec_is_heldout(attn_held, set()) is True     # held-out probe (HELDOUT_TASKS)
     assert rc._rec_is_heldout(rms, set()) is False
     # non-train arch -> held out (subsumes the old gfx950 special-case)
     assert rc._rec_is_heldout({"type": "repair", "operation": "rmsnorm",

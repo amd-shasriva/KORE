@@ -95,10 +95,15 @@ COUNTER_SETS = {
         "SQ_INSTS_VMEM",
         "SQ_INSTS_SALU",
         "SQ_INSTS_LDS",
-        # --- MFMA throughput (FLOP-weighted MOPS family; gfx942 has BF16 here) ---
+        # --- MFMA throughput (FLOP-weighted MOPS family). BF16/F16/F32 exist on
+        #     all CDNA; F8 (OCP-FP8), F6F4 (MXFP6/MXFP4) and XF32 are gfx950/CDNA4
+        #     ONLY and are required to ground MI350 low-precision matrix kernels. ---
         "SQ_INSTS_VALU_MFMA_MOPS_BF16",
         "SQ_INSTS_VALU_MFMA_MOPS_F16",
         "SQ_INSTS_VALU_MFMA_MOPS_F32",
+        "SQ_INSTS_VALU_MFMA_MOPS_F8",      # gfx950: OCP-FP8 matrix ops
+        "SQ_INSTS_VALU_MFMA_MOPS_F6F4",    # gfx950: MXFP6 / MXFP4 matrix ops
+        "SQ_INSTS_VALU_MFMA_MOPS_XF32",    # gfx950: XF32 (TF32-equiv) matrix ops
         # --- pipeline stalls / issue latency ---
         "SQ_WAIT_INST_ANY",
         "SQ_WAIT_INST_LDS",
@@ -137,6 +142,14 @@ GROUNDING_PASSES: list[list[str]] = [
     ["TCC_HIT_sum", "TCC_MISS_sum", "TCC_EA0_RDREQ_sum", "TCC_EA0_RDREQ_32B_sum"],
     # pass 4 — TCC write traffic
     ["TCC_EA0_WRREQ_sum", "TCC_EA0_WRREQ_64B_sum"],
+    # pass 5 — gfx950/CDNA4 low-precision MFMA op mix (OCP-FP8 / MXFP6 / MXFP4 /
+    #          XF32). These counters exist ONLY on gfx950; on a gfx942 node the
+    #          pass yields no CSV and is silently skipped (collection merges the
+    #          rest — see KoreEnv.collect_counters), so this is arch-safe.
+    [
+        "SQ_INSTS_VALU_MFMA_MOPS_F8", "SQ_INSTS_VALU_MFMA_MOPS_F6F4",
+        "SQ_INSTS_VALU_MFMA_MOPS_XF32",
+    ],
 ]
 
 
@@ -174,6 +187,9 @@ COUNTER_META: dict[str, tuple[str, str]] = {
     "SQ_INSTS_VALU_MFMA_MOPS_F32": ("F32 matrix-FMA ops", "ops x512"),
     "SQ_INSTS_VALU_MFMA_MOPS_F64": ("F64 matrix-FMA ops", "ops x512"),
     "SQ_INSTS_VALU_MFMA_MOPS_I8": ("INT8 matrix-FMA ops", "ops x512"),
+    "SQ_INSTS_VALU_MFMA_MOPS_F8": ("OCP-FP8 matrix-FMA ops (gfx950/CDNA4)", "ops x512"),
+    "SQ_INSTS_VALU_MFMA_MOPS_F6F4": ("MXFP6/MXFP4 matrix-FMA ops (gfx950/CDNA4)", "ops x512"),
+    "SQ_INSTS_VALU_MFMA_MOPS_XF32": ("XF32 matrix-FMA ops (gfx950/CDNA4)", "ops x512"),
     # MFMA issue-count family (gfx942 has NO ..._BF16 member here)
     "SQ_INSTS_VALU_MFMA_F16": ("F16 matrix-FMA instructions issued", "instr"),
     "SQ_INSTS_VALU_MFMA_F32": ("F32 matrix-FMA instructions issued", "instr"),

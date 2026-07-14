@@ -1,4 +1,8 @@
-"""MI300X (gfx942 / CDNA3) roofline model + counter-grounded bottleneck analysis.
+"""Arch-aware (gfx950/CDNA4 default) roofline model + counter-grounded analysis.
+
+Auto-selects the running GPU's peaks: **gfx950 / CDNA4 (AMD Instinct MI350X /
+MI355X)** is the KORE target hardware and the default; gfx942 / CDNA3 (MI300X)
+is retained for the previous-gen node. Override with ``KORE_ROOFLINE_ARCH``.
 
 Pure, importable, CPU-only (no torch / no GPU at import) so it can run inside
 datagen, the reward path, and unit tests. It answers three questions KORE's
@@ -16,23 +20,25 @@ plus :func:`op_flop_bytes` so callers can turn an (op_family, shape, dtype) into
 
 Relationship to :mod:`kore.analysis.rooflines` (note the plural): that module is
 the operator-level Speed-of-Light (eta = T_min / T_measured) model used by the P0
-falsification harness, and its ``gfx942`` peaks are tuned for the MI325X node it
-runs on. THIS module is anchored to the **MI300X** datasheet (the KORE target
-device) and is counter/measurement-oriented; the two are intentionally decoupled
-so neither's edits break the other.
+falsification harness. THIS module is counter/measurement-oriented; the two are
+intentionally decoupled so neither's edits break the other.
 
-Hardware constants (well-sourced; see inline citations):
-  * HBM3 bandwidth 5.325 TB/s, FP16/BF16 matrix 1307.4 TFLOP/s, FP8/INT8 2614.9,
-    TF32 653.7, FP32 163.4, FP64 163.4 (matrix) / 81.7 (vector): AMD Instinct
-    MI300X data sheet (MI300-05A) + ROCm MI300 microarchitecture peak table
-    https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi300.html
-  * 304 CUs @ up to 2.1 GHz, 256 MB Infinity Cache, 64 KB LDS/CU, 512 VGPR/SIMD:
-    same data sheet + ROCm workload-optimization guide (occupancy section).
+Hardware constants (DENSE matrix-core peaks — no 2x structured sparsity — and
+datasheet HBM peak), per arch (see ``_ARCH_PEAKS``):
+  * gfx950 / CDNA4 (MI350X, DEFAULT): HBM3E 8 TB/s, FP16/BF16 2.3 PFLOP/s,
+    OCP-FP8/MXFP8/INT8 4.6, MXFP6/MXFP4 9.2, FP32 144.2 TFLOP/s, FP64 72.1;
+    256 CUs @ 2.2 GHz. AMD Instinct MI350X product spec (CDNA4).
+    https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html
+  * gfx950 / CDNA4 (MI355X): HBM3E 8 TB/s, FP16/BF16 2.5, FP8 5.0, MXFP6/4 10.1,
+    FP32 157.3, FP64 78.6; 256 CUs @ 2.4 GHz.
+  * gfx942 / CDNA3 (MI300X): HBM3 5.325 TB/s, FP16/BF16 1307.4 TFLOP/s, FP8/INT8
+    2614.9, TF32 653.7, FP32/FP64 163.4; 304 CUs @ 2.1 GHz. MI300-05A data sheet.
 """
 
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional, Union
 
 from kore.verifier.pmc import (
@@ -45,54 +51,128 @@ from kore.verifier.pmc import (
 )
 
 # --------------------------------------------------------------------------- #
-# MI300X / gfx942 / CDNA3 hardware constants.
-# FLOP/s are the DENSE matrix-core peaks (no 2x structured sparsity), which is
-# the right ceiling for tl.dot/MFMA kernels. byte/s is the datasheet HBM3 peak.
+# Per-architecture hardware constants. FLOP/s are the DENSE matrix-core peaks (no
+# 2x structured sparsity — the right ceiling for tl.dot/MFMA kernels); byte/s is
+# the datasheet HBM peak. The ACTIVE set is auto-selected from the running GPU
+# (see _detect_arch); override with KORE_ROOFLINE_ARCH=gfx950|gfx942|mi355x.
 # --------------------------------------------------------------------------- #
-HBM_BW_BYTES_PER_S: float = 5.325e12       # 5.325 TB/s (8192-bit bus * 5.2 Gbps / 8)
-PEAK_FLOPS_BF16: float = 1.3074e15         # 1307.4 TFLOP/s dense BF16 matrix
-PEAK_FLOPS_FP16: float = 1.3074e15         # 1307.4 TFLOP/s dense FP16 matrix
-PEAK_FLOPS_FP8: float = 2.6149e15          # 2614.9 TFLOP/s dense FP8 matrix
-PEAK_FLOPS_INT8: float = 2.6149e15         # 2614.9 TOP/s INT8 matrix
-PEAK_FLOPS_TF32: float = 6.537e14          # 653.7 TFLOP/s TF32
-PEAK_FLOPS_FP32: float = 1.634e14          # 163.4 TFLOP/s FP32 (vector or matrix)
-PEAK_FLOPS_FP64: float = 1.634e14          # 163.4 TFLOP/s FP64 matrix (vector: 81.7)
-
-NUM_CUS: int = 304
-PEAK_CLOCK_HZ: float = 2.1e9
-INFINITY_CACHE_BYTES: int = 256 * 1024 * 1024  # 256 MB L2/Infinity Cache
-
-# Convenience bundle of every MI300X constant (also surfaces the occupancy
-# constants that live canonically in kore.verifier.pmc).
-MI300X: dict[str, float] = {
-    "arch": "gfx942",
-    "hbm_bw_bytes_per_s": HBM_BW_BYTES_PER_S,
-    "peak_flops_bf16": PEAK_FLOPS_BF16,
-    "peak_flops_fp16": PEAK_FLOPS_FP16,
-    "peak_flops_fp8": PEAK_FLOPS_FP8,
-    "peak_flops_int8": PEAK_FLOPS_INT8,
-    "peak_flops_tf32": PEAK_FLOPS_TF32,
-    "peak_flops_fp32": PEAK_FLOPS_FP32,
-    "peak_flops_fp64": PEAK_FLOPS_FP64,
-    "num_cus": NUM_CUS,
-    "peak_clock_hz": PEAK_CLOCK_HZ,
-    "lds_bytes_per_cu": LDS_BYTES_PER_CU,
-    "vgpr_per_simd": VGPR_PER_SIMD,
-    "max_waves_per_simd": MAX_WAVES_PER_SIMD,
-    "infinity_cache_bytes": INFINITY_CACHE_BYTES,
+_ARCH_PEAKS: dict[str, dict] = {
+    # gfx950 / CDNA4 — AMD Instinct MI350X (air-cooled, 2.2 GHz).  DEFAULT hardware.
+    "gfx950": {
+        "name": "MI350X", "arch": "gfx950",
+        "hbm_bw_bytes_per_s": 8.0e12,                              # 8 TB/s HBM3E
+        "peak_flops_bf16": 2.30e15, "peak_flops_fp16": 2.30e15,   # 2.3 PFLOP matrix
+        "peak_flops_fp8": 4.60e15, "peak_flops_int8": 4.60e15,    # OCP-FP8 / INT8
+        "peak_flops_fp6": 9.20e15, "peak_flops_fp4": 9.20e15,     # MXFP6 / MXFP4
+        "peak_flops_tf32": 1.153e15, "peak_flops_fp32": 1.442e14, # FP32 144.2 TFLOP
+        "peak_flops_fp64": 7.21e13,                               # CDNA4 halves FP64
+        "num_cus": 256, "peak_clock_hz": 2.2e9,
+        "infinity_cache_bytes": 256 * 1024 * 1024,
+    },
+    # gfx950 / CDNA4 — AMD Instinct MI355X (direct-liquid-cooled, 2.4 GHz).
+    "mi355x": {
+        "name": "MI355X", "arch": "gfx950",
+        "hbm_bw_bytes_per_s": 8.0e12,
+        "peak_flops_bf16": 2.50e15, "peak_flops_fp16": 2.50e15,
+        "peak_flops_fp8": 5.00e15, "peak_flops_int8": 5.00e15,
+        "peak_flops_fp6": 10.10e15, "peak_flops_fp4": 10.10e15,
+        "peak_flops_tf32": 1.2583e15, "peak_flops_fp32": 1.573e14,
+        "peak_flops_fp64": 7.86e13,
+        "num_cus": 256, "peak_clock_hz": 2.4e9,
+        "infinity_cache_bytes": 256 * 1024 * 1024,
+    },
+    # gfx942 / CDNA3 — AMD Instinct MI300X (previous gen).
+    "gfx942": {
+        "name": "MI300X", "arch": "gfx942",
+        "hbm_bw_bytes_per_s": 5.325e12,
+        "peak_flops_bf16": 1.3074e15, "peak_flops_fp16": 1.3074e15,
+        "peak_flops_fp8": 2.6149e15, "peak_flops_int8": 2.6149e15,
+        "peak_flops_fp6": 2.6149e15, "peak_flops_fp4": 2.6149e15,  # no native fp4/6
+        "peak_flops_tf32": 6.537e14, "peak_flops_fp32": 1.634e14,
+        "peak_flops_fp64": 1.634e14,
+        "num_cus": 304, "peak_clock_hz": 2.1e9,
+        "infinity_cache_bytes": 256 * 1024 * 1024,
+    },
 }
+
+
+def _detect_arch() -> str:
+    """Select the roofline arch: ``KORE_ROOFLINE_ARCH`` override, else the running
+    GPU's gfx target (via torch, no import cost if torch absent), else gfx950 (the
+    KORE target hardware / CDNA4)."""
+    env = os.environ.get("KORE_ROOFLINE_ARCH", "").strip().lower()
+    if env in _ARCH_PEAKS:
+        return env
+    if env in ("mi350x", "mi350", "cdna4"):
+        return "gfx950"
+    if env in ("mi355", "mi355x"):
+        return "mi355x"
+    if env in ("mi300x", "mi300", "mi325x", "cdna3"):
+        return "gfx942"
+    try:  # pragma: no cover - hardware dependent
+        import torch
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0).lower()
+            gcn = (getattr(torch.cuda.get_device_properties(0),
+                           "gcnArchName", "") or "").lower()
+            if "mi355" in name:
+                return "mi355x"
+            if "gfx950" in gcn or "gfx950" in name or "mi350" in name:
+                return "gfx950"
+            if "gfx942" in gcn or "mi300" in name or "mi325" in name:
+                return "gfx942"
+    except Exception:
+        pass
+    return "gfx950"  # KORE target hardware (CDNA4)
+
+
+ACTIVE_ARCH: str = _detect_arch()
+_ACTIVE: dict = _ARCH_PEAKS[ACTIVE_ARCH]
+
+# Module-level constants reflect the ACTIVE arch (all downstream code uses these).
+HBM_BW_BYTES_PER_S: float = _ACTIVE["hbm_bw_bytes_per_s"]
+PEAK_FLOPS_BF16: float = _ACTIVE["peak_flops_bf16"]
+PEAK_FLOPS_FP16: float = _ACTIVE["peak_flops_fp16"]
+PEAK_FLOPS_FP8: float = _ACTIVE["peak_flops_fp8"]
+PEAK_FLOPS_INT8: float = _ACTIVE["peak_flops_int8"]
+PEAK_FLOPS_FP6: float = _ACTIVE["peak_flops_fp6"]
+PEAK_FLOPS_FP4: float = _ACTIVE["peak_flops_fp4"]
+PEAK_FLOPS_TF32: float = _ACTIVE["peak_flops_tf32"]
+PEAK_FLOPS_FP32: float = _ACTIVE["peak_flops_fp32"]
+PEAK_FLOPS_FP64: float = _ACTIVE["peak_flops_fp64"]
+
+NUM_CUS: int = int(_ACTIVE["num_cus"])
+PEAK_CLOCK_HZ: float = _ACTIVE["peak_clock_hz"]
+INFINITY_CACHE_BYTES: int = int(_ACTIVE["infinity_cache_bytes"])
+
+
+def _bundle(peaks: dict) -> dict:
+    """Attach the pmc-canonical occupancy constants to a per-arch peak dict."""
+    return {**peaks, "lds_bytes_per_cu": LDS_BYTES_PER_CU,
+            "vgpr_per_simd": VGPR_PER_SIMD, "max_waves_per_simd": MAX_WAVES_PER_SIMD}
+
+
+# Per-board bundles + the ACTIVE one. ``MI300X`` kept as a back-compat name.
+MI300X: dict = _bundle(_ARCH_PEAKS["gfx942"])
+MI350X: dict = _bundle(_ARCH_PEAKS["gfx950"])
+MI355X: dict = _bundle(_ARCH_PEAKS["mi355x"])
+ACTIVE: dict = _bundle(_ACTIVE)
 
 
 # --------------------------------------------------------------------------- #
 # dtype helpers
 # --------------------------------------------------------------------------- #
-def dtype_bytes(dtype: str) -> int:
-    """Element size in bytes for a dtype string (fp8=1, fp16/bf16=2, fp32=4, ...)."""
+def dtype_bytes(dtype: str) -> float:
+    """Element size in bytes for a dtype string (fp4=0.5, fp6=0.75, fp8/int8=1,
+    fp16/bf16=2, fp32=4, ...). Sub-byte types are the packed storage size (the MX
+    block scale overhead is negligible for the HBM-traffic lower bound)."""
     d = (dtype or "").lower()
+    if "fp4" in d or "e2m1" in d:
+        return 0.5   # packed 4-bit
+    if "fp6" in d or "e2m3" in d or "e3m2" in d:
+        return 0.75  # packed 6-bit
     if "fp8" in d or "float8" in d or "int8" in d or "e4m3" in d or "e5m2" in d:
         return 1
-    if "fp4" in d or "mxfp4" in d:
-        return 1  # packed 4-bit; approximate as 1B
     if "bf16" in d or "fp16" in d or "float16" in d or "bfloat16" in d or "half" in d:
         return 2
     if "tf32" in d:
@@ -105,8 +185,17 @@ def dtype_bytes(dtype: str) -> int:
 
 
 def peak_flops(dtype: str) -> float:
-    """Dense matrix-core peak FLOP/s on MI300X for ``dtype``."""
+    """Dense matrix-core peak FLOP/s on the ACTIVE arch for ``dtype``.
+
+    fp4/fp6 (MXFP4/MXFP6) and OCP-FP8 are first-class on gfx950/CDNA4; on gfx942
+    they fall back to the fp8 peak (no native sub-8-bit matrix path).
+    """
     d = (dtype or "").lower()
+    # sub-8-bit first (so mxfp4/mxfp6 don't get caught by an "fp8" test)
+    if "fp4" in d or "e2m1" in d:
+        return PEAK_FLOPS_FP4
+    if "fp6" in d or "e2m3" in d or "e3m2" in d:
+        return PEAK_FLOPS_FP6
     if "fp8" in d or "float8" in d or "e4m3" in d or "e5m2" in d:
         return PEAK_FLOPS_FP8
     if "int8" in d:

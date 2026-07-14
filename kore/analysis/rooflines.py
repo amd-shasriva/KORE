@@ -38,12 +38,14 @@ from typing import Optional
 # gfx950 = MI350X/MI355X (CDNA4); gfx942 = MI325X (CDNA3, kept for cross-arch).
 # --------------------------------------------------------------------------- #
 PEAKS: dict[str, dict[str, float]] = {
-    "gfx950": {  # MI350-class, CDNA4 -- THIS NODE
-        "hbm_bytes_per_s": 8.0e12,    # ~8.0 TB/s HBM3E (288 GB)
-        "bf16_flops_per_s": 2.5e15,   # ~2.5 PFLOP/s dense bf16/fp16 (approx)
-        "fp16_flops_per_s": 2.5e15,
-        "fp8_flops_per_s": 5.0e15,    # ~5.0 PFLOP/s dense fp8 (approx)
-        "fp32_flops_per_s": 3.0e14,
+    "gfx950": {  # AMD Instinct MI350X, CDNA4 -- THIS NODE (rocminfo: MI350X @ 2.2 GHz)
+        # Datasheet dense matrix peaks (no 2x structured sparsity). MI355X (liquid,
+        # 2.4 GHz) is ~9% higher: bf16 2.5, fp8 5.0. Kept to the reported board.
+        "hbm_bytes_per_s": 8.0e12,    # 8.0 TB/s HBM3E (288 GB)
+        "bf16_flops_per_s": 2.3e15,   # 2.3 PFLOP/s dense bf16/fp16 matrix
+        "fp16_flops_per_s": 2.3e15,
+        "fp8_flops_per_s": 4.6e15,    # 4.6 PFLOP/s OCP-FP8 matrix (MXFP4/6: 9.2)
+        "fp32_flops_per_s": 1.442e14, # 144.2 TFLOP/s FP32 matrix
     },
     "gfx942": {  # MI325X, CDNA3
         "hbm_bytes_per_s": 6.0e12,    # ~6.0 TB/s HBM3E

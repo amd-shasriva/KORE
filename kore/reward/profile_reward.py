@@ -125,6 +125,65 @@ def profile_efficiency_score(cand: dict, ref: dict) -> Optional[float]:
     return sum(comps) / len(comps)
 
 
+def roofline_dense_score(
+    cand: dict,
+    ref: Optional[dict] = None,
+    *,
+    flops: Optional[float] = None,
+    bytes: Optional[float] = None,
+    measured_ms: Optional[float] = None,
+    dtype: str = "bf16",
+) -> Optional[float]:
+    """Roofline-aware DENSE efficiency in [0, 1] for a CORRECT candidate.
+
+    Complements :func:`profile_efficiency_score` (which is purely baseline-relative
+    and therefore needs the vendor reference's counters) with an ABSOLUTE,
+    roofline-anchored signal, so the dense reward still has gradient when reference
+    counters are unavailable (the common case in the GRPO rollout, whose public
+    ``collect_counters`` only profiles the candidate). Blends up to three bounded,
+    hardware-grounded components — the arithmetic mean of whichever can be computed:
+
+      * roofline attainment  ``A = attained_fraction(measured_ms, flops, bytes)/100``
+        clamped to ``[0, 1]`` — the fraction of the MI300X (gfx942) roofline the
+        kernel actually reached (0 == idle, 1 == on the roofline; >1 from cache
+        reuse is clamped). This is the "far-from-roofline -> low, near-roofline ->
+        high" signal that gives gradient in the flat correct-but-slow band where the
+        wall-clock speedup reward is uninformative.
+      * issue efficiency     ``I = 1 - stall_fraction(cand)`` — the ALU-busy fraction
+        from the candidate's OWN rocprofv3 counters (a kernel that spends its cycles
+        stalled on ``SQ_WAIT_*`` is, by definition, far from any roofline).
+      * baseline-relative    ``E = profile_efficiency_score(cand, ref)`` when the
+        reference counters are supplied (fewer stalls / less HBM traffic than the
+        tuned vendor baseline).
+
+    Returns ``None`` when NO component is computable, so the caller can no-op (dense
+    term 0.0). Every component is bounded to ``[0, 1]`` and RELATIVE to the roofline
+    or the baseline; raw counter magnitudes (which scale with problem size and are
+    trivially inflatable) never enter the score. Pure / CPU-testable — the only
+    dependency, :func:`kore.analysis.roofline.attained_fraction`, is imported lazily
+    so this module stays import-light and free of any cycle.
+    """
+    comps: list[float] = []
+
+    if flops and float(flops) > 0.0 and measured_ms and float(measured_ms) > 0.0:
+        from kore.analysis.roofline import attained_fraction  # lazy: import-light + cycle-free
+        af = attained_fraction(float(measured_ms), float(flops), float(bytes or 0.0), dtype)
+        comps.append(_clamp01(af / 100.0))
+
+    ie = issue_efficiency(cand)
+    if ie is not None:
+        comps.append(_clamp01(ie))
+
+    if ref:
+        e = profile_efficiency_score(cand, ref)
+        if e is not None:
+            comps.append(_clamp01(e))
+
+    if not comps:
+        return None
+    return sum(comps) / len(comps)
+
+
 def profile_metrics(cand: dict, ref: dict) -> ProfileMetrics:
     """Full derived-metrics record for logging/diagnosis."""
     score = profile_efficiency_score(cand, ref)

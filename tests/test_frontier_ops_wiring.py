@@ -149,6 +149,36 @@ def test_frontier_breakers_break_new_op_seeds():
     assert b != bw and h == "snr_fail" and "tl.atomic_add" not in b
 
 
+def test_headroom_rebalance_concentrates_compute_bound():
+    from kore.data.curate import op_class, rebalance_by_headroom
+
+    def krow(op, n_extra=0):
+        return {"_provenance": {"operation": op, "verified": True, "speedup": 2.0},
+                "_source": "kernel_repair_opt",
+                "messages": [{"role": "assistant", "content": "x" * (100 + n_extra)}]}
+
+    # op_class taxonomy
+    assert op_class(krow("gemm_bf16")) == "compute_bound"
+    assert op_class(krow("flash_attn_prefill")) == "compute_bound"
+    assert op_class(krow("gen_add_bf16")) == "trivial"          # bare elementwise
+    assert op_class(krow("rmsnorm_bf16")) == "memory_bound"     # structured fusion
+    assert op_class({"messages": []}) == "retention"
+
+    # rich pool: 10 compute + 90 trivial -> rebalance to ~50% compute
+    pool = [krow("gemm_bf16") for _ in range(10)] + [krow("gen_add_bf16") for _ in range(90)]
+    out, st = rebalance_by_headroom(pool, target_compute_frac=0.5)
+    assert st["compute_frac"] >= 0.5 and st["capped"] == 80 and st["low_kept"] == 10
+
+    # thin pool (only 2 compute): degrade gracefully, never below available
+    thin = [krow("gemm_bf16") for _ in range(2)] + [krow("gen_add_bf16") for _ in range(5)]
+    out2, st2 = rebalance_by_headroom(thin, target_compute_frac=0.5)
+    assert st2["compute_bound"] == 2 and st2["low_kept"] == 2  # 2*(1-.5)/.5 = 2
+    # degenerate: no compute-bound -> unchanged, no crash
+    only_low = [krow("gen_add_bf16") for _ in range(4)]
+    out3, st3 = rebalance_by_headroom(only_low, target_compute_frac=0.5)
+    assert len(out3) == 4 and st3["capped"] == 0
+
+
 def test_frontier_breakers_family_routed():
     from kore.data import mutate as m
     root = Path(__file__).resolve().parents[1] / "kore" / "tasks"

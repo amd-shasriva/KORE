@@ -19,12 +19,14 @@ import re
 # dual-system-prompt drift). We re-export SYSTEM_PROMPT so existing
 # ``from kore.data.prompts import SYSTEM_PROMPT`` call-sites transparently get the
 # canonical prompt. format.py is pure (re/typing only) so this adds no heavy deps.
-from kore.policy.format import (  # noqa: F401  (SYSTEM_PROMPT re-exported)
+from kore.policy.format import (  # noqa: F401  (SYSTEM_PROMPT/gate re-exported)
     OUTPUT_CONTRACT as _OUTPUT_CONTRACT,
     SYSTEM_PROMPT,
+    check_change_consistency,
     format_assistant_turn,
     normalize_assistant,
     wrap_full_kernel,
+    _split_think,
 )
 
 _MODE_INSTRUCTIONS = {
@@ -122,12 +124,28 @@ def _dedent_block(text: str) -> str:
 def extract_kernel(response: str) -> str:
     """Extract kernel source from a model response.
 
-    Priority: a ``FULL_KERNEL:`` block (with or without an inner fenced code
-    block), else the first ```python (or generic) fenced block, else "".
+    The OPTIONAL ``<think>`` deep-reasoning scratchpad is stripped FIRST (shared
+    with :func:`kore.policy.format._split_think`) so a scratchpad that quotes
+    ``FULL_KERNEL:`` or drafts code in its own fenced block is never mistaken for
+    the real kernel. Priority within the think-stripped body: a ``FULL_KERNEL:``
+    block (with or without an inner fenced code block), else the first ```python
+    (or generic) fenced block, else "". If the body has no kernel but the
+    scratchpad did (a think-only response), fall back to the raw response so the
+    pre-deep-CoT behavior is preserved.
     """
     if not response:
         return ""
+    _, body = _split_think(response)
+    src = _extract_kernel_from_body(body)
+    if src:
+        return src
+    if body != response:  # code lived only inside the <think> scratchpad
+        return _extract_kernel_from_body(response)
+    return ""
 
+
+def _extract_kernel_from_body(response: str) -> str:
+    """FULL_KERNEL/fenced-block extraction on already-scratchpad-stripped text."""
     m = _FULL_KERNEL_RE.search(response)
     if m:
         content = m.group(1)

@@ -356,6 +356,161 @@ def composite_agentic_reward(kernel_reward: float, tool_reward: float = 0.0,
 
 
 # --------------------------------------------------------------------------- #
+# P5: dense hardware-counter (rocprofv3) reward — the flagship novelty, wired
+# into the rollout. Everything below is GATED on the dense-reward weight (>0) and
+# fully fail-safe: any profiler/analysis error degrades to a 0.0 bonus and never
+# touches the correctness verdict. Weight 0 (the default) is a byte-for-byte
+# no-op — collect_counters is never even called.
+# --------------------------------------------------------------------------- #
+def _dense_profile_weight(config) -> float:
+    """Effective dense hardware-counter reward weight (0.0 => fully inert).
+
+    Prefers the training ``config``; falls back to the global ``CONFIG`` and then
+    the ``KORE_PROFILE_REWARD_WEIGHT`` env var (the same knob ``kore.config`` reads).
+    Any missing / non-numeric / negative value is treated as 0.0 (disabled). This is
+    the single gate for the whole dense-reward path: reward, feedback, AND the
+    env-profiling-disable below all consult it.
+    """
+    candidates = [getattr(config, "profile_reward_weight", None)]
+    try:
+        from kore.config import CONFIG
+        candidates.append(getattr(CONFIG, "profile_reward_weight", None))
+    except Exception:  # noqa: BLE001 - config import must never break a rollout
+        pass
+    for w in candidates:
+        try:
+            w = float(w)
+        except (TypeError, ValueError):
+            continue
+        if w > 0.0:
+            return w
+    import os
+    try:
+        w = float(os.environ.get("KORE_PROFILE_REWARD_WEIGHT", "0.0"))
+    except (TypeError, ValueError):
+        return 0.0
+    return w if w > 0.0 else 0.0
+
+
+def _make_rollout_env(task, config=None, gpu=None, serial=True):
+    """Construct the rollout :class:`KoreEnv`, disabling its INTERNAL profiling when
+    the serial dense reward is active.
+
+    When the dense hardware-counter reward is on, the SERIAL GRPO rollout
+    (:func:`_rollout`) collects rocprofv3 counters itself (via
+    ``env.collect_counters``) and OWNS the dense bonus — so ``KoreEnv.step`` must not
+    ALSO profile internally, otherwise the baseline-relative term would be
+    double-counted (once in ``compute_reward`` via ``obs.profile_efficiency`` and
+    again in the rollout) and could breach the "profiler shapes, never leads"
+    invariant. In that case we hand KoreEnv a config with ``profile_reward_weight=0``
+    to suppress the internal pass.
+
+    ``serial=False`` (the agentic path, which does NOT add a rollout-side dense
+    bonus) leaves KoreEnv's internal profiling untouched, preserving its exact prior
+    behavior. When the dense reward is OFF (the default), or anything goes wrong,
+    KoreEnv is built exactly as before (no extra args) so behavior is byte-for-byte
+    unchanged and lightweight test doubles that accept only ``task`` keep working.
+    """
+    from kore.env.kore_env import KoreEnv
+    if serial and _dense_profile_weight(config) > 0.0:
+        cfg0 = None
+        try:
+            import dataclasses
+            from kore.config import CONFIG
+            cfg0 = dataclasses.replace(CONFIG, profile_reward_weight=0.0)
+        except Exception:  # noqa: BLE001 - fall back to default env construction
+            cfg0 = None
+        if cfg0 is not None:
+            return (KoreEnv(task, config=cfg0, gpu=gpu) if gpu is not None
+                    else KoreEnv(task, config=cfg0))
+    return KoreEnv(task, gpu=gpu) if gpu is not None else KoreEnv(task)
+
+
+def _dense_profile_bonus(env, task, code, obs, config):
+    """Dense hardware-counter reward + counter-driven turn feedback for a CORRECT
+    candidate. Returns ``(dense_term, feedback_text)``; ``(0.0, "")`` when inert.
+
+    Flow (env -> rollout -> reward -> feedback):
+      1. ``env.collect_counters(code)`` profiles the CANDIDATE on the primary shape
+         (rocprofv3 PMC), returning ``{counter: value}`` (+ vgpr/lds/num_warps) or
+         None. This is the ONLY new GPU work, and only for the turn's best correct
+         kernel.
+      2. :func:`kore.reward.profile_reward.roofline_dense_score` turns those counters
+         (+ the op's analytical FLOPs/bytes from :func:`op_flop_bytes` and the measured
+         wall time) into a bounded ``[0,1]`` roofline-attainment / issue-efficiency
+         score. ``dense_term = weight * score`` is the SHAPED bonus.
+      3. :func:`bottleneck_from_counters` + :func:`attained_fraction` render a compact
+         counter diagnosis appended to the turn feedback, so multi-turn trajectories
+         learn counter-grounded diagnosis instead of guessed bottlenecks.
+
+    Fully fail-safe: ANY exception (no rocprofv3, unmodelable op, parser hiccup, a
+    test double without ``collect_counters``) yields ``(0.0, "")`` — the rollout,
+    the correctness verdict, and the speedup reward are never affected. Gated on the
+    dense-reward weight and skipped in the correctness curriculum phase (which must
+    stay pure correctness).
+    """
+    weight = _dense_profile_weight(config)
+    if weight <= 0.0 or not getattr(obs, "validation_passed", False):
+        return 0.0, ""
+    if str(getattr(config, "reward_phase", "")).lower() == "correctness":
+        return 0.0, ""
+    try:
+        from kore.analysis.roofline import (
+            attained_fraction, bottleneck_from_counters, op_flop_bytes,
+        )
+        from kore.reward.profile_reward import roofline_dense_score
+
+        collect = getattr(env, "collect_counters", None)
+        counters = collect(code) if callable(collect) else None
+        counters = counters or {}
+
+        # Primary shape + the op's analytical (FLOPs, bytes) for roofline attainment.
+        sh = None
+        if hasattr(task, "shape"):
+            sh = task.shape("primary") or task.shape("minimal")
+        if sh is None:
+            shapes = getattr(task, "shapes", None) or []
+            sh = shapes[0] if shapes else None
+        flops = byts = None
+        dims = getattr(sh, "dims", None) if sh is not None else None
+        if dims:
+            fb = op_flop_bytes(getattr(task, "operation", ""), dims,
+                               getattr(task, "dtype", "bf16"))
+            if fb:
+                flops, byts = fb
+
+        measured = getattr(obs, "wall_ms", None)
+        if measured is None:
+            wbs = getattr(obs, "wall_by_shape", None) or {}
+            measured = max(wbs.values()) if wbs else None
+
+        score = roofline_dense_score(counters, flops=flops, bytes=byts,
+                                     measured_ms=measured,
+                                     dtype=getattr(task, "dtype", "bf16"))
+        dense = weight * max(0.0, min(1.0, score)) if score is not None else 0.0
+
+        # Counter-driven diagnosis for the turn feedback (teach counter reading).
+        parts: list[str] = []
+        if counters:
+            label, evidence = bottleneck_from_counters(
+                counters, vgpr=counters.get("vgpr_count"),
+                lds=counters.get("lds_bytes"), num_warps=counters.get("num_warps"))
+            parts.append(f"bottleneck={label} — {evidence}")
+        if flops and measured:
+            pct = attained_fraction(measured, flops, byts or 0.0,
+                                    getattr(task, "dtype", "bf16"))
+            parts.append(f"roofline attainment {pct:.1f}% of MI300X peak")
+        if dense > 0.0:
+            parts.append(f"dense efficiency reward +{dense:.4f}")
+        fb_txt = ("\nHARDWARE COUNTERS (rocprofv3): " + "; ".join(parts) +
+                  ". Diagnose from these counters; target the named bottleneck next "
+                  "turn (move toward the roofline).") if parts else ""
+        return dense, fb_txt
+    except Exception:  # noqa: BLE001 - dense reward is best-effort; never break rollout
+        return 0.0, ""
+
+
+# --------------------------------------------------------------------------- #
 # training entrypoint
 # --------------------------------------------------------------------------- #
 def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inprocess"):
@@ -869,7 +1024,9 @@ def _train_grpo_fallback(config, tasks):
         (item 4c) and SC-GRPO KL-weighting (item 4b) can be applied in-place before
         the loss.
         """
-        env = KoreEnv(task)
+        # Serial refinement (_rollout) owns the dense bonus, so disable KoreEnv's
+        # internal profiling for it; the agentic path keeps the env unchanged.
+        env = _make_rollout_env(task, config, serial=not config.agentic)
         G = config.num_trajectories
         rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=seed) if config.rc_grpo else [None] * G
         traj_scores: list[float] = []
@@ -1505,7 +1662,9 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
         _bench_gpu = _ids[_lr] if _lr < len(_ids) else str(_lr)
     else:
         _bench_gpu = str(_lr)
-    env = KoreEnv(task, gpu=_bench_gpu)
+    # The distributed slice always runs the SERIAL _rollout (agentic is ragged), so
+    # it owns the dense bonus -> disable KoreEnv's internal profiling when active.
+    env = _make_rollout_env(task, config, gpu=_bench_gpu, serial=True)
     G = config.num_trajectories
     my = _rank_slice(G, rank, world)
     rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=seed) if config.rc_grpo else [None] * G
@@ -2047,6 +2206,21 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
                 best = (seq, text, code, obs, rr)
 
         seq, text, code, obs, rr = best
+        # P5 flagship dense reward: a SHAPED hardware-counter bonus on the CORRECT
+        # tier only, collected once for the turn's chosen kernel. Inert -> (0.0, "")
+        # unless the dense-reward weight > 0, so the default path is a byte-for-byte
+        # no-op (collect_counters is never called). The bonus is added ON TOP of the
+        # existing correctness+speedup reward and the counter diagnosis is appended
+        # to the turn feedback so multi-turn trajectories learn counter-grounded
+        # diagnosis. Fully fail-safe: never affects the correctness verdict.
+        dense_term, dense_fb = 0.0, ""
+        if getattr(rr, "correct", False):
+            dense_term, dense_fb = _dense_profile_bonus(env, task, code, obs, config)
+            if dense_term > 0.0:
+                rr.reward += dense_term
+                rr.flags.append(f"dense_profile+{dense_term:.3f}")
+                rr.detail = (f"{rr.detail} | dense-profile +{dense_term:.4f}"
+                             if rr.detail else f"dense-profile +{dense_term:.4f}")
         gen_inputs = [(ids.detach(), seq)]
         n_tok = max(int(seq.shape[0]), 1)
         # DAPO importance-ratio anchor: detached policy token-mean logp at rollout.
@@ -2069,7 +2243,7 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         out["n_tokens"].append(n_tok)
         out["codes"].append(code)
         out["speedups"].append(rr.speedup if rr.correct else None)
-        turns.append({"response": text, "feedback": build_turn_feedback(obs)})
+        turns.append({"response": text, "feedback": build_turn_feedback(obs) + dense_fb})
     return out
 
 

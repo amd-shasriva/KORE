@@ -147,6 +147,15 @@ def assemble_multicap_sources(
         log.metric("curate_kernel_sft",
                    dropped_trivial=_ct["n_dropped_trivial_wins"],
                    family_capped=_cb.get("capped", 0), kept=len(kernel_repair_opt))
+        # Headroom rebalance (WS-C3): cap the low-headroom (trivial/memory-bound)
+        # kernel rows so compute-bound (gemm/attention/moe) reaches the target share
+        # -- the audited pool was ~82% low-headroom, starving the demos that matter
+        # on MI300X. Opt-in (frontier default ON); degrades gracefully on thin pools.
+        if os.environ.get("KORE_REBALANCE_HEADROOM", "1") != "0":
+            from kore.data.curate import rebalance_by_headroom
+            _tc = float(os.environ.get("KORE_COMPUTE_FRAC", "0.5"))
+            kernel_repair_opt, _rh = rebalance_by_headroom(kernel_repair_opt, target_compute_frac=_tc)
+            log.metric("curate_headroom", **_rh)
 
     # External public-corpus breadth (WS-E): fold PRE-VERIFIED external kernels
     # (produced during datagen by ingest_external_to_disk -> license + decontam +

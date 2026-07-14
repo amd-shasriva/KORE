@@ -142,6 +142,77 @@ def curriculum_order(rows: Iterable[dict], reverse: bool = False) -> list[dict]:
                   reverse=reverse)
 
 
+# --------------------------------------------------------------------------- #
+# Headroom-aware rebalance (WS-C3): the audited kernel pool was ~82% low-headroom
+# memory-bound / trivial-elementwise work (torch already at the roofline) and only
+# ~18% compute-bound (gemm/attention/moe) where MI300X kernel skill actually
+# matters. Training on that mix over-teaches trivial pointwise kernels. This caps
+# the low-headroom share so the compute-bound demos drive the gradient.
+# --------------------------------------------------------------------------- #
+_COMPUTE_BOUND_FAMILIES = {"gemm", "attention", "moe"}
+# Structured memory-bound ops with real fusion/reduction headroom (worth training on
+# more than a bare elementwise op). Everything whose family is a *raw op name* (add,
+# mul, abs, exp, row_sum, ...) — i.e. not one of the recognised structured families —
+# is treated as trivial (near-roofline single-elementwise/reduction; lowest headroom).
+_MEMORY_BOUND_FAMILIES = {"rmsnorm", "layernorm", "quant", "softmax", "rope",
+                          "activation", "moe_router"}
+
+
+def op_class(row: dict) -> str:
+    """'compute_bound' | 'memory_bound' | 'trivial' | 'retention' for a chat row.
+
+    compute_bound = gemm/attention/moe (high MFMA headroom); memory_bound = the
+    structured norm/quant/softmax/rope/activation fusions; trivial = bare
+    elementwise/reduction ops (``_family_of`` returns their raw op name), which are
+    near-roofline in torch and teach the least.
+    """
+    if not is_kernel_row(row):
+        return "retention"
+    fam = row_family(row)
+    if fam in _COMPUTE_BOUND_FAMILIES:
+        return "compute_bound"
+    if fam in _MEMORY_BOUND_FAMILIES:
+        return "memory_bound"
+    return "trivial"
+
+
+def rebalance_by_headroom(rows: Iterable[dict], *, target_compute_frac: float = 0.5,
+                          scorer: Callable[[dict], float] = quality_score,
+                          ) -> tuple[list[dict], dict]:
+    """Cap low-headroom kernel rows so compute-bound reaches ``target_compute_frac``
+    of the KERNEL pool when the pool allows.
+
+    ALL compute-bound + ALL retention rows are kept; the low-headroom (trivial +
+    memory-bound) kernel rows are thinned to the top-scoring ``nc*(1-t)/t`` (so
+    compute reaches the target). Deterministic (keeps the highest ``quality_score``
+    low-headroom rows, ties by original order) and order-preserving. Degrades
+    gracefully: no compute-bound rows, or a pool already above target -> unchanged.
+    """
+    import math
+    rows = list(rows)
+    low_idx = [i for i, r in enumerate(rows) if is_kernel_row(r) and op_class(r) != "compute_bound"]
+    compute_idx = [i for i, r in enumerate(rows) if op_class(r) == "compute_bound"]
+    nc = len(compute_idx)
+    keep = {i for i in range(len(rows)) if i not in set(low_idx)}  # retention + compute
+    capped = 0
+    t = min(max(target_compute_frac, 1e-6), 1.0)
+    if nc > 0 and low_idx:
+        max_low = int(math.floor(nc * (1.0 - t) / t))
+        if max_low >= len(low_idx):
+            keep |= set(low_idx)
+        else:
+            ranked = sorted(low_idx, key=lambda i: (scorer(rows[i]), -i), reverse=True)
+            keep |= set(ranked[:max_low])
+            capped = len(low_idx) - max_low
+    else:
+        keep |= set(low_idx)  # degenerate (no compute-bound): keep everything
+    out = [rows[i] for i in range(len(rows)) if i in keep]
+    low_kept = len([i for i in keep if i in set(low_idx)])
+    frac = nc / (nc + low_kept) if (nc + low_kept) else 0.0
+    return out, {"compute_bound": nc, "low_in": len(low_idx), "low_kept": low_kept,
+                 "capped": capped, "compute_frac": round(frac, 4)}
+
+
 def curate(rows: Iterable[dict], *, min_win_speedup: float = 1.1,
            family_cap_frac: Optional[float] = 0.25, quality_floor: float = 0.0,
            curriculum: bool = False) -> tuple[list[dict], dict]:
@@ -166,4 +237,5 @@ def curate(rows: Iterable[dict], *, min_win_speedup: float = 1.1,
 __all__ = [
     "quality_score", "difficulty_score", "filter_trivial_wins",
     "balance_by_family", "curriculum_order", "curate", "is_kernel_row", "row_family",
+    "op_class", "rebalance_by_headroom",
 ]

@@ -22,7 +22,7 @@ from typing import Any, Iterable, Union
 
 _LOG = logging.getLogger(__name__)
 
-GPU_DEFAULT = "gfx942"
+GPU_DEFAULT = "gfx950"  # KORE target = MI350X/CDNA4 (matches registry.TRAIN_ARCH)
 
 
 @dataclass

@@ -471,7 +471,7 @@ def evolve_task(
                         parent_id=kernel_hash(parent_src),
                         candidates=cand_recs,
                         preferences=prefs,
-                        gpu=getattr(task, "gpu_target", "gfx942"),
+                        gpu=getattr(task, "gpu_target", "gfx950"),
                         operation=getattr(task, "operation", None),
                         arch=getattr(task, "gpu_target", None),
                     ))
@@ -506,7 +506,7 @@ def evolve_task(
                 speedup=speedup,
                 final_source=best_src,
                 snr_db=best_snr,
-                gpu=getattr(task, "gpu_target", "gfx942"),
+                gpu=getattr(task, "gpu_target", "gfx950"),
                 operation=getattr(task, "operation", None),
                 arch=getattr(task, "gpu_target", None),
             ))

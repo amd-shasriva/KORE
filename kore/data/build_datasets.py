@@ -651,6 +651,7 @@ def _group_key(rec: Any, by: tuple = ("operation", "arch")) -> str:
     provenance field is absent. This replaces the brittle leading-``_`` split so
     the same op family never leaks across train/val/test."""
     from kore.data.mutate import infer_family
+    from kore.tasks.registry import TRAIN_ARCH, TRAIN_ARCHS
 
     rec = _as_record(rec)
     d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
@@ -659,6 +660,16 @@ def _group_key(rec: Any, by: tuple = ("operation", "arch")) -> str:
         val = d.get(field)
         if field == "operation":
             val = infer_family(val or d.get("task_id", ""))
+        elif field == "arch":
+            # Resolve arch<-gpu, and CANONICALIZE the CDNA3/CDNA4 lineage: a record
+            # tagged gfx942 (previous gen) and its gfx950 sibling are the same op
+            # family on the same hardware lineage, so they must land in the SAME
+            # split — otherwise gemm|gfx942 and gemm|gfx950 fracture into different
+            # groups and the op family leaks across train/val (audit C1/C5). A
+            # genuinely foreign arch (e.g. gfx1100) keeps its own key.
+            val = val or d.get("gpu")
+            if val in TRAIN_ARCHS:
+                val = TRAIN_ARCH
         parts.append(str(val) if val is not None else "")
     key = "|".join(parts)
     return key or str(d.get("task_id", ""))

@@ -17,7 +17,7 @@ from typing import Any, Optional
 # Re-use the canonical JSONL IO (do NOT edit schemas.py).
 from kore.data.schemas import write_jsonl, read_jsonl  # noqa: F401
 
-GPU_DEFAULT = "gfx942"
+GPU_DEFAULT = "gfx950"  # KORE target = MI350X/CDNA4 (matches registry.TRAIN_ARCH)
 
 
 @dataclass

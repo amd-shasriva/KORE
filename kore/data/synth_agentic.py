@@ -51,8 +51,8 @@ log = get_logger("data.synth_agentic")
 
 # Fallback ONLY when a source record carries no arch. Matches the registry's
 # TRAIN_ARCH so the synthesized slice stays consistent with the rest of the
-# corpus (kernel/repair/QA prompts) — a no-rerun additive corpus is gfx942.
-DEFAULT_ARCH = "gfx942"
+# corpus (kernel/repair/QA prompts) — the KORE target is gfx950/CDNA4 (MI350X).
+DEFAULT_ARCH = "gfx950"
 
 # --------------------------------------------------------------------------- #
 # Small, pure helpers
@@ -429,6 +429,12 @@ def synthesize_agentic(
     rng = random.Random(seed)
     budgets = {k: max(0, int(round(cap * frac))) for k, frac in mix}
     built: dict[str, list[AgenticTrajectoryRecord]] = {k: [] for k in _SYNTH_FN}
+    # Held-out generalization tasks (paged-KV decode, MLA) must NEVER be synthesized
+    # into agentic SFT trajectories — otherwise they leak into training and invalidate
+    # the eval split (audit C2). The kernel repair/win/group slices are already
+    # train-filtered; this closes the agentic bypass at the source.
+    from kore.tasks.registry import HELDOUT_TASKS
+    n_heldout_skipped = 0
 
     for kind in _SYNTH_FN:
         want = budgets.get(kind, 0)
@@ -440,6 +446,9 @@ def synthesize_agentic(
         for r in recs:
             if len(built[kind]) >= want:
                 break
+            if isinstance(r, dict) and r.get("task_id") in HELDOUT_TASKS:
+                n_heldout_skipped += 1
+                continue
             try:
                 out = fn(r, arch)
             except Exception as e:  # noqa: BLE001 — one bad record must not abort
@@ -457,6 +466,7 @@ def synthesize_agentic(
         if write and recs:
             write_jsonl(agdir / f"{prefix}_{kind}.jsonl", [r.to_dict() for r in recs])
     summary["total"] = sum(len(v) for v in built.values())
+    summary["heldout_skipped"] = n_heldout_skipped
     log.event("agentic_synth_done", cap=cap, arch=str(arch), **summary)
     return summary
 

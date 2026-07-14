@@ -62,7 +62,15 @@ _DOC_SRC = '''\
 # ROCm rocprof tuning guide
 
 Use rocprofiler-compute to inspect occupancy and LDS bank conflicts on gfx942.
-Tune BLOCK sizes and num_warps for the MI300 matmul/gemm kernels.
+Tune BLOCK sizes and num_warps for the MI300 matmul/gemm kernels. On CDNA3 the
+matrix cores prefer 16x16 and 32x32 MFMA tiles; keeping the fp32 accumulator in
+registers and streaming the K dimension in BLOCK_K chunks avoids VGPR spills.
+
+Measure the attained fraction of the HBM3 bandwidth roofline before optimizing:
+memory-bound kernels benefit from wider vectorized loads and cache-modifier hints,
+while compute-bound GEMMs want deeper software pipelining (num_stages) to hide the
+global-load latency behind the MFMA issue. Watch the L2 hit-rate and the valu/mfma
+busy counters in rocprofv3 to decide which bottleneck to attack next.
 '''
 
 _REF_SRC = '''\
@@ -164,7 +172,10 @@ def test_corpus_wellformed_and_deterministic(tmp_path):
         assert counts.get(src, 0) > 0, f"expected chunks for source {src!r}: {counts}"
 
 
-def test_corpus_dedup_collapses_identical_files(tmp_path):
+def test_corpus_dedup_collapses_identical_files(tmp_path, monkeypatch):
+    # Isolate dedup: disable source-weighting (which intentionally re-duplicates
+    # high-signal chunks AFTER dedup) so the uniqueness assertion tests dedup only.
+    monkeypatch.setenv("KORE_MIDTRAIN_WEIGHTING", "0")
     repo_root, task_root = _make_tmp_sources(tmp_path)
     cfg = _make_config(max_seq_length=256)  # big budget: 1 chunk per triton file
     out = tmp_path / "c.jsonl"
@@ -174,6 +185,44 @@ def test_corpus_dedup_collapses_identical_files(tmp_path):
     assert rep["n_dropped_dup"] >= 1
     texts = [json.loads(ln)["text"] for ln in out.read_text().splitlines() if ln.strip()]
     assert len(texts) == len(set(texts)), "no duplicate chunk texts should remain"
+
+
+def test_corpus_source_weighting_oversamples_high_signal(tmp_path, monkeypatch):
+    repo_root, task_root = _make_tmp_sources(tmp_path)
+    # Isolate kernel-source counts (no general replay) and use a big budget.
+    cfg = _make_config(max_seq_length=256, general_replay_frac=0.0)
+
+    monkeypatch.setenv("KORE_MIDTRAIN_WEIGHTING", "0")
+    off = tmp_path / "off.jsonl"
+    rep_off = build_midtrain_corpus(off, cfg, seed=0, source_roots=[repo_root],
+                                    task_root=task_root)
+    assert rep_off["n_weighted_added"] == 0
+
+    monkeypatch.setenv("KORE_MIDTRAIN_WEIGHTING", "1")
+    on = tmp_path / "on.jsonl"
+    rep_on = build_midtrain_corpus(on, cfg, seed=0, source_roots=[repo_root],
+                                   task_root=task_root)
+    # High-signal channels (torch->Triton pairs @2x, kore_tasks @1.5x) are
+    # oversampled; a neutral channel (triton @1.0x) is unchanged.
+    assert rep_on["n_weighted_added"] > 0
+    assert rep_on["counts"]["pytorch_triton_pairs"] > rep_off["counts"]["pytorch_triton_pairs"]
+    assert rep_on["counts"]["triton"] == rep_off["counts"]["triton"]
+    # Determinism holds with weighting on.
+    on2 = tmp_path / "on2.jsonl"
+    build_midtrain_corpus(on2, cfg, seed=0, source_roots=[repo_root], task_root=task_root)
+    assert on.read_bytes() == on2.read_bytes()
+
+
+def test_source_weights_env_override(monkeypatch):
+    from kore.data.midtrain_corpus import _source_weights
+    monkeypatch.setenv("KORE_MIDTRAIN_WEIGHTS", "amd_kernels=3.5,triton=2,bogus")
+    w = _source_weights()
+    assert w["amd_kernels"] == 3.5   # overridden
+    assert w["triton"] == 2.0        # newly added
+    assert w["pytorch_triton_pairs"] == 2.0  # default preserved
+    # factors are floored at 1.0 (never drop via weighting)
+    monkeypatch.setenv("KORE_MIDTRAIN_WEIGHTS", "amd_kernels=0.2")
+    assert _source_weights()["amd_kernels"] == 1.0
 
 
 def test_corpus_docs_pathfilter_excludes_unrelated_md(tmp_path):

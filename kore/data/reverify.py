@@ -60,7 +60,14 @@ def reverify_group(group: dict, task, env, cfg, *, speed_band: float = _SPEED_BA
     order = rank_candidates(results)
     rank_of = {idx: pos for pos, idx in enumerate(order)}
     new_cands = [{"source": r["source"], "wall_us": r["wall_us"],
-                  "snr_db": r["snr_db"], "rank": rank_of[i]}
+                  "snr_db": r["snr_db"], "rank": rank_of[i],
+                  # Persist the baseline-anchoring fields so build_dpo's
+                  # candidate_baseline_speedup keeps working post-reverify. Dropping
+                  # them silently degraded DPO preference weighting to among-correct
+                  # (audit C3); they mirror gen_groups' persisted candidate dict.
+                  "speedup": r.get("speedup"),
+                  "baseline_wall_us": r.get("baseline_wall_us"),
+                  "correct": r.get("correct")}
                  for i, r in enumerate(results)]
     out = dict(group)
     out["candidates"] = new_cands

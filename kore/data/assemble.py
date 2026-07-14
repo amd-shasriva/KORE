@@ -42,13 +42,21 @@ def _read_dir(data_root: Path, sub: str, typed: bool = True) -> list:
 
 def _agentic_rows(data_root: Path) -> list[dict]:
     """Agentic trajectory records -> SFT chat rows (their ``messages``)."""
+    from kore.tasks.registry import HELDOUT_TASKS
     rows: list[dict] = []
     d = data_root / "agentic"
     if not d.exists():
         return rows
     for p in sorted(d.glob("*.jsonl")):
         for rec in read_jsonl(p, typed=False):
-            msgs = rec.get("messages") if isinstance(rec, dict) else None
+            if not isinstance(rec, dict):
+                continue
+            # Defense-in-depth: never route a held-out generalization task's
+            # trajectory into SFT, even from a legacy on-disk shard (audit C2).
+            tid = rec.get("task_id") or (rec.get("_provenance") or {}).get("task_id")
+            if tid in HELDOUT_TASKS:
+                continue
+            msgs = rec.get("messages")
             if msgs:
                 rows.append({"messages": msgs})
     return rows

@@ -980,7 +980,11 @@ def _rec_op(rec) -> str:
 
 
 def _rec_arch(rec):
-    return _rec_dict(rec).get("arch")
+    # Fall back arch<-gpu so a record tagged only with ``gpu`` (e.g. hard negatives)
+    # is still arch-checked by _rec_is_heldout; a foreign arch in ``gpu`` alone would
+    # otherwise slip past the held-out filter (audit C5).
+    d = _rec_dict(rec)
+    return d.get("arch") or d.get("gpu")
 
 
 def _rec_is_heldout(rec, heldout_ids: set) -> bool:

@@ -74,7 +74,7 @@ def episode_to_record(
         reflections=reflections,
         phase_trace=phase_trace,
         provenance=provenance,
-        gpu=getattr(task, "gpu_target", "gfx942"),
+        gpu=getattr(task, "gpu_target", "gfx950"),
     )
 
 

@@ -38,7 +38,7 @@ log = get_logger("data.gold_wins")
 
 DEFAULT_SNR_GATE = 40.0      # dB; group candidates sit at 76-999 dB, so this keeps clearly-correct only
 DEFAULT_MIN_SPEEDUP = 1.02   # only demonstrate a REAL improvement over the parent
-DEFAULT_ARCH = "gfx942"
+DEFAULT_ARCH = "gfx950"  # KORE target = MI350X/CDNA4 (matches registry.TRAIN_ARCH)
 
 
 def _correct(cands: list[dict], gate: float) -> list[dict]:

@@ -25,7 +25,7 @@ from kore.obs import get_logger
 
 log = get_logger("data.repair_dpo")
 
-DEFAULT_ARCH = "gfx942"
+DEFAULT_ARCH = "gfx950"  # KORE target = MI350X/CDNA4 (matches registry.TRAIN_ARCH)
 _FENCE_RE = re.compile(r"```(?:python)?\s*\n?(.*?)```", re.DOTALL)
 
 

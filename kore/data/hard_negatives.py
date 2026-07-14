@@ -431,7 +431,7 @@ def build_hard_negative_group(correct_src: str, task=None) -> RankedGroupRecord:
         parent_id=kernel_hash(correct_src),
         candidates=candidates,
         preferences=preferences,
-        gpu=getattr(task, "gpu_target", None) or "gfx942",
+        gpu=getattr(task, "gpu_target", None) or "gfx950",
     )
 
 

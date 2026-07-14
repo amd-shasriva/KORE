@@ -1,0 +1,22 @@
+task_id: gemm_mxfp4
+operation: gemm_mxfp4
+dtype: mxfp4_w4a16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0   # bf16 MFMA fidelity on shared-mxfp4 weights (not quant error)
+shapes:
+  minimal: {M: 64, N: 128, K: 256}
+  primary: {M: 16, N: 4096, K: 4096}      # decode (small M) weight-bound: mxfp4 shines
+  validation:
+    - {M: 1, N: 4096, K: 14336}           # single-token decode, Llama FFN down
+    - {M: 4096, N: 4096, K: 4096}         # prefill (large M), still weight-bound-ish
+    - {M: 32, N: 5120, K: 3584}           # Qwen3-ish, non-square, K multiple of 32
+# MI350/CDNA4 headline: OCP Microscaling FP4 (E2M1 codes + E8M0 block scale of 32)
+# weight-only GEMM (bf16 activation). Correctness = SNR vs the fp32 dequant-matmul
+# oracle (mxfp4 rounding shared by candidate + reference). Baseline (--impl
+# reference) = materialize weight to bf16 + hipBLASLt matmul; the mxfp4 kernel wins
+# on decode by moving ~4x less weight through HBM.
+targets:
+  snr_db: 30.0
+  comparison_baseline: bf16_dequant_matmul

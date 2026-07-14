@@ -1,0 +1,22 @@
+task_id: flash_attn_varlen_bf16
+operation: flash_attn_varlen
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+# bf16 variable-length (ragged, cu_seqlens) causal-GQA attention vs per-sequence
+# fp32 SDPA oracle. Online-softmax bf16 accumulation lands well above the 25 dB
+# low-precision attention bar; the gate rejects a wrong cu_seqlens index / missing
+# max-subtraction / bad mask. Baseline pads the batch + runs dense FMHA (the waste
+# varlen avoids).
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 2, H: 8, KV: 2, D: 128, SMAX: 256}
+  primary: {B: 8, H: 32, KV: 8, D: 128, SMAX: 2048}     # mixed-length prompt batch
+  validation:
+    - {B: 4, H: 32, KV: 8, D: 128, SMAX: 4096}          # longer, fewer seqs
+    - {B: 16, H: 16, KV: 16, D: 128, SMAX: 1024}        # many short seqs, MHA
+    - {B: 3, H: 32, KV: 8, D: 128, SMAX: 1000}          # non-multiple seqlens
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn   # padded dense FMHA (varlen beats the padding)

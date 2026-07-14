@@ -332,8 +332,8 @@ def build_midtrain_corpus(
     *,
     source_roots: Optional[list] = None,
     task_root=None,
-    max_files_per_source: int = 400,
-    scan_budget: int = 6000,
+    max_files_per_source: int = 5000,
+    scan_budget: int = 40000,
     max_chars_per_file: int = 200_000,
 ) -> dict:
     """Assemble the Stage-0 continued-pretraining corpus and write it to disk.
@@ -358,6 +358,12 @@ def build_midtrain_corpus(
         "repo_roots"}``.
     """
     out_path = Path(out_path)
+    # Env-tunable volume so a frontier midtrain can ingest thousands of MI300-native
+    # kernels + KernelBook pairs + repo Triton/HIP/CK/docs (defaults already raised
+    # 400 -> 5000 for a rich domain corpus; the highest-signal source is the ~60k
+    # gfx942-native AMD kernels, previously capped at 400).
+    max_files_per_source = int(os.environ.get("KORE_MIDTRAIN_MAX_FILES", max_files_per_source))
+    scan_budget = int(os.environ.get("KORE_MIDTRAIN_SCAN_BUDGET", scan_budget))
     budget_chars = max(1, int(config.max_seq_length) * CHARS_PER_TOKEN)
     frac = float(getattr(config, "general_replay_frac", 0.15) or 0.0)
 

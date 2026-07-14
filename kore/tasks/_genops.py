@@ -41,10 +41,11 @@ DTYPES: dict[str, tuple[str, str, float]] = {
     "bf16": ("bfloat16", "tl.bfloat16", 30.0),
     "fp16": ("float16", "tl.float16", 30.0),
     "fp32": ("float32", "tl.float32", 40.0),
-    # fp8 e4m3fnuz (gfx942/CDNA3): used by quantized GEMM vendor ops. The oracle
-    # dequantizes the SAME fp8 operands, so the gate measures the kernel's fp32
-    # accumulation fidelity (bf16 output) — a ~25 dB bar, not the quant error.
-    "fp8": ("float8_e4m3fnuz", "tl.float8e4b8", 25.0),
+    # fp8 e4m3 — OCP e4m3fn on gfx950/CDNA4 (MI350X/MI355X, the native CDNA4
+    # format; gfx942/CDNA3 used FNUZ). Used by quantized GEMM vendor ops. The
+    # oracle dequantizes the SAME fp8 operands, so the gate measures the kernel's
+    # fp32 accumulation fidelity (bf16 output) — a ~25 dB bar, not the quant error.
+    "fp8": ("float8_e4m3fn", "tl.float8e4nv", 25.0),
     # int8 symmetric (W8A8): int8-in / bf16-out quantized GEMM (per-row/col scales).
     "int8": ("int8", "tl.int8", 25.0),
 }

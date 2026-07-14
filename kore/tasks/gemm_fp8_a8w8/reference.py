@@ -3,9 +3,10 @@
 Quantized inference GEMM: activation A and weight W are both fp8 e4m3 with
 per-tensor fp32 scales, output bf16. Computes ``Y = (A_deq) @ (W_deq)^T``.
 
-gfx942 / CDNA3 fp8 format: **torch.float8_e4m3fnuz (FNUZ)**, NOT the OCP
-``e4m3fn``. FNUZ has a different exponent bias / no -0/inf encoding; using the
-wrong format silently mismatches AITER and hipBLASLt.
+fp8 format is arch-selected via ``FP8_DTYPE``: OCP ``e4m3fn`` on gfx950/CDNA4
+(MI350X/MI355X — the native format AITER/hipBLASLt use there); FNUZ
+``e4m3fnuz`` on gfx942/CDNA3. The two differ in exponent bias / -0/inf encoding,
+so the candidate + oracle must use the SAME (arch) dtype.
 
 Layout (matches AITER ``gemm_a8w8`` CK): XQ [M, K], WQ [N, K] (so the op does
 ``X @ W^T``), x_scale [M, 1] fp32, w_scale [1, N] fp32.

@@ -1,7 +1,8 @@
-"""Seed FUSED RMSNorm -> per-token fp8 quant for gfx942 (CDNA3).
+"""Seed FUSED RMSNorm -> per-token fp8 quant (arch-aware fp8: OCP e4m3fn on
+gfx950/CDNA4 MI350X/MI355X, FNUZ on gfx942/CDNA3).
 
 Exposes ``quant(x, w) -> (xq, scale)`` where x is [M,N] bf16, w is [N] bf16, xq
-is [M,N] fp8 e4m3fnuz and scale is [M,1] fp32:
+is [M,N] fp8 (arch dtype) and scale is [M,1] fp32:
     y        = x * rsqrt(mean(x^2) + eps) * w        (fp32 math)
     scale[m] = rowamax(y[m]) / FP8_MAX
     xq[m]    = clamp(y[m] / scale[m], +/-FP8_MAX) -> fp8
@@ -20,8 +21,10 @@ import torch
 import triton
 import triton.language as tl
 
-# gfx942 fp8 e4m3fnuz max magnitude.
-FP8_MAX = 240.0
+# gfx950/CDNA4 (MI350X/MI355X) fp8 e4m3 is the OCP variant e4m3fn (max 448.0) --
+# the CDNA4-native format the reference oracle also quantizes to on this arch.
+FP8_DTYPE = torch.float8_e4m3fn
+FP8_MAX = float(torch.finfo(FP8_DTYPE).max)
 EPS = 1e-6
 
 
@@ -69,7 +72,7 @@ def _rmsnorm_quant_kernel(
 
 def quant(x: torch.Tensor, w: torch.Tensor, eps: float = EPS):
     M, N = x.shape
-    xq = torch.empty((M, N), device=x.device, dtype=torch.float8_e4m3fnuz)
+    xq = torch.empty((M, N), device=x.device, dtype=FP8_DTYPE)
     scale = torch.empty((M, 1), device=x.device, dtype=torch.float32)
     BLOCK_N = 1024 if N > 1024 else triton.next_power_of_2(N)
     _rmsnorm_quant_kernel[(M,)](

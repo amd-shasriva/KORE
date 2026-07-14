@@ -1,7 +1,8 @@
-"""Seed FUSED SiLU-gate-mul -> per-token fp8 quant for gfx942 (CDNA3).
+"""Seed FUSED SiLU-gate-mul -> per-token fp8 quant (arch-aware fp8: OCP e4m3fn on
+gfx950/CDNA4 MI350X/MI355X, FNUZ on gfx942/CDNA3).
 
 Exposes ``quant(x) -> (xq, scale)`` where x is [M, 2*inter] bf16 (gate || up),
-xq is [M, inter] fp8 e4m3fnuz and scale is [M,1] fp32:
+xq is [M, inter] fp8 (arch dtype) and scale is [M,1] fp32:
     y        = silu(x[:, :inter]) * x[:, inter:]      (fp32 math)
     scale[m] = rowamax(y[m]) / FP8_MAX
     xq[m]    = clamp(y[m] / scale[m], +/-FP8_MAX) -> fp8
@@ -19,8 +20,10 @@ import torch
 import triton
 import triton.language as tl
 
-# gfx942 fp8 e4m3fnuz max magnitude.
-FP8_MAX = 240.0
+# gfx950/CDNA4 (MI350X/MI355X) fp8 e4m3 is the OCP variant e4m3fn (max 448.0) --
+# the CDNA4-native format the reference oracle also quantizes to on this arch.
+FP8_DTYPE = torch.float8_e4m3fn
+FP8_MAX = float(torch.finfo(FP8_DTYPE).max)
 
 
 @triton.jit
@@ -60,7 +63,7 @@ def _silu_mul_quant_kernel(
 def quant(x: torch.Tensor):
     M, N = x.shape
     INTER = N // 2
-    xq = torch.empty((M, INTER), device=x.device, dtype=torch.float8_e4m3fnuz)
+    xq = torch.empty((M, INTER), device=x.device, dtype=FP8_DTYPE)
     scale = torch.empty((M, 1), device=x.device, dtype=torch.float32)
     BLOCK_N = 1024 if INTER > 1024 else triton.next_power_of_2(INTER)
     _silu_mul_quant_kernel[(M,)](

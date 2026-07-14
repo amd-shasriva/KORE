@@ -2,7 +2,7 @@ task_id: flash_attn_decode_bf16
 operation: flash_attn_decode
 dtype: bf16
 backend: triton
-gpu_target: gfx942
+gpu_target: gfx950
 seed_kernel_name: seed_triton.py
 # bf16 GQA decode (seq_q=1) vs fp32 SDPA oracle. Single-query online-softmax over
 # a long KV window lands ~40-45 dB; gate at 25 dB (KORE low-precision attention

@@ -2,7 +2,7 @@ task_id: fused_moe_silu_bf16
 operation: fused_moe_silu
 dtype: bf16
 backend: triton
-gpu_target: gfx942
+gpu_target: gfx950
 seed_kernel_name: seed_triton.py
 # bf16 top-k fused MoE (grouped GEMM + SiLU-mul) vs fp32 oracle. fp32-accumulation
 # candidate lands ~40+ dB; gate at 25 dB (KORE bf16 bar). Router assignment is the

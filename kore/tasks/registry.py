@@ -16,9 +16,19 @@ from kore.tasks.base import Task
 
 TASKS_DIR = Path(__file__).resolve().parent
 
-# The arch we train on; anything else is arch-specific and is held out (e.g. a
-# gfx950/CDNA4-only kernel must never leak into the gfx942 training set).
-TRAIN_ARCH = "gfx942"
+# The PRIMARY arch we train on = the KORE target hardware, gfx950 / CDNA4 (AMD
+# Instinct MI350X / MI355X). New records are tagged with this.
+TRAIN_ARCH = "gfx950"
+
+# Arches ACCEPTED into the train set. gfx942/CDNA3 is retained alongside gfx950 so
+# that (a) tasks/records tagged with the previous-gen label are NOT retroactively
+# held out when the primary arch advances to gfx950 (they are the same hardware
+# lineage and run correctly on this CDNA4 node), and (b) a mid-flight campaign's
+# already-generated gfx942-tagged data keeps training. A truly foreign arch
+# (e.g. gfx1100 / NVIDIA) is still held out. Override via KORE_TRAIN_ARCHS.
+import os as _os
+TRAIN_ARCHS: frozenset = frozenset(
+    _os.environ.get("KORE_TRAIN_ARCHS", "gfx950,gfx942").split(","))
 
 # Whole operator families reserved for the held-out generalization set. (None by
 # default now: the model TRAINS on core attention for product capability. Kept as a
@@ -65,12 +75,12 @@ def operator_family(task: Task) -> str:
 
 def is_heldout(task: Task) -> bool:
     """Held out if the task is individually reserved, its family is reserved, OR it
-    is arch-specific (a non-gfx942 kernel must never leak into the gfx942 train set)."""
+    targets a FOREIGN arch (outside TRAIN_ARCHS -- gfx950/gfx942 lineage)."""
     if getattr(task, "task_id", "") in HELDOUT_TASKS:
         return True
     if operator_family(task) in HELDOUT_FAMILIES:
         return True
-    if (getattr(task, "gpu_target", None) or TRAIN_ARCH) != TRAIN_ARCH:
+    if (getattr(task, "gpu_target", None) or TRAIN_ARCH) not in TRAIN_ARCHS:
         return True
     return False
 

@@ -52,7 +52,7 @@ def _as_record(rec: Any):
 _wrap_full_kernel = wrap_full_kernel
 
 
-def _generic_prompt(task_id: str, gpu: str = "gfx942") -> list[dict]:
+def _generic_prompt(task_id: str, gpu: str = "gfx950") -> list[dict]:
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {

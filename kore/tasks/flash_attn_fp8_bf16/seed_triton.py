@@ -1,4 +1,4 @@
-"""Seed Triton fp8 causal (GQA) flash attention for gfx942 (fp8 QKV -> bf16 out).
+"""Seed Triton fp8 causal (GQA) flash attention for gfx950/CDNA4 (fp8 QKV -> bf16 out).
 
 Exposes ``flash_attn(q, k, v, sq, sk, sv, causal=True)`` with q ``[B,S,H,D]`` fp8,
 k/v ``[B,S,KV,D]`` fp8, per-tensor fp32 scales sq/sk/sv. Loads fp8 in-register,

@@ -2,7 +2,7 @@ task_id: genv_gelu_mul_bf16
 operation: gelu_mul
 dtype: bf16
 backend: triton
-gpu_target: gfx942
+gpu_target: gfx950
 seed_kernel_name: seed_triton.py
 snr_threshold: 30.0
 op_family: vendor_gelu_mul

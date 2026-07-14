@@ -2,7 +2,7 @@ task_id: gen_add_add_relu_bf16
 operation: add_add_relu
 dtype: bf16
 backend: triton
-gpu_target: gfx942
+gpu_target: gfx950
 seed_kernel_name: seed_triton.py
 snr_threshold: 30.0
 op_family: fusion

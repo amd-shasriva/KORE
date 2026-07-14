@@ -2,7 +2,7 @@ task_id: flash_attn_prefill_bf16
 operation: flash_attn_prefill
 dtype: bf16
 backend: triton
-gpu_target: gfx942
+gpu_target: gfx950
 seed_kernel_name: seed_triton.py
 # bf16 causal-GQA prefill vs fp32 SDPA oracle. Online-softmax accumulation in
 # bf16 lands ~45-49 dB in practice; gate at 25 dB (the KORE low-precision

@@ -1,4 +1,4 @@
-"""Seed Triton bf16 MLA (Multi-head Latent Attention) decode for gfx942.
+"""Seed Triton bf16 MLA (Multi-head Latent Attention) decode for gfx950 (CDNA4).
 
 Exposes ``mla(q_nope, q_pe, c_kv, k_pe, w_uk, w_uv) -> out``. Absorbed-form MLA:
 per (batch, head) it projects the query into the latent space

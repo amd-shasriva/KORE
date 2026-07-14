@@ -2,7 +2,7 @@ task_id: gen_hardsigmoid_fp32
 operation: hardsigmoid
 dtype: fp32
 backend: triton
-gpu_target: gfx942
+gpu_target: gfx950
 seed_kernel_name: seed_triton.py
 snr_threshold: 40.0
 op_family: unary

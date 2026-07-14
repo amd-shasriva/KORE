@@ -2,7 +2,7 @@ task_id: flash_attn_fp8_bf16
 operation: flash_attn_fp8
 dtype: fp8_e4m3fnuz
 backend: triton
-gpu_target: gfx942
+gpu_target: gfx950
 seed_kernel_name: seed_triton.py
 # fp8 causal-GQA attention vs fp32 SDPA on the dequantized fp8 q/k/v. The fp8
 # rounding is shared by candidate + reference, so the gate measures the kernel's

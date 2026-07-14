@@ -995,7 +995,7 @@ def _rec_is_heldout(rec, heldout_ids: set) -> bool:
     from types import SimpleNamespace
 
     from kore.tasks.registry import (
-        HELDOUT_FAMILIES, HELDOUT_TASKS, TRAIN_ARCH, operator_family,
+        HELDOUT_FAMILIES, HELDOUT_TASKS, TRAIN_ARCHS, operator_family,
     )
 
     d = _rec_dict(rec)
@@ -1005,7 +1005,7 @@ def _rec_is_heldout(rec, heldout_ids: set) -> bool:
     if tid and tid in HELDOUT_TASKS:   # registry task-level holdout (paged-KV / MLA)
         return True
     arch = _rec_arch(rec)
-    if arch not in (None, TRAIN_ARCH):
+    if arch is not None and arch not in TRAIN_ARCHS:  # foreign arch (gfx950/gfx942 both train)
         return True
     op = _rec_op(rec)
     if op and operator_family(SimpleNamespace(operation=op, task_id=tid or "")) in HELDOUT_FAMILIES:

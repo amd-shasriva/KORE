@@ -103,7 +103,7 @@ def _yaml(op: str, family: str, dtype: str, snr: float) -> str:
         f"operation: {op}",
         f"dtype: {dtype}",
         "backend: triton",
-        "gpu_target: gfx942",
+        "gpu_target: gfx950",
         "seed_kernel_name: seed_triton.py",
         f"snr_threshold: {snr}",
         f"op_family: {family}",

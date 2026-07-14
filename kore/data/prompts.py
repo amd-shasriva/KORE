@@ -1,7 +1,7 @@
 """Writer prompts + kernel extraction for KORE data generation.
 
 Pure, side-effect-free string helpers so they can be unit-tested without a GPU
-or a teacher model. The writer prompt encodes gfx942 / MI325X (CDNA3) discipline;
+or a teacher model. The writer prompt encodes gfx950 / MI350X (CDNA4) discipline;
 ``build_turn_prompt`` adapts KernelForge's evolve ``_build_prompt`` into three
 modes (exploit / explore / repair) and always ends with the ``FULL_KERNEL:``
 output contract. ``extract_kernel`` robustly parses either a ``FULL_KERNEL:``
@@ -76,7 +76,7 @@ def build_turn_prompt(
 
     hints_block = ""
     if tuning_hints:
-        hints_block = f"\n## Tuning hints (gfx942)\n{tuning_hints.strip()}\n"
+        hints_block = f"\n## Tuning hints (gfx950 / CDNA4)\n{tuning_hints.strip()}\n"
 
     src_block = (
         "\n## Parent Kernel Source (MODIFY THIS — do NOT write from scratch)\n"
@@ -84,7 +84,7 @@ def build_turn_prompt(
     )
 
     return (
-        "You are optimizing a Triton kernel on AMD MI325X (gfx942).\n"
+        "You are optimizing a Triton kernel on AMD Instinct MI350X (gfx950 / CDNA4).\n"
         "Reason about the bottleneck FIRST, then make your change.\n\n"
         f"{mode_block}\n"
         f"{feedback_block}{hints_block}{src_block}\n"

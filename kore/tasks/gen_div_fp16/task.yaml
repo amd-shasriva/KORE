@@ -2,7 +2,7 @@ task_id: gen_div_fp16
 operation: div
 dtype: fp16
 backend: triton
-gpu_target: gfx942
+gpu_target: gfx950
 seed_kernel_name: seed_triton.py
 snr_threshold: 30.0
 op_family: binary

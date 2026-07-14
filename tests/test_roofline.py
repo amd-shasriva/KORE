@@ -18,22 +18,61 @@ from kore.verifier import pmc
 # constants
 # --------------------------------------------------------------------------- #
 def test_mi300x_constants_match_datasheet():
-    assert R.HBM_BW_BYTES_PER_S == pytest.approx(5.325e12, rel=1e-3)
-    assert R.PEAK_FLOPS_BF16 == pytest.approx(1.3074e15, rel=1e-3)
-    assert R.PEAK_FLOPS_FP16 == pytest.approx(1.3074e15, rel=1e-3)
-    assert R.PEAK_FLOPS_FP8 == pytest.approx(2.6149e15, rel=1e-3)
-    assert R.PEAK_FLOPS_FP32 == pytest.approx(1.634e14, rel=1e-3)
-    assert R.MI300X["num_cus"] == 304
+    # gfx942 / CDNA3 bundle (previous gen) — always available in the arch table.
+    mi = R.MI300X
+    assert mi["hbm_bw_bytes_per_s"] == pytest.approx(5.325e12, rel=1e-3)
+    assert mi["peak_flops_bf16"] == pytest.approx(1.3074e15, rel=1e-3)
+    assert mi["peak_flops_fp8"] == pytest.approx(2.6149e15, rel=1e-3)
+    assert mi["peak_flops_fp32"] == pytest.approx(1.634e14, rel=1e-3)
+    assert mi["num_cus"] == 304
     # occupancy constants sourced from pmc (single source of truth)
-    assert R.MI300X["lds_bytes_per_cu"] == pmc.LDS_BYTES_PER_CU == 65536
-    assert R.MI300X["vgpr_per_simd"] == pmc.VGPR_PER_SIMD == 512
+    assert mi["lds_bytes_per_cu"] == pmc.LDS_BYTES_PER_CU == 65536
+    assert mi["vgpr_per_simd"] == pmc.VGPR_PER_SIMD == 512
+
+
+def test_mi350x_constants_match_datasheet():
+    # gfx950 / CDNA4 — the KORE target hardware (default ACTIVE arch).
+    mi = R.MI350X
+    assert mi["arch"] == "gfx950"
+    assert mi["hbm_bw_bytes_per_s"] == pytest.approx(8.0e12, rel=1e-3)   # HBM3E 8 TB/s
+    assert mi["peak_flops_bf16"] == pytest.approx(2.30e15, rel=1e-3)
+    assert mi["peak_flops_fp8"] == pytest.approx(4.60e15, rel=1e-3)      # OCP-FP8
+    assert mi["peak_flops_fp4"] == pytest.approx(9.20e15, rel=1e-3)      # MXFP4
+    assert mi["peak_flops_fp6"] == pytest.approx(9.20e15, rel=1e-3)      # MXFP6
+    assert mi["peak_flops_fp64"] == pytest.approx(7.21e13, rel=1e-3)     # CDNA4 halves FP64
+    assert mi["num_cus"] == 256
+    # MI355X (liquid-cooled) variant runs hotter/faster.
+    assert R.MI355X["peak_flops_bf16"] == pytest.approx(2.50e15, rel=1e-3)
+    assert R.MI355X["peak_flops_fp8"] == pytest.approx(5.00e15, rel=1e-3)
+
+
+def test_active_arch_is_cdna4_and_consistent():
+    # The module-level constants must mirror the ACTIVE arch's table entry, and
+    # the KORE node default is CDNA4 (gfx950).
+    a = R._ARCH_PEAKS[R.ACTIVE_ARCH]
+    assert R.HBM_BW_BYTES_PER_S == a["hbm_bw_bytes_per_s"]
+    assert R.PEAK_FLOPS_BF16 == a["peak_flops_bf16"]
+    assert R.PEAK_FLOPS_FP8 == a["peak_flops_fp8"]
+    assert R.ACTIVE["arch"] == "gfx950"
+
+
+def test_detect_arch_env_override(monkeypatch):
+    monkeypatch.setenv("KORE_ROOFLINE_ARCH", "gfx942")
+    assert R._detect_arch() == "gfx942"
+    monkeypatch.setenv("KORE_ROOFLINE_ARCH", "mi355x")
+    assert R._detect_arch() == "mi355x"
+    monkeypatch.setenv("KORE_ROOFLINE_ARCH", "mi350x")
+    assert R._detect_arch() == "gfx950"
 
 
 def test_dtype_bytes_and_peak_selection():
     assert R.dtype_bytes("bf16") == 2 and R.dtype_bytes("fp16") == 2
     assert R.dtype_bytes("fp8_e4m3fnuz") == 1 and R.dtype_bytes("fp32") == 4
+    assert R.dtype_bytes("fp4_e2m1") == 0.5 and R.dtype_bytes("mxfp6") == 0.75
     assert R.peak_flops("bf16") == R.PEAK_FLOPS_BF16
     assert R.peak_flops("fp8_e4m3") == R.PEAK_FLOPS_FP8
+    assert R.peak_flops("mxfp4") == R.PEAK_FLOPS_FP4
+    assert R.peak_flops("fp6_e3m2") == R.PEAK_FLOPS_FP6
     assert R.peak_flops("fp32") == R.PEAK_FLOPS_FP32
 
 
@@ -43,7 +82,10 @@ def test_dtype_bytes_and_peak_selection():
 def test_ridge_point():
     r = R.roofline(1.0, 1.0, "bf16")
     assert r["ridge_point"] == pytest.approx(R.PEAK_FLOPS_BF16 / R.HBM_BW_BYTES_PER_S)
-    assert r["ridge_point"] == pytest.approx(245.5, rel=1e-2)
+    # gfx950/MI350X default: 2.3 PFLOP / 8 TB/s = 287.5 FLOP/byte (MI300X was 245.5).
+    a = R._ARCH_PEAKS[R.ACTIVE_ARCH]
+    assert r["ridge_point"] == pytest.approx(
+        a["peak_flops_bf16"] / a["hbm_bw_bytes_per_s"], rel=1e-2)
 
 
 def test_large_gemm_is_compute_bound():

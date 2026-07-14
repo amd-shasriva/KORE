@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import types
 
+from kore.analysis import roofline as _R
 from kore.reward import profile_reward as pr
 from kore.reward.reward import Observation
 
@@ -35,11 +36,14 @@ def _counters(valu, salu, vmem, mfma, wait):
 
 
 # A modelable op (bf16, arithmetic intensity 0.25 => memory-bound). The bandwidth
-# roofline lower bound is ~ bytes / HBM_BW = 4e6 / 5.325e12 ~= 7.5e-4 ms.
+# roofline lower bound is t_min = bytes / HBM_BW on the ACTIVE arch (gfx950/MI350X:
+# 4e6 / 8e12 = 5.0e-4 ms; gfx942/MI300X was 7.5e-4). Derive the near/far runtimes
+# from t_min so the test is correct on whichever arch is active.
 _FLOPS = 1.0e6
 _BYTES = 4.0e6
-_NEAR_MS = 8.0e-4    # ~= t_min  -> near the roofline
-_FAR_MS = 8.0e-3     # ~= 10x t_min -> far from the roofline
+_TMIN_MS = _R.roofline(_FLOPS, _BYTES, "bf16")["t_min_ms"]
+_NEAR_MS = _TMIN_MS * 1.05    # ~5% off the roofline -> near (high score)
+_FAR_MS = _TMIN_MS * 10.0     # 10x t_min -> far from the roofline (low score)
 
 # Stalling kernel (spends most cycles waiting) vs a busy one (ALUs kept fed).
 _STALLING = _counters(valu=800, salu=100, vmem=500, mfma=0, wait=4000)   # low issue eff

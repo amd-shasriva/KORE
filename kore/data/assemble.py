@@ -25,7 +25,7 @@ from kore.data.hard_negatives import (
     meets_hard_negative_target,
 )
 from kore.data.mixing import build_multicap_sft, mixture_report
-from kore.data.schemas import read_jsonl, write_jsonl
+from kore.data.schemas import read_jsonl
 from kore.obs import get_logger
 
 log = get_logger("data.assemble")
@@ -52,53 +52,6 @@ def _agentic_rows(data_root: Path) -> list[dict]:
             if msgs:
                 rows.append({"messages": msgs})
     return rows
-
-
-def _external_rows(data_root: Path) -> list[dict]:
-    """Pre-verified external public-corpus SFT rows -> chat rows.
-
-    Produced during datagen (with a GPU verifier) by :func:`ingest_external_to_disk`
-    into ``data_root/external/<source>.jsonl`` after the full frontier gate
-    (license -> decontam -> gfx942-verify -> contract-normalize). The build reads
-    them offline; an absent dir is a safe no-op (native data only)."""
-    rows: list[dict] = []
-    d = data_root / "external"
-    if not d.exists():
-        return rows
-    for p in sorted(d.glob("*.jsonl")):
-        for rec in read_jsonl(p, typed=False):
-            if isinstance(rec, dict) and rec.get("messages"):
-                rows.append(rec)
-    return rows
-
-
-def ingest_external_to_disk(data_root, sources, verify, *, heldout_op_families=None,
-                            limit: Optional[int] = None, log_fn=None) -> dict:
-    """Datagen-stage (GPU) external ingestion: run the full frontier gate for each
-    public source and WRITE the admitted, contract-normalized SFT rows to
-    ``data_root/external/<source>.jsonl`` so the offline build folds them in.
-
-    ``verify(ExternalKernel) -> bool`` MUST be a real gfx942 compile+correctness
-    check (generic NVIDIA/torch.compile kernels that don't run on CDNA3 are
-    dropped). ``heldout_op_families`` defaults to the registry's held-out set so
-    external data can never leak the generalization eval. Returns per-source stats.
-    """
-    from kore.data import external as ext
-    data_root = Path(data_root)
-    if heldout_op_families is None:
-        from kore.tasks.registry import heldout_families
-        heldout_op_families = heldout_families()
-    log_fn = log_fn or (lambda m: log.info(m))
-    stats: dict = {}
-    for src in sources:
-        res = ext.ingest(src, heldout_op_families=heldout_op_families, verify=verify,
-                         limit=limit, log=log_fn)
-        stats[src] = res.get("stats", {})
-        if res.get("admitted") and res.get("sft_rows"):
-            write_jsonl(data_root / "external" / f"{src}.jsonl", res["sft_rows"])
-    log.metric("ingest_external_to_disk", sources=list(sources),
-               admitted={s: bool(stats[s].get("sft_rows")) for s in stats})
-    return stats
 
 
 def assemble_multicap_sources(
@@ -156,18 +109,6 @@ def assemble_multicap_sources(
             _tc = float(os.environ.get("KORE_COMPUTE_FRAC", "0.5"))
             kernel_repair_opt, _rh = rebalance_by_headroom(kernel_repair_opt, target_compute_frac=_tc)
             log.metric("curate_headroom", **_rh)
-
-    # External public-corpus breadth (WS-E): fold PRE-VERIFIED external kernels
-    # (produced during datagen by ingest_external_to_disk -> license + decontam +
-    # gfx942-verify + contract-normalize) into the kernel repair/opt bucket. They
-    # are contract-identical + already verified-on-target, and are added AFTER
-    # curation (they carry no speedup metadata to trivially-filter, and are
-    # pre-balanced by the ingest gate). Offline-safe: no external dir -> no-op.
-    if os.environ.get("KORE_EXTERNAL", "1") != "0":
-        ext_rows = _external_rows(data_root)
-        if ext_rows:
-            kernel_repair_opt = kernel_repair_opt + ext_rows
-            log.metric("assemble_external", external_rows=len(ext_rows))
 
     # Agentic slice = KORE-native tool trajectories (real build/test/bench/pmc on our
     # tools) + a "generic layer" of real public function-calling data (ToolACE via the

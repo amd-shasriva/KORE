@@ -2,7 +2,7 @@
 
   * new ops registered + CPU-verifiable oracles (embedding_gather, fp8 fusions,
     W4A16 int4 GEMM, rmsnorm backward);
-  * external public-corpus ingestion wired into the build (WS-E);
+  * headroom rebalance of the curation mix (WS-C3);
   * frontier failure taxonomy for the new op classes (WS-D3).
 
 All CPU-only (no GPU / no Triton compile) so it runs in CI.
@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import math
 import random
-import tempfile
 from pathlib import Path
 
 import torch
 
-from kore.tasks.registry import get_task, operator_family, is_heldout
+from kore.tasks.registry import get_task, is_heldout
 
 
 def _snr(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -97,38 +96,6 @@ def test_rmsnorm_backward_formula_matches_autograd():
     dx_an = rr * wf * g - (rr ** 3) * xf * c / N
     dw_an = (g * xf * rr).sum(0)
     assert _snr(dx_an, dx_ref) > 60.0 and _snr(dw_an, dw_ref) > 60.0
-
-
-# --------------------------------------------------------------------------- #
-# WS-E: external ingestion wired into the build.
-# --------------------------------------------------------------------------- #
-def test_external_ingest_normalize_and_build_fold():
-    from kore.data import external as ext
-    from kore.data.assemble import _external_rows
-    from kore.data.schemas import write_jsonl
-
-    res = ext.ingest("kb_multiturn_traces", heldout_op_families={"attention"},
-                     verify=lambda r: True,
-                     local_rows=[{"torch": "def f(x): return x.gelu()",
-                                  "triton": "import triton\n# k\n"}])
-    assert res["admitted"] and len(res["sft_rows"]) == 1
-    row = res["sft_rows"][0]
-    assert row["messages"][0]["role"] == "system"
-    assert row["_provenance"]["verified_gfx942"] is True
-
-    with tempfile.TemporaryDirectory() as d:
-        write_jsonl(Path(d) / "external" / "kb.jsonl", res["sft_rows"])
-        got = _external_rows(Path(d))
-        assert len(got) == 1 and got[0]["messages"] == row["messages"]
-        assert _external_rows(Path(d) / "absent") == []  # offline-safe no-op
-
-
-def test_external_license_gate_blocks_untrainable_source():
-    from kore.data import external as ext
-    # kernelbook is train_ok=False -> never admitted for training
-    res = ext.ingest("kernelbook", heldout_op_families=set(), verify=lambda r: True,
-                     local_rows=[{"torch": "x", "triton": "y"}])
-    assert res["admitted"] is False
 
 
 # --------------------------------------------------------------------------- #

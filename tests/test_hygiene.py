@@ -44,12 +44,16 @@ def test_dedup_near_fuzzy_merge():
 
 
 def test_decontam_record_family_gate():
-    assert D.is_contaminated_record({"task_id": "flash_attn_prefill_bf16"})
-    assert D.is_contaminated_record({"operation": "paged_attention_decode"})
+    # Core attention now TRAINS (product capability) -> NOT contaminated. Only the
+    # held-out TASKS (paged-KV decode + MLA) are gated (registry HELDOUT_TASKS).
+    assert not D.is_contaminated_record({"task_id": "flash_attn_prefill_bf16"})
+    assert D.is_contaminated_record({"task_id": "paged_attn_decode_bf16"})
+    assert D.is_contaminated_record({"task_id": "mla_decode_bf16"})
     assert not D.is_contaminated_record({"task_id": "gemm_bf16", "operation": "gemm"})
     clean, st = D.decontaminate_records(
-        [{"task_id": "gemm_bf16"}, {"task_id": "flash_attn_decode_bf16"}, {"operation": "attn"}])
-    assert st["n_dropped_heldout"] == 2 and st["n_kept"] == 1
+        [{"task_id": "gemm_bf16"}, {"task_id": "paged_attn_decode_bf16"},
+         {"task_id": "mla_decode_bf16"}, {"task_id": "flash_attn_decode_bf16"}])
+    assert st["n_dropped_heldout"] == 2 and st["n_kept"] == 2  # paged+mla dropped; gemm+flash train
 
 
 def test_decontam_text_ngram_containment():

@@ -1,0 +1,22 @@
+task_id: mla_decode_bf16
+operation: mla_decode
+dtype: bf16
+backend: triton
+gpu_target: gfx942
+seed_kernel_name: seed_triton.py
+# bf16 MLA (Multi-head Latent Attention, DeepSeek-V2/V3) decode vs the exact fp32
+# MLA oracle. Absorbed-form: project q into the latent, attend the compressed KV
+# latent, project out. Extra latent up-projections drop fidelity slightly vs plain
+# attention, so the gate is 25 dB (still rejects wrong-scale / bad-softmax / wrong
+# up-projection). HELD OUT of training (registry HELDOUT_TASKS) -> generalization eval.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 4, S: 256, DC: 512, DNOPE: 128, DROPE: 64, DV: 128, SQ: 1}
+  primary: {B: 1, H: 16, S: 2048, DC: 512, DNOPE: 128, DROPE: 64, DV: 128, SQ: 1}   # decode
+  validation:
+    - {B: 1, H: 16, S: 4096, DC: 512, DNOPE: 128, DROPE: 64, DV: 128, SQ: 1}         # long cache
+    - {B: 2, H: 8, S: 2048, DC: 512, DNOPE: 128, DROPE: 64, DV: 128, SQ: 16}         # chunked/spec decode
+    - {B: 1, H: 16, S: 1000, DC: 512, DNOPE: 128, DROPE: 64, DV: 128, SQ: 8}         # non-multiple cache
+targets:
+  snr_db: 25.0
+  comparison_baseline: torch_mla_batched   # non-fused vectorized MLA (kernel beats it)

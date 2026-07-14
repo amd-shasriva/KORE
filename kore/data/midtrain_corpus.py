@@ -324,6 +324,58 @@ def _load_amd_kernels(n: int, max_chars: int) -> list:
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
+def _near_dedup_corpus(rows: list[dict], threshold: float = 0.7,
+                       num_perm: int = 64, bands: int = 16) -> list[dict]:
+    """Collapse near-duplicate corpus chunks via MinHash-LSH (The-Stack-v2 practice:
+    MinHash + banded LSH, Jaccard 0.7). Exact-hash dedup upstream catches
+    byte-identical chunks; this catches token-level near-dups (forked / reformatted /
+    renamed kernels copied across repos) so continued-pretraining isn't dominated by
+    redundant copies. O(n * bands) bucketing + confirm-with-Jaccard; keeps one
+    representative per near-dup cluster (first-seen, so order is stable)."""
+    from collections import defaultdict
+
+    from kore.data.dedup import jaccard, minhash_signature
+
+    n = len(rows)
+    if n < 2:
+        return rows
+    rows_per_band = max(1, num_perm // bands)
+    sigs = [minhash_signature(r.get("text", ""), num_perm=num_perm) for r in rows]
+    buckets: dict = defaultdict(list)
+    for i, sig in enumerate(sigs):
+        for b in range(bands):
+            band = tuple(sig[b * rows_per_band:(b + 1) * rows_per_band])
+            buckets[(b, band)].append(i)
+
+    parent = list(range(n))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for idxs in buckets.values():
+        if len(idxs) < 2:
+            continue
+        a = idxs[0]
+        for b0 in idxs[1:]:
+            if _find(a) == _find(b0):
+                continue
+            if jaccard(sigs[a], sigs[b0]) >= threshold:  # confirm (avoid band false-pos)
+                parent[_find(b0)] = _find(a)
+
+    seen_root: set = set()
+    kept: list[dict] = []
+    for i, r in enumerate(rows):
+        root = _find(i)
+        if root in seen_root:
+            continue
+        seen_root.add(root)
+        kept.append(r)
+    return kept
+
+
 def build_midtrain_corpus(
     out_path,
     config,
@@ -496,6 +548,30 @@ def build_midtrain_corpus(
                 n_src += 1
         counts[source] = n_src
 
+    # Near-duplicate collapse (SOTA: The-Stack-v2 MinHash-LSH, Jaccard 0.7). The
+    # exact-hash pass above only catches byte-identical chunks; this removes the
+    # token-level near-dups (forked/reformatted/renamed kernels copied across the
+    # many repos we ingest) so continued-pretraining isn't dominated by redundant
+    # copies. Applied to the kernel-domain chunks only (general replay is added
+    # below and is already deduped upstream). Gated by KORE_MIDTRAIN_NEAR_DEDUP.
+    n_near = 0
+    if os.environ.get("KORE_MIDTRAIN_NEAR_DEDUP", "1") != "0" and len(rows) > 1:
+        # Translation-pair sources (torch<->triton) are an intentional signal whose
+        # value is the PAIRING even when the triton half also appears as raw code, so
+        # they are exempt from near-dedup; only raw-code/doc redundancy is collapsed.
+        _pair_srcs = {"pytorch_triton_pairs", "kernelbook"}
+        _dedupable = [r for r in rows if r["source"] not in _pair_srcs]
+        _kept = _near_dedup_corpus(_dedupable, threshold=0.7)
+        _kept_ids = {id(r) for r in _kept}
+        _new_rows = [r for r in rows if r["source"] in _pair_srcs or id(r) in _kept_ids]
+        n_near = len(rows) - len(_new_rows)
+        rows = _new_rows
+        if n_near:
+            kept_by_src: dict[str, int] = {}
+            for r in rows:
+                kept_by_src[r["source"]] = kept_by_src.get(r["source"], 0) + 1
+            counts = {k: kept_by_src.get(k, 0) for k in counts}
+
     # Text-level decontamination backstop (Pillar 5): drop any chunk whose n-grams
     # overlap the HELD-OUT reference sources. The kore_tasks/pairs dir-filter above
     # already excludes held-out KORE tasks; this also catches a held-out kernel
@@ -571,6 +647,7 @@ def build_midtrain_corpus(
         "total": total,
         "counts": counts,
         "n_dropped_dup": n_dropped,
+        "n_dropped_near_dup": n_near,
         "n_dropped_decontam": n_decontam,
         "general_frac": round(general_frac, 4),
         "max_seq_length": int(config.max_seq_length),
@@ -579,7 +656,7 @@ def build_midtrain_corpus(
     }
     log.info("midtrain corpus built", **{
         "out": str(out_path), "total": total, "general_frac": report["general_frac"],
-        "dropped_dup": n_dropped, "dropped_decontam": n_decontam,
+        "dropped_dup": n_dropped, "dropped_near_dup": n_near, "dropped_decontam": n_decontam,
         **{f"n_{k}": v for k, v in counts.items()},
     })
     return report

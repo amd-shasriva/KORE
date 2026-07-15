@@ -23,6 +23,14 @@ class _StubEnv:
     """Correctness + speed keyed off markers in the source (deterministic)."""
 
     def step(self, source, full_validation=True, multi_shape=True):
+        if "__INFRA__" in source:  # TRANSIENT OOM/timeout/profiler crash (not a verdict)
+            return Observation(compiled=True, validation_passed=True, snr_db=60.0,
+                               snr_by_shape={"primary": 60.0}, wall_ms=1.0,
+                               baseline_ms=2.0, dtype="fp16", infra_error=True)
+        if "__FLAKE__" in source:  # correct, but the bench couldn't measure a speedup
+            return Observation(compiled=True, validation_passed=True, snr_db=60.0,
+                               snr_by_shape={"primary": 60.0}, wall_ms=None,
+                               baseline_ms=None, dtype="fp16")
         if "__WRONG__" in source:  # fails adversarial correctness now
             return Observation(compiled=True, validation_passed=False, snr_db=5.0,
                                snr_by_shape={"primary": 5.0}, dtype="fp16")
@@ -70,6 +78,44 @@ def test_reverify_repair_drops_lucky_pass():
     assert ok is not None and bad is None
 
 
+def test_reverify_group_keeps_original_on_infra():
+    """A transient infra failure on any candidate must NOT re-rank/re-prefer the
+    group (which would forge a preference against the true best) -- keep it intact
+    and flag for retry (audit R2 reverify C1)."""
+    env, task = _StubEnv(), _Task()
+    g = {"task_id": "t", "candidates": [
+        {"source": "cand FAST", "wall_us": 1.0, "snr_db": 99, "rank": 0},
+        {"source": "cand __INFRA__", "wall_us": 0.5, "snr_db": 99, "rank": 1}],
+        "preferences": [[0, 1]], "type": "ranked_group"}
+    ng = RV.reverify_group(g, task, env, CONFIG)
+    assert ng["_reverify_infra_error"] is True
+    assert ng["candidates"] == g["candidates"]   # untouched (no forged re-rank)
+    assert ng["preferences"] == g["preferences"]
+
+
+def test_reverify_win_keeps_correct_on_bench_flake():
+    """Correct win whose speedup can't be measured (bench flake) must be kept, not
+    dropped as if it were a genuine <=1.0x slowdown (audit R2 reverify)."""
+    env, task = _StubEnv(), _Task()
+    flake = RV.reverify_win({"final_source": "cand __FLAKE__", "speedup": 9.9},
+                            task, env, CONFIG)
+    assert flake is not None and flake["speedup"] == 9.9  # original kept, not culled
+
+
+def test_reverify_shard_strips_infra_sentinel_and_flags(tmp_path):
+    """The infra sentinel is stripped from disk (never pollutes the shard) and the
+    shard reports infra=True so the caller skips the .done marker."""
+    env, task = _StubEnv(), _Task()
+    wp = tmp_path / "wins" / "t.jsonl"
+    wp.parent.mkdir(parents=True)
+    wp.write_text(json.dumps({"final_source": "cand __INFRA__", "speedup": 9.9}) + "\n")
+    n_in, n_keep, infra = RV._reverify_shard(
+        wp, lambda r: RV.reverify_win(r, task, env, CONFIG), drop_none=True, backup=False)
+    assert n_in == 1 and n_keep == 1 and infra is True
+    out = [json.loads(x) for x in wp.read_text().splitlines() if x.strip()]
+    assert len(out) == 1 and "_reverify_infra_error" not in out[0]  # sentinel stripped
+
+
 def test_reverify_shard_drops_and_backs_up(tmp_path):
     env, task = _StubEnv(), _Task()
     wp = tmp_path / "wins" / "t.jsonl"
@@ -77,9 +123,9 @@ def test_reverify_shard_drops_and_backs_up(tmp_path):
     wp.write_text("\n".join(json.dumps(x) for x in [
         {"final_source": "cand FAST", "speedup": 9.9},
         {"final_source": "cand __SLOW__", "speedup": 9.9}]) + "\n")
-    n_in, n_keep = RV._reverify_shard(
+    n_in, n_keep, infra = RV._reverify_shard(
         wp, lambda r: RV.reverify_win(r, task, env, CONFIG), drop_none=True, backup=True)
-    assert n_in == 2 and n_keep == 1  # slow win culled
+    assert n_in == 2 and n_keep == 1 and infra is False  # slow win culled, no infra
     assert (tmp_path / "wins" / "t.jsonl.pre_reverify.bak").exists()
     out = [json.loads(x) for x in wp.read_text().splitlines() if x.strip()]
     assert len(out) == 1 and out[0]["final_source"] == "cand FAST"

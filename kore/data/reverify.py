@@ -57,6 +57,16 @@ def reverify_group(group: dict, task, env, cfg, *, speed_band: float = _SPEED_BA
     results = [_evaluate(env, task, c.get("source", ""), cfg) for c in cands]
     if not results:
         return group
+    # If ANY candidate hit a TRANSIENT infra failure (OOM/timeout/profiler crash),
+    # re-verifying would demote a correct candidate to incorrect, corrupt the ranking,
+    # and FORGE DPO preference pairs against the true best kernel. Keep the ORIGINAL
+    # group intact and mark it not-cleanly-done so the task is retried, rather than
+    # freezing corrupted data (audit R2 reverify C1 -- the hole in the round-1 win/
+    # repair infra-keep that never covered groups).
+    if any(r.get("infra_error") for r in results):
+        out = dict(group)
+        out["_reverify_infra_error"] = True
+        return out
     order = rank_candidates(results)
     rank_of = {idx: pos for pos, idx in enumerate(order)}
     new_cands = [{"source": r["source"], "wall_us": r["wall_us"],
@@ -90,14 +100,20 @@ def reverify_win(win: dict, task, env, cfg) -> Optional[dict]:
         return None
     r = _evaluate(env, task, src, cfg)
     if r.get("infra_error"):
-        return dict(win)  # TRANSIENT (OOM/timeout/crash): keep the original win
-                          # unchanged rather than permanently dropping a correct
-                          # kernel on infra noise (audit THEME F silent data loss).
+        # TRANSIENT (OOM/timeout/crash): keep the original win + flag for retry rather
+        # than dropping a correct kernel on infra noise (audit THEME F / R2 reverify).
+        return {**win, "_reverify_infra_error": True}
     if not r.get("correct"):
         return None  # fails adversarial correctness now (v1 lucky-pass)
     sp = r.get("speedup")
-    if not sp or sp <= 1.0:
-        return None  # no longer beats the strong baseline -> not a win
+    if sp is None:
+        # Correct, but the BENCH couldn't measure a speedup this time (transient
+        # timing flake, common for fp8/attention). Do NOT drop a still-correct win
+        # as if it were slow -- keep the original (audit R2 reverify: bench-flake
+        # was conflated with <=1.0x). A genuine slowdown has a real number below.
+        return dict(win)
+    if sp <= 1.0:
+        return None  # genuinely no longer beats the strong baseline -> not a win
     out = dict(win)
     out["speedup"] = round(float(sp), 4)
     out["snr_db"] = r["snr_db"]
@@ -118,10 +134,10 @@ def reverify_repair(repair: dict, task, env, cfg) -> Optional[dict]:
         return None
     try:
         obs = env.step(fixed, full_validation=True, multi_shape=True)
-    except Exception:  # noqa: BLE001 - TRANSIENT: keep the original, don't drop
-        return dict(repair)
+    except Exception:  # noqa: BLE001 - TRANSIENT: keep the original + flag for retry
+        return {**repair, "_reverify_infra_error": True}
     if getattr(obs, "infra_error", False):
-        return dict(repair)  # OOM/timeout/crash: keep original (audit THEME F)
+        return {**repair, "_reverify_infra_error": True}  # OOM/timeout: keep + retry
     if not getattr(obs, "validation_passed", False):
         return None  # no longer passes -> drop (honest v1 lucky-pass)
     out = dict(repair)
@@ -133,23 +149,30 @@ def reverify_repair(repair: dict, task, env, cfg) -> Optional[dict]:
 # Per-shard / per-task
 # --------------------------------------------------------------------------- #
 def _reverify_shard(path: Path, fn: Callable[[dict], Optional[dict]], *,
-                    drop_none: bool, backup: bool) -> tuple[int, int]:
+                    drop_none: bool, backup: bool) -> tuple[int, int, bool]:
     """Apply ``fn`` to each row of a JSONL shard (drop rows -> None when drop_none).
 
-    Returns ``(n_in, n_kept)``. Writes atomically; keeps a ``.pre_reverify.bak``.
+    Rows that ``fn`` keeps but tags with the transient-infra sentinel
+    ``_reverify_infra_error`` are written back WITHOUT the sentinel (never pollute the
+    shard) and ``infra=True`` is returned so the caller can skip the ``.done`` marker
+    and retry the task later (audit R2 reverify: don't freeze infra-kept stale rows).
+    Returns ``(n_in, n_kept, infra)``. Writes atomically; keeps a ``.pre_reverify.bak``.
     """
     if not path.is_file():
-        return 0, 0
+        return 0, 0, False
     rows = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
     if not rows:
-        return 0, 0
+        return 0, 0, False
     kept: list[dict] = []
+    infra = False
     for r in rows:
         nr = fn(r)
         if nr is None:
             if not drop_none:
                 kept.append(r)
             continue
+        if isinstance(nr, dict) and nr.pop("_reverify_infra_error", False):
+            infra = True   # sentinel stripped by pop(); row kept as-is
         kept.append(nr)
     if backup:
         bak = path.with_suffix(path.suffix + ".pre_reverify.bak")
@@ -158,26 +181,31 @@ def _reverify_shard(path: Path, fn: Callable[[dict], Optional[dict]], *,
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in kept) + "\n")
     tmp.replace(path)
-    return len(rows), len(kept)
+    return len(rows), len(kept), infra
 
 
 def reverify_task(data_root, task, env, cfg, *, ground: bool = False,
                   backup: bool = True) -> dict:
-    """Re-verify all (real, non-derived) shards for one task. Returns stats."""
+    """Re-verify all (real, non-derived) shards for one task. Returns stats.
+
+    ``stats["infra_error"]`` is True if any shard hit a transient failure; callers
+    should then NOT write the ``.done`` marker so the task re-verifies later.
+    """
     data_root = Path(data_root)
     tid = task.task_id
-    g_in, g_keep = _reverify_shard(
+    g_in, g_keep, g_infra = _reverify_shard(
         data_root / "groups" / f"{tid}.jsonl",
         lambda r: reverify_group(r, task, env, cfg, ground=ground),
         drop_none=False, backup=backup)
-    w_in, w_keep = _reverify_shard(
+    w_in, w_keep, w_infra = _reverify_shard(
         data_root / "wins" / f"{tid}.jsonl",
         lambda r: reverify_win(r, task, env, cfg), drop_none=True, backup=backup)
-    r_in, r_keep = _reverify_shard(
+    r_in, r_keep, r_infra = _reverify_shard(
         data_root / "repair" / f"{tid}.jsonl",
         lambda r: reverify_repair(r, task, env, cfg), drop_none=True, backup=backup)
     stats = {"task": tid, "groups": g_in, "wins_in": w_in, "wins_kept": w_keep,
-             "repair_in": r_in, "repair_kept": r_keep}
+             "repair_in": r_in, "repair_kept": r_keep,
+             "infra_error": bool(g_infra or w_infra or r_infra)}
     log.event("reverify_task", **stats)
     return stats
 
@@ -226,11 +254,16 @@ def _worker(payload: dict) -> list[tuple]:
             # (torch-eager, no adversarial) numbers. Re-verify must MEASURE fresh under
             # rigor, never serve stale cached obs, or the re-baseline is a no-op.
             env = KoreEnv(task, use_replay=False)
-            reverify_task(data_root, task, env, CONFIG, ground=ground)
-            m = _marker(data_root, tid)
-            m.parent.mkdir(parents=True, exist_ok=True)
-            m.write_text("ok\n")
-            print(f"[reverify w{gpu}] {tid} done", flush=True)
+            _st = reverify_task(data_root, task, env, CONFIG, ground=ground)
+            if _st.get("infra_error"):
+                # transient failure on some shard -> do NOT freeze this task as done;
+                # leave it unmarked so a later pass re-verifies it (audit R2 reverify).
+                print(f"[reverify w{gpu}] {tid} infra-error -> not marked done (retry)", flush=True)
+            else:
+                m = _marker(data_root, tid)
+                m.parent.mkdir(parents=True, exist_ok=True)
+                m.write_text("ok\n")
+                print(f"[reverify w{gpu}] {tid} done", flush=True)
             out.append((tid, "done"))
         except Exception as e:  # noqa: BLE001 - one task never aborts the shard
             print(f"[reverify w{gpu}] {tid} ERROR {type(e).__name__}: {e}", flush=True)
@@ -272,11 +305,16 @@ def _queue_worker(gpu, task_q, result_q, data_root, ground, rigorous):
         try:
             task = get_task(tid)
             env = KoreEnv(task, use_replay=False)
-            reverify_task(data_root, task, env, CONFIG, ground=ground)
-            m = _marker(data_root, tid)
-            m.parent.mkdir(parents=True, exist_ok=True)
-            m.write_text("ok\n")
-            print(f"[reverify w{gpu}] {tid} done", flush=True)
+            _st = reverify_task(data_root, task, env, CONFIG, ground=ground)
+            if _st.get("infra_error"):
+                # transient failure on some shard -> do NOT freeze this task as done;
+                # leave it unmarked so a later pass re-verifies it (audit R2 reverify).
+                print(f"[reverify w{gpu}] {tid} infra-error -> not marked done (retry)", flush=True)
+            else:
+                m = _marker(data_root, tid)
+                m.parent.mkdir(parents=True, exist_ok=True)
+                m.write_text("ok\n")
+                print(f"[reverify w{gpu}] {tid} done", flush=True)
             result_q.put((tid, "done"))
         except Exception as e:  # noqa: BLE001 - one task never aborts the worker
             print(f"[reverify w{gpu}] {tid} ERROR {type(e).__name__}: {e}", flush=True)

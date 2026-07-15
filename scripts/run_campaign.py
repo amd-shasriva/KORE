@@ -1742,7 +1742,12 @@ def build_parser() -> argparse.ArgumentParser:
     #   synth = reconstruct trajectories from ALREADY-verified repair/wins/groups
     #           records (CPU-only, minutes, real measurements) — see synth_agentic.
     #   both  = synth first, then live on top.
-    p.add_argument("--agentic", choices=["live", "synth", "both"], default="live",
+    # Default "synth": reconstruct native build/test/bench/pmc trajectories CPU-side
+    # from verified repair/wins/groups (reliable, zero-GPU, always populates the
+    # native agentic SFT slice). The old "live" default needed the GPU harness and
+    # left the slice empty -> agentic trained on generic ToolACE only (audit THEME G/C1).
+    # Use "both" to add live GPU trajectories on top.
+    p.add_argument("--agentic", choices=["live", "synth", "both"], default="synth",
                    dest="agentic_mode")
     p.add_argument("--synth-agentic-cap", type=int, default=4000,
                    dest="synth_agentic_cap")

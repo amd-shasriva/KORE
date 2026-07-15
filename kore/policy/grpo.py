@@ -2172,19 +2172,26 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(model.device)
         ids = _truncate_prompt_ids(ids, config)  # Fix 3: honor max_prompt_length
 
-        # Generate candidate(s) for this turn (no graph retained).
+        # Generate ALL candidate(s) for this turn in ONE batched decode (no graph
+        # retained). The n_cand candidates share the IDENTICAL prompt, so a single
+        # ``num_return_sequences=n_cand`` call draws them in one batched forward instead
+        # of n_cand sequential batch-1 decodes -- ~n_cand x fewer decode loops with an
+        # identical sampling distribution (audit R2 perf C1: rollout is the multi-day
+        # long pole). ``output_scores`` dropped: gen.scores is never consumed and at
+        # batch it costs vocab x steps x n_cand of VRAM for nothing.
         cands: list[tuple] = []  # (seq_detached, text, code)
-        for _c in range(n_cand):
-            with torch.no_grad():
-                # Fix 2: pass top_p (+temperature) so sampling matches the config.
-                # synced_gpus keeps all ranks in lockstep under ZeRO-3/FSDP sharded
-                # generation (default False -> single-process behavior unchanged).
-                gen = model.generate(ids, max_new_tokens=config.max_response_length,
-                                     do_sample=True, temperature=config.temperature,
-                                     top_p=config.top_p,
-                                     synced_gpus=getattr(config, "_grpo_synced_gpus", False),
-                                     return_dict_in_generate=True, output_scores=True)
-            seq = gen.sequences[0][ids.shape[1]:].detach()
+        with torch.no_grad():
+            # Fix 2: pass top_p (+temperature) so sampling matches the config.
+            # synced_gpus keeps all ranks in lockstep under ZeRO-3/FSDP sharded
+            # generation (default False -> single-process behavior unchanged).
+            gen = model.generate(ids, max_new_tokens=config.max_response_length,
+                                 do_sample=True, temperature=config.temperature,
+                                 top_p=config.top_p, num_return_sequences=n_cand,
+                                 synced_gpus=getattr(config, "_grpo_synced_gpus", False),
+                                 return_dict_in_generate=True, output_scores=False)
+        plen = ids.shape[1]
+        for _i in range(gen.sequences.shape[0]):
+            seq = gen.sequences[_i][plen:].detach()
             text = tok.decode(seq, skip_special_tokens=True)
             cands.append((seq, text, parse_response(text).get("kernel", "")))
 

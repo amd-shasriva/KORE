@@ -345,6 +345,9 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         save_steps=config.save_steps,
         save_total_limit=1,   # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill
         report_to=config.report_to,
+        dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
+        dataloader_pin_memory=getattr(config, "dataloader_pin_memory", True),
+        dataset_num_proc=getattr(config, "dataset_num_proc", 32),
         **fsdp_kwargs,
     )
     # Lightweight per-log-step observability callback (guarded transformers import).

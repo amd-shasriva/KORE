@@ -60,6 +60,12 @@ class DistributedMixin:
     fsdp: str = "full_shard auto_wrap"
     fsdp_transformer_layer_cls: Optional[str] = None
     fsdp_cpu_offload: bool = False
+    # Input-pipeline parallelism (audit THEME E): the HF default is 0 loader workers
+    # + single-core tokenization, which starves 8 GPUs on a 96-core box at 8k-16k seq.
+    # These feed the Trainer stages (midtrain/sft/dpo); GRPO's custom loop ignores them.
+    dataloader_num_workers: int = 8
+    dataloader_pin_memory: bool = True
+    dataset_num_proc: int = 32
 
 
 @dataclass

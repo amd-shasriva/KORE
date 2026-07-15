@@ -103,6 +103,9 @@ def build_trl_dpo_kwargs(config) -> dict:
         save_total_limit=1,   # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill
         seed=config.seed,
         report_to=config.report_to,
+        dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
+        dataloader_pin_memory=getattr(config, "dataloader_pin_memory", True),
+        dataset_num_proc=getattr(config, "dataset_num_proc", 32),
     )
     # loss_type may be a STRING ("sigmoid"/"ipo") OR a LIST of components for a
     # composite loss. ["sigmoid", "sft"] + loss_weights=[1,1] == RPO (DPO + an

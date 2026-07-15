@@ -66,7 +66,11 @@ def test_midtrain_has_save_total_limit_and_live_knobs():
     # Knobs previously hardcoded in midtrain.py are now config-driven.
     assert mt.per_device_train_batch_size == 1
     assert mt.gradient_accumulation_steps == 16
-    assert mt.packing is True
+    # packing is False on the SDPA runtime: TRL bfd packing silently cross-contaminates
+    # documents without a flash-attn backend (audit THEME B/C2).
+    assert mt.packing is False
+    # input-pipeline parallelism (THEME E): loader workers + multiproc tokenization.
+    assert mt.dataloader_num_workers >= 1 and mt.dataset_num_proc >= 1
     assert mt.save_steps == 200 and mt.logging_steps == 10
     assert mt.max_grad_norm == 1.0 and mt.seed == 0
     # recipe replay fraction matches the dataclass intent (Ibrahim/DeepSeek-V2)

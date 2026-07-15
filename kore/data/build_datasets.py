@@ -574,12 +574,20 @@ def _record_source(rec: Any) -> str:
     """A representative source string for a record, for dedup hashing."""
     rec = _as_record(rec)
     if isinstance(rec, RepairRecord):
+        fixed = ""
         for m in reversed(rec.messages):
             if m.get("role") == "assistant":
                 k = extract_kernel(m.get("content", ""))
                 if k:
-                    return k
-        return rec.parent_hash
+                    fixed = k
+                    break
+        # Key on the (broken-parent -> fixed) TRANSITION, not the fixed kernel alone.
+        # Datagen mutates MANY distinct broken parents toward a small set of canonical
+        # fixes, so keying on the fix collapsed distinct repair LESSONS (and could
+        # cross-collide with a win whose final_source equals the fix, dropping the win).
+        # Each broken->fixed transition is a distinct lesson (audit R2 sft I1). The
+        # "repair:" prefix namespaces repairs away from win/group keys.
+        return "repair:" + (rec.parent_hash or "") + "->" + (fixed or rec.parent_hash or "")
     if isinstance(rec, WinRecord):
         return rec.final_source or ""
     if isinstance(rec, RankedGroupRecord):

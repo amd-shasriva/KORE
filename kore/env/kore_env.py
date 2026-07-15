@@ -217,6 +217,16 @@ class KoreEnv:
         # task actually targets (a gfx950 task must not be built as gfx942/FNUZ).
         env["GPU_TARGET"] = getattr(self.task, "gpu_target", None) or self.cfg.gpu_target
         env["HOME"] = str(Path(env.get("TMPDIR", "/tmp")))
+        # Shared, persistent Triton/inductor compile caches (audit R2 perf M3). Pinned
+        # to a STABLE dir -- NOT the per-eval HOME/TMPDIR above -- so the FIRST worker to
+        # compile a given kernel warms the cache for ALL 64 workers and every future
+        # eval + restart, turning the cold-compile bulk of the ~35s/eval into a one-time
+        # cost. Triton/inductor handle concurrent cache access (atomic writes + locks).
+        # Overridable via KORE_COMPILE_CACHE_DIR. setdefault so an explicit parent env
+        # wins. Compiled code is deterministic, so caching never changes measured timing.
+        _cache_root = env.get("KORE_COMPILE_CACHE_DIR") or "/tmp/kore_compile_cache"
+        env.setdefault("TRITON_CACHE_DIR", os.path.join(_cache_root, "triton"))
+        env.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.join(_cache_root, "inductor"))
         # Cap CPU BLAS/OMP threads in the driver. By default OpenBLAS spawns one
         # thread PER CORE (96 here); across 32 concurrent datagen workers that is a
         # thread explosion that both wastes CPU and pushes the per-UID thread count

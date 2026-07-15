@@ -105,6 +105,11 @@ def build_trl_dpo_kwargs(config) -> dict:
         report_to=config.report_to,
         dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
         dataloader_pin_memory=getattr(config, "dataloader_pin_memory", True),
+        # THROUGHPUT (audit R2 perf): persist workers + deeper prefetch, and
+        # group_by_length to cut pad-to-longest waste at micro-batch>1 on SDPA.
+        dataloader_persistent_workers=getattr(config, "dataloader_num_workers", 8) > 0,
+        dataloader_prefetch_factor=getattr(config, "dataloader_prefetch_factor", 4),
+        group_by_length=getattr(config, "group_by_length", True),
         dataset_num_proc=getattr(config, "dataset_num_proc", 32),
     )
     # loss_type may be a STRING ("sigmoid"/"ipo") OR a LIST of components for a

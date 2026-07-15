@@ -149,6 +149,14 @@ def _strip_think(text: str) -> str:
     return text.strip()
 
 
+def _is_lora_adapter_dir(path: str) -> bool:
+    """A PEFT LoRA checkpoint is a dir containing ``adapter_config.json`` (mirrors
+    ``soup._is_lora_adapter_dir``)."""
+    import os
+    return isinstance(path, str) and os.path.isdir(path) and \
+        os.path.exists(os.path.join(path, "adapter_config.json"))
+
+
 def _apply_chat_no_think(tok, messages):
     """``apply_chat_template`` with thinking DISABLED for hybrid-reasoning models
     (Qwen3). Retention/eval answers must be DIRECT: with thinking on, Qwen3 spends
@@ -198,11 +206,27 @@ def load_generate(model_id: str, *, backend: str = "hf", tensor_parallel_size: i
         import torch  # guarded heavy import
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        tok = AutoTokenizer.from_pretrained(model_id)
+        # A LoRA checkpoint is an ADAPTER dir (adapter_config.json), not a full model:
+        # AutoModelForCausalLM.from_pretrained on it loads only the tiny adapter and the
+        # eval/retention gate would score garbage. Detect it, load the base named in the
+        # adapter config, attach + merge the adapter (audit R2 soup-eval I1: eval path
+        # must load adapters like soup._load_kore_model already does for the soup).
+        if _is_lora_adapter_dir(model_id):
+            import json as _json
+            import os as _os
+            cfg = _json.loads(open(_os.path.join(model_id, "adapter_config.json")).read())
+            base_id = cfg.get("base_model_name_or_path") or model_id
+            from peft import PeftModel
+            tok = AutoTokenizer.from_pretrained(base_id)
+            base = AutoModelForCausalLM.from_pretrained(
+                base_id, torch_dtype=torch.bfloat16, device_map="auto", **kw)
+            model = PeftModel.from_pretrained(base, model_id).merge_and_unload()
+        else:
+            tok = AutoTokenizer.from_pretrained(model_id)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id, torch_dtype=torch.bfloat16, device_map="auto", **kw)
         if tok.pad_token is None:
             tok.pad_token = tok.eos_token
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id, torch_dtype=torch.bfloat16, device_map="auto", **kw)
         model.eval()
 
         def generate(prompt_or_messages, max_tokens: int = max_new_tokens,

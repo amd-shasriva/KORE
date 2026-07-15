@@ -1,10 +1,10 @@
-"""Seed Triton fp8 (a8w8) GEMM for gfx942 (MI325X, CDNA3).
+"""Seed Triton fp8 (a8w8) GEMM for gfx950 (MI350X/MI355X, CDNA4).
 
 Exposes ``gemm_fp8(xq, wq, x_scale, w_scale) -> y`` computing
 ``Y = (XQ*x_scale) @ (WQ*w_scale)^T`` in bf16.
 
-    XQ: [M, K] fp8 e4m3fnuz
-    WQ: [N, K] fp8 e4m3fnuz   (so the contraction is X @ W^T)
+    XQ: [M, K] fp8 e4m3fn (OCP; arch-selected via FP8_DTYPE)
+    WQ: [N, K] fp8 e4m3fn     (so the contraction is X @ W^T)
     x_scale: [M, 1] fp32      (per-row, per-tensor broadcast)
     w_scale: [1, N] fp32      (per-col, per-tensor broadcast)
 

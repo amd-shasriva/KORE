@@ -1,10 +1,10 @@
 task_id: quant_fp8_pertoken
 operation: quant_fp8_pertoken
-dtype: fp8_e4m3fnuz
+dtype: fp8_e4m3fn
 backend: triton
 gpu_target: gfx950
 seed_kernel_name: seed_triton.py
-snr_threshold: 25.0   # fp8 e4m3fnuz gate (low precision); SNR on dequantized
+snr_threshold: 25.0   # fp8 e4m3fn (OCP, gfx950) gate (low precision); SNR on dequant
 shapes:
   minimal: {M: 64, N: 512}
   primary: {M: 4096, N: 4096}       # Llama-3-8B activation quant
@@ -12,7 +12,7 @@ shapes:
     - {M: 8192, N: 5120}            # Qwen3 hidden
     - {M: 1, N: 8192}               # decode single-token (edge S2)
     - {M: 4096, N: 8191}            # non-pow2 N tail (edge S1, masking)
-# Dynamic per-token (rowwise) fp8 quant to e4m3fnuz: out[M,N] fp8 + scales[M,1]
+# Dynamic per-token (rowwise) fp8 quant to e4m3fn (OCP): out[M,N] fp8 + scales[M,1]
 # fp32, scale = rowamax / FP8_MAX. Correctness = SNR on dequant (out*scale) vs
 # the original activation AND scale/code match vs the torch oracle. Baseline
 # (--impl reference) = AITER dynamic_per_token_scaled_quant (the fp8 serving bar).

@@ -89,8 +89,9 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
     tok = AutoTokenizer.from_pretrained(config.model_id)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
+    _attn_impl = preferred_attn_impl()
     model_kwargs = {"torch_dtype": torch.bfloat16,
-                    "attn_implementation": preferred_attn_impl()}
+                    "attn_implementation": _attn_impl}
     if not use_fsdp:
         model_kwargs["device_map"] = "auto"
     model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
@@ -127,6 +128,15 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
     # is the other source of the mismatch on FSDP1/use_orig_params).
     grad_ckpt = bool(config.gradient_checkpointing)
 
+    # Packing safety guard (audit R2 / THEME B): TRL bfd packing needs a flash-attn
+    # backend for the block-diagonal mask; on SDPA it silently falls back to a plain
+    # causal mask (cross-document attention). Enforce the config invariant at runtime.
+    _packing = bool(config.packing)
+    if _packing and _attn_impl != "flash_attention_2":
+        log.info("midtrain: packing DISABLED -- attn backend is SDPA (not "
+                 "flash_attention_2); packing on SDPA cross-contaminates docs", attn=_attn_impl)
+        _packing = False
+
     # Plain-text completion mode: SFTTrainer trains the LM objective over the
     # ``text`` field (no chat template / no completion-only masking).
     args = TRLSFTConfig(
@@ -145,7 +155,7 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
         gradient_checkpointing=grad_ckpt,
         gradient_checkpointing_kwargs={"use_reentrant": True},
         dataset_text_field="text",
-        packing=bool(config.packing),
+        packing=_packing,
         dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
         dataloader_pin_memory=getattr(config, "dataloader_pin_memory", True),
         dataset_num_proc=getattr(config, "dataset_num_proc", 32),

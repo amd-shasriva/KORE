@@ -524,6 +524,21 @@ def test_dedup_by_source_hash():
     assert len(out) == 2
 
 
+def test_dedup_keeps_distinct_repair_transitions(monkeypatch=None):
+    """audit R2 sft I1: two repairs that converge to the SAME fixed kernel from
+    DIFFERENT broken parents are DISTINCT lessons and must both survive dedup; only a
+    true (same parent + same fix) duplicate is dropped, and a repair never collides
+    with a win whose final_source equals the fix."""
+    r1 = _sample_repair()                       # parent deadbeef -> fix a@b
+    r2 = _sample_repair(); r2.parent_hash = "cafef00d"   # DIFFERENT broken parent, same fix
+    r_dup = _sample_repair()                    # identical to r1 (same parent + fix)
+    w = _sample_win(); w.final_source = "def matmul(a,b):\n    return a@b"  # == the repair fix
+    out = dedup_by_source_hash([r1, r2, r_dup, w])
+    kinds = [type(x).__name__ for x in out]
+    assert kinds.count("RepairRecord") == 2      # r1 + r2 kept, r_dup collapsed
+    assert "WinRecord" in kinds                  # the win is NOT dropped by the repair fix
+
+
 def test_leakage_split_no_group_crosses():
     recs = []
     for op in ("gemm", "softmax", "layernorm", "relu", "add", "conv"):

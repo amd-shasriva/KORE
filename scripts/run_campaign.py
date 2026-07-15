@@ -1145,8 +1145,19 @@ def _stage_build(ctx):
                                   total=ctx["args"].sft_total, use_hf=ctx["args"].use_hf,
                                   kernel_records=kernel_records)
     _write_rows(ctx["data_root"] / "sft" / "multicap.jsonl", rows)
-    _log("build", f"multicap SFT (train-only): {len(rows)} rows; "
-                  f"mix={summarize_multicap(rows)['fractions']}")
+    _mix = summarize_multicap(rows)["fractions"]
+    _log("build", f"multicap SFT (train-only): {len(rows)} rows; mix={_mix}")
+    # General-retention floor (audit R2 sft C1): the ~45-50% general slice is the
+    # anti-catastrophic-forgetting backbone. When --use-hf is off (or HF falls back to
+    # the tiny bundled pool), the mixer's content-hash dedup collapses it to a handful
+    # of rows and water-fills the deficit onto kernel/QA -- inverting the mix into a
+    # forgetting ACCELERATOR. Abort loudly rather than train it.
+    _gen_frac = sum(_mix.get(k, 0.0) for k in ("general_code", "math_reasoning", "general_chat"))
+    if _gen_frac < 0.10:
+        raise SystemExit(
+            f"SFT general-retention slice collapsed (general_frac={_gen_frac:.3f}, target "
+            f"~0.45); enable --use-hf or expand replay_samples -- an SFT mix with ~0% "
+            f"general data wrecks retention (audit R2 sft C1)")
 
     # Pillar 3: build DPO prompts IN THE INFERENCE CONTEXT — the GRPO turn-1
     # transcript (system + seed-kernel task prompt) — so preferences are learned in
@@ -1211,20 +1222,41 @@ def _stage_midtrain(ctx):
                              f"--use-hf); rebuilding with the HF flagship sources")
             rebuild = True
     if rebuild:
-        report = build_midtrain_corpus(corpus, cfg, seed=0, use_hf=ctx["args"].use_hf)
+        # Pass the repo root EXPLICITLY so corpus discovery of triton/rocm_hip/docs
+        # can never silently fail on a foreign cwd (audit R2 midtrain C1: the internal
+        # discover_repo_roots is cwd/parents-sensitive).
+        report = build_midtrain_corpus(corpus, cfg, seed=0, use_hf=ctx["args"].use_hf,
+                                       source_roots=[_repo_root() / "repos"])
         _log("midtrain", f"built corpus -> {corpus}: {report['total']} chunks "
                          f"(general_frac={report['general_frac']}, "
                          f"dropped_dup={report['n_dropped_dup']})")
         for src, n in report["counts"].items():
             LOG.metric("midtrain_corpus_source", source=src, n=n)
+        _c = report["counts"]
         if ctx["args"].use_hf:
-            amd = report["counts"].get("amd_kernels", 0)
-            kb = report["counts"].get("kernelbook", 0)
+            amd, kb = _c.get("amd_kernels", 0), _c.get("kernelbook", 0)
             if amd == 0 or kb == 0:
                 raise SystemExit(
                     f"midtrain corpus is missing flagship HF sources "
                     f"(amd_kernels={amd}, kernelbook={kb}) -- aborting rather than "
                     f"continued-pretraining on a degenerate corpus (THEME B/C1)")
+        # Repo device-code guard (audit R2 midtrain C1): a gfx950 kernel-CPT corpus with
+        # ZERO HIP/CK/Triton repo source means repo discovery failed -> the model never
+        # sees real device code. Abort loudly.
+        if (_c.get("rocm_hip", 0) == 0) and (_c.get("triton", 0) == 0):
+            raise SystemExit(
+                f"midtrain corpus has 0 repo device-code chunks (rocm_hip=0, triton=0) "
+                f"-- repo discovery failed (looked under {_repo_root()/'repos'}); aborting")
+        # General-replay floor (audit R2 midtrain I4 / sft C1): if the anti-forgetting
+        # replay collapsed far below target (e.g. HF fell back to the tiny bundled pool),
+        # CPT becomes a forgetting ACCELERATOR -- abort rather than wreck retention.
+        gfrac = float(report.get("general_frac", 0.0) or 0.0)
+        gtarget = float(getattr(cfg, "general_replay_frac", 0.30) or 0.0)
+        if gtarget > 0 and gfrac < 0.5 * gtarget:
+            raise SystemExit(
+                f"midtrain general-replay collapsed (general_frac={gfrac:.3f} << target "
+                f"{gtarget:.2f}); enable --use-hf or expand replay_samples -- CPT without "
+                f"replay risks catastrophic forgetting (audit R2 midtrain I4)")
     else:
         _log("midtrain", f"reusing existing corpus at {corpus}")
 

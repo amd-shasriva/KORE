@@ -140,13 +140,12 @@ def discover_repo_roots() -> list[Path]:
     env = os.environ.get("KORE_REPOS_DIR")
     if env:
         candidates.append(Path(env))
-    pkg = Path(kore.__file__).resolve()
+    pkg = Path(kore.__file__).resolve()   # .../<REPO>/kore/__init__.py
     candidates += [
         Path.cwd() / "repos",
         Path.cwd().parent / "repos",
-        pkg.parents[2] / "repos",   # <repo>/kore/kore/__init__.py -> <repo>/repos
-        pkg.parents[3] / "repos",
-        Path("/root/Kore-rl/repos"),
+        pkg.parents[1] / "repos",   # .../<REPO>/kore/__init__.py -> .../<REPO>/repos (CORRECT)
+        pkg.parents[2] / "repos",   # extra fallback for a nested <repo>/kore/kore layout
     ]
     seen: set[Path] = set()
     out: list[Path] = []

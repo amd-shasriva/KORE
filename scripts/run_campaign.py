@@ -113,6 +113,11 @@ def _start_heartbeat(ctx):
 
 
 def _write_rows(path: Path, rows: list) -> None:
+    # Final build-time scrub: rewrite any stale non-gfx950 arch labels (from
+    # pre-retarget legacy data) to the real target so the model never trains on a
+    # wrong-arch mention. Pure text pass, idempotent (see kore.data.arch_normalize).
+    from kore.data.arch_normalize import normalize_rows
+    rows = normalize_rows(rows)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
@@ -1333,7 +1338,8 @@ def _dagger_fold_into_sft(ctx, policy, teacher, round_idx: int, rounds: int) -> 
         _log("dpo", f"round {round_idx}: DAgger found no repairable policy failures")
         return 0
     write_jsonl(ctx["data_root"] / "dagger" / f"round{round_idx}.jsonl", reps)
-    rows = build_sft(reps)
+    from kore.data.arch_normalize import normalize_rows
+    rows = normalize_rows(build_sft(reps))  # same gfx950 arch scrub as _write_rows
     sft_path = ctx["data_root"] / "sft" / "multicap.jsonl"
     sft_path.parent.mkdir(parents=True, exist_ok=True)
     with sft_path.open("a") as f:

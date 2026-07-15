@@ -783,8 +783,14 @@ def build_midtrain_corpus(
     # Write JSONL (deterministic order: kernel sources then general replay).
     # ------------------------------------------------------------------ #
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    from kore.data.arch_normalize import normalize_text
     with out_path.open("w", encoding="utf-8") as f:
         for row in rows:
+            # Scrub stale non-gfx950 arch labels in KORE / kernel-source chunks so
+            # continued pretraining is arch-consistent with the target. The general-
+            # replay slice is arbitrary domain text and is left untouched.
+            if row.get("source") != "general_replay":
+                row = {**row, "text": normalize_text(row.get("text", ""))}
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     total = len(rows)

@@ -110,13 +110,59 @@ class VLLMPolicy:
         temperature: float = 1.0,
         max_tokens: int = 8192,
         top_p: float = 1.0,
+        enable_thinking: Optional[bool] = None,
     ) -> list[str]:
-        """Generate from a batch of chat-message lists via vLLM's chat API."""
+        """Generate from a batch of chat-message lists via vLLM's chat API.
+
+        ``enable_thinking=False`` disables the Qwen3-style ``<think>`` trace at the
+        chat-template level (used by eval/retention so answers are direct); left as
+        ``None`` it uses the template default. Silently ignored by templates that
+        don't support the kwarg (older vLLM / non-Qwen)."""
         from vllm import SamplingParams
 
         params = SamplingParams(temperature=temperature, top_p=top_p, max_tokens=max_tokens)
-        outputs = self._llm.chat(messages_batch, params)
+        kw = {}
+        if enable_thinking is not None:
+            kw["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+        try:
+            outputs = self._llm.chat(messages_batch, params, **kw)
+        except TypeError:  # older vLLM without chat_template_kwargs
+            outputs = self._llm.chat(messages_batch, params)
         return [out.outputs[0].text for out in outputs]
+
+
+import re as _re
+
+_THINK_RE = _re.compile(r"<think>.*?</think>", _re.DOTALL)
+_THINK_OPEN_RE = _re.compile(r"<think>.*$", _re.DOTALL)
+
+
+def _strip_think(text: str) -> str:
+    """Remove ``<think>...</think>`` reasoning spans (and a dangling unclosed
+    ``<think>`` when the token budget cut it off) so downstream answer parsing --
+    MMLU letter, code block, JSON tool call -- never sees the trace. Retention/eval
+    scoring must read the ANSWER, not the reasoning (audit R2 soup-eval C1)."""
+    if not text:
+        return text
+    text = _THINK_RE.sub("", text)
+    text = _THINK_OPEN_RE.sub("", text)
+    return text.strip()
+
+
+def _apply_chat_no_think(tok, messages):
+    """``apply_chat_template`` with thinking DISABLED for hybrid-reasoning models
+    (Qwen3). Retention/eval answers must be DIRECT: with thinking on, Qwen3 spends
+    the (tiny, e.g. MMLU=32) token budget on a ``<think>`` block and never emits the
+    answer, so base and candidate both score ~random and the gate rubber-stamps
+    catastrophic forgetting (audit R2 soup-eval C1). Falls back cleanly for
+    tokenizers whose template doesn't accept ``enable_thinking``."""
+    try:
+        return tok.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt",
+            enable_thinking=False)
+    except TypeError:  # template doesn't support the kwarg (non-Qwen) -> plain
+        return tok.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt")
 
 
 def load_generate(model_id: str, *, backend: str = "hf", tensor_parallel_size: int = 1,
@@ -138,10 +184,13 @@ def load_generate(model_id: str, *, backend: str = "hf", tensor_parallel_size: i
         def generate(prompt_or_messages, max_tokens: int = max_new_tokens,
                      temperature: float = 0.0) -> str:
             if isinstance(prompt_or_messages, str):
-                return policy.generate([prompt_or_messages], temperature=temperature,
-                                       max_tokens=max_tokens)[0]
-            return policy.chat([prompt_or_messages], temperature=temperature,
-                               max_tokens=max_tokens)[0]
+                out = policy.generate([prompt_or_messages], temperature=temperature,
+                                      max_tokens=max_tokens)[0]
+            else:
+                # thinking OFF for eval/retention so the answer isn't a <think> trace
+                out = policy.chat([prompt_or_messages], temperature=temperature,
+                                  max_tokens=max_tokens, enable_thinking=False)[0]
+            return _strip_think(out)
 
         return generate
 
@@ -160,8 +209,7 @@ def load_generate(model_id: str, *, backend: str = "hf", tensor_parallel_size: i
                      temperature: float = 0.0) -> str:
             messages = ([{"role": "user", "content": prompt_or_messages}]
                         if isinstance(prompt_or_messages, str) else prompt_or_messages)
-            ids = tok.apply_chat_template(
-                messages, add_generation_prompt=True, return_tensors="pt").to(model.device)
+            ids = _apply_chat_no_think(tok, messages).to(model.device)
             do_sample = bool(temperature and temperature > 0.0)
             with torch.no_grad():
                 out = model.generate(
@@ -169,7 +217,7 @@ def load_generate(model_id: str, *, backend: str = "hf", tensor_parallel_size: i
                     temperature=temperature if do_sample else None,
                     pad_token_id=tok.pad_token_id)
             gen = out[0][ids.shape[1]:]
-            return tok.decode(gen, skip_special_tokens=True)
+            return _strip_think(tok.decode(gen, skip_special_tokens=True))
 
         return generate
 

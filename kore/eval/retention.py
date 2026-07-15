@@ -587,7 +587,10 @@ class MMLUScorer:
         per_item = []
         for it in items:
             prompt = format_mmlu_prompt(it)
-            out = model_generate(prompt, max_tokens=8, temperature=0.0)
+            # 32 (not 8) so a brief "The answer is B" lead-in still reaches the
+            # letter; the real fix is thinking OFF in load_generate so the budget
+            # isn't spent on a <think> trace (audit R2 soup-eval C1).
+            out = model_generate(prompt, max_tokens=32, temperature=0.0)
             pred = parse_mmlu_answer(out, len(it["choices"]))
             gold = _norm_letter(it["answer"])
             ok = pred == gold

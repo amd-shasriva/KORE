@@ -112,11 +112,26 @@ def test_hbm_bytes_approx_without_split_assumes_64b():
 # --------------------------------------------------------------------------- #
 # Occupancy — matches the ROCm MI300X worked example.
 # --------------------------------------------------------------------------- #
+def test_occupancy_constants_arch_selected():
+    # CDNA4 (gfx950, the KORE default) vs CDNA3 (gfx942): the ROCm MI355X cheat sheet
+    # changed exactly two limits -- LDS 64->160 KiB and VGPR granularity 16->8; the
+    # 512-VGPR/SIMD file is UNCHANGED (CDNA4 did not double it).
+    c4 = pmc._occupancy_constants("gfx950")
+    c3 = pmc._occupancy_constants("gfx942")
+    assert c4["lds_bytes_per_cu"] == 163840 and c4["vgpr_alloc_granularity"] == 8
+    assert c3["lds_bytes_per_cu"] == 65536 and c3["vgpr_alloc_granularity"] == 16
+    assert c4["vgpr_per_simd"] == c3["vgpr_per_simd"] == 512
+    # module defaults are CDNA4 (the gfx950 target)
+    assert pmc.LDS_BYTES_PER_CU == 163840 and pmc.VGPR_ALLOC_GRANULARITY == 8
+
+
 def test_waves_per_simd_from_vgpr_rocm_worked_example():
-    # ROCm workload guide: 170 VGPRs -> round up to 176 (blocks of 16) ->
-    # floor(512/176) = 2 waves per EU (SIMD).
+    # ROCm workload guide: 170 VGPRs -> round up to 176 -> floor(512/176) = 2
+    # (176 = ceil under BOTH granularity 8 and 16, so this holds on either arch).
     assert pmc.waves_per_simd_from_vgpr(170) == 2
-    # granularity + caps
+    # ROCm MI355X (CDNA4) granularity-8 example: 100 -> 104 -> floor(512/104) = 4.
+    assert pmc.waves_per_simd_from_vgpr(100) == 4
+    # caps / exact divisors
     assert pmc.waves_per_simd_from_vgpr(128) == 4      # 512/128
     assert pmc.waves_per_simd_from_vgpr(64) == pmc.MAX_WAVES_PER_SIMD  # 512/64=8 (capped)
     assert pmc.waves_per_simd_from_vgpr(0) == pmc.MAX_WAVES_PER_SIMD   # no VGPR limit
@@ -131,13 +146,21 @@ def test_est_occupancy_vgpr_limited_matches_rocm_example():
     assert occ.limiter == "vgpr"
 
 
-def test_est_occupancy_lds_limited_matches_cdna3_example():
-    # ROCm CDNA3 example: 32 KB LDS/workgroup -> floor(64/32)=2 workgroups/CU
-    # -> 2 waves/SIMD (with 4 waves/workgroup).
+def test_est_occupancy_lds_limited_cdna4_default():
+    # CDNA4 (gfx950 default): 32 KB LDS/wg -> floor(160/32)=5 workgroups/CU -> 5
+    # waves/SIMD (4 waves/wg). The 160 KiB LDS lifts the CDNA3 (2 wg) ceiling.
     occ = pmc.est_occupancy(vgpr=None, lds=32768, num_warps=4)
-    assert occ.wg_by_lds == 2
-    assert occ.waves_per_simd == pytest.approx(2.0)
+    assert occ.wg_by_lds == 5
+    assert occ.waves_per_simd == pytest.approx(5.0)
     assert occ.limiter == "lds"
+
+
+def test_est_occupancy_mxfp8_tile_matches_rocm_mi355x_worked_example():
+    # ROCm MI355X blog worked example: 256-thread WG (4 waves), 128 total VGPR,
+    # 32 KB LDS -> CDNA4 is register-bound at 50% (LDS headroom), where the SAME tile
+    # was LDS-bound at 25% on CDNA3. The module default is gfx950 (CDNA4).
+    occ = pmc.est_occupancy(vgpr=128, lds=32768, num_warps=4)
+    assert occ.occupancy == pytest.approx(0.50) and occ.limiter == "vgpr"
 
 
 def test_est_occupancy_unconstrained_is_full():

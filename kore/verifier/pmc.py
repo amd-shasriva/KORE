@@ -1,4 +1,4 @@
-"""PMC counter sets + derived-metric helpers for rocprofv3 collection (gfx942).
+"""PMC counter sets + derived-metric helpers for rocprofv3 collection (gfx950/gfx942).
 
 The actual collection lives in ``kore.env.kore_env.KoreEnv._collect_profile`` /
 ``KoreEnv.collect_counters`` (candidate-vs-reference, fail-safe, wired into the
@@ -7,9 +7,12 @@ and the pure, CPU-testable formulas that turn raw rocprofv3 counters into the
 bottleneck-grounding metrics KORE reasons about (L2 hit-rate, HBM bytes,
 occupancy).
 
-Everything here is valid for **gfx942 / CDNA3 (AMD Instinct MI300X)** and uses the
-counter names published in the ROCm "MI300 and MI200 series performance counters
-and metrics" reference:
+The KORE target is **gfx950 / CDNA4 (AMD Instinct MI350X / MI355X)**; the occupancy
+constants are arch-selected (``_occupancy_constants``) and default to CDNA4 (160 KiB
+LDS, VGPR granularity 8), with the CDNA3/gfx942 (MI300X) legacy limits available. The
+``SQ_*``/``GRBM_*``/``TCC_*`` counter names follow the ROCm "MI300 and MI200 series
+performance counters and metrics" reference (the SQ family is shared on CDNA4; the
+gfx950-only low-precision MFMA op counters live in a separate collection pass):
     https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi300-mi200-performance-counters.html
 
 Two counter families matter for gfx942 correctness (see ``COUNTER_META``):
@@ -37,6 +40,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from typing import Optional
+
+from kore.config import CONFIG
 
 
 # --------------------------------------------------------------------------- #
@@ -310,29 +315,51 @@ def hbm_bytes(counters: dict) -> Optional[float]:
 
 
 # --------------------------------------------------------------------------- #
-# MI300X / CDNA3 occupancy hardware constants.
+# Arch-selected occupancy hardware constants (CDNA4 gfx950 default; CDNA3 gfx942).
 #
 # Sources (cited so the numbers are defensible / auditable):
-#  * 512 VGPRs per SIMD, allocation granularity 16, max 8 waves/SIMD (32/CU),
-#    4 SIMDs/CU, 64 KiB LDS/CU:
-#    ROCm "MI300/MI350 workload optimization" ("each Execution Unit has 512
-#    available VGPRs, allocated in blocks of 16 ... 170 -> 176 -> 2 waves/EU"):
-#    https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
-#    ROCm blog "Occupancy Math on the AMD MI355X (CDNA4)" CDNA3 cheat-sheet
-#    (512 VGPR/lane per SIMD shared by regular<=256 + accumulator<=256; max 8
-#    waves/SIMD, 32/CU; VGPR granularity; 64 KB LDS on MI300X):
+#  * CDNA4 (gfx950 / MI350X / MI355X) cheat sheet, "verified on-device": 512 VGPR/
+#    lane per SIMD (regular<=256 + accumulator<=256, ONE shared file -- NOT doubled
+#    on CDNA4), ~800 SGPR/SIMD, **160 KB LDS/CU**, max 8 waves/SIMD (32/CU), **VGPR
+#    alloc granularity 8** (eight-Dword groups), SGPR granularity 16:
+#    ROCm blog "Occupancy Math on the AMD MI355X GPU (CDNA4)" +
+#    "AMD Instinct CDNA4 ISA Reference Guide" (Aug 2025) §3.6.4:
 #    https://rocm.blogs.amd.com/software-tools-optimization/occupancy-math-mi355x/README.html
+#  * CDNA3 (gfx942 / MI300X / MI325X): identical EXCEPT 64 KiB LDS/CU and VGPR
+#    granularity 16 (blocks of 16). CDNA4 changed exactly those two limits
+#    (LDS 64->160 KiB, VGPR granularity 16->8); everything else is shared.
 #  NB the register file is shared by architected VGPRs and MFMA accumulator
 #  (Acc)VGPRs; ``vgpr`` here is the TOTAL (regular + accumulator) per lane.
 # --------------------------------------------------------------------------- #
-VGPR_PER_SIMD = 512          # total VGPRs per SIMD (regular + accumulator)
-VGPR_ALLOC_GRANULARITY = 16  # VGPRs are allocated in blocks of 16 on gfx942
-SGPR_PER_SIMD = 800          # ~800 SGPRs/SIMD, <=102/wave (rarely the limiter)
-SGPR_ALLOC_GRANULARITY = 16
-MAX_WAVES_PER_SIMD = 8       # instruction-buffer slots -> 8 waves/SIMD (32/CU)
-SIMDS_PER_CU = 4
-LDS_BYTES_PER_CU = 65536     # 64 KiB LDS per CU on MI300X (CDNA3)
-WAVEFRONT_SIZE = 64          # CDNA is wave64
+def _occupancy_constants(arch: str) -> dict:
+    """Per-arch occupancy hardware constants (see the citation block above).
+
+    gfx950/CDNA4 is the KORE target and the default; only gfx942/gfx90a/gfx908
+    (CDNA3/CDNA2) select the 64 KiB-LDS / granularity-16 legacy values.
+    """
+    a = (arch or "").lower()
+    is_cdna3 = ("gfx942" in a or "gfx90a" in a or "gfx908" in a)
+    return {
+        "vgpr_per_simd": 512,                                # unchanged CDNA3->CDNA4
+        "vgpr_alloc_granularity": 16 if is_cdna3 else 8,     # CDNA4: 8-Dword groups
+        "sgpr_per_simd": 800,
+        "sgpr_alloc_granularity": 16,
+        "max_waves_per_simd": 8,                             # 8 waves/SIMD (32/CU)
+        "simds_per_cu": 4,
+        "lds_bytes_per_cu": 65536 if is_cdna3 else 163840,   # 64 KiB / 160 KiB
+        "wavefront_size": 64,                                # CDNA is wave64
+    }
+
+
+_OCC = _occupancy_constants(getattr(CONFIG, "gpu_target", "gfx950"))
+VGPR_PER_SIMD = _OCC["vgpr_per_simd"]              # total VGPRs per SIMD (regular + acc)
+VGPR_ALLOC_GRANULARITY = _OCC["vgpr_alloc_granularity"]
+SGPR_PER_SIMD = _OCC["sgpr_per_simd"]              # ~800 SGPRs/SIMD, <=102/wave
+SGPR_ALLOC_GRANULARITY = _OCC["sgpr_alloc_granularity"]
+MAX_WAVES_PER_SIMD = _OCC["max_waves_per_simd"]    # instruction-buffer slots
+SIMDS_PER_CU = _OCC["simds_per_cu"]
+LDS_BYTES_PER_CU = _OCC["lds_bytes_per_cu"]
+WAVEFRONT_SIZE = _OCC["wavefront_size"]
 
 
 def _ceil_mult(x: float, mult: int) -> int:
@@ -341,7 +368,8 @@ def _ceil_mult(x: float, mult: int) -> int:
 
 @dataclass
 class Occupancy:
-    """Result of :func:`est_occupancy` (all "per-CU"/"per-SIMD" are CDNA3 units)."""
+    """Result of :func:`est_occupancy` (all "per-CU"/"per-SIMD" in the arch-selected
+    units -- CDNA4/gfx950 by default; see ``_occupancy_constants``)."""
     waves_per_simd: float          # achieved wavefronts per SIMD
     occupancy: float               # waves_per_simd / MAX_WAVES_PER_SIMD, in [0,1]
     limiter: str                   # "vgpr" | "lds" | "wave_slots" | "none"
@@ -364,11 +392,12 @@ class Occupancy:
 
 
 def waves_per_simd_from_vgpr(vgpr: Optional[int]) -> int:
-    """VGPR-limited wavefronts per SIMD on gfx942.
+    """VGPR-limited wavefronts per SIMD (arch-selected granularity).
 
-    ``floor(512 / roundup(vgpr, 16))`` capped at 8 (ROCm worked example: 170 VGPRs
-    -> 176 after granularity -> floor(512/176) = 2 waves/EU). ``vgpr`` is the total
-    (regular + accumulator) VGPRs per lane; 0/None means "not VGPR-limited".
+    ``floor(512 / roundup(vgpr, VGPR_ALLOC_GRANULARITY))`` capped at 8. On CDNA4/
+    gfx950 the granularity is 8 (ROCm worked example: 100 VGPRs -> 104 -> floor(512/
+    104) = 4 waves/SIMD); on CDNA3/gfx942 it is 16. ``vgpr`` is the total (regular +
+    accumulator) VGPRs per lane; 0/None means "not VGPR-limited".
     """
     if not vgpr or vgpr <= 0:
         return MAX_WAVES_PER_SIMD
@@ -380,7 +409,8 @@ def waves_per_simd_from_vgpr(vgpr: Optional[int]) -> int:
 
 def est_occupancy(vgpr: Optional[int] = None, lds: Optional[int] = None,
                   num_warps: Optional[int] = None) -> Occupancy:
-    """Estimate achieved occupancy (waves/SIMD) on MI300X/gfx942.
+    """Estimate achieved occupancy (waves/SIMD); arch-selected limits (CDNA4/gfx950
+    default -- 160 KiB LDS, VGPR granularity 8; CDNA3/gfx942 -- 64 KiB, granularity 16).
 
     Args:
         vgpr: total VGPRs per lane the kernel uses (regular + accumulator).
@@ -391,9 +421,9 @@ def est_occupancy(vgpr: Optional[int] = None, lds: Optional[int] = None,
     block for citations). All resource limits are reduced to workgroups/CU, the
     minimum is the achieved count, then converted back to waves/SIMD::
 
-        occ_vgpr   = floor(512 / roundup(vgpr,16))                 # waves/SIMD
+        occ_vgpr   = floor(512 / roundup(vgpr, GRAN))             # waves/SIMD
         wg_vgpr    = floor(occ_vgpr * SIMDS_PER_CU / num_warps)    # workgroups/CU
-        wg_lds     = floor(65536 / lds)                           # workgroups/CU
+        wg_lds     = floor(LDS_BYTES_PER_CU / lds)                # workgroups/CU
         wg_slots   = floor(8 * SIMDS_PER_CU / num_warps)          # workgroups/CU
         workgroups = min(wg_vgpr, wg_lds, wg_slots)
         waves/SIMD = workgroups * num_warps / SIMDS_PER_CU

@@ -398,7 +398,10 @@ _DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
 # vllm/aiter/repos -- audit THEME B/C4). Anchored to path-segment boundaries so it
 # only matches real MLA/paged files, not incidental substrings.
 _HELDOUT_CONCEPT_RE = re.compile(
-    r"(?:^|[/_.\-])(mla|multi.?head.?latent|paged.?attn|page.?attention|paged.?kv)",
+    # match the held-out concepts as path tokens INCLUDING concatenated spellings the
+    # old regex missed: `paged_attention` (canonical vLLM/AITER: paged_attention_v1.cu),
+    # `flashmla`, and `paged_decode`/`paged_prefill` (audit R2 midtrain I2).
+    r"(mla|multi.?head.?latent|flashmla|paged?[_.\-]?(attn|attention|kv|cache|decode|prefill))",
     re.IGNORECASE)
 
 
@@ -672,20 +675,28 @@ def build_midtrain_corpus(
     # replay shard that carries an eval-benchmark question (MMLU/HumanEval/...), which
     # would otherwise train-on-test and inflate the retention gate. Safe no-op if the
     # reference sources can't be loaded.
+    # Build the decontam n-gram set ONCE (held-out KORE kernels + the retention eval
+    # benchmarks) and reuse it for BOTH the kernel rows here AND the general-replay
+    # chunks appended later -- the replay slice (OpenCodeInstruct/OpenThoughts/tulu)
+    # is the one most likely to carry a verbatim eval question, so it MUST be
+    # decontaminated too (audit R2 midtrain I1: replay previously bypassed decontam).
+    _decontam_ng: set = set()
     n_decontam = 0
     if os.environ.get("KORE_DECONTAM", "1") != "0":
-        from kore.data.decontam import decontaminate_corpus, eval_benchmark_texts
-        _eval_src = eval_benchmark_texts() if os.environ.get(
-            "KORE_DECONTAM_EVAL_BENCH", "1") != "0" else None
-        rows, _dc = decontaminate_corpus(rows, text_key="text", n=8, threshold=0.10,
-                                         extra_sources=_eval_src)
-        n_decontam = int(_dc.get("n_dropped_contaminated", 0))
-        if n_decontam:
-            # keep per-source counts honest after the drop
-            kept_by_src: dict[str, int] = {}
-            for r in rows:
-                kept_by_src[r["source"]] = kept_by_src.get(r["source"], 0) + 1
-            counts = {k: kept_by_src.get(k, 0) for k in counts}
+        from kore.data.decontam import (build_heldout_ngrams, contaminated_by_text,
+                                        eval_benchmark_texts)
+        _eval_src = (eval_benchmark_texts()
+                     if os.environ.get("KORE_DECONTAM_EVAL_BENCH", "1") != "0" else None)
+        _decontam_ng = build_heldout_ngrams(8, extra_sources=_eval_src)
+        if _decontam_ng:
+            kept = [r for r in rows if not contaminated_by_text(r["text"], _decontam_ng, 8, 0.10)]
+            n_decontam = len(rows) - len(kept)
+            rows = kept
+            if n_decontam:
+                kept_by_src: dict[str, int] = {}
+                for r in rows:
+                    kept_by_src[r["source"]] = kept_by_src.get(r["source"], 0) + 1
+                counts = {k: kept_by_src.get(k, 0) for k in counts}
 
     # ------------------------------------------------------------------ #
     # Source weighting: up-weight the highest-signal channels (real MI300 AMD
@@ -755,6 +766,14 @@ def build_midtrain_corpus(
                     h = _norm_hash(chunk)
                     if h in seen:
                         continue
+                    # Decontaminate the replay slice against held-out kernels + eval
+                    # benchmarks (audit R2 midtrain I1) -- a mined general row carrying
+                    # a HumanEval/MMLU item or a held-out MLA/paged kernel is train-on-
+                    # test / leakage and must not enter CPT.
+                    if _decontam_ng:
+                        from kore.data.decontam import contaminated_by_text as _cbt
+                        if _cbt(chunk, _decontam_ng, 8, 0.10):
+                            continue
                     seen.add(h)
                     rows.append({"text": chunk, "source": "general_replay"})
                     n_general += 1

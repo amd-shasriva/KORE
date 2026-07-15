@@ -44,7 +44,10 @@ PEAKS: dict[str, dict[str, float]] = {
         "hbm_bytes_per_s": 8.0e12,    # 8.0 TB/s HBM3E (288 GB)
         "bf16_flops_per_s": 2.3e15,   # 2.3 PFLOP/s dense bf16/fp16 matrix
         "fp16_flops_per_s": 2.3e15,
-        "fp8_flops_per_s": 4.6e15,    # 4.6 PFLOP/s OCP-FP8 matrix (MXFP4/6: 9.2)
+        "fp8_flops_per_s": 4.6e15,    # 4.6 PFLOP/s OCP-FP8 matrix
+        "int8_flops_per_s": 4.6e15,   # 4.6 POPS INT8 matrix
+        "fp6_flops_per_s": 9.2e15,    # 9.2 PFLOP/s MXFP6 matrix (CDNA4 headline)
+        "fp4_flops_per_s": 9.2e15,    # 9.2 PFLOP/s MXFP4 matrix (CDNA4 headline)
         "fp32_flops_per_s": 1.442e14, # 144.2 TFLOP/s FP32 matrix
     },
     "gfx942": {  # MI325X, CDNA3
@@ -52,6 +55,9 @@ PEAKS: dict[str, dict[str, float]] = {
         "bf16_flops_per_s": 1.3e15,   # ~1.3 PFLOP/s dense bf16/fp16
         "fp16_flops_per_s": 1.3e15,
         "fp8_flops_per_s": 2.6e15,
+        "int8_flops_per_s": 2.6e15,
+        "fp6_flops_per_s": 2.6e15,    # no native sub-8-bit matrix on CDNA3 -> = fp8
+        "fp4_flops_per_s": 2.6e15,
         "fp32_flops_per_s": 1.6e14,
     },
 }
@@ -102,12 +108,15 @@ def _env_float(name: str) -> Optional[float]:
 # --------------------------------------------------------------------------- #
 # dtype byte sizes and peak selection
 # --------------------------------------------------------------------------- #
-def dtype_bytes(dtype: str) -> int:
+def dtype_bytes(dtype: str) -> float:
     d = (dtype or "").lower()
-    if "fp8" in d or "float8" in d:
+    # sub-8-bit first (mxfp4/mxfp6 must not be caught by the fp8 test)
+    if "fp4" in d or "mxfp4" in d or "e2m1" in d:
+        return 0.5   # packed 4-bit
+    if "fp6" in d or "mxfp6" in d or "e2m3" in d or "e3m2" in d:
+        return 0.75  # packed 6-bit
+    if "fp8" in d or "float8" in d or "int8" in d:
         return 1
-    if "fp4" in d or "mxfp4" in d:
-        return 1  # packed 4-bit; approximate
     if "bf16" in d or "fp16" in d or "float16" in d or "bfloat16" in d:
         return 2
     if "fp32" in d or "float32" in d:
@@ -117,8 +126,15 @@ def dtype_bytes(dtype: str) -> int:
 
 def peak_flops(peaks: dict[str, float], dtype: str) -> float:
     d = (dtype or "").lower()
+    # sub-8-bit MXFP4/MXFP6 are CDNA4's headline matrix path (9.2 PF); check before fp8.
+    if "fp4" in d or "mxfp4" in d or "e2m1" in d:
+        return peaks.get("fp4_flops_per_s", peaks["fp8_flops_per_s"])
+    if "fp6" in d or "mxfp6" in d or "e2m3" in d or "e3m2" in d:
+        return peaks.get("fp6_flops_per_s", peaks["fp8_flops_per_s"])
     if "fp8" in d or "float8" in d:
         return peaks["fp8_flops_per_s"]
+    if "int8" in d:
+        return peaks.get("int8_flops_per_s", peaks["fp8_flops_per_s"])
     if "fp32" in d or "float32" in d:
         return peaks["fp32_flops_per_s"]
     return peaks["bf16_flops_per_s"]

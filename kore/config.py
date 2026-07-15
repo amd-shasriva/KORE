@@ -23,7 +23,7 @@ CONFIGS_DIR = KORE_ROOT / "configs"
 class KoreConfig:
     """Runtime configuration. Override via env vars where noted."""
 
-    gpu_target: str = field(default_factory=lambda: os.environ.get("GPU_TARGET", "gfx942"))
+    gpu_target: str = field(default_factory=lambda: os.environ.get("GPU_TARGET", "gfx950"))  # KORE target = MI350X/CDNA4
     rocm_path: str = field(default_factory=lambda: os.environ.get("ROCM_PATH", "/opt/rocm"))
 
     # correctness gate

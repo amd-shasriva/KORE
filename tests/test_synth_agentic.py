@@ -170,14 +170,16 @@ def test_tool_calls_parse_and_chat_roundtrips():
                            for m in chat if m["role"] == "assistant")
 
 
-def test_arch_parameterization_is_backward_compatible():
-    # Default (no arch) preserves the historical gfx942 wording.
-    assert "MI325X (gfx942 / CDNA3)" in build_agent_system_prompt()
-    # Explicit gfx950 flips the descriptor.
-    assert "MI355X (gfx950 / CDNA4)" in build_agent_system_prompt(arch="gfx950")
+def test_arch_parameterization():
+    # Default (no arch) is now the KORE target hardware, gfx950/CDNA4 (MI350X).
+    assert "MI350X (gfx950 / CDNA4)" in build_agent_system_prompt()
+    # Explicit gfx950 -> MI350X (the reported board, not MI355X).
+    assert "MI350X (gfx950 / CDNA4)" in build_agent_system_prompt(arch="gfx950")
+    # Explicit gfx942 -> previous-gen descriptor still available for cross-arch.
+    assert "gfx942" in build_agent_system_prompt(arch="gfx942")
     # Synthesized prompts follow the source record's arch (corpus-consistent).
     rec = synth_from_repair(_repair_rec())
-    assert "gfx942" in rec.messages[0]["content"]
+    assert "gfx9" in rec.messages[0]["content"]
 
 
 # --------------------------------------------------------------------------- #

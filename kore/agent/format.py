@@ -260,10 +260,12 @@ def _episode_messages(episode: Any) -> list[dict]:
 # Arch descriptor for the system prompt. Keeps the SFT data honest about the
 # ACTUAL target (a gfx950 run must not train the policy to say "gfx942").
 _ARCH_DESC: dict[str, str] = {
-    "gfx950": "AMD MI355X (gfx950 / CDNA4)",
-    "gfx942": "AMD MI325X (gfx942 / CDNA3)",
+    "gfx950": "AMD Instinct MI350X (gfx950 / CDNA4)",  # rocminfo board name (not MI355X)
+    "gfx942": "AMD Instinct MI300X (gfx942 / CDNA3)",
 }
-_DEFAULT_ARCH_DESC = "AMD MI325X (gfx942 / CDNA3)"
+# Default = the KORE target hardware (gfx950/CDNA4) so an un-arched caller no longer
+# trains the policy to think it is on the previous-gen MI325X/gfx942.
+_DEFAULT_ARCH_DESC = "AMD Instinct MI350X (gfx950 / CDNA4)"
 
 
 def arch_desc(arch: Optional[str]) -> str:

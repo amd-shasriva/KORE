@@ -256,21 +256,40 @@ def break_missing_mask(src: str) -> tuple[str, FailureHint]:
 
 
 def break_fp8_variant(src: str) -> tuple[str, FailureHint]:
-    """Swap the AMD FNUZ fp8 encoding for the OCP ``fn`` variant (N8 / L-trap).
+    """Swap the fp8 e4m3/e5m2 encoding to the WRONG variant for the arch (N8 / L-trap).
 
-    gfx942 uses ``float8_e4m3fnuz`` (FNUZ). Emitting the OCP ``e4m3fn`` layout
-    silently mismatches what AITER/hipBLASLt expect (``aiter_ref.py``), so the
-    kernel compiles/runs but is numerically wrong vs the production baseline.
+    The correct fp8 encoding is arch-specific: **OCP** ``e4m3fn`` on gfx950/CDNA4
+    (MI350X, the KORE target) and **FNUZ** ``e4m3fnuz`` on gfx942/CDNA3. Emitting the
+    other variant silently mismatches what AITER/hipBLASLt expect (``aiter_ref.py``),
+    so the kernel compiles/runs but is numerically wrong vs the production baseline.
+
+    BIDIRECTIONAL: breaks a gfx950 (OCP ``fn``) seed by inserting the CDNA3 ``fnuz``
+    variant, AND a gfx942 (``fnuz``) seed by inserting OCP ``fn`` -- so on the current
+    gfx950 task suite this actually produces the fp8-encoding repair pair the model
+    most needs (previously it only matched fnuz->fn and was silently inert on fn
+    seeds; audit datagen C1).
     """
-    for pat, repl in (
-        (r"float8_e4m3fnuz", "float8_e4m3fn"),
-        (r"float8_e5m2fnuz", "float8_e5m2"),
-        (r"\btl\.float8e4b8\b", "tl.float8e4nv"),   # AMD FNUZ -> NVIDIA/OCP
-        (r"\btl\.float8e5b16\b", "tl.float8e5"),
-        (r"e4m3fnuz", "e4m3fn"),
-        (r"e5m2fnuz", "e5m2"),
-        (r"fnuz", "fn"),
-    ):
+    fnuz_present = ("fnuz" in src) or ("float8e4b8" in src) or ("float8e5b16" in src)
+    if fnuz_present:
+        pairs = (
+            (r"float8_e4m3fnuz", "float8_e4m3fn"),
+            (r"float8_e5m2fnuz", "float8_e5m2"),
+            (r"\btl\.float8e4b8\b", "tl.float8e4nv"),   # AMD FNUZ -> OCP
+            (r"\btl\.float8e5b16\b", "tl.float8e5"),
+            (r"e4m3fnuz", "e4m3fn"),
+            (r"e5m2fnuz", "e5m2"),
+            (r"fnuz", "fn"),
+        )
+    else:  # OCP fn source (gfx950-native): break by inserting the CDNA3 FNUZ variant
+        pairs = (
+            (r"float8_e4m3fn\b", "float8_e4m3fnuz"),
+            (r"float8_e5m2\b", "float8_e5m2fnuz"),
+            (r"\btl\.float8e4nv\b", "tl.float8e4b8"),   # OCP -> AMD FNUZ
+            (r"\btl\.float8e5\b", "tl.float8e5b16"),
+            (r"\be4m3fn\b", "e4m3fnuz"),
+            (r"\be5m2\b", "e5m2fnuz"),
+        )
+    for pat, repl in pairs:
         out, ok = _first_sub(src, pat, repl)
         if ok:
             return out, "snr_fail"

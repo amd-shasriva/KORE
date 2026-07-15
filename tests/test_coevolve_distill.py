@@ -56,7 +56,7 @@ def test_qualifying_win_is_written_and_roundtrips(tmp_path):
     assert rec.operation == "rmsnorm"
     assert rec.final_source == "def k():\n    return 1"
     assert rec.shape == "primary"
-    assert rec.gpu == "gfx942"
+    assert rec.gpu == "gfx950"   # default arch retargeted to the KORE hardware (CDNA4)
 
 
 def test_trajectory_is_valid_and_extracts_final_kernel(tmp_path):

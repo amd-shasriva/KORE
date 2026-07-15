@@ -16,7 +16,7 @@
 #   replicated on every rank between forwards, so model.generate() runs PURELY
 #   LOCALLY on each rank (no per-decode all_gather, ragged lengths cannot
 #   deadlock). Grads + optimizer state are STILL sharded, so a 14B/32B full-FT
-#   still fits on 8x MI300 (~50GB/rank: 28 replicated bf16 params + sharded
+#   still fits on 8x MI350X (gfx950 / CDNA4) (~50GB/rank: 28 replicated bf16 params + sharded
 #   grads + sharded fp32 Adam). This matches kore.policy.grpo.build_fsdp_plugin,
 #   which already requests reshard_after_forward=SHARD_GRAD_OP in-code; this file
 #   makes the accelerate LAUNCHER agree (its FSDP env-vars otherwise override the
@@ -36,7 +36,7 @@ main_process_port: null
 main_training_function: main
 mixed_precision: bf16
 num_machines: 1
-num_processes: 8            # 8x MI300-class GPUs (gfx942); one process per GPU
+num_processes: 8            # 8x MI350X GPUs (gfx950 / CDNA4); one process per GPU
 rdzv_backend: static
 same_network: true
 tpu_use_cluster: false

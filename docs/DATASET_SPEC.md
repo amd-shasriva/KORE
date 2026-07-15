@@ -1,6 +1,6 @@
 # KORE Training-Data Design Specification (v1)
 
-Target: frontier ROCm GPU-kernel-generation model. Hardware: AMD Instinct MI325X, CDNA3, `gfx942`, wavefront 64, 304 CUs, 64 KB LDS/CU, 512 KiB VGPR file/CU, FP8 = **FNUZ** variant. (MX-FP4/FP8 native scaled-MFMA is **gfx950/CDNA4 only** - see Section 1.4.)
+Target: frontier ROCm GPU-kernel-generation model. Hardware: **AMD Instinct MI350X, CDNA4, `gfx950`** (the sole KORE target), wavefront 64, 256 CUs, 160 KiB LDS/CU, FP8 = **OCP** `e4m3fn`, with native MX-FP4 / MX-FP6 scaled-MFMA. (The previous-gen MI300X / MI325X `gfx942` / CDNA3 used the **FNUZ** FP8 variant and 64 KB LDS/CU; it appears here only as legacy training-data provenance, never as a target - see Section 1.4.)
 
 This spec is directly implementable against the KORE codebase (`kore/kore/data/*`, `kore/kore/tasks/*`, `kore/kore/verifier/*`) and the record schemas in `kore/kore/data/schemas.py` (`RepairRecord`, `RankedGroupRecord`, `WinRecord`).
 

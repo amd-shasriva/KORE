@@ -2,7 +2,8 @@
 
 KORE's training stages support **real distributed full fine-tuning** via
 PyTorch FSDP (`full_shard` == ZeRO-3 equivalent), so full-FT actually runs at
-14B / 32B / 70B on 8× MI300-class GPUs (gfx942). This replaces the old
+14B / 32B / 70B on **8x AMD Instinct MI350X GPUs (gfx950 / CDNA4, ~270 GB HBM3E
+per GPU)**, which is the sole KORE target. This replaces the old
 `device_map="auto"` shortcut, which only ever pipelines a single process across
 GPUs and cannot train a 14B+ model.
 
@@ -160,11 +161,16 @@ path and lets FSDP own it.
 Rules of thumb for a full-FT run in bf16 with AdamW (~16 bytes/param of optimizer
 + master state, sharded across N ranks under FULL_SHARD):
 
-| Model | GPUs | Sharding | Offload | Notes |
+All sizing below is for the KORE target: **8x MI350X (gfx950 / CDNA4, ~270 GB
+HBM3E per GPU)**. The extra memory over the previous-gen 192 GB MI300 is decisive:
+it moves 32B and even 70B full-FT into single-node-feasible territory without CPU
+offload.
+
+| Model | GPUs | Sharding | Offload | Notes (MI350X, ~270 GB/GPU) |
 |-------|------|----------|---------|-------|
-| 14B   | 8×MI300 | `full_shard auto_wrap` | none | Fits comfortably; activation checkpointing on. |
-| 32B   | 8×MI300 | `full_shard auto_wrap` | optimizer/param CPU offload (or +nodes) | Tight without offload at long `max_seq_length`; enable offload or shrink seq len / grad-accum. |
-| 70B   | 8×MI300 (min) → multi-node | `full_shard auto_wrap offload` | CPU param+grad+optimizer offload; prefer 2+ nodes | Single-node 8-GPU is borderline; multi-node is the safe path. Wrap class = `LlamaDecoderLayer`. |
+| 14B   | 8×MI350X | `full_shard auto_wrap` | none | Fits easily (~40 GB/rank); activation checkpointing on. |
+| 32B   | 8×MI350X | `full_shard auto_wrap` | none | Fits without offload (~90 GB/rank); enable offload only to push a very long `max_seq_length`. |
+| 70B   | 8×MI350X | `full_shard auto_wrap` | none (validate) or offload if tight | Sharded state ~140 GB/rank + activations => ~180-220 GB/rank at 16k seq, which fits in 270 GB, so single-node is feasible on MI350X (the 192 GB MI300 needed offload + multi-node). Validate at your `max_seq_length`, free any co-tenant GPU memory first, and use 2+ nodes for headroom. Wrap class = `LlamaDecoderLayer`. |
 
 ### 14B - `configs/accelerate_fsdp.yaml` as shipped (no offload)
 
@@ -178,11 +184,12 @@ Key `fsdp_config` bits: `fsdp_reshard_after_forward: FULL_SHARD`,
 `fsdp_offload_params: false`, `fsdp_activation_checkpointing: true`,
 `fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer`.
 
-### 32B - full_shard + optimizer/param CPU offload
+### 32B - full_shard (offload optional on MI350X)
 
-Copy the shipped yaml and flip offload on (or add nodes). Training config sets
-`"fsdp_cpu_offload": true` (which appends `offload` to the `fsdp` string), and the
-accelerate yaml:
+On 8x MI350X, 32B full-FT fits **without** CPU offload (~90 GB/rank). Offload is
+only needed to push a very long `max_seq_length` (or to free headroom for a
+co-tenant). To enable it, copy the shipped yaml and set `"fsdp_cpu_offload":
+true` (which appends `offload` to the `fsdp` string); the accelerate yaml:
 
 ```yaml
 distributed_type: FSDP
@@ -209,10 +216,14 @@ explicitly).
 
 ### 70B - full_shard + CPU offload, multi-node preferred
 
-`deepseek-ai/DeepSeek-R1-Distill-Llama-70B` (Llama arch). Single 8×MI300 node is
-borderline even with full offload; use 2+ nodes when possible. Training config:
-`"model_id": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B"`, `"use_lora": false`,
-`"fsdp_cpu_offload": true`, `"fsdp_transformer_layer_cls": "LlamaDecoderLayer"`.
+`deepseek-ai/DeepSeek-R1-Distill-Llama-70B` (Llama arch). On 8x MI350X (~270
+GB/GPU) a 70B full-FT fits **single-node** (~180-220 GB/rank at 16k seq) without
+CPU offload in principle; validate at your target `max_seq_length` and free any
+co-tenant GPU memory first. Use 2+ nodes for headroom. (The older 192 GB MI300
+required offload and multi-node here.) Training config: `"model_id":
+"deepseek-ai/DeepSeek-R1-Distill-Llama-70B"`, `"use_lora": false`,
+`"fsdp_transformer_layer_cls": "LlamaDecoderLayer"` (add `"fsdp_cpu_offload":
+true` only if a rank is tight at long sequence length).
 
 Single-node (8 GPUs) accelerate yaml:
 

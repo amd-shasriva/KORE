@@ -285,11 +285,23 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
             log.info("sft: assistant_only_loss disabled (template not maskable)",
                      reason=repr(e))
 
+    _attn_impl = preferred_attn_impl()
     model_kwargs = {"torch_dtype": torch.bfloat16,
-                    "attn_implementation": preferred_attn_impl()}
+                    "attn_implementation": _attn_impl}
     if not use_fsdp:
         model_kwargs["device_map"] = "auto"
     model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
+
+    # Packing safety guard (audit R2 / THEME B): TRL bfd packing needs a FLASH-ATTN
+    # backend to build the block-diagonal (per-document) attention mask. On the SDPA
+    # runtime it silently falls back to a plain causal mask, so tokens attend ACROSS
+    # packed documents -- cross-contamination that corrupts every packed row. Enforce
+    # the invariant at runtime (not just in the config comment): never pack on SDPA.
+    _packing = bool(config.packing)
+    if _packing and _attn_impl != "flash_attention_2":
+        log.info("sft: packing DISABLED -- attn backend is SDPA (not flash_attention_2); "
+                 "packing on SDPA cross-contaminates documents", attn=_attn_impl)
+        _packing = False
     # Activation checkpointing (routed through fsdp_config) is INCOMPATIBLE with
     # the KV cache: the cache changes the tensor count between forward and
     # recompute -> torch.utils.checkpoint CheckpointError. HF's Trainer only
@@ -343,7 +355,7 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         max_grad_norm=config.max_grad_norm,
         seed=config.seed,
         max_length=config.max_seq_length,
-        packing=bool(config.packing),
+        packing=_packing,
         assistant_only_loss=bool(assistant_only),
         bf16=config.bf16,
         gradient_checkpointing=grad_ckpt,

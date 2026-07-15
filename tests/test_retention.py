@@ -94,6 +94,35 @@ def test_mmlu_parse_answer_variants():
     assert R.parse_mmlu_answer("E F G", 4) == "?"
 
 
+def test_strip_think_removes_reasoning_trace():
+    from kore.policy.serve import _strip_think
+    assert _strip_think("<think>weigh the options</think>B") == "B"
+    assert _strip_think("<think>a</think>\nThe answer is C.") == "The answer is C."
+    # budget-truncated (unclosed) trace -> nothing survives (no stray-letter pollution)
+    assert _strip_think("<think>consider A vs B vs C before deciding") == ""
+    assert _strip_think("D") == "D"  # no trace -> untouched
+
+
+def test_mmlu_gate_un_vacuumed_when_thinking_stripped():
+    """A hybrid-reasoning model (Qwen3) emits <think>...</think> before the answer.
+    load_generate strips it (and disables thinking), so the MMLU letter is real and
+    the retention gate can actually detect regression. Without stripping, a
+    budget-truncated trace leaves no answer and the gate is vacuous (R2 soup-eval C1).
+    """
+    from kore.policy.serve import _strip_think
+
+    mmlu = R.load_bench("mmlu")
+
+    def real_answer_with_thinking(prompt, **kw):
+        for it in mmlu:
+            if it["question"] in prompt:
+                return f"<think>weigh each option</think>{R._norm_letter(it['answer'])}"
+        return "<think>hmm</think>?"
+
+    stripped = lambda p, **kw: _strip_think(real_answer_with_thinking(p, **kw))  # noqa: E731
+    assert R.MMLUScorer().score(stripped)["accuracy"] == 1.0  # gate now measures truth
+
+
 # ---------------------------------------------------------------------------
 # HumanEval (sandboxed exec)
 # ---------------------------------------------------------------------------

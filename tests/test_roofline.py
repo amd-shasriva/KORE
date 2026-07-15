@@ -25,9 +25,10 @@ def test_mi300x_constants_match_datasheet():
     assert mi["peak_flops_fp8"] == pytest.approx(2.6149e15, rel=1e-3)
     assert mi["peak_flops_fp32"] == pytest.approx(1.634e14, rel=1e-3)
     assert mi["num_cus"] == 304
-    # occupancy constants sourced from pmc (single source of truth)
-    assert mi["lds_bytes_per_cu"] == pmc.LDS_BYTES_PER_CU == 65536
-    assert mi["vgpr_per_simd"] == pmc.VGPR_PER_SIMD == 512
+    # MI300X (CDNA3) carries its OWN occupancy constants (64 KiB LDS, granularity 16)
+    # regardless of the ACTIVE arch -- NOT the gfx950 default (audit R2 pmc).
+    assert mi["lds_bytes_per_cu"] == 65536
+    assert mi["vgpr_per_simd"] == 512
 
 
 def test_mi350x_constants_match_datasheet():
@@ -41,9 +42,13 @@ def test_mi350x_constants_match_datasheet():
     assert mi["peak_flops_fp6"] == pytest.approx(9.20e15, rel=1e-3)      # MXFP6
     assert mi["peak_flops_fp64"] == pytest.approx(7.21e13, rel=1e-3)     # CDNA4 halves FP64
     assert mi["num_cus"] == 256
-    # MI355X (liquid-cooled) variant runs hotter/faster.
+    # CDNA4 occupancy limits: 160 KiB LDS/CU (2.5x CDNA3), 512 VGPR/SIMD (unchanged).
+    assert mi["lds_bytes_per_cu"] == 163840
+    assert mi["vgpr_per_simd"] == 512
+    # MI355X (liquid-cooled) variant runs hotter/faster, same CDNA4 occupancy limits.
     assert R.MI355X["peak_flops_bf16"] == pytest.approx(2.50e15, rel=1e-3)
     assert R.MI355X["peak_flops_fp8"] == pytest.approx(5.00e15, rel=1e-3)
+    assert R.MI355X["lds_bytes_per_cu"] == 163840
 
 
 def test_active_arch_is_cdna4_and_consistent():

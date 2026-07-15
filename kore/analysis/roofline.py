@@ -42,9 +42,8 @@ import os
 from typing import Optional, Union
 
 from kore.verifier.pmc import (
-    LDS_BYTES_PER_CU,
     MAX_WAVES_PER_SIMD,
-    VGPR_PER_SIMD,
+    _occupancy_constants,
     est_occupancy,
     hbm_bytes,
     l2_hit_rate,
@@ -147,9 +146,14 @@ INFINITY_CACHE_BYTES: int = int(_ACTIVE["infinity_cache_bytes"])
 
 
 def _bundle(peaks: dict) -> dict:
-    """Attach the pmc-canonical occupancy constants to a per-arch peak dict."""
-    return {**peaks, "lds_bytes_per_cu": LDS_BYTES_PER_CU,
-            "vgpr_per_simd": VGPR_PER_SIMD, "max_waves_per_simd": MAX_WAVES_PER_SIMD}
+    """Attach the ARCH-CORRECT pmc occupancy constants to a per-arch peak dict, so
+    each board reports its OWN limits (MI300X = 64 KiB LDS / VGPR-granularity 16;
+    MI350X/MI355X = 160 KiB LDS / granularity 8) instead of the ACTIVE arch's -- the
+    old code stamped every board with the ACTIVE arch's constants (audit R2 pmc)."""
+    occ = _occupancy_constants(peaks.get("arch", "gfx950"))
+    return {**peaks, "lds_bytes_per_cu": occ["lds_bytes_per_cu"],
+            "vgpr_per_simd": occ["vgpr_per_simd"],
+            "max_waves_per_simd": occ["max_waves_per_simd"]}
 
 
 # Per-board bundles + the ACTIVE one. ``MI300X`` kept as a back-compat name.

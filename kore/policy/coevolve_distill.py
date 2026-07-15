@@ -73,8 +73,8 @@ def _build_trajectory(task_id: str, operation: Optional[str], final_source: str)
     :func:`kore.data.prompts.extract_kernel`."""
     op_str = f" (operation: {operation})" if operation else ""
     user = (
-        "Write and optimize a Triton kernel for the AMD Instinct MI325X "
-        f"(CDNA3, gfx942) for task `{task_id}`{op_str}. "
+        "Write and optimize a Triton kernel for the AMD Instinct MI350X "
+        f"(gfx950 / CDNA4) for task `{task_id}`{op_str}. "
         "Output the complete kernel under the FULL_KERNEL: contract."
     )
     assistant = f"FULL_KERNEL:\n```python\n{final_source}\n```"

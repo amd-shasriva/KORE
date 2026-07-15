@@ -66,7 +66,8 @@ TOOL_SCHEMAS: list[dict] = [
     ),
     _fn(
         "test",
-        "Run the 5-stage correctness validation + SNR gate on a candidate. "
+        "Run the full four-prong correctness oracle (random, adversarial, "
+        "metamorphic, determinism) with the SNR gate on a candidate. "
         "Returns whether it is numerically correct on the target shape(s).",
         {"kernel_src": _KERNEL_SRC, "shape": _SHAPE},
         ["kernel_src"],

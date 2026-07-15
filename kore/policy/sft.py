@@ -366,6 +366,13 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         report_to=config.report_to,
         dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
         dataloader_pin_memory=getattr(config, "dataloader_pin_memory", True),
+        # THROUGHPUT (audit R2 perf): persist dataloader workers across the 3 SFT epochs
+        # (they respawned every epoch) + deeper prefetch to keep the MI350X fed; and
+        # group_by_length batches similar-length rows so dynamic pad-to-longest wastes
+        # far less compute on the SDPA (no-packing) runtime with micro-batch>1.
+        dataloader_persistent_workers=getattr(config, "dataloader_num_workers", 8) > 0,
+        dataloader_prefetch_factor=getattr(config, "dataloader_prefetch_factor", 4),
+        group_by_length=getattr(config, "group_by_length", True),
         dataset_num_proc=getattr(config, "dataset_num_proc", 32),
         **fsdp_kwargs,
     )

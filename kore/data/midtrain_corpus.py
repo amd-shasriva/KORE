@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import random
+import re
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -391,6 +392,23 @@ _DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
 }
 
 
+# Held-out generalization concepts (MLA / paged-attention). Files whose PATH hits
+# these are kept OUT of the CPT corpus so it never teaches the ops the eval measures
+# as "unseen" (verbatim n-gram decontam misses differently-written impls in
+# vllm/aiter/repos -- audit THEME B/C4). Anchored to path-segment boundaries so it
+# only matches real MLA/paged files, not incidental substrings.
+_HELDOUT_CONCEPT_RE = re.compile(
+    r"(?:^|[/_.\-])(mla|multi.?head.?latent|paged.?attn|page.?attention|paged.?kv)",
+    re.IGNORECASE)
+
+
+def _is_heldout_concept(path) -> bool:
+    try:
+        return bool(_HELDOUT_CONCEPT_RE.search(str(path)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _source_weights() -> dict[str, float]:
     """Return the source->oversample-factor map (env-overridable)."""
     w = dict(_DEFAULT_SOURCE_WEIGHTS)
@@ -569,6 +587,21 @@ def build_midtrain_corpus(
     # Gated by KORE_MIDTRAIN_QUALITY. Applied to every source incl. the mined AMD /
     # KernelBook sets so even those are screened for junk.
     # ------------------------------------------------------------------ #
+    # Concept-level decontam: drop files whose PATH matches a held-out generalization
+    # op (MLA / paged-attention) across ALL repo sources so the CPT corpus never
+    # teaches the concepts the eval measures as unseen (audit THEME B/C4). Gated by
+    # KORE_MIDTRAIN_DECONTAM_CONCEPTS.
+    if os.environ.get("KORE_MIDTRAIN_DECONTAM_CONCEPTS", "1") != "0":
+        _dc: list[tuple[str, list[tuple[Path, str]]]] = []
+        _n_concept = 0
+        for source, files in collected:
+            keep = [(p, t) for (p, t) in files if not _is_heldout_concept(p)]
+            _n_concept += len(files) - len(keep)
+            _dc.append((source, keep))
+        collected = _dc
+        if _n_concept:
+            log.info("midtrain concept decontam (held-out MLA/paged)", dropped=_n_concept)
+
     if os.environ.get("KORE_MIDTRAIN_QUALITY", "1") != "0":
         from kore.data.corpus_quality import quality_filter
         _filtered: list[tuple[str, list[tuple[Path, str]]]] = []

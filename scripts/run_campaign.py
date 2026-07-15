@@ -1183,14 +1183,36 @@ def _stage_midtrain(ctx):
         # Contract: --full-ft sets distributed=True on every training config.
         setattr(cfg, "distributed", True)
 
-    # 1. Build the corpus from local sources if it is not already on disk.
-    if not corpus.exists():
+    # 1. Build the corpus. Rebuild when absent, when --force, or when the on-disk
+    #    corpus is STALE (a prior run may have written a tiny pre-HF corpus without
+    #    the flagship 60k AMD kernels / KernelBook pairs). Never silently reuse a
+    #    degenerate corpus, and fail loud if the HF flagship sources are missing
+    #    (audit THEME B/C1: the shipped corpus was 1,360 chunks with 0 AMD kernels).
+    rebuild = (not corpus.exists()) or bool(getattr(ctx["args"], "force", False))
+    if corpus.exists() and not rebuild and ctx["args"].use_hf:
+        try:
+            n_existing = sum(1 for _ in corpus.open())
+        except OSError:
+            n_existing = 0
+        if n_existing < 20000:
+            _log("midtrain", f"existing corpus is stale ({n_existing} chunks < 20k with "
+                             f"--use-hf); rebuilding with the HF flagship sources")
+            rebuild = True
+    if rebuild:
         report = build_midtrain_corpus(corpus, cfg, seed=0, use_hf=ctx["args"].use_hf)
         _log("midtrain", f"built corpus -> {corpus}: {report['total']} chunks "
                          f"(general_frac={report['general_frac']}, "
                          f"dropped_dup={report['n_dropped_dup']})")
         for src, n in report["counts"].items():
             LOG.metric("midtrain_corpus_source", source=src, n=n)
+        if ctx["args"].use_hf:
+            amd = report["counts"].get("amd_kernels", 0)
+            kb = report["counts"].get("kernelbook", 0)
+            if amd == 0 or kb == 0:
+                raise SystemExit(
+                    f"midtrain corpus is missing flagship HF sources "
+                    f"(amd_kernels={amd}, kernelbook={kb}) -- aborting rather than "
+                    f"continued-pretraining on a degenerate corpus (THEME B/C1)")
     else:
         _log("midtrain", f"reusing existing corpus at {corpus}")
 

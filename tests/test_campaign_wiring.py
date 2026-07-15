@@ -100,6 +100,15 @@ def test_rec_is_heldout_uses_registry_authority():
                                "arch": "gfx1100", "task_id": "x"}, set()) is True
     # explicit reserved id -> held out
     assert rc._rec_is_heldout(rms, {"rmsnorm_aiter"}) is True
+    # MLA / paged-KV are held out by FAMILY now (audit R2), so a VARIANT record whose
+    # task_id is not one of the two seed ids is still kept out of TRAIN, while core
+    # attention (flash prefill/decode) keeps training.
+    assert rc._rec_is_heldout({"type": "win", "operation": "mla_decode",
+                               "task_id": "mla_variant_x", "arch": "gfx950"}, set()) is True
+    assert rc._rec_is_heldout({"type": "win", "operation": "paged_attn_decode",
+                               "task_id": "paged_variant_y", "arch": "gfx950"}, set()) is True
+    assert rc._rec_is_heldout({"type": "win", "operation": "flash_attn_prefill",
+                               "task_id": "flash_x", "arch": "gfx950"}, set()) is False
 
 
 def test_build_trains_on_ALL_non_heldout_families_no_random_drop():

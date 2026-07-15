@@ -29,4 +29,5 @@ def test_korebench_dry_run_report():
 def test_data_scale_summary_wide():
     d = data_scale_summary()
     assert d["operators"] >= 100
-    assert "attention" in d["heldout_families"]
+    # reserved generalization families are MLA + paged-KV (audit R2); core attention trains
+    assert "mla" in d["heldout_families"] and "paged_attention" in d["heldout_families"]

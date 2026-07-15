@@ -11,7 +11,10 @@ def test_audit_reports_operators_families_and_shapes():
     assert rep.n_train + rep.n_heldout == rep.n_operators
     assert len(rep.families) >= 5
     assert rep.total_base_shapes >= rep.n_operators  # >=1 shape/op
-    assert "attention" in rep.heldout_families       # generalization family reserved
+    # reserved generalization families = MLA + paged-KV decode (audit R2); core
+    # attention trains, so it must NOT be in the held-out set.
+    assert "mla" in rep.heldout_families and "paged_attention" in rep.heldout_families
+    assert "attention" not in rep.heldout_families
 
 
 def test_shape_augmentation_increases_effective_shapes():

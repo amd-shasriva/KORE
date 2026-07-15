@@ -665,14 +665,20 @@ def build_midtrain_corpus(
             counts = {k: kept_by_src.get(k, 0) for k in counts}
 
     # Text-level decontamination backstop (Pillar 5): drop any chunk whose n-grams
-    # overlap the HELD-OUT reference sources. The kore_tasks/pairs dir-filter above
-    # already excludes held-out KORE tasks; this also catches a held-out kernel
-    # (e.g. a flash-attention impl) copied into a mined source (KernelBook /
-    # amd_kernels / repo Triton). Safe no-op if held-out sources can't be loaded.
+    # overlap the HELD-OUT reference sources OR the RETENTION eval benchmarks. The
+    # kore_tasks/pairs dir-filter above already excludes held-out KORE tasks; this also
+    # catches a held-out kernel (e.g. a flash-attention impl) copied into a mined
+    # source (KernelBook / amd_kernels / repo Triton), AND -- new in R2 -- any general-
+    # replay shard that carries an eval-benchmark question (MMLU/HumanEval/...), which
+    # would otherwise train-on-test and inflate the retention gate. Safe no-op if the
+    # reference sources can't be loaded.
     n_decontam = 0
     if os.environ.get("KORE_DECONTAM", "1") != "0":
-        from kore.data.decontam import decontaminate_corpus
-        rows, _dc = decontaminate_corpus(rows, text_key="text", n=8, threshold=0.10)
+        from kore.data.decontam import decontaminate_corpus, eval_benchmark_texts
+        _eval_src = eval_benchmark_texts() if os.environ.get(
+            "KORE_DECONTAM_EVAL_BENCH", "1") != "0" else None
+        rows, _dc = decontaminate_corpus(rows, text_key="text", n=8, threshold=0.10,
+                                         extra_sources=_eval_src)
         n_decontam = int(_dc.get("n_dropped_contaminated", 0))
         if n_decontam:
             # keep per-source counts honest after the drop

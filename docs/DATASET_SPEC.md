@@ -1,6 +1,6 @@
 # KORE Training-Data Design Specification (v1)
 
-Target: frontier ROCm GPU-kernel-generation model. Hardware: **AMD Instinct MI350X, CDNA4, `gfx950`** (the sole KORE target), wavefront 64, 256 CUs, 160 KiB LDS/CU, FP8 = **OCP** `e4m3fn`, with native MX-FP4 / MX-FP6 scaled-MFMA. (The previous-gen MI300X / MI325X `gfx942` / CDNA3 used the **FNUZ** FP8 variant and 64 KB LDS/CU; it appears here only as legacy training-data provenance, never as a target - see Section 1.4.)
+Target: frontier ROCm GPU-kernel-generation model. Hardware: **AMD Instinct MI350X, CDNA4, `gfx950`** (the sole KORE target), wavefront 64, 256 CUs, 160 KiB LDS/CU, FP8 = **OCP** `e4m3fn`, with native MX-FP4 / MX-FP6 scaled-MFMA. (The previous-gen MI300X / MI325X `gfx942` / CDNA3 used the **FNUZ** FP8 variant and 64 KB LDS/CU; it appears here only as legacy training-data provenance, never as a target - see Section 1.2.)
 
 This spec is directly implementable against the KORE codebase (`kore/kore/data/*`, `kore/kore/tasks/*`, `kore/kore/verifier/*`) and the record schemas in `kore/kore/data/schemas.py` (`RepairRecord`, `RankedGroupRecord`, `WinRecord`).
 
@@ -11,12 +11,12 @@ This spec is directly implementable against the KORE codebase (`kore/kore/data/*
 Five principles derived from the evidence (Kevin, ConCuR, GEAK, KORE.pdf) that every subsequent section enforces:
 
 1. **The baseline is the production kernel, not torch.** Every performance label is a speedup vs the *real* serving op (AITER / hipBLASLt / rocBLAS / CK), measured on-box (`--impl reference`), never vs `torch.matmul`/eager. This is the single most important differentiator from KernelBench/Kevin (which use PyTorch Eager) and is already the KORE convention (`kore/kore/tasks/aiter_ref.py`, every `task.yaml` `comparison_baseline`). A model that only beats torch is worthless in production; a model that beats AITER is best-in-world.
-2. **Measured, not asserted.** Only *executed* outcomes enter the corpus. Every correctness/speedup label is produced by the verifier on real gfx942 silicon, re-verified independently, with a variance gate. No teacher-claimed number is ever trusted (Section 4).
+2. **Measured, not asserted.** Only *executed* outcomes enter the corpus. Every correctness/speedup label is produced by the verifier on real gfx950 silicon, re-verified independently, with a variance gate. No teacher-claimed number is ever trusted (Section 4).
 3. **Learn from the abundant, RL-manufacture the scarce.** Repairs and ranked candidates are cheap and plentiful; strong wins are scarce (~15-20 per ~300 audited trajectories per KORE.pdf §2). The curriculum warm-starts on the plentiful (repair SFT → DPO/RFT) then uses RL to produce wins (Kevin's result: 56%→82% correct via multi-turn RL).
 4. **Hard negatives are first-class data, labeled.** Reward hacking is the dominant failure at small scale (Kevin §6.2: 7B copies reference, recycles reference output tensor, wraps in try/except). We *manufacture* these as labeled negatives so the reward model / DPO explicitly learns to reject them (Section 2.6).
 5. **Conciseness of reasoning is a quality signal.** ConCuR's central finding: for a fixed task, the *shortest* CoT that achieves the *highest* speedup is the best training example. We adopt CoT-length × speedup as a curation score for reasoning traces (Section 3.6).
 
-**Sources.** KORE.pdf (`/root/Kore-rl/plans/KORE.pdf`); Kevin arXiv:2507.11948 (https://arxiv.org/abs/2507.11948, https://cognition.ai/blog/kevin-32b); ConCuR arXiv:2510.07356 (https://arxiv.org/html/2510.07356v1); KernelBench arXiv:2502.10517; GEAK arXiv:2507.23194 (https://www.arxiv.org/pdf/2507.23194), ROCm GEAK blogs (https://rocm.blogs.amd.com/artificial-intelligence/geak-agents-family/README.html); KernelBook (https://huggingface.co/datasets/GPUMODE/KernelBook); MI325X specs (https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html, CDNA3 white paper).
+**Sources.** KORE.pdf (`/root/Kore-rl/plans/KORE.pdf`); Kevin arXiv:2507.11948 (https://arxiv.org/abs/2507.11948, https://cognition.ai/blog/kevin-32b); ConCuR arXiv:2510.07356 (https://arxiv.org/html/2510.07356v1); KernelBench arXiv:2502.10517; GEAK arXiv:2507.23194 (https://www.arxiv.org/pdf/2507.23194), ROCm GEAK blogs (https://rocm.blogs.amd.com/artificial-intelligence/geak-agents-family/README.html); KernelBook (https://huggingface.co/datasets/GPUMODE/KernelBook); MI350X / CDNA4 specs (https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html, CDNA4 white paper), with the legacy MI300X / MI325X / CDNA3 white paper kept only for reference.
 
 ---
 
@@ -35,16 +35,16 @@ We rank operator families by Amdahl weight `f` (fraction of inference GPU time),
 
 **Rule:** P0 must have data in *every* dtype × shape-regime × backend cell that is physically meaningful (Section 1.5 marks the impossible cells). P1 must cover all shape regimes in bf16 + fp8. P2 gets primary+1 validation shape each. P3 is synthetic-only breadth (Section 3.5).
 
-### 1.2 dtype axis (gfx942-correct)
+### 1.2 dtype axis (gfx950-correct)
 
-| dtype | gfx942 encoding | SNR gate | Notes / edge |
+| dtype | gfx950 encoding | SNR gate | Notes / edge |
 |---|---|---|---|
 | bf16 | native | **30 dB** | default accum fp32 |
 | fp16 | native | **30 dB** (40 for pure GEMM per `gemm_fp16.yaml`) | overflow risk at large K |
-| fp8 e4m3 | **`float8_e4m3fnuz` (FNUZ)** - NOT OCP `e4m3fn` | **25 dB** | wrong variant silently mismatches AITER/hipBLASLt (`aiter_ref.py`) |
-| fp8 e5m2 | `float8_e5m2fnuz` (FNUZ) | 25 dB | KV-cache / attention accumulation |
+| fp8 e4m3 | **`float8_e4m3fn` (OCP, max 448)** - NOT FNUZ (legacy gfx942 used `e4m3fnuz`, max 240) | **25 dB** | wrong variant silently mismatches AITER/hipBLASLt (`aiter_ref.py`) |
+| fp8 e5m2 | `float8_e5m2` (OCP; legacy gfx942 used `e5m2fnuz`) | 25 dB | KV-cache / attention accumulation |
 | int8 | native | 30 dB (exact-ish) | per-row/col scales; W8A8 |
-| **mxfp4** (OCP microscaling, e2m1 + e8m0/32) | **gfx950 ONLY** (CDNA4 scaled MFMA) | 25 dB | on gfx942: emulated/dequant path only - label `arch=gfx950` |
+| **mxfp4** (OCP microscaling, e2m1 + e8m0/32) | **gfx950 ONLY** (CDNA4 scaled MFMA) | 25 dB | native target capability; on legacy gfx942 it was emulated/dequant path only |
 | **mxfp8** (OCP e4m3 + e8m0/32) | **gfx950 ONLY** | 25 dB | K must be multiple of 32 (scale group) |
 | fp32 | native | 40 dB | reference/oracle only; rarely a kernel target |
 
@@ -72,9 +72,9 @@ We rank operator families by Amdahl weight `f` (fraction of inference GPU time),
 
 ### 1.5 The concrete coverage table (with essential/optional and impossible cells)
 
-Legend: ✅ essential (must have data), ➕ optional/differentiator, ⛔ physically N/A on gfx942, 🔷 gfx950-only (label separately).
+Legend: ✅ essential (must have data), ➕ optional/differentiator, ⛔ physically N/A (dtype does not apply to this family), 🔷 MX path, native on gfx950/CDNA4 (the target; emulated only on legacy gfx942).
 
-| Family | bf16 | fp16 | fp8-FNUZ | int8 | mxfp4/mxfp8 | decode | prefill | Triton | HIP/CK |
+| Family | bf16 | fp16 | fp8-OCP | int8 | mxfp4/mxfp8 | decode | prefill | Triton | HIP/CK |
 |---|---|---|---|---|---|---|---|---|---|
 | GEMM dense | ✅ | ✅ | ✅ | ➕ | 🔷 | ✅(tiny-M) | ✅ | ✅ | ✅ |
 | GEMM grouped (MoE) | ✅ | ➕ | ✅ | ➕ | 🔷 | ✅ | ✅ | ✅ | ➕ |
@@ -155,12 +155,12 @@ Each edge case below is a *data requirement*: there must exist (a) at least one 
 |---|---|---|---|---|
 | N1 | fp32-accumulator dropped (accumulate in bf16/fp16) over large K | `K≥8192` GEMM | `break_accumulator_dtype`, `break_dtype_cast` (exist) | SNR fail |
 | N2 | Large-K accumulation overflow in fp16 | `K=28672`, fp16, large magnitudes | scale inputs ×1e2 in a fuzz seed | SNR fail / inf |
-| N3 | fp8 scaling extremes: amax→0 (all-zero tile) and amax huge (→ clamp at FP8_MAX=240) | per-tensor + per-token quant | zero-row input; ×1e4 input | must not NaN; SNR pass |
+| N3 | fp8 scaling extremes: amax→0 (all-zero tile) and amax huge (→ clamp at FP8_MAX=448 for OCP `e4m3fn`; legacy gfx942 FNUZ clamps at 240) | per-tensor + per-token quant | zero-row input; ×1e4 input | must not NaN; SNR pass |
 | N4 | Denormal / underflow in fp8 (values < smallest normal) | tiny magnitudes (1e-4) | fuzz seed | correct rounding |
 | N5 | NaN/Inf propagation guard (softmax with -inf masked rows, all-masked row) | attention fully-masked row; RMSNorm zero-variance row | `break_eps` (exist, drops `+eps`) | must produce 0/defined, not NaN |
 | N6 | Softmax overflow (no max-subtraction / online-softmax rescale bug) | large logits (seq 32K, scale off) | `break_scale` (exist) | SNR fail |
 | N7 | Catastrophic cancellation in variance (RMSNorm/LayerNorm) | large mean + small var | reduction-order mutation | SNR fail |
-| N8 | Wrong fp8 variant (OCP `e4m3fn` instead of FNUZ) | any fp8 task | new mutator `break_fp8_variant` | SNR fail vs AITER |
+| N8 | Wrong fp8 variant (legacy FNUZ `e4m3fnuz` instead of target OCP `e4m3fn`) | any fp8 task | new mutator `break_fp8_variant` | SNR fail vs AITER |
 
 ### 2.2 Shape edge cases
 
@@ -203,7 +203,7 @@ Each edge case below is a *data requirement*: there must exist (a) at least one 
 | # | Edge case | Detection | Notes |
 |---|---|---|---|
 | R1 | VGPR spill (>256 VGPR/thread) | compiler output parse (`verifier/parsers/compiler_output.py`), rocprofv3 VGPR count | tile too big; skills `reduce_vgpr_reload_lds`, `moe_register_aliasing` |
-| R2 | LDS overflow (>64 KB/CU on gfx942) | compile fail / occupancy=0 | **hard gfx942 limit 64 KB** (gfx950 has 160 KB - do not copy gfx950 tiles) |
+| R2 | LDS overflow (>160 KiB/CU on gfx950) | compile fail / occupancy=0 | **hard gfx950 limit 160 KiB/CU** (legacy gfx942 was 64 KB; do not carry the 64 KB tile assumption onto the gfx950 target) |
 | R3 | Occupancy cliff | rocprofv3 occupancy; a tile change halving waves/CU | skill `warp_tile_lds_coupling` |
 | R4 | Register spill to scratch (silent slowdown) | perf regression w/ correct result | must be caught by speedup label, not correctness |
 | R5 | num_warps/num_stages mis-tune (pipeline stall) | benchmark | `num_warps∈{4,8}`, tune `num_stages` (SYSTEM_PROMPT) |
@@ -282,7 +282,7 @@ Serving is dominated by memory-bound decode, but compute-bound prefill has the b
 | Compute-bound (prefill attention, square GEMM, MoE prefill) | **35%** | biggest MFMA-utilization wins; roofline reasoning |
 | Latency-bound (tiny kernels, launch overhead, fusion) | **10%** | fusion opportunities (KernelBench L2 style) |
 
-Label every task with `roofline_class ∈ {memory, compute, latency}` (computed from arithmetic intensity vs the gfx942 ridge point; use MAF ≈ 50% of peak per skill `roofline_use_maf_not_peak`: bf16≈650, fp8≈1300 TFLOPs).
+Label every task with `roofline_class ∈ {memory, compute, latency}` (computed from arithmetic intensity vs the gfx950 ridge point; use MAF ≈ 50% of peak per skill `roofline_use_maf_not_peak`: bf16≈1150, fp8≈2300 TFLOPs).
 
 ### 3.4 Difficulty distribution (curriculum)
 
@@ -348,7 +348,7 @@ Before a candidate is even benchmarked, run a static scan (cheap, deterministic)
 Use `leakage_split(by=("operation","shape"))` (exists) so **no op×shape group crosses train/val/test**. Additionally hold out:
 - **≥1 whole operator family** end-to-end (KORE.pdf §5 evaluates on "one held-out operator family"). Recommend holding out **grouped-GEMM MoE** or **MLA prefill** as the never-trained eval family.
 - **Held-out shapes within trained ops** (Section 4.1 #3).
-- **Held-out arch:** train shape/config on gfx942; keep a small gfx950-labeled slice (MX ops) as an OOD generalization probe - never train the model to assume gfx950 LDS (160 KB) tiles on a gfx942 target.
+- **Held-out arch (OOD probe):** gfx950 is the *target* and is always trained on, never held out. The generalization split is by operator family (MLA latent attention + paged-attention KV-decode are the reserved families); if an arch OOD probe is wanted, reserve a small slice from a foreign arch outside the gfx950/gfx942 lineage. Never invert this by holding out gfx950.
 - **Provenance-based holdout:** hold out entire source repos (e.g. all kernels from one GitHub repo in KernelBook) from train to prevent memorization.
 
 ### 4.5 Labeling & provenance (schema additions)
@@ -358,12 +358,12 @@ Extend each record with a metadata block (all cheap to compute, critical for cur
 ```
 meta = {
   "operator_family": "gemm|attention|moe|norm|activation|rope|kvcache|quant|sampling|comms|elementwise",
-  "dtype": "bf16|fp16|fp8_e4m3fnuz|fp8_e5m2fnuz|int8|mxfp4|mxfp8|fp32",
+  "dtype": "bf16|fp16|fp8_e4m3fn|fp8_e5m2|fp8_e4m3fnuz|fp8_e5m2fnuz|int8|mxfp4|mxfp8|fp32",  # OCP e4m3fn/e5m2 = gfx950 target; *fnuz = legacy gfx942
   "regime": "decode|prefill|chunked|small_batch|peak",
   "roofline_class": "memory|compute|latency",
   "difficulty": "easy|medium|hard",         # or cot_tokens bucket
   "backend": "triton|hip|ck|flydsl",
-  "arch": "gfx942|gfx950",
+  "arch": "gfx950|gfx942",                  # gfx950 = target; gfx942 = legacy/reference
   "shape_key": "M4096_N4096_K4096",
   "provenance": {"source": "teacher|self|synthetic|kernelbook", "model": "...", "commit": "...", "license": "..."},
   "verify": {"snr_db_worst": 41.2, "shapes_tested": 5, "seeds": 5, "cv": 0.021,
@@ -380,20 +380,20 @@ A record is admitted to the training corpus iff: verified on ≥ N_shapes (≥3)
 
 ## 5. Existing datasets to reuse/adapt - and their gaps for AMD
 
-| Dataset | Local path / URL | What it gives KORE | Gap for gfx942/AMD | Action |
+| Dataset | Local path / URL | What it gives KORE | Gap for gfx950/AMD | Action |
 |---|---|---|---|---|
 | **KernelBench** (L1 100, L2 100, L3 50, L4 20) | `repos/KernelBench/KernelBench/level{1..4}` | 270 PyTorch reference modules; the *task specifications* (op + reference) and the `fast_p` metric | CUDA-oriented; baseline is **torch eager**, not AITER; no Triton/HIP AMD kernels; no fp8/MoE/MLA depth | Reuse the **reference modules as task specs**; re-target baseline to AITER on-box; port to KORE `task.yaml` + `driver.py`. Use L1 (basic ops) + L2 (fusion) for breadth; adopt `fast_p@1.2` as the win metric (KORE.pdf §5). |
 | **GEAK-eval TritonBench-revised** (184) | `repos/GEAK-eval/geak_eval/data/TritonBench/data/TritonBench_G_v1/*` (185 files) | 184 real Triton kernels with harnesses; attention/GLA/retention/linear-attn breadth | Some kernels needed AMD fixes (GEAK: 37/184 failed on AMD - shared-mem errors, invalid HIP args); harnesses assume NVIDIA idioms | Reuse as **held-out eval + SFT breadth**; run through the AMD-fix pass GEAK did; do NOT leak into train (it's an eval bench). |
 | **GEAK-eval ROCm bench** (30-31) | `repos/GEAK-eval/geak_eval/data/ROCm/data/ROCm_v1/*` (31 files) | Real AMD ROCm kernels: `gemm.py`, `layernorm.py`, `moe_gemm.py`, `rmsnorm_fwd/bwd.py`, `test_flashattention_fwd.py`, `test_chained_dot_fp8.py`, `test_matmul_MXFP.py` | Only 31 kernels; the *most* AMD-authentic set available but tiny | **Highest-value seed set.** Use as gold seeds for repair-mutation and as the primary held-out AMD eval. `test_chained_dot_fp8` and `test_matmul_MXFP` directly inform fp8/MX coverage. |
-| **KernelBook** (18,162 torch↔Triton) | https://huggingface.co/datasets/GPUMODE/KernelBook (+ local `data/synthetic.py` regenerates via Inductor) | Massive breadth of correct-by-construction torch→Triton pairs; idiomatic Triton | Inductor targets NVIDIA; **not** MFMA/gfx942-tuned; no fp8/MoE/MLA; no perf-vs-AITER labels | Use for **Stage-1 breadth only** (25% of SFT). Regenerate on gfx942 with `torch.compile` to capture AMD-flavored Triton where possible. Never use for perf labels. |
+| **KernelBook** (18,162 torch↔Triton) | https://huggingface.co/datasets/GPUMODE/KernelBook (+ local `data/synthetic.py` regenerates via Inductor) | Massive breadth of correct-by-construction torch→Triton pairs; idiomatic Triton | Inductor targets NVIDIA; **not** MFMA/gfx950-tuned; no fp8/MoE/MLA; no perf-vs-AITER labels | Use for **Stage-1 breadth only** (25% of SFT). Regenerate on gfx950 with `torch.compile` to capture AMD-flavored Triton where possible. Never use for perf labels. |
 | **ConCuR** (4,892 CoT+CUDA) | https://arxiv.org/abs/2510.07356 | The *curation method* (short-CoT×high-speedup) and evidence that concise CoT → better kernels | CUDA, not Triton/HIP; torch-eager baseline | Reuse the **curation pipeline** (Section 3.6), not the data. Regenerate Triton/HIP CoT traces with the Opus teacher on KORE tasks. |
 | **KernelForge task suite** | `repos/KernelForge-main/tasks/*.yaml` | 9 production-grade AMD task specs with real shapes, constraints, phase gates, and measured results (MLA, MoE-MXFP4, MXFP8 grouped GEMM, flash-attn, sparse attn, SLA bwd, gemm fp16) | gfx950-targeted for MX ops; not a "dataset" but a spec source | **Directly port to KORE `task.yaml`** - these are the P1/P2 coverage cells with real dims + the unbalanced MoE trace. |
 | **KernelForge knowledge_base/skills** (37 skills) | `repos/KernelForge-main/knowledge_base/skills/*.json` | Distilled AMD optimization + pitfall knowledge (VGPR/LDS/MFMA/MoE/MLA/sparse) | - | Mine as **tuning_hints** for prompts and as the source list for edge cases in Section 2 (each skill ⇒ a repair transition). |
 
 ### 5.1 Net-new data KORE must create (nobody else has it)
 
-1. **AMD-baseline perf labels** - speedup vs AITER/hipBLASLt/rocBLAS/CK measured on gfx942. This is the moat; no public dataset has it.
-2. **fp8-FNUZ correctness data** at scale (per-tensor/per-token/block-scale) - the FNUZ-vs-OCP trap (Section 2.1 N8, `aiter_ref.py`).
+1. **AMD-baseline perf labels** - speedup vs AITER/hipBLASLt/rocBLAS/CK measured on gfx950. This is the moat; no public dataset has it.
+2. **fp8-OCP correctness data** at scale (per-tensor/per-token/block-scale) - the OCP-vs-FNUZ trap (Section 2.1 N8, `aiter_ref.py`).
 3. **MLA decode/prefill + paged-KV + MoE-fused** repair/win data with DeepSeek-V3 constants.
 4. **Labeled reward-hack negatives** (Section 2.6) - deliberately manufactured, absent from all public sets.
 5. **Multi-turn AMD evolve trajectories** with per-turn verifier feedback (the Stage-3 substrate).
@@ -404,11 +404,11 @@ A record is admitted to the training corpus iff: verified on ≥ N_shapes (≥3)
 
 The corpus is "done" only when every row below has ≥1 verification shape AND ≥1 repair transition:
 
-- [ ] N1-N8 numerical (fp32-accum, large-K overflow, fp8 amax extremes, denormal, NaN/all-masked-row, softmax overflow, variance cancellation, fp8-FNUZ-vs-OCP)
+- [ ] N1-N8 numerical (fp32-accum, large-K overflow, fp8 amax extremes, denormal, NaN/all-masked-row, softmax overflow, variance cancellation, fp8-OCP-vs-FNUZ)
 - [ ] S1-S10 shape (non-pow2, tiny, huge, ragged/varlen, tail-mask, K%32≠0 fp8/MX, misaligned ptr, head-dim 64/192/256, 0-token+giant expert, batch extremes)
 - [ ] L1-L7 layout (transposed, non-contiguous, permuted fp8 MFMA operand, weight [N,K]/trans_b, N-first scale layout, paged-KV indirection, LDS swizzle pitfall)
 - [ ] C1-C4 concurrency (BLOCK_M=64 sparse corruption, atomic nondeterminism, race-only-at-scale, LSE reduction order)
-- [ ] R1-R5 resource (VGPR spill >256, LDS overflow >64 KB, occupancy cliff, scratch spill, num_warps/stages)
+- [ ] R1-R5 resource (VGPR spill >256, LDS overflow >160 KiB, occupancy cliff, scratch spill, num_warps/stages)
 - [ ] H1-H9 reward-hack negatives, labeled, ≥8% of DPO pairs
 - [ ] Every P0 op has data in every meaningful dtype×regime×backend cell (Section 1.5)
 - [ ] ≥1 whole operator family held out end-to-end for eval

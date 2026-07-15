@@ -502,7 +502,10 @@ def test_full_ft_dpo_iterative_shells_out_per_round(monkeypatch, tmp_path):
     assert len(calls) == 1 and calls[0]["cmd"][2] == "dpo"
     written = json.loads((tmp_path / "launch" / "dpo_round1.json").read_text())
     assert written["distributed"] is True and written["use_lora"] is False
-    assert written["loss_type"] == "ipo"
+    # iterative DPO keeps the SFT anchor (IPO+SFT composite), never a bare "ipo" that
+    # can still collapse likelihoods; loss_weights arity matches (R2 dpo C1).
+    assert written["loss_type"] == ["ipo", "sft"]
+    assert written["loss_weights"] == [1.0, 1.0]
     assert written["ref_model_id"] == "round0_ckpt"
 
 

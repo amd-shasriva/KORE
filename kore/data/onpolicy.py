@@ -106,6 +106,7 @@ def iterative_dpo(
     train_fn: Optional[Callable[["IterativeDPORound"], Optional[str]]] = None,
     aggregate: bool = True,
     prompt_fn: Optional[Callable[[str], Any]] = None,
+    extra_pairs: Optional[list] = None,
 ) -> list[IterativeDPORound]:
     """Run ``rounds`` of iterative on-policy DPO.
 
@@ -128,8 +129,15 @@ def iterative_dpo(
     module docstring / campaign notes). When it is ``None`` the loop still runs
     relabel+build every round (useful for dry data generation / tests) but never
     refreshes the reference. Returns the per-round records.
+
+    ``extra_pairs`` (the build stage's CURATED preference rows -- reward-hack hard
+    negatives + fixed>broken repair pairs) are folded into EVERY round's training set
+    alongside the on-policy relabeled group pairs, so iterative DPO keeps the
+    correctness/anti-hack contrast instead of collapsing to among-correct speed pairs
+    only (audit R2 dpo C2: the old loop trained on relabeled groups alone).
     """
     task_list = list(tasks) if isinstance(tasks, (list, tuple)) else [tasks]
+    extra = list(extra_pairs or [])
     agg_groups: list[RankedGroupRecord] = []
     results: list[IterativeDPORound] = []
     prev_ckpt: Optional[str] = None
@@ -150,6 +158,9 @@ def iterative_dpo(
             # on-policy preferences match the deployment context, exactly like the
             # first-round build stage. Falls back to the generic prompt if None.
             dpo_pairs = build_dpo(agg_groups, prompt_fn=prompt_fn)
+            if extra:
+                # union the curated hard-neg/repair contrast into every round
+                dpo_pairs = list(dpo_pairs) + extra
             rd = IterativeDPORound(
                 round=r,
                 ref_model_id=prev_ckpt,

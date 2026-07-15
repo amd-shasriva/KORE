@@ -1340,17 +1340,29 @@ def _stage_dpo(ctx):
     _retention_gate(ctx, stage="dpo", candidate=ctx["dpo_ckpt"], base=sft)
 
 
+# RPO composite loss (DPO preference term + an NLL-on-chosen anchor). The SFT/NLL
+# anchor is THE fix for the likelihood-displacement that degenerated DPO v1 (widening
+# the margin by tanking BOTH chosen and rejected log-probs -> entropy collapse ->
+# garbage/incomplete kernels). loss_type and loss_weights MUST be co-set with matching
+# arity (dpo.build_trl_dpo_kwargs guards this) (audit R2 dpo C1 "keep RPO anchor").
+_RPO_LOSS_TYPE = ["sigmoid", "sft"]
+_RPO_LOSS_WEIGHTS = [1.0, 1.0]
+
+
 def _stage_dpo_single(ctx, sft) -> str:
     ds = str(ctx["data_root"] / "dpo" / "pairs.jsonl")
     # Full-FT: engage FSDP via the launcher (accelerate) under the hood.
     if _full_ft(ctx) and _stage_supports_launcher("dpo"):
         return _launch_distributed(ctx, "dpo", {
-            "model_id": sft, "dataset_path": ds, "output_dir": ctx["args"].dpo_out})
+            "model_id": sft, "dataset_path": ds, "output_dir": ctx["args"].dpo_out,
+            "loss_type": _RPO_LOSS_TYPE, "loss_weights": _RPO_LOSS_WEIGHTS})
     from kore.policy.configs import DPOConfig
     from kore.policy.dpo import train
 
     cfg = DPOConfig(model_id=sft, dataset_path=ds,
                     output_dir=ctx["args"].dpo_out, use_lora=ctx["args"].lora)
+    cfg.loss_type = _RPO_LOSS_TYPE          # RPO anti-degeneration anchor (v1 fix)
+    cfg.loss_weights = _RPO_LOSS_WEIGHTS
     result = train(cfg)
     return (result.get("output_dir") if isinstance(result, dict) else None) or ctx["args"].dpo_out
 
@@ -1399,25 +1411,50 @@ def _stage_dpo_iterative(ctx, sft, rounds: int) -> str:
         out_dir = str(Path(ctx["args"].dpo_out) / f"round{rd.round}")
         # Full-FT: shell out per round to the FSDP launcher (IPO + refreshed ref
         # travel in the JSON config); LoRA / single-process stays in-process.
+        # IPO (bounded, MSE-style objective that doesn't push the reward gap to
+        # infinity on near-deterministic on-policy pairs) + an SFT/NLL anchor -- the
+        # iterative path KEEPS the RPO anti-degeneration anchor rather than switching
+        # to a bare "ipo" that can still collapse likelihoods (audit R2 dpo C1).
+        _ipo_loss_type = ["ipo", "sft"]
+        _ipo_loss_weights = [1.0, 1.0]
         if _full_ft(ctx) and _stage_supports_launcher("dpo"):
-            _log("dpo", f"round {rd.round}: full-FT IPO DPO on {rd.n_pairs} aggregated pairs "
+            _log("dpo", f"round {rd.round}: full-FT IPO+SFT DPO on {rd.n_pairs} aggregated pairs "
                         f"(model={base_ckpt}, ref={base_ckpt}) via FSDP launcher -> {out_dir}")
             return _launch_distributed(ctx, "dpo", {
                 "model_id": base_ckpt, "dataset_path": str(ds_path), "output_dir": out_dir,
-                "loss_type": "ipo", "ref_model_id": base_ckpt}, run_name=f"dpo_round{rd.round}")
+                "loss_type": _ipo_loss_type, "loss_weights": _ipo_loss_weights,
+                "ref_model_id": base_ckpt}, run_name=f"dpo_round{rd.round}")
         cfg = DPOConfig(model_id=base_ckpt, dataset_path=str(ds_path),
                         output_dir=out_dir, use_lora=ctx["args"].lora)
-        cfg.loss_type = "ipo"                          # bounded IPO objective for on-policy prefs
+        cfg.loss_type = _ipo_loss_type                 # bounded IPO + SFT anchor for on-policy prefs
+        cfg.loss_weights = _ipo_loss_weights
         cfg.ref_model_id = base_ckpt                   # refreshed frozen reference = current policy
-        _log("dpo", f"round {rd.round}: IPO DPO on {rd.n_pairs} aggregated pairs "
+        _log("dpo", f"round {rd.round}: IPO+SFT DPO on {rd.n_pairs} aggregated pairs "
                     f"(model={base_ckpt}, ref={base_ckpt}) -> {out_dir}")
         result = train(cfg)
         return (result.get("output_dir") if isinstance(result, dict) else None) or out_dir
+
+    # C2: the on-policy group relabeling reproduces SPEED pairs but NOT the curated
+    # reward-hack hard negatives (the crucial anti-hacking correctness contrast), so
+    # build them once from the train-task seeds and fold them into EVERY round's
+    # training set via ``extra_pairs`` (audit R2 dpo C2).
+    from kore.data.assemble import build_dpo_with_hard_negatives
+    try:
+        _hard = build_dpo_with_hard_negatives(
+            ctx["data_root"], train_tasks, group_records=[], prompt_fn=_dpo_prompt_fn)
+        extra_pairs = list(_hard.get("rows") or [])
+        _log("dpo", f"iterative: folding {len(extra_pairs)} curated hard-negative pairs "
+                    f"into every round (anti-reward-hack contrast)")
+    except Exception as e:  # noqa: BLE001 - never let extra-pair curation abort DPO
+        _log("dpo", f"iterative: hard-negative curation unavailable ({e}); "
+                    f"training on on-policy group pairs only")
+        extra_pairs = []
 
     results = iterative_dpo(
         rounds, policy_factory, train_tasks, lambda t: KoreEnv(t),
         n_parents=ctx["args"].n_parents, k=ctx["args"].k, seed=0, cfg=CONFIG,
         train_fn=train_fn, aggregate=True, prompt_fn=_dpo_prompt_fn,
+        extra_pairs=extra_pairs,
     )
     return results[-1].policy_ckpt or ctx["args"].dpo_out
 

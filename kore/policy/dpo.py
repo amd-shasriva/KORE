@@ -115,13 +115,27 @@ def build_trl_dpo_kwargs(config) -> dict:
     # incomplete kernels) is countered by a positive "keep the chosen likely"
     # gradient. TRL 0.29.1 has no rpo_alpha; the list form + loss_weights is the
     # supported equivalent (verified: loss_type is list[str], "sft" is a component).
+    # ARITY GUARD (audit R2 dpo C1): TRL requires a COMPOSITE (list) loss_type to be
+    # paired with a loss_weights list of the SAME length, and a SCALAR loss_type to
+    # carry NO loss_weights. A per-round override that changes only one of the two --
+    # e.g. iterative DPO flipping loss_type to a scalar while a composite loss_weights
+    # lingers, or setting a list loss_type without weights -- otherwise raises a
+    # len(loss_weights)!=len(loss_type) ValueError inside DPOTrainer and hard-stops the
+    # stage. Reconcile here so the trainer can NEVER crash on an inconsistent pair.
     loss_type = getattr(config, "loss_type", None)
-    if loss_type:
-        kwargs["loss_type"] = (list(loss_type)
-                               if isinstance(loss_type, (list, tuple)) else str(loss_type))
     loss_weights = getattr(config, "loss_weights", None)
-    if loss_weights:
-        kwargs["loss_weights"] = [float(w) for w in loss_weights]
+    if loss_type:
+        if isinstance(loss_type, (list, tuple)):
+            lt = [str(x) for x in loss_type]
+            kwargs["loss_type"] = lt
+            if loss_weights and len(loss_weights) == len(lt):
+                kwargs["loss_weights"] = [float(w) for w in loss_weights]
+            else:
+                # missing / mismatched -> equal weights matching the loss arity
+                kwargs["loss_weights"] = [1.0] * len(lt)
+        else:
+            kwargs["loss_type"] = str(loss_type)
+            # a scalar loss takes no loss_weights (passing them is the arity crash)
     label_smoothing = getattr(config, "label_smoothing", None)
     if label_smoothing:
         kwargs["label_smoothing"] = float(label_smoothing)

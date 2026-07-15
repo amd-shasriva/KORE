@@ -1,0 +1,22 @@
+task_id: flash_attn_decode_fp8
+operation: flash_attn_decode_fp8
+dtype: fp8_e4m3fn
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# fp8 GQA decode (seq_q=1) vs fp32 SDPA on the dequantized fp8 q/k/v. Decode is
+# KV-cache-bandwidth bound, so fp8 KV (~half the bytes of bf16) is the win. The fp8
+# rounding is shared by candidate + reference, so the gate measures the kernel's
+# online-softmax fidelity (well above 25 dB); still rejects a missing max-subtraction /
+# wrong-rescale / wrong-scale-fold kernel. STAGED DRAFT - verify on gfx950 before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 8, KV: 2, Skv: 1024, D: 128}
+  primary: {B: 8, H: 32, KV: 8, Skv: 4096, D: 128}   # Llama-3.1-8B GQA decode, fp8 KV
+  validation:
+    - {B: 1, H: 32, KV: 8, Skv: 8192, D: 128}         # long KV
+    - {B: 64, H: 32, KV: 8, Skv: 1024, D: 128}        # large batch decode
+    - {B: 1, H: 32, KV: 8, Skv: 1023, D: 128}         # non-multiple-of-BLOCK KV edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn   # bf16 FMHA seq_q=1 decode (fp8 wins on KV bytes)

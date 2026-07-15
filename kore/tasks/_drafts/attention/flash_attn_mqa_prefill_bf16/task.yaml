@@ -1,0 +1,21 @@
+task_id: flash_attn_mqa_prefill_bf16
+operation: flash_attn_mqa_prefill
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# bf16 MQA (KV==1, all query heads share one kv head) causal prefill vs fp32 SDPA
+# oracle. Online-softmax bf16 accumulation lands ~45-49 dB; gate at 25 dB (KORE
+# low-precision attention bar) rejects a missing max-subtraction / wrong-rescale /
+# wrong-kv-broadcast kernel. STAGED DRAFT - verify on gfx950 before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 8, KV: 1, S: 256, D: 128}
+  primary: {B: 1, H: 32, KV: 1, S: 4096, D: 128}   # MQA prefill (blueprint A3)
+  validation:
+    - {B: 2, H: 32, KV: 1, S: 2048, D: 128}          # batched MQA
+    - {B: 1, H: 64, KV: 1, S: 4096, D: 128}          # wide-head MQA
+    - {B: 1, H: 32, KV: 1, S: 1000, D: 128}          # non-multiple-of-BLOCK seqlen edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn   # AITER CK/ASM FMHA (Hkv=1)

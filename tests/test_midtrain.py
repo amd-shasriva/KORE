@@ -87,6 +87,9 @@ import triton
 import triton.language as tl
 
 
+# KORE-authored seed kernel carrying STALE pre-retarget arch labels
+# (gfx942 / MI300X / CDNA3); the corpus builder must scrub these to the gfx950
+# target because this code is genuinely gfx950 (portable Triton, re-verified).
 @triton.jit
 def rmsnorm_kernel(x_ptr, w_ptr, y_ptr, N, eps, BLOCK_N: tl.constexpr):
     row = tl.program_id(0)
@@ -95,6 +98,41 @@ def rmsnorm_kernel(x_ptr, w_ptr, y_ptr, N, eps, BLOCK_N: tl.constexpr):
     var = tl.sum(x * x, axis=0) / N
     y = x * (1.0 / tl.sqrt(var + eps))
     tl.store(y_ptr + row * N + offs, y, mask=offs < N)
+'''
+
+# Genuinely gfx942 AMD ISA assembly (hand-written Tensile-style CustomKernel).
+# EXTERNAL repo text: it is really compiled for gfx942 and MUST stay verbatim
+# (its arch label is a true fact, not a stale KORE label to be rewritten).
+_ASM_SRC = '''\
+/* Custom Tensile GEMM CustomKernel (fp8 MFMA) */
+.amdgcn_target "amdgcn-amd-amdhsa--gfx942"
+.text
+.globl custom_gemm_f8_gfx942
+.p2align 8
+.type custom_gemm_f8_gfx942,@function
+custom_gemm_f8_gfx942:
+    s_load_dwordx4 s[0:3], s[4:5], 0x0
+    v_mfma_f32_16x16x32_fp8_fp8 a[0:3], v[8:9], v[10:11], a[0:3]
+    v_mfma_f32_16x16x32_fp8_fp8 a[4:7], v[12:13], v[14:15], a[4:7]
+    ds_read_b128 v[16:19], v20 offset:0
+    ds_write_b128 v24, v[16:19] offset:512
+    s_waitcnt lgkmcnt(0)
+    s_endpgm
+'''
+
+# ROCm/CDNA optimization doc as reStructuredText (Sphinx). EXTERNAL repo text
+# that legitimately discusses gfx942 / MI300X / CDNA3 -> left verbatim.
+_RST_SRC = '''\
+CDNA ISA Optimization Guide
+===========================
+
+This guide covers optimizing GEMM and attention kernels on AMD Instinct GPUs.
+On gfx942 (MI300X, CDNA3) the matrix cores execute MFMA instructions on a
+64-lane wavefront; keep the fp32 accumulator resident in AccVGPRs and stream the
+K dimension in BLOCK_K tiles through the LDS to avoid register spills. Measure
+occupancy and LDS bank conflicts with rocprofiler before tuning num_warps and
+num_stages for the software pipeline. Prefer wide ds_read_b128 loads and watch
+the valu and mfma busy counters to locate the roofline bottleneck.
 '''
 
 
@@ -106,8 +144,13 @@ def _make_tmp_sources(tmp_path: Path) -> tuple[Path, Path]:
     # A duplicate triton file (identical body, different name) -> must dedup.
     (repo / "src" / "add_triton_copy.py").write_text(_TRITON_SRC)
     (repo / "src" / "saxpy.cu").write_text(_HIP_SRC)
+    # AMD ISA assembly device code (.s) -> amd_asm source (external, verbatim).
+    (repo / "src" / "custom_gemm_gfx942.s").write_text(_ASM_SRC)
     (repo / "docs" / "rocprof").mkdir(parents=True)
     (repo / "docs" / "rocprof" / "tuning_guide.md").write_text(_DOC_SRC)
+    # A ROCm/CDNA optimization guide as .rst -> docs source (external, verbatim).
+    (repo / "docs" / "rocm").mkdir(parents=True)
+    (repo / "docs" / "rocm" / "cdna_isa_guide.rst").write_text(_RST_SRC)
     # An unrelated md (no ROCm/kernel keyword in path) -> excluded from docs.
     (repo / "docs" / "misc").mkdir(parents=True)
     (repo / "docs" / "misc" / "changelog.md").write_text("# Changelog\n\nRandom notes.\n")
@@ -235,6 +278,87 @@ def test_corpus_docs_pathfilter_excludes_unrelated_md(tmp_path):
     joined = "\n".join(doc_texts)
     assert "rocprof" in joined
     assert "Random notes" not in joined  # unrelated changelog.md was filtered out
+
+
+def test_amd_asm_and_rst_docs_are_collected(tmp_path):
+    """The strengthened device-code sources ingest AMD ISA assembly (.s -> amd_asm)
+    and reStructuredText docs (.rst -> docs), not just .py/.cu/.md."""
+    repo_root, task_root = _make_tmp_sources(tmp_path)
+    cfg = _make_config(max_seq_length=512)
+    out = tmp_path / "c.jsonl"
+    rep = build_midtrain_corpus(out, cfg, seed=0, source_roots=[repo_root],
+                                task_root=task_root)
+    rows = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
+
+    def _txt(src):
+        return "\n".join(r["text"] for r in rows if r["source"] == src)
+
+    # AMD ISA assembly is a first-class device-code channel now.
+    assert rep["counts"].get("amd_asm", 0) > 0, rep["counts"]
+    assert "v_mfma_f32_16x16x32_fp8_fp8" in _txt("amd_asm")  # real ISA content
+    # The .rst optimization guide is picked up by the docs channel.
+    assert "CDNA ISA Optimization Guide" in _txt("docs")
+
+
+def test_external_repo_text_not_arch_normalized_but_kore_authored_is(tmp_path):
+    """arch_normalize scrubs stale gfx942/MI300X/CDNA3 labels ONLY in KORE-authored
+    slices (their code is genuinely gfx950). EXTERNAL repo text (repo asm/docs) is
+    genuinely other-hardware and must be preserved verbatim -- rewriting it would
+    corrupt true facts (e.g. a real gfx942 CustomKernel's target triple)."""
+    repo_root, task_root = _make_tmp_sources(tmp_path)
+    cfg = _make_config(max_seq_length=512)
+    out = tmp_path / "c.jsonl"
+    build_midtrain_corpus(out, cfg, seed=0, source_roots=[repo_root], task_root=task_root)
+    rows = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
+
+    def _txt(src):
+        return "\n".join(r["text"] for r in rows if r["source"] == src)
+
+    # KORE-authored slices: stale arch labels are scrubbed to the gfx950 target.
+    for src in ("kore_tasks", "pytorch_triton_pairs"):
+        t = _txt(src)
+        assert t, f"expected rows for {src}"
+        assert "gfx942" not in t and "gfx950" in t, src
+        assert "MI300X" not in t, src
+        assert "CDNA3" not in t, src
+
+    # EXTERNAL repo text is left verbatim (genuinely other-hardware).
+    assert "gfx942" in _txt("amd_asm")   # real gfx942 CustomKernel target triple
+    asm = _txt("amd_asm")
+    assert "gfx950" not in asm            # NOT rewritten
+    docs = _txt("docs")
+    assert "gfx942" in docs and "CDNA3" in docs  # ROCm doc discussing gfx942 kept as-is
+
+
+def test_corpus_scale_env_scales_caps_and_env_overrides_win(tmp_path, monkeypatch):
+    """KORE_MIDTRAIN_SCALE multiplies the (raised) default caps so a big run pulls
+    proportionally more; an explicit per-source env cap still wins absolutely. The
+    report echoes the resolved scale + cap so a build reports what it was sized for."""
+    repo_root, task_root = _make_tmp_sources(tmp_path)
+    cfg = _make_config(max_seq_length=256)
+
+    monkeypatch.setenv("KORE_MIDTRAIN_SCALE", "2.0")
+    rep = build_midtrain_corpus(tmp_path / "s.jsonl", cfg, seed=0,
+                                source_roots=[repo_root], task_root=task_root,
+                                max_files_per_source=10, scan_budget=100)
+    assert rep["corpus_scale"] == 2.0
+    assert rep["max_files_per_source"] == 20  # 10 base * 2.0 scale
+
+    # An explicit absolute cap overrides the scale dial.
+    monkeypatch.setenv("KORE_MIDTRAIN_MAX_FILES", "7")
+    rep2 = build_midtrain_corpus(tmp_path / "s2.jsonl", cfg, seed=0,
+                                 source_roots=[repo_root], task_root=task_root,
+                                 max_files_per_source=10, scan_budget=100)
+    assert rep2["max_files_per_source"] == 7
+
+
+def test_default_caps_are_sized_for_a_big_run():
+    """The CODE default caps are large (a frontier run pulls much more); small values
+    are per-run env overrides, not the default."""
+    import inspect
+    sig = inspect.signature(build_midtrain_corpus)
+    assert sig.parameters["max_files_per_source"].default >= 20000
+    assert sig.parameters["scan_budget"].default >= 100000
 
 
 def test_eval_benchmark_decontam_drops_train_on_test(tmp_path):

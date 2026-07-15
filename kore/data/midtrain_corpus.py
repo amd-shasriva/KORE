@@ -14,13 +14,23 @@ Sources (each reported separately in the returned counts):
                                 built from each task's ``reference.py`` +
                                 ``seed_triton.py`` (real torch->Triton examples).
   - ``triton``                : Triton kernel Python files found under the local
-                                repos (GEAK / KernelBench / KernelForge* / vllm).
-  - ``rocm_hip``              : HIP/CUDA/Composable-Kernel source (``*.cu``,
-                                ``*.cuh``, ``*.hip``, ``*.cpp``, ``*.hpp``,
-                                ``*.h``, ``*.cc``) under the local repos.
-  - ``docs``                  : ROCm / rocprof / tuning / perf-guide markdown
-                                docs under the local repos (path-filtered so the
-                                corpus stays a kernel/ROCm corpus, not all md).
+                                repos (AITER / Composable-Kernel / hipBLASLt /
+                                Triton / FlagGems / vLLM / rocPRIM / ... - every
+                                repo discovered under the repos dir).
+  - ``rocm_hip``              : HIP/CUDA/Composable-Kernel/hipBLASLt device source
+                                (``*.cu``, ``*.cuh``, ``*.hip``, ``*.cpp``,
+                                ``*.hpp``, ``*.h``, ``*.cc``) under the local repos
+                                (AITER / CK / hipBLASLt / rocPRIM / ...).
+  - ``amd_asm``               : AMD GCN/CDNA ISA assembly device code (``*.s`` /
+                                ``*.S``) - hand-written Tensile CustomKernels and
+                                other ``.amdgcn_target`` MFMA assembly under the
+                                repos (deepest AMD-native ISA signal). No-op when
+                                absent.
+  - ``docs``                  : ROCm / rocprof / CDNA / ISA / tuning / perf-guide
+                                Markdown AND reStructuredText docs (``*.md`` /
+                                ``*.rst``) under the local repos (path/keyword-
+                                filtered so the corpus stays a kernel/ROCm corpus,
+                                not all docs).
   - ``general_replay``        : ~``config.general_replay_frac`` general shards
                                 (code/math/chat/IF/tool-use) via
                                 :func:`kore.data.general_replay.load_general_replay`
@@ -58,6 +68,17 @@ CHARS_PER_TOKEN = 4
 # HIP / CUDA / Composable-Kernel source extensions.
 _HIP_EXTS = (".cu", ".cuh", ".hip", ".cpp", ".cc", ".hpp", ".h")
 
+# AMD GCN/CDNA ISA assembly (hand-written Tensile CustomKernels, .amdgcn_target
+# MFMA assembly). Case-variant ``.S`` is included for portability; both no-op when
+# absent. This is genuinely arch-specific device text (e.g. gfx942 CustomKernels)
+# and is therefore treated as EXTERNAL (never arch-normalized - see write step).
+_ASM_EXTS = (".s", ".S")
+
+# Documentation extensions: Markdown + reStructuredText. ROCm / CK / hipBLASLt /
+# rocPRIM ship a large fraction of their conceptual + optimization + ISA docs as
+# ``.rst`` (Sphinx), which the old ``.md``-only pass missed entirely.
+_DOC_EXTS = (".md", ".rst")
+
 # Markers that identify a Triton kernel Python file (any one is enough).
 _TRITON_MARKERS = ("import triton", "triton.jit", "triton.language", "tl.")
 
@@ -79,12 +100,24 @@ def _is_heldout_task_dir(dir_name: str) -> bool:
     except Exception:  # noqa: BLE001 - registry missing -> do not exclude (safe)
         return False
 
-# Path keywords that keep the ``docs`` slice a ROCm/kernel/perf corpus rather
-# than pulling in every unrelated markdown file in the repos.
+# Path/content keywords that keep the ``docs`` slice a ROCm/kernel/perf corpus
+# rather than pulling in every unrelated doc file in the repos. Broadened for the
+# CDNA4/gfx950 target so real AMD ISA + optimization guides (CK ck_tile concepts,
+# CDNA/MFMA/wavefront/LDS tuning, rocprofiler/omniperf roofline) pass the filter.
 _DOC_KEYWORDS = (
-    "rocprof", "tuning", "perf", "optimize", "occupancy", "triton", "hip",
-    "rocm", "kernel", "amd", "gpu", "mi300", "mi200", "gfx", "matmul", "gemm",
-    "attention", "quant", "fp8", "bf16",
+    # tooling + perf
+    "rocprof", "rocprofiler", "omniperf", "tuning", "perf", "optimize",
+    "occupancy", "roofline", "benchmark", "profil",
+    # stack / backends
+    "triton", "hip", "rocm", "kernel", "composable", "ck_tile", "tensile",
+    "hipblaslt", "rocblas", "aiter",
+    # hardware / arch
+    "amd", "gpu", "instinct", "mi300", "mi325", "mi350", "mi355", "mi200",
+    "gfx", "cdna", "wavefront", "wave", "lds", "vgpr", "mfma", "wmma", "isa",
+    "swizzle", "tile",
+    # ops / dtypes
+    "matmul", "gemm", "attention", "quant", "fp8", "bf16", "mxfp4", "mxfp8",
+    "microscaling",
 )
 
 # Directory names we never descend into (build/cache/vendor noise).
@@ -377,6 +410,18 @@ def _near_dedup_corpus(rows: list[dict], threshold: float = 0.7,
     return kept
 
 
+# KORE-authored source slices. Only these carry stale pre-retarget gfx942 labels
+# on code that is genuinely gfx950 (Triton is portable + re-verified on gfx950), so
+# only these get the gfx950 ``arch_normalize`` scrub at write time. EXTERNAL repo
+# text (``triton`` / ``rocm_hip`` / ``amd_asm`` / ``docs`` from the repos, and the
+# mined ``amd_kernels`` / ``kernelbook`` HF sets) is genuinely other-hardware text
+# (real gfx942 CustomKernels, NVIDIA-Inductor Triton, Hopper FP8 docs, ...); scrubbing
+# its arch labels would corrupt true facts (FNUZ<->OCP fp8, 64<->160 KiB LDS, register
+# counts), so it is left verbatim. ``general_replay`` is arbitrary domain text (also
+# left verbatim).
+_KORE_AUTHORED_SOURCES = frozenset({"kore_tasks", "pytorch_triton_pairs"})
+
+
 # Source weighting: oversample the highest-signal channels for continued
 # pretraining. The real MI300 AMD competition kernels and the torch->Triton
 # translation pairs are the most direct signal for the target task (writing fast
@@ -435,11 +480,20 @@ def build_midtrain_corpus(
     *,
     source_roots: Optional[list] = None,
     task_root=None,
-    max_files_per_source: int = 5000,
-    scan_budget: int = 40000,
+    max_files_per_source: int = 20000,
+    scan_budget: int = 200000,
     max_chars_per_file: int = 200_000,
 ) -> dict:
     """Assemble the Stage-0 continued-pretraining corpus and write it to disk.
+
+    Defaults are sized for a FRONTIER (32B/70B) continued-pretrain: the per-source
+    file cap and scan budget are large enough to ingest the full local AMD device
+    corpus (all of AITER / Composable-Kernel / hipBLASLt / rocPRIM HIP+CK source,
+    the Tensile ISA CustomKernels, the ROCm/CK ``.rst`` optimization docs) plus the
+    full mined ``amd_kernels`` / ``kernelbook`` HF sets. Everything stays
+    env-overridable, and a single ``KORE_MIDTRAIN_SCALE`` float multiplies every
+    default cap so a bigger box can pull proportionally more (or a smoke run less)
+    without touching individual knobs.
 
     Args:
         out_path: destination JSONL path (parents created).
@@ -451,22 +505,51 @@ def build_midtrain_corpus(
         source_roots: override the repo roots to search (defaults to
             :func:`discover_repo_roots`). Tests pass a tmp source tree here.
         task_root: override the KORE task root (defaults to ``kore/tasks``).
-        max_files_per_source: per-source file cap (bounds corpus size + cost).
-        scan_budget: max candidate files inspected per collection pass.
+        max_files_per_source: BASE per-source file cap (bounds corpus size + cost);
+            scaled by ``KORE_MIDTRAIN_SCALE``, overridden by ``KORE_MIDTRAIN_MAX_FILES``.
+        scan_budget: BASE max candidate files inspected per collection pass; scaled
+            by ``KORE_MIDTRAIN_SCALE``, overridden by ``KORE_MIDTRAIN_SCAN_BUDGET``.
         max_chars_per_file: truncate each source file to this many chars.
+
+    Env knobs (all optional):
+        ``KORE_MIDTRAIN_SCALE``          - float (default 1.0); multiplies every
+            default cap below (target corpus-size dial for a big run).
+        ``KORE_MIDTRAIN_MAX_FILES``      - absolute per-source file cap (wins over scale).
+        ``KORE_MIDTRAIN_SCAN_BUDGET``    - absolute scan budget (wins over scale).
+        ``KORE_MIDTRAIN_AMD_MAX``        - absolute cap for the mined AMD kernels.
+        ``KORE_MIDTRAIN_KERNELBOOK_MAX`` - absolute cap for the mined KernelBook pairs.
 
     Returns:
         A report dict: ``{"out_path", "total", "counts": {source: n},
         "n_dropped_dup", "general_frac", "max_seq_length", "budget_chars",
-        "repo_roots"}``.
+        "repo_roots", "corpus_scale", "max_files_per_source"}``.
     """
     out_path = Path(out_path)
-    # Env-tunable volume so a frontier midtrain can ingest thousands of MI300-native
-    # kernels + KernelBook pairs + repo Triton/HIP/CK/docs (defaults already raised
-    # 400 -> 5000 for a rich domain corpus; the highest-signal source is the ~60k
-    # gfx942-native AMD kernels, previously capped at 400).
-    max_files_per_source = int(os.environ.get("KORE_MIDTRAIN_MAX_FILES", max_files_per_source))
-    scan_budget = int(os.environ.get("KORE_MIDTRAIN_SCAN_BUDGET", scan_budget))
+    # Env-tunable volume so a frontier (32B/70B) midtrain can ingest the FULL local
+    # AMD device corpus (all AITER/CK/hipBLASLt/rocPRIM HIP+CK source, the Tensile ISA
+    # CustomKernels, ROCm/CK .rst optimization docs) + the full mined ~60k gfx942-native
+    # AMD kernels + ~18k KernelBook pairs. ``KORE_MIDTRAIN_SCALE`` is the single
+    # corpus-size dial (multiplies every default cap); explicit per-source env vars
+    # still win over it (absolute override). Small per-run values (e.g. 800) are
+    # env overrides, NOT the code default, which is now sized for a big run.
+    scale = 1.0
+    try:
+        scale = max(0.01, float(os.environ.get("KORE_MIDTRAIN_SCALE", "1.0") or 1.0))
+    except (TypeError, ValueError):
+        scale = 1.0
+
+    def _cap(env_name: str, base_default) -> int:
+        """Absolute env override if set + valid, else ``base_default`` (already scaled)."""
+        v = os.environ.get(env_name)
+        if v is not None and str(v).strip():
+            try:
+                return max(1, int(float(v)))
+            except (TypeError, ValueError):
+                pass
+        return max(1, int(base_default))
+
+    max_files_per_source = _cap("KORE_MIDTRAIN_MAX_FILES", max_files_per_source * scale)
+    scan_budget = _cap("KORE_MIDTRAIN_SCAN_BUDGET", scan_budget * scale)
     budget_chars = max(1, int(config.max_seq_length) * CHARS_PER_TOKEN)
     frac = float(getattr(config, "general_replay_frac", 0.15) or 0.0)
 
@@ -523,7 +606,8 @@ def build_midtrain_corpus(
     # NVIDIA/libdevice flavor of the Triton is fine for teaching the pattern.
     kb_pairs: list[tuple[Path, str]] = []
     if use_hf:
-        kb_max = int(os.environ.get("KORE_MIDTRAIN_KERNELBOOK_MAX", str(max_files_per_source)))
+        # Base default already scaled via max_files_per_source; captures all ~18k pairs.
+        kb_max = _cap("KORE_MIDTRAIN_KERNELBOOK_MAX", max_files_per_source)
         kb_pairs = _load_kernelbook_pairs(n=kb_max, max_chars=max_chars_per_file)
     collected.append(("kernelbook", kb_pairs))
 
@@ -536,9 +620,10 @@ def build_midtrain_corpus(
         # The ~60k gfx942/MI300-native passing kernels are the HIGHEST-signal source,
         # so pull MANY more than other sources (up-weight); the MinHash near-dedup
         # below collapses the redundant competition submissions (many per problem)
-        # into a diverse, deduped set of real AMD kernels. Env-tunable.
-        amd_max = int(os.environ.get("KORE_MIDTRAIN_AMD_MAX",
-                                     str(max(max_files_per_source, 25000))))
+        # into a diverse, deduped set of real AMD kernels. The default floor (60k,
+        # scaled) captures essentially the whole set; env-tunable + scaled.
+        amd_max = _cap("KORE_MIDTRAIN_AMD_MAX",
+                       max(max_files_per_source, int(60000 * scale)))
         amd_kernels = _load_amd_kernels(n=amd_max, max_chars=max_chars_per_file)
     collected.append(("amd_kernels", amd_kernels))
 
@@ -552,7 +637,10 @@ def build_midtrain_corpus(
         )
     collected.append(("triton", triton_files))
 
-    # 4. HIP / CUDA / Composable-Kernel source.
+    # 4. HIP / CUDA / Composable-Kernel / hipBLASLt device source (AITER / CK /
+    # hipBLASLt / rocPRIM / ...). This is the bulk AMD device-code channel; the
+    # raised default cap now lets it ingest the WHOLE local HIP+CK tree instead of
+    # truncating after the alphabetically-first repos.
     hip_files: list[tuple[Path, str]] = []
     if repo_roots:
         hip_files = _collect_files(
@@ -561,11 +649,27 @@ def build_midtrain_corpus(
         )
     collected.append(("rocm_hip", hip_files))
 
-    # 5. ROCm / rocprof / tuning docs (path-filtered markdown).
+    # 4b. AMD GCN/CDNA ISA assembly (``.s`` / ``.S``) - hand-written Tensile
+    # CustomKernels + other ``.amdgcn_target`` MFMA assembly. The deepest AMD-native
+    # ISA signal (real VGPR/SGPR/LDS allocation, MFMA tiling, fp8). Genuinely
+    # arch-specific text, so it is EXTERNAL (never arch-normalized). No-op when the
+    # repos contain no assembly.
+    asm_files: list[tuple[Path, str]] = []
+    if repo_roots:
+        asm_files = _collect_files(
+            repo_roots, _ASM_EXTS, max_files=max_files_per_source,
+            scan_budget=scan_budget, max_chars_per_file=max_chars_per_file,
+        )
+    collected.append(("amd_asm", asm_files))
+
+    # 5. ROCm / rocprof / CDNA / ISA / tuning docs (Markdown + reStructuredText,
+    # path/keyword-filtered). ROCm/CK/hipBLASLt/rocPRIM ship their conceptual +
+    # optimization + ISA docs largely as ``.rst`` (Sphinx), which the old .md-only
+    # pass missed; both are collected here and gated to stay a kernel/ROCm corpus.
     doc_files: list[tuple[Path, str]] = []
     if repo_roots:
         doc_files = _collect_files(
-            repo_roots, (".md",), max_files=max_files_per_source,
+            repo_roots, _DOC_EXTS, max_files=max_files_per_source,
             scan_budget=scan_budget * 3, max_chars_per_file=max_chars_per_file,
             content_filter=None,
         )
@@ -786,10 +890,16 @@ def build_midtrain_corpus(
     from kore.data.arch_normalize import normalize_text
     with out_path.open("w", encoding="utf-8") as f:
         for row in rows:
-            # Scrub stale non-gfx950 arch labels in KORE / kernel-source chunks so
-            # continued pretraining is arch-consistent with the target. The general-
-            # replay slice is arbitrary domain text and is left untouched.
-            if row.get("source") != "general_replay":
+            # Scrub stale non-gfx950 arch labels ONLY in KORE-authored slices
+            # (kore_tasks / pytorch_triton_pairs): that code is genuinely gfx950 but
+            # carries pre-retarget gfx942 labels, so normalizing makes CPT arch-
+            # consistent with the target. EXTERNAL repo text (triton / rocm_hip /
+            # amd_asm / docs) and the mined amd_kernels / kernelbook sets are
+            # genuinely other-hardware (real gfx942 Tensile CustomKernels, NVIDIA
+            # Inductor Triton, Hopper FP8 docs); rewriting their arch tokens would
+            # corrupt true facts (FNUZ<->OCP fp8, LDS/register limits), so they - and
+            # the arbitrary general_replay slice - are written verbatim.
+            if row.get("source") in _KORE_AUTHORED_SOURCES:
                 row = {**row, "text": normalize_text(row.get("text", ""))}
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -807,6 +917,8 @@ def build_midtrain_corpus(
         "max_seq_length": int(config.max_seq_length),
         "budget_chars": budget_chars,
         "repo_roots": [str(r) for r in repo_roots],
+        "corpus_scale": scale,
+        "max_files_per_source": max_files_per_source,
     }
     log.info("midtrain corpus built", **{
         "out": str(out_path), "total": total, "general_frac": report["general_frac"],

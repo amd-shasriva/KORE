@@ -1,0 +1,22 @@
+task_id: flash_attn_noncausal_fp8
+operation: flash_attn_noncausal_fp8
+dtype: fp8_e4m3fn
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# fp8 NON-causal (bidirectional) GQA attention vs fp32 SDPA on the dequantized fp8
+# q/k/v. The fp8 rounding is shared by candidate + reference, so the gate measures the
+# kernel's online-softmax fidelity (lands well above 25 dB); still rejects a missing
+# max-subtraction / wrong-rescale / wrong-scale-fold kernel. Complements the causal fp8
+# prefill task. STAGED DRAFT - verify on gfx950 before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 8, KV: 2, S: 256, D: 128}
+  primary: {B: 1, H: 32, KV: 8, S: 2048, D: 128}   # Llama-3.1-8B, fp8 serving (bidir)
+  validation:
+    - {B: 1, H: 32, KV: 8, S: 4096, D: 128}
+    - {B: 2, H: 16, KV: 16, S: 2048, D: 128}        # MHA bidirectional
+    - {B: 1, H: 32, KV: 8, S: 1000, D: 128}         # non-multiple seqlen edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn   # bf16 FMHA (fp8 kernel wins on QKV bytes)

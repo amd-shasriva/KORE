@@ -1,0 +1,22 @@
+task_id: flash_attn_headdim_prefill_bf16
+operation: flash_attn_headdim_prefill
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# bf16 causal GQA prefill across head-dim edges D in {64,128,192,256} (blueprint A7)
+# vs fp32 SDPA oracle. The seed pads non-power-of-2 D (192) to the next power of 2 and
+# masks it, so it stays correct; the SNR gate (25 dB low-precision attention bar) still
+# rejects a missing max-subtraction / wrong-rescale / wrong-D-mask kernel.
+# STAGED DRAFT - verify on gfx950 (D=192/256 LDS + aiter D-support) before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 8, KV: 2, S: 256, D: 64}
+  primary: {B: 1, H: 32, KV: 8, S: 2048, D: 128}   # Llama-3.1-8B head-dim
+  validation:
+    - {B: 1, H: 32, KV: 8, S: 2048, D: 64}           # small head-dim
+    - {B: 1, H: 16, KV: 1, S: 2048, D: 256}          # large head-dim (LDS pressure)
+    - {B: 1, H: 16, KV: 1, S: 2048, D: 192}          # DeepSeek qk head-dim, NON-pow2
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn   # AITER CK/ASM FMHA (D in {64,128,192,256})

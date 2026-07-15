@@ -1,0 +1,22 @@
+task_id: flash_attn_chunked_prefill_bf16
+operation: flash_attn_chunked_prefill
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# bf16 chunked-prefill (GQA) vs fp32 bottom-right-causal SDPA oracle. A chunk of Sq new
+# query tokens attends a longer Skv KV context (Sq<=Skv), causal aligned bottom-right
+# (last new token sees the whole context). Online-softmax bf16 lands ~45-49 dB; gate at
+# 25 dB rejects a missing max-subtraction / wrong-rescale / wrong-alignment kernel.
+# STAGED DRAFT - verify on gfx950 (esp. aiter bottom-right causal for Sq!=Skv) before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 8, KV: 2, Sq: 128, Skv: 256, D: 128}
+  primary: {B: 1, H: 32, KV: 8, Sq: 512, Skv: 4096, D: 128}   # 512-token chunk vs 4k ctx
+  validation:
+    - {B: 1, H: 32, KV: 8, Sq: 256, Skv: 8192, D: 128}         # small chunk, long ctx
+    - {B: 2, H: 16, KV: 16, Sq: 512, Skv: 2048, D: 128}        # MHA chunked
+    - {B: 1, H: 32, KV: 8, Sq: 500, Skv: 4000, D: 128}         # non-multiple-of-BLOCK edges
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn   # AITER flash_attn_func causal (Sq != Skv)

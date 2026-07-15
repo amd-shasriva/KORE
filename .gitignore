@@ -21,5 +21,7 @@ runs_smoke/
 # torch.compile / inductor on-disk cache (machine-local, huge, regenerable)
 .inductor_cache/
 
-# vendored external repos (large; cloned separately)
-../repos/
+# vendored external repos (large; cloned separately as embedded checkouts)
+/repos/
+# rocprofv3 profiler dumps (machine-local, regenerable)
+.rocprofv3/

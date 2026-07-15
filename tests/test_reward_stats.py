@@ -91,6 +91,16 @@ def test_scan_blocks_operator_and_module_and_fs_bypasses():
     assert scan_for_hacks("import os\nos.chmod('reference.py', 0o644)") is not None
     # env read (mode-sniff / escape channel)
     assert scan_for_hacks("import os\nif os.environ.get('BENCH'): fast()") is not None
+    # copy-reference delegation via the sibling driver/reference modules (R2 reverify):
+    # importing them, or calling the oracle/baseline fn, returns the oracle's own output.
+    assert scan_for_hacks("import driver\ndef f(x): return driver.ref.ref_fn(x)") is not None
+    assert scan_for_hacks("from driver import ref\ndef f(x): return ref(x)") is not None
+    assert scan_for_hacks("import reference\ndef f(x): return reference.fn(x)") is not None
+    assert scan_for_hacks("from reference import matmul_ref\ndef f(a,b): return matmul_ref(a,b)") is not None
+    assert scan_for_hacks("def f(x): return ref_fn(x)") is not None
+    assert scan_for_hacks("def f(a,b): return baseline_fn(a,b)") is not None
+    # a Triton driver-config attribute (e.g. tl.constexpr named driver) must NOT trip
+    assert scan_for_hacks("import triton.language as tl\ndef k(driver_id): return driver_id") is None
     # a decorator STACK must NOT trip the @ operator rule (regression)
     assert scan_for_hacks(
         "import triton\nimport triton.language as tl\n"

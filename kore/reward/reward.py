@@ -116,6 +116,13 @@ _HACK_PATTERNS = [
      "calls the reference oracle instead of computing the result"),
     # accessing the KORE package (to import the task's oracle) from a kernel.
     (r"\b(?:import\s+kore\b|from\s+kore\b|kore\.tasks)", "imports the KORE package to reach the oracle"),
+    # importing the sibling driver/reference modules (which re-export ref_fn/baseline_fn
+    # /the vendor kernel) is a copy-reference delegation hack: the candidate returns the
+    # oracle's own output and passes correctness with SNR~=inf (audit R2 reverify).
+    (r"\b(?:import|from)\s+(?:driver|reference)\b",
+     "imports the sibling driver/reference module to reach the oracle/baseline"),
+    (r"\b(?:ref_fn|baseline_fn|matmul_ref)\s*\(",
+     "calls the reference oracle / vendor baseline function instead of computing"),
     # dynamic import / code exec — an escape hatch to reach vendor libs / the oracle.
     (r"\bimportlib\b|__import__\s*\(|\bexec\s*\(|\beval\s*\(", "uses dynamic import/exec to escape"),
     (r"\bctypes\b|\bcffi\b|\bCDLL\b|dlopen|LoadLibrary", "loads a native lib via ctypes/cffi"),

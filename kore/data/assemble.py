@@ -40,9 +40,31 @@ def _read_dir(data_root: Path, sub: str, typed: bool = True) -> list:
     return recs
 
 
+def _agentic_row_is_heldout(rec: dict) -> bool:
+    """True iff an agentic record belongs to the held-out generalization split --
+    by task_id, by operator FAMILY (mla/paged), OR by foreign arch. Mirrors
+    run_campaign._rec_is_heldout so the agentic slice enforces the SAME authority as
+    every other SFT source (audit R2 sft I3: the old task_id-only check missed the
+    MLA/paged family holdout + foreign-arch trajectories)."""
+    from types import SimpleNamespace
+
+    from kore.tasks.registry import (HELDOUT_FAMILIES, HELDOUT_TASKS, TRAIN_ARCHS,
+                                     operator_family)
+    prov = rec.get("_provenance") or {}
+    tid = rec.get("task_id") or prov.get("task_id")
+    if tid and tid in HELDOUT_TASKS:
+        return True
+    arch = rec.get("arch") or rec.get("gpu") or prov.get("arch")
+    if arch is not None and arch not in TRAIN_ARCHS:
+        return True
+    op = rec.get("operation") or prov.get("op") or ((tid or "").split("_")[0] if tid else "")
+    if op and operator_family(SimpleNamespace(operation=op, task_id=tid or "")) in HELDOUT_FAMILIES:
+        return True
+    return False
+
+
 def _agentic_rows(data_root: Path) -> list[dict]:
     """Agentic trajectory records -> SFT chat rows (their ``messages``)."""
-    from kore.tasks.registry import HELDOUT_TASKS
     rows: list[dict] = []
     d = data_root / "agentic"
     if not d.exists():
@@ -51,10 +73,9 @@ def _agentic_rows(data_root: Path) -> list[dict]:
         for rec in read_jsonl(p, typed=False):
             if not isinstance(rec, dict):
                 continue
-            # Defense-in-depth: never route a held-out generalization task's
-            # trajectory into SFT, even from a legacy on-disk shard (audit C2).
-            tid = rec.get("task_id") or (rec.get("_provenance") or {}).get("task_id")
-            if tid in HELDOUT_TASKS:
+            # Defense-in-depth: never route a held-out generalization trajectory into
+            # SFT (task / FAMILY / arch), even from a legacy on-disk shard (audit C2/R2).
+            if _agentic_row_is_heldout(rec):
                 continue
             msgs = rec.get("messages")
             if msgs:

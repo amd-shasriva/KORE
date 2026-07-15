@@ -102,11 +102,14 @@ def _seed_snippet(task: Any, max_lines: int = 40) -> str:
 
 
 def _view(task: Any) -> dict:
+    gpu = _get(task, "gpu_target") or _get(task, "gpu", "gfx950")
+    uarch = "CDNA4" if gpu == "gfx950" else ("CDNA3" if gpu in ("gfx942", "gfx90a") else "CDNA")
     return {
         "task_id": _get(task, "task_id", "unknown_task"),
         "operation": _get(task, "operation") or _get(task, "task_id", "kernel"),
         "dtype": _get(task, "dtype", "bf16"),
-        "gpu": _get(task, "gpu_target") or _get(task, "gpu", "gfx942"),
+        "gpu": gpu,
+        "uarch": uarch,   # microarch string derived from the arch (gfx950 -> CDNA4)
         "snippet": _seed_snippet(task),
     }
 
@@ -117,9 +120,9 @@ def _view(task: Any) -> dict:
 def _q_occupancy_bound(v: dict, rng: random.Random) -> str:
     return (
         f"Below is the seed Triton kernel for task '{v['task_id']}' "
-        f"({v['operation']}, {v['dtype']}) targeting {v['gpu']} (CDNA3, wave64).\n\n"
+        f"({v['operation']}, {v['dtype']}) targeting {v['gpu']} ({v['uarch']}, wave64).\n\n"
         f"```python\n{v['snippet']}\n```\n\n"
-        "Explain why this kernel is likely occupancy-bound on gfx942, referencing "
+        f"Explain why this kernel is likely occupancy-bound on {v['gpu']}, referencing "
         "VGPR/LDS pressure and the wave64 wavefront, and name the single change you "
         "would try first to raise occupancy."
     )
@@ -154,7 +157,7 @@ def _q_fp32_accumulator(v: dict, rng: random.Random) -> str:
 
 def _q_wavefront_block(v: dict, rng: random.Random) -> str:
     return (
-        f"On {v['gpu']} (CDNA3) the wavefront is 64 lanes. For the '{v['operation']}' "
+        f"On {v['gpu']} ({v['uarch']}) the wavefront is 64 lanes. For the '{v['operation']}' "
         "kernel, explain why BLOCK_M/BLOCK_N/BLOCK_K should be multiples of 64 and "
         "how a non-multiple (say 96) hurts MFMA utilization and masking."
     )

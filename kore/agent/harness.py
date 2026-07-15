@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from kore.agent.format import (
+    arch_desc,
     build_agent_system_prompt,
     parse_reflection,
     parse_tool_calls,
@@ -179,7 +180,7 @@ def build_agent_user_prompt(task, seed_src: str = "", kb_context: str = "") -> s
     dtype = getattr(task, "dtype", "fp32")
     seed_block = f"\n\n## Seed kernel (optimize this)\n```python\n{seed_src}\n```" if seed_src else ""
     return (
-        f"Optimize the `{op}` Triton kernel ({dtype}) for AMD MI325X (gfx942).\n"
+        f"Optimize the `{op}` Triton kernel ({dtype}) for {arch_desc(getattr(task, 'gpu_target', None))}.\n"
         "Use your tools to build, test, and bench candidates. Keep improvements "
         "and revert regressions. Reach a correct kernel first, then maximize the "
         f"speedup vs the production baseline.{seed_block}{kb_context}"
@@ -243,7 +244,9 @@ class AgentHarness:
     def _system_prompt_for(self, phase: str) -> str:
         if self.fixed_system_prompt is not None:
             return self.fixed_system_prompt
-        return build_agent_system_prompt(self.tools, phase=phase)
+        return build_agent_system_prompt(
+            self.tools, phase=phase,
+            arch=getattr(self.task, "gpu_target", None))
 
     def _kb_context(self) -> str:
         wins = self.kb.retrieve(

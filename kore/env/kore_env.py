@@ -212,7 +212,10 @@ class KoreEnv:
             env["CUDA_VISIBLE_DEVICES"] = str(self._gpu)
         else:
             env["HIP_VISIBLE_DEVICES"] = env.get("HIP_VISIBLE_DEVICES", "0")
-        env["GPU_TARGET"] = self.cfg.gpu_target
+        # Prefer the TASK's declared arch over the global default so the driver
+        # subprocess compiles/benches + selects the fp8 encoding for the arch the
+        # task actually targets (a gfx950 task must not be built as gfx942/FNUZ).
+        env["GPU_TARGET"] = getattr(self.task, "gpu_target", None) or self.cfg.gpu_target
         env["HOME"] = str(Path(env.get("TMPDIR", "/tmp")))
         # Cap CPU BLAS/OMP threads in the driver. By default OpenBLAS spawns one
         # thread PER CORE (96 here); across 32 concurrent datagen workers that is a

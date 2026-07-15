@@ -190,7 +190,17 @@ def rebalance_by_headroom(rows: Iterable[dict], *, target_compute_frac: float = 
     """
     import math
     rows = list(rows)
-    low_idx = [i for i, r in enumerate(rows) if is_kernel_row(r) and op_class(r) != "compute_bound"]
+
+    def _is_repair(r: dict) -> bool:
+        # A verified broken->fixed repair is a correctness lesson, not a speed demo;
+        # it must NEVER be thinned to hit a compute-fraction target -- especially for
+        # the memory-bound norm/quant/softmax families the model must still get right
+        # (audit R2 sft I2: rebalance_by_headroom dropped repairs that filter_trivial_
+        # wins had deliberately exempted).
+        return (r.get("_provenance") or {}).get("kind") == "repair"
+
+    low_idx = [i for i, r in enumerate(rows)
+               if is_kernel_row(r) and op_class(r) != "compute_bound" and not _is_repair(r)]
     compute_idx = [i for i, r in enumerate(rows) if op_class(r) == "compute_bound"]
     nc = len(compute_idx)
     keep = {i for i in range(len(rows)) if i not in set(low_idx)}  # retention + compute

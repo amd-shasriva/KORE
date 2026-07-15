@@ -8,6 +8,7 @@ from kore.data.curate import (
     difficulty_score,
     filter_trivial_wins,
     quality_score,
+    rebalance_by_headroom,
     row_family,
     curate,
 )
@@ -18,6 +19,21 @@ def _win(op, sp, content="x"):
             "_source": "kernel_repair_opt",
             "_provenance": {"kind": "win", "operation": op, "speedup": sp,
                             "snr_db": 99, "verified": True}}
+
+
+def test_rebalance_by_headroom_never_drops_repairs():
+    """audit R2 sft I2: repairs (broken->fixed correctness lessons) must be exempt
+    from the compute-fraction thinning, even for memory-bound families -- exactly the
+    exemption filter_trivial_wins already has."""
+    rows = ([_win("gemm", 3.0)]                       # 1 compute-bound win
+            + [_repair("rmsnorm") for _ in range(6)]   # 6 memory-bound REPAIRS
+            + [_win("rmsnorm", 1.2) for _ in range(6)])  # 6 memory-bound wins (thinnable)
+    out, stats = rebalance_by_headroom(rows, target_compute_frac=0.5)
+    kept_repairs = sum(1 for r in out
+                       if (r.get("_provenance") or {}).get("kind") == "repair")
+    assert kept_repairs == 6           # ALL repairs survive
+    # the memory-bound WINS are still thinned toward the compute target
+    assert stats["capped"] >= 1
 
 
 def _repair(op):

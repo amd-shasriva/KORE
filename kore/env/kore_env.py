@@ -236,6 +236,15 @@ class KoreEnv:
         for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
                    "NUMEXPR_NUM_THREADS"):
             env.setdefault(_v, "4")
+        # Cap the per-driver torch-inductor compile-worker pool (audit R2 perf): each
+        # eval is its own driver subprocess, and inductor's default pool is
+        # ~min(32, cores/2) workers PER driver -- with many concurrent reverify/datagen
+        # workers that is a thread explosion that oversubscribes the box (400+ procs on
+        # 384 cores) and SLOWS every eval via CPU contention. A small fixed pool keeps
+        # total processes ~= worker_count x few, so cores feed compiles instead of
+        # thrashing on context switches. Overridable via the env.
+        env.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "4")
+        env.setdefault("MAX_JOBS", "4")   # ninja/C++ ext build parallelism per driver
         return env
 
     def _exec(self, cmd, workdir, env, timeout):

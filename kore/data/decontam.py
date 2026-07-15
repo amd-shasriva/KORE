@@ -42,8 +42,21 @@ def heldout_families() -> frozenset[str]:
 
 
 def _family_of(op_or_task: str) -> str:
-    """Infer the operator family from an operation / task_id string (no Task obj)."""
+    """Infer the operator family from an operation / task_id string (no Task obj).
+
+    Mirrors :func:`kore.tasks.registry.operator_family`. The held-out families
+    (``mla``, ``paged_attention``) MUST be matched before the generic ``attn``
+    catch, because ``paged_attn_decode`` also contains ``attn`` and ``mla_decode``
+    would otherwise fall through to its raw string. Getting this wrong makes the
+    family branch of :func:`is_contaminated_record` inert for held-out families,
+    so a generated MLA / paged variant with a novel task id could leak into the
+    corpus past the family gate (the exact-task-id check would still miss it).
+    """
     op = (op_or_task or "").lower()
+    if "mla" in op or "latent_attn" in op or "latent_attention" in op:
+        return "mla"
+    if "paged" in op:
+        return "paged_attention"
     if "attn" in op or "attention" in op:
         return "attention"
     if "topk" in op:

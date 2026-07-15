@@ -46,7 +46,7 @@ def _get(counters: dict, *names: str) -> float:
 def diagnose_bottleneck(counters: dict) -> tuple[str, str]:
     """Classify the kernel bottleneck from rocprofv3 counters. Returns (label, evidence).
 
-    Heuristics (gfx942), in priority order:
+    Heuristics (CDNA), in priority order:
       * no-matrix-cores - MFMA issue count is ~0 while VALU is nonzero (the kernel
         hand-rolls scalar FMAs instead of using tl.dot -> the matrix cores idle);
       * lds-bound - LDS stall waits dominate total waits (bank conflicts / pressure);
@@ -221,7 +221,7 @@ def counter_grounded_prompt(op: str, counters: dict, transform: Optional[str] = 
                      f"the measured bottleneck.\n" if transform else
                      "Name the single highest-impact change and why the counters justify it.\n")
     return (
-        f"You are optimizing a `{op}` Triton kernel on AMD gfx942 (CDNA3).\n"
+        f"You are optimizing a `{op}` Triton kernel on AMD gfx950 (CDNA4, MI350X).\n"
         f"MEASURED rocprofv3 hardware counters for the current kernel:\n"
         f"{_fmt_counters(counters)}\n\n"
         f"Counter-based diagnosis: {label} ({evidence}).\n\n"

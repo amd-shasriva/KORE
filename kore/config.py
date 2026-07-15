@@ -156,7 +156,11 @@ class KoreConfig:
 
     def snr_threshold_for(self, dtype: str) -> float:
         d = (dtype or "").lower()
-        if "fp8" in d or "mxfp4" in d or "fp4" in d or "mxfp8" in d:
+        # Low-precision dtypes (incl. int8, mxfp6/fp6) use the relaxed floor: their
+        # quantization error is intrinsic + shared candidate<->oracle, so the 30 dB
+        # fp32 gate would false-reject correct kernels (audit reverify #4).
+        if ("fp8" in d or "mxfp4" in d or "fp4" in d or "mxfp8" in d
+                or "int8" in d or "mxfp6" in d or "fp6" in d):
             return self.snr_threshold_lowp
         if "fp16" in d or "bf16" in d or "float16" in d or "bfloat16" in d:
             return self.snr_threshold_lowp

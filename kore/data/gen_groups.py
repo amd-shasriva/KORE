@@ -132,6 +132,8 @@ def _evaluate(env, task, source: str, cfg) -> dict:
             "snr_db": None,
             "wall_us": None,
             "error": str(e)[:200],
+            "infra_error": True,   # an exception is a TRANSIENT/infra failure, not a
+                                   # genuine correctness verdict (see reverify keep-on-infra)
         }
     rr = compute_reward(obs, source, dtype=task.dtype, cfg=cfg)
     wall_us = obs.wall_ms * 1000.0 if obs.wall_ms is not None else None
@@ -142,6 +144,9 @@ def _evaluate(env, task, source: str, cfg) -> dict:
         "speedup": rr.speedup,
         "snr_db": obs.snr_db,
         "wall_us": wall_us,
+        # Surface OOM/timeout/profiler crashes so re-verification never treats a
+        # transient failure as a real "no longer correct" verdict and drops data.
+        "infra_error": bool(getattr(obs, "infra_error", False)),
     }
 
 

@@ -1,0 +1,22 @@
+task_id: flash_attn_sink_prefill_bf16
+operation: flash_attn_sink_prefill
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# bf16 attention-SINK (gpt-oss / StreamingLLM) causal GQA prefill vs fp32 SDPA-with-sink
+# oracle. Each head has a learned sink logit in the softmax denominator (no value), an
+# always-available no-op attention slot. Online-softmax bf16 lands ~45-49 dB; gate at
+# 25 dB rejects a missing max-subtraction / wrong-rescale / missing-sink-term kernel.
+# STAGED DRAFT - verify on gfx950 (esp. aiter sink_ptr semantics) before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 8, KV: 2, S: 256, D: 128}
+  primary: {B: 1, H: 32, KV: 8, S: 2048, D: 128}   # gpt-oss-style GQA + sinks
+  validation:
+    - {B: 1, H: 32, KV: 8, S: 4096, D: 128}          # long-context
+    - {B: 2, H: 16, KV: 16, S: 2048, D: 128}         # MHA + sinks
+    - {B: 1, H: 32, KV: 8, S: 1000, D: 128}          # non-multiple-of-BLOCK seqlen edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn   # AITER flash_attn_func(..., sink_ptr=sinks)

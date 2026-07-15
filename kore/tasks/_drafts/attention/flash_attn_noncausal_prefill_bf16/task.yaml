@@ -1,0 +1,21 @@
+task_id: flash_attn_noncausal_prefill_bf16
+operation: flash_attn_noncausal_prefill
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# bf16 NON-causal (bidirectional) GQA prefill vs fp32 full-SDPA oracle. Online-softmax
+# bf16 accumulation lands ~45-49 dB; gate at 25 dB (KORE low-precision attention bar)
+# rejects a missing max-subtraction / wrong-rescale kernel. STAGED DRAFT - verify on
+# gfx950 before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 8, KV: 2, S: 256, D: 128}
+  primary: {B: 1, H: 32, KV: 8, S: 2048, D: 128}   # GQA bidirectional prefill (A4)
+  validation:
+    - {B: 2, H: 16, KV: 16, S: 512, D: 128}          # MHA bidirectional (blueprint A4)
+    - {B: 1, H: 32, KV: 8, S: 4096, D: 128}          # long-context
+    - {B: 1, H: 32, KV: 8, S: 1000, D: 128}          # non-multiple-of-BLOCK seqlen edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn   # AITER CK/ASM FMHA (causal=False)

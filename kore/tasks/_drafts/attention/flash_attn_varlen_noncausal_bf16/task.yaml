@@ -1,0 +1,23 @@
+task_id: flash_attn_varlen_noncausal_bf16
+operation: flash_attn_varlen_noncausal
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# bf16 NON-causal varlen / packed (ragged) GQA attention vs fp32 per-sequence full-SDPA
+# oracle. Sequences of different lengths are packed with no padding (cu_seqlens); each
+# attends bidirectionally within itself. DISTINCT from the live causal flash_attn_varlen
+# task (different masking + graded vs the TRUE aiter.flash_attn_varlen_func, not padded
+# dense). Online-softmax bf16 lands ~45-49 dB; gate 25 dB rejects a wrong cu_seqlens /
+# missing max-subtraction kernel. STAGED DRAFT - verify on gfx950 before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 2, H: 8, KV: 2, S: 256, D: 128}
+  primary: {B: 4, H: 32, KV: 8, S: 4096, D: 128}   # ragged bidirectional prefix batch
+  validation:
+    - {B: 8, H: 32, KV: 8, S: 2048, D: 128}          # more sequences, mixed lengths
+    - {B: 4, H: 16, KV: 16, S: 4096, D: 128}         # MHA ragged
+    - {B: 3, H: 32, KV: 8, S: 777, D: 128}           # small odd-length batch (ragged edge)
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_flash_attn_varlen   # aiter.flash_attn_varlen_func (causal=False)

@@ -1,11 +1,12 @@
 """Eval decontamination (Pillar 5 hygiene).
 
 A credible "best dataset in the world" must PROVE the training data never
-contains the held-out generalization set. KORE reserves whole operator families
-(``attention``) + any arch-specific task as held-out (see
-``kore.tasks.registry``), but today two leaks exist:
+contains the held-out generalization set. KORE reserves the structurally-distinct
+MLA and paged-KV-decode operator families (``mla`` / ``paged_attention``) + any
+arch-specific task as held-out (core attention is TRAINED); see
+``kore.tasks.registry``. Two leak paths must be closed:
   1. the midtrain corpus ingests ALL ``kore/tasks/*.py`` - including the held-out
-     attention kernels - as raw text (``source == "kore_tasks"``);
+     MLA / paged-attention kernels - as raw text (``source == "kore_tasks"``);
   2. nothing checks general-replay / mined corpus chunks for a copied held-out
      kernel.
 
@@ -190,8 +191,9 @@ def decontaminate_chat_rows(rows: Iterable[dict], n: int = 8,
     """Drop chat rows ({"messages": [...]}) whose combined text overlaps held-out src.
 
     For the general-replay slices (code/math/chat/tool) - a KernelBook/OpenCode row
-    could carry a held-out attention kernel. Pass a prebuilt ``heldout_ngrams`` to
-    avoid recomputing it per slice. Safe no-op when held-out sources can't be loaded.
+    could carry a held-out MLA / paged-attention kernel. Pass a prebuilt
+    ``heldout_ngrams`` to avoid recomputing it per slice. Safe no-op when held-out
+    sources can't be loaded.
     """
     heldout = heldout_ngrams if heldout_ngrams is not None else build_heldout_ngrams(n)
     if not heldout:

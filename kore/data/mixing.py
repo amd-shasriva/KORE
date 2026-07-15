@@ -3,12 +3,12 @@
 Assembles the final Stage-1 SFT corpus by sampling several capability sources at
 their configured fractions (see :class:`~kore.policy.configs.MultiCapSFTConfig`):
 
-    kernel_repair_opt : 0.35   broken->fixed + optimization kernel turns
+    kernel_repair_opt : 0.28   broken->fixed + optimization kernel turns
     kernel_qa         : 0.10   kernel/GPU/ROCm QA + explanation (gen_qa.py)
-    agentic_tooluse   : 0.10   Hermes tool-use trajectories (the orchestration skill)
-    general_code      : 0.20   \
-    math_reasoning    : 0.15    >  ~45% general replay = the retention backbone
-    general_chat      : 0.10   /
+    agentic_tooluse   : 0.12   Hermes tool-use trajectories (the orchestration skill)
+    general_code      : 0.13   \
+    math_reasoning    : 0.10    >  ~50% general replay = the retention backbone
+    general_chat      : 0.27   /
 
 Design goals:
   * Sample each source at its target fraction of ``total``.
@@ -46,7 +46,7 @@ SOURCE_FRACTION_FIELDS: dict[str, str] = {
     "general_chat": "frac_general_chat",
 }
 
-# Sources that make up the ~45% general-retention half (for reporting/wiring).
+# Sources that make up the ~50% general-retention half (for reporting/wiring).
 GENERAL_REPLAY_SOURCES = ("general_code", "math_reasoning", "general_chat")
 
 SOURCE_TAG_KEY = "_source"

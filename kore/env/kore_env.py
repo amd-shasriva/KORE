@@ -14,8 +14,11 @@ that returns a reward :class:`Observation`. Hardening (see audits):
 * **Infra vs kernel.** Timeouts, OOM-kills, segfaults, and missing-dependency
   imports are classified as ``infra_error`` - never cached, never fed to the
   policy as a kernel-correctness signal.
-* **Trustworthy timing.** Each (shape, impl) is benched several times; the
-  coefficient of variation is recorded and high-variance speedups are damped.
+* **Trustworthy timing.** Timing is cold-cache (the driver L2-flushes between
+  timed iters) and each (shape, impl) is benched several times; the coefficient of
+  variation is recorded and high-variance speedups are damped. Candidate correctness
+  is re-verified AFTER the timed loop, so a kernel that is correct while checked but
+  garbage while timed (a stateful invocation-count hack) is caught and rejected.
 """
 
 from __future__ import annotations
@@ -199,7 +202,9 @@ class KoreEnv:
     # ------------------------------------------------------------------ #
     def _env(self) -> dict:
         env = os.environ.copy()
-        project_root = str(Path(__file__).resolve().parents[2])  # /root/Kore-rl/kore
+        # Repo root (the parent of the kore/ package). Prepended to PYTHONPATH so the
+        # compile/bench driver subprocess can ``import kore.*`` (e.g. _genops.driver_main).
+        project_root = str(Path(__file__).resolve().parents[2])
         env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
         if self._gpu is not None:
             # ABSOLUTE physical GPU id for the compile/bench subprocess. Set BOTH
@@ -451,7 +456,7 @@ class KoreEnv:
             from kore.verifier.pmc import COUNTER_SETS
             try:
                 from kore.verifier.pmc import counter_passes
-                passes = counter_passes("grounding")   # real gfx942 BW/L2/occupancy set
+                passes = counter_passes("grounding")   # real gfx950/gfx942 BW/L2/occupancy set
             except Exception:  # noqa: BLE001 - older pmc: single-pass fallback
                 passes = [COUNTER_SETS["full"]]
         except Exception:  # noqa: BLE001

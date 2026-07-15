@@ -2,7 +2,7 @@
 
 **Kernel-Optimization Reinforcement Learning for AMD GPUs.** KORE trains a language model to write fast, provably-correct ROCm/Triton GPU kernels by descending a **physics-grounded roofline residual** - the measured distance to each kernel's Speed-of-Light lower bound - under a **verifiable correctness oracle**, on real AMD Instinct silicon (gfx942 / CDNA3, gfx950 / CDNA4).
 
-> The thesis: don't reward *relative speedup vs. an arbitrary baseline* (which is gameable and operator-specific). Reward *absolute attainment of the hardware's physical limit* (`η = T_min / T_measured`), gate every reward behind an adversarial + metamorphic correctness oracle, and hold out an entire operator family to measure zero-shot cross-family generalization.
+> The thesis: don't reward *relative speedup vs. an arbitrary baseline* (which is gameable and operator-specific). Reward *absolute attainment of the hardware's physical limit* (`η = T_min / T_measured`), gate every reward behind an adversarial + metamorphic correctness oracle, and hold out two structurally-distinct attention variants (MLA latent attention and paged-KV decode) to measure zero-shot cross-family generalization while still training core attention for product capability.
 
 ---
 
@@ -39,7 +39,7 @@ KORE replaces both with hardware truth:
 | Reward signal | relative speedup vs. baseline | **roofline attainment** `η = T_min/T_measured` (absolute, physics-grounded) |
 | Correctness | ~5 random trials | **provable adversarial + metamorphic oracle** (no lucky pass on enumerated regimes) |
 | Baseline honesty | torch-eager | **production vendor kernels** (AITER / hipBLASLt), cold-cache (L2-flushed) timing |
-| Generalization claim | in-distribution | **held-out operator family** (attention) for zero-shot cross-family eval |
+| Generalization claim | in-distribution | **held-out families** (MLA latent attention + paged-KV decode) for zero-shot cross-family eval |
 | Capability retention | not measured | **retention gate** after every stage (MMLU/HumanEval/IFEval/BFCL/LiveCodeBench/MT-Bench) |
 
 The physical premise was pre-registered and falsification-tested before any training - see [`Kore-prelim-analysis`](../Kore-prelim-analysis/) and [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md). Headline P0 result: the runtime residual `T_measured − T_min` reconstructs from named PMC terms (memory-stall + occupancy-deficit) with **R² = 0.978** on gfx950 - the "named gradient" a residual-descent reward would exploit is real in the hardware.
@@ -73,7 +73,7 @@ hack  <  compile_fail  <  incorrect  <  correct
 
 **Correctness oracle** (`kore/verify/`). Four prongs - random (statistical), **adversarial** (deterministic edge regimes), **metamorphic** (algebraic self-consistency), and **determinism** - so a kernel wrong on any enumerated regime is rejected with certainty ("no lucky pass").
 
-**Generalization** (`kore/eval/generalization.py`). The **attention** family is reserved: trained never, evaluated zero-shot, to measure genuine cross-operator transfer.
+**Generalization** (`kore/eval/generalization.py`). Core attention (flash prefill / decode / sliding-window / varlen / fp8) is trained so the product model is strong at attention, but two structurally-distinct variants are **reserved** whole: MLA (DeepSeek latent attention) and paged-KV decode. They are trained never and evaluated zero-shot, so the eval measures genuine cross-family transfer rather than in-distribution recall. The reservation is by *family* (`kore/tasks/registry.py`), so any generated or mined variant of a held-out family stays out of training, not just the two seed task ids.
 
 > **A note on scope, stated honestly.** A follow-up "crux" experiment (`kore/analysis/residual_transfer.py`) showed the residual *value* does **not** transfer across operator families out-of-the-box (leave-one-family-out median R² ≈ 0.11 raw / negative normalized). KORE therefore trains on the dense per-family residual signal (validated at R²≈0.98 pooled) rather than claiming a universal residual latent. See [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md).
 
@@ -84,7 +84,7 @@ hack  <  compile_fail  <  incorrect  <  correct
 ```mermaid
 flowchart TB
   subgraph reg["Task registry (kore/tasks)"]
-    T["~181 kernel tasks<br/>reference oracle + vendor baseline + shapes"]
+    T["251 kernel tasks<br/>reference oracle + vendor baseline + shapes"]
   end
   subgraph env["Verified environment (kore/env)"]
     KE["KoreEnv: compile → correctness → cold-cache bench → PMC"]
@@ -147,7 +147,7 @@ Each box is a Python subpackage under `kore/` with its own README:
 
 ## The training pipeline
 
-One command (`scripts/run_campaign.py`) orchestrates nine stages. It is **manifest-resumable**: every completed stage whose on-disk artifact is present is skipped on restart.
+One command (`scripts/run_campaign.py`) orchestrates the campaign. The default run is **nine stages** (below); two more are **opt-in**: `reverify` (re-grade any existing data under the current strong oracle before training) and `evolve` (co-evolution task-frontier expansion). The full ordered set (`ALL_STAGES`) is `reverify, datagen, evolve, agentic, build, midtrain, sft, dpo, grpo, soup, eval`. The campaign is **manifest-resumable**: every completed stage whose on-disk artifact is present is skipped on restart.
 
 ```mermaid
 flowchart LR
@@ -165,7 +165,9 @@ flowchart LR
 
 | Stage | What it does | Key module |
 | --- | --- | --- |
+| `reverify` *(opt-in)* | Re-grade existing repair / win / group shards under the current strong oracle (compiled + vendor baseline, cold-cache timing, adversarial correctness), so data generated under a weaker oracle earns honest numbers without regenerating it | `kore/data/reverify.py` |
 | `datagen` | Teacher generates verified repair / ranked-group / win kernels (parallel, shard-resumable) | `kore/data` |
+| `evolve` *(opt-in)* | Evolutionary kernel datagen: a D-MAB bandit plus MAP-Elites islands plus value-model prefilter mine extra verified win / group records per train task | `kore/data/evolve.py` |
 | `agentic` | Multi-turn tool-use trajectories (build/test/bench/pmc) | `kore/agent` |
 | `build` | Assemble multi-capability SFT mix + DPO pairs (+ hard negatives), leakage-split | `kore/data` |
 | `midtrain` | Continued pretraining on ROCm/HIP/Triton corpus → SFT base | `kore/policy/midtrain.py` |

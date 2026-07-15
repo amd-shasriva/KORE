@@ -144,11 +144,13 @@ def roofline_dense_score(
     hardware-grounded components - the arithmetic mean of whichever can be computed:
 
       * roofline attainment  ``A = attained_fraction(measured_ms, flops, bytes)/100``
-        clamped to ``[0, 1]`` - the fraction of the MI300X (gfx942) roofline the
+        clamped to ``[0, 1]`` - the fraction of the target-arch roofline the
         kernel actually reached (0 == idle, 1 == on the roofline; >1 from cache
-        reuse is clamped). This is the "far-from-roofline -> low, near-roofline ->
-        high" signal that gives gradient in the flat correct-but-slow band where the
-        wall-clock speedup reward is uninformative.
+        reuse is clamped). Peaks resolve per dtype and honor the KORE_PEAK_* env
+        overrides, so this is not pinned to one device. This is the "far-from-
+        roofline -> low, near-roofline -> high" signal that gives gradient in the
+        flat correct-but-slow band where the wall-clock speedup reward is
+        uninformative.
       * issue efficiency     ``I = 1 - stall_fraction(cand)`` - the ALU-busy fraction
         from the candidate's OWN rocprofv3 counters (a kernel that spends its cycles
         stalled on ``SQ_WAIT_*`` is, by definition, far from any roofline).

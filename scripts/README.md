@@ -8,7 +8,7 @@ Everything needed to run KORE end-to-end: the campaign orchestrator, the portabl
 
 | Script | Purpose |
 | --- | --- |
-| `run_campaign.py` | The orchestrator - 9 stages, manifest resume, retention gates, CLI |
+| `run_campaign.py` | The orchestrator: 9 default stages (plus 2 opt-in, `reverify` and `evolve`), manifest resume, retention gates, CLI |
 | `run_conductor_14b.sh` | **Portable** full-14B launcher (repo-root-relative, loads `.env.local`, project venv) |
 | `tmux_campaign.sh` | Run the conductor launcher in a durable detached tmux session |
 | `run_full_14b.sh` | Legacy full-14B launcher with **hardcoded** dev-node paths (`/root/Kore-rl/kore`) |
@@ -42,7 +42,7 @@ flowchart LR
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--model` | `Qwen/Qwen3-14B` | base model |
-| `--stages` | all | comma-list subset of `datagen,evolve,agentic,build,midtrain,sft,dpo,grpo,soup,eval` |
+| `--stages` | 9 defaults | comma-list subset of `reverify,datagen,evolve,agentic,build,midtrain,sft,dpo,grpo,soup,eval`; the default omits the opt-in `reverify` and `evolve` |
 | `--dry-run` | off | import-check + print plan, no GPU/side effects |
 | `--force` | off | re-run requested stages ignoring the manifest |
 | `--full-ft` / `--lora` | `--lora` | full-parameter FSDP vs. LoRA bring-up |

@@ -1,4 +1,8 @@
-"""Parser for rocprofv3 CSV output (gfx942 / MI300X).
+"""Parser for rocprofv3 CSV output (gfx942/CDNA3 and gfx950/CDNA4).
+
+The layout, not the arch, drives parsing (LONG vs WIDE, see
+:func:`parse_rocprofv3_csv`), so the same parser serves both the CDNA3 and the
+default CDNA4 target.
 
 Besides the hardware ``counters`` dict, rocprofv3 emits per-dispatch kernel
 resource metadata (VGPR/SGPR/AccumVGPR usage, LDS block size, scratch size).
@@ -56,8 +60,9 @@ class KernelPMC:
     def total_vgpr(self) -> Optional[int]:
         """Total VGPRs/lane (architected + MFMA accumulator) - the occupancy input.
 
-        On CDNA3 the register file is shared by regular and accumulator VGPRs, so
-        occupancy is driven by their sum. None if neither was reported.
+        On CDNA3 and CDNA4 the register file is shared by regular and accumulator
+        VGPRs (not doubled), so occupancy is driven by their sum. None if neither
+        was reported.
         """
         if self.vgpr_count is None and self.accum_vgpr_count is None:
             return None

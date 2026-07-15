@@ -17,14 +17,14 @@
 # The <config.json> is a flat map of the stage's Config fields (see
 # docs/DISTRIBUTED.md). It should have `use_lora: false` for real full-FT; each
 # stage entrypoint defaults `distributed: true` so FSDP kicks in. LoRA runs do
-# NOT need this launcher — the single-process path handles them.
+# NOT need this launcher - the single-process path handles them.
 #
 # Each stage runs `python -m kore.policy.<stage> <config.json>`, which must read
 # a JSON config positional. sft/dpo/grpo ship that entrypoint (grpo via
 # `grpo_config_from_dict` + `__main__`), so `--full-ft` shells each out here for
 # real full-parameter sharded (ZeRO-3/FSDP) training. midtrain is owned by a
 # sibling track and gains it when its `-m` JSON entry lands (until then the
-# campaign runs midtrain in-process with a LOUD warning — see
+# campaign runs midtrain in-process with a LOUD warning - see
 # docs/DISTRIBUTED.md#full-ft-per-stage-status). The launcher accepts all four so
 # the plumbing is ready the moment any remaining entrypoint ships.
 #

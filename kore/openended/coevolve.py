@@ -15,8 +15,10 @@ paradigm. Each generation:
 
 The loop is PURE orchestration: the policy, the measurement (env), and the
 distillation sink are INJECTED, so it is fully unit-testable on CPU with mocks and
-GPU-agnostic. It is deliberately decoupled from run_campaign/grpo - a driver script
-wires a real served policy + KoreEnv + the GRPO update into these hooks.
+GPU-agnostic. This standalone loop is runner-agnostic (a driver script wires a
+real served policy + KoreEnv + the GRPO update into these hooks); the in-training
+integration lives in :class:`kore.openended.controller.CoevolutionController`,
+which multi-turn GRPO drives directly when ``coevolve`` is enabled.
 
 Why kernels make open-endedness actually work (the paradigm claim): the task space
 is infinitely + cheaply generatable, every task is ground-truth VERIFIABLE, and

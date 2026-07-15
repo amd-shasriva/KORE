@@ -1,9 +1,10 @@
-"""Operator-generation engine for scaling the KORE task suite (15 -> 100+).
+"""Operator-generation engine: scale the KORE task suite from a hand-authored core
+to 200+ generated operator tasks (this engine emits the 201 ``gen_*`` tasks).
 
 A KORE task = task.yaml + reference.py (torch oracle + inputs) + seed_triton.py
 (a compiling starter kernel) + driver.py (the verifier contract). Hand-writing
-120 of those is infeasible *and* error-prone, so this engine generates them from a
-declarative op spec:
+hundreds of those is infeasible *and* error-prone, so this engine generates them
+from a declarative op spec:
 
   * ``make_reference(op, family, dtype)`` -> the reference.py namespace (parse_shape,
     get_inputs, ref_fn oracle, baseline_fn production path, arity, entry_name).
@@ -13,7 +14,7 @@ declarative op spec:
   * ``driver_main(ref, task_dir)`` -> the generic KernelForge driver: multi-trial
     correctness + cold-cache timing + the POST-TIMING anti-hack re-verification
     (candidate module cached so a stateful invocation-count kernel is caught), in
-    ONE place (no 15x driver duplication for generated ops).
+    ONE place (rather than duplicating the driver into every generated task dir).
 
 Generated ops use the torch FRAMEWORK op as the production baseline (the honest
 ROCm serving path for elementwise/reduction ops, exactly like the shipped
@@ -661,8 +662,8 @@ _GEMM_TMPL = '''"""GENERATED seed Triton GEMM + fused epilogue for {op} ({dtype}
 C = act(A @ B [+ bias]) in ONE kernel (fp32 accumulate, {tldt} store). torch runs
 this as matmul (-> hipBLASLt) + bias + activation = SEPARATE kernels, so fusing
 saves HBM round-trips of the [M,N] output -> real headroom vs the vendor path.
-Grouped tiling + K-mask (ROCm/gfx942-safe, libdevice-free act). Regenerate via
-kore/tasks/generate_ops.py - do not hand-edit.
+Grouped tiling + K-mask (ROCm/CDNA-safe on gfx942/gfx950, libdevice-free act).
+Regenerate via kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 

@@ -4,7 +4,7 @@
 # Why tmux: it detaches the training process from your SSH connection, so the run
 # survives a dropped/closed terminal for the life of the node reservation. Files
 # persist under your account, and the campaign is manifest-resumable, so if the
-# reservation ends you just re-reserve and re-run this script — it resumes.
+# reservation ends you just re-reserve and re-run this script - it resumes.
 #
 # Usage:
 #   bash scripts/tmux_campaign.sh            # start (or report an existing run)
@@ -31,7 +31,7 @@ if [ "${1:-}" = "--status" ]; then
 fi
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
-  echo "[tmux] session '$SESSION' already exists — NOT starting a second run (GPU contention)."
+  echo "[tmux] session '$SESSION' already exists - NOT starting a second run (GPU contention)."
   echo "[tmux] attach:  tmux attach -t $SESSION"
   echo "[tmux] status:  bash scripts/tmux_campaign.sh --status"
   exit 0

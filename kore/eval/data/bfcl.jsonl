@@ -1,4 +1,4 @@
-# SMOKE SUBSET — BFCL-style function/tool-calling cases (single-turn). NOT the full bench.
+# SMOKE SUBSET - BFCL-style function/tool-calling cases (single-turn). NOT the full bench.
 # TODO: load the full Berkeley Function-Calling Leaderboard set (gorilla-llm/BFCL) for a real run.
 # The model must emit a JSON object {"name": <tool>, "arguments": {...}}. Scoring checks the tool name and args match.
 {"id": "bfcl-0", "question": "What is the current weather in Paris? Report the temperature in celsius.", "tools": [{"name": "get_weather", "parameters": ["location", "unit"]}], "answer": {"name": "get_weather", "arguments": {"location": "Paris", "unit": "celsius"}}}

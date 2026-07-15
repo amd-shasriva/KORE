@@ -269,10 +269,11 @@ _DEFAULT_ARCH_DESC = "AMD Instinct MI350X (gfx950 / CDNA4)"
 
 
 def arch_desc(arch: Optional[str]) -> str:
-    """Human descriptor for an arch slug ('gfx950' -> 'AMD MI355X (gfx950 / CDNA4)').
+    """Human descriptor for an arch slug ('gfx950' -> 'AMD Instinct MI350X (gfx950 / CDNA4)').
 
-    Unknown/empty slugs fall back to the historical default so existing callers
-    (and their golden strings) are byte-for-byte unchanged when ``arch`` is None.
+    Unknown/empty slugs (including ``arch=None``) fall back to
+    ``_DEFAULT_ARCH_DESC``, the KORE target hardware (gfx950/CDNA4), so an
+    un-arched caller advertises the current target, not a previous-gen board.
     """
     if not arch:
         return _DEFAULT_ARCH_DESC
@@ -280,7 +281,7 @@ def arch_desc(arch: Optional[str]) -> str:
 
 
 def _hermes_header(arch: Optional[str] = None) -> str:
-    """The Hermes header, parameterized by target arch (default = legacy gfx942)."""
+    """The Hermes header, parameterized by target arch (default = KORE target gfx950/CDNA4)."""
     desc = arch_desc(arch)
     return (
         f"You are KORE, an expert {desc} kernel engineer operating as "
@@ -297,7 +298,7 @@ def _hermes_header(arch: Optional[str] = None) -> str:
     )
 
 
-# Backward-compatible module constant (identical to the historical string).
+# Backward-compatible module constant: the default-arch (gfx950/CDNA4) header.
 _HERMES_HEADER = _hermes_header()
 
 _REFLECT_GUIDE = """\
@@ -341,7 +342,8 @@ def build_agent_system_prompt(
     ("correctness" | "optimize"); when ``None`` a neutral both-phases prompt is
     produced. The reflection protocol is always advertised so the policy knows
     how to introspect after a failure. ``arch`` (e.g. "gfx950") sets the target
-    descriptor in the header; ``None`` preserves the legacy gfx942 wording.
+    descriptor in the header; ``None`` falls back to the KORE target default
+    (gfx950/CDNA4).
     """
     tools = tools or TOOL_SCHEMAS
     lines = [_hermes_header(arch), "", _REFLECT_GUIDE]

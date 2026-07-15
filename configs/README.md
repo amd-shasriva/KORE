@@ -58,6 +58,6 @@ Scaling notes are inline: flip `fsdp_offload_params: true` for 32B, add nodes (`
 }
 ```
 
-> GRPO distributed effectively uses ZeRO-2 (SHARD_GRAD_OP) at rollout time so `model.generate()` works under sharding - see [`kore/policy`](../kore/policy/README.md) FSDP notes.
+> Note: the `zero_stage: 3` and `synced_gpus: true` fields above are superseded at runtime. Distributed GRPO runs ZeRO-2 (`SHARD_GRAD_OP`, set authoritatively in `accelerate_fsdp_grpo.yaml`) and rolls out against a full-weight local replica synced once per step, so `model.generate()` never triggers an FSDP all-gather. See [`kore/policy`](../kore/policy/README.md) FSDP notes.
 
 Every field maps to a `GRPOConfig` dataclass field (`kore/policy/configs.py`). See [`scripts/README.md`](../scripts/README.md) for how these are launched and [`docs/DISTRIBUTED.md`](../docs/DISTRIBUTED.md) for sizing.

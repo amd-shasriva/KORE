@@ -60,7 +60,8 @@ def adversarial_patterns(shape, dtype: str, seed: int = 0) -> list[tuple[str, np
     The battery (each of ``shape``): zeros, ones, negative ones, a nonzero constant
     (all-equal), large ``±`` magnitudes, small magnitudes, denormal-ish, a signed ramp
     that crosses every activation knot, sign-alternating checkerboard, a sparse-spike
-    tensor (mostly zero), and explicit activation-knot values (``0, ±1, ±3, ±6``).
+    tensor (mostly zero), ``±`` inf-adjacent (the dtype's max finite value), explicit
+    activation-knot values (``0, ±1, ±3, ±6, ±0.5, 2.0``), and a mixed-magnitude tile.
     """
     dims = _dims(shape)
     n = int(np.prod(dims)) if dims else 1
@@ -104,7 +105,7 @@ def adversarial_patterns(shape, dtype: str, seed: int = 0) -> list[tuple[str, np
     pats.append(("inf_adjacent_pos", full(mx)))
     pats.append(("inf_adjacent_neg", full(-mx)))
 
-    # explicit activation knots tiled across the tensor (0, ±1, ±3, ±6, ±0.5).
+    # explicit activation knots tiled across the tensor (0, ±1, ±3, ±6, ±0.5, 2.0).
     knots = np.array([0.0, 1.0, -1.0, 3.0, -3.0, 6.0, -6.0, 0.5, -0.5, 2.0],
                      dtype=np.float64)
     tiled = np.resize(knots, n).reshape(dims)

@@ -223,7 +223,8 @@ def roofline(flops: float, bytes: float, dtype: str = "bf16") -> dict:
       * ``arithmetic_intensity``  - FLOP/byte (op intensity; dtype-independent).
       * ``bound``                 - ``"compute"`` if AI >= ridge point else ``"memory"``.
       * ``peak_attainable_flops`` - ``min(peak_flops, AI * peak_bw)`` FLOP/s, the
-                                     highest FLOP/s this op could reach on MI300X.
+                                     highest FLOP/s this op could reach on the ACTIVE
+                                     arch (gfx950 by default; see ``_detect_arch``).
       * ``ridge_point``           - peak_flops / peak_bw (FLOP/byte); ops above it
                                      are compute-bound.
       * ``peak_flops`` / ``peak_bandwidth_bytes_per_s`` - the dtype's ceilings used.
@@ -260,7 +261,7 @@ def roofline(flops: float, bytes: float, dtype: str = "bf16") -> dict:
 
 def attained_fraction(measured_ms: float, flops: float, bytes: float,
                       dtype: str = "bf16") -> float:
-    """Percent of the MI300X roofline peak a kernel achieved at ``measured_ms``.
+    """Percent of the ACTIVE-arch roofline peak a kernel achieved at ``measured_ms``.
 
     ``100 * (flops / measured_s) / peak_attainable_flops``. 100% == on the roofline.
     Values >100% are legitimate and signal cache reuse (true HBM traffic below the

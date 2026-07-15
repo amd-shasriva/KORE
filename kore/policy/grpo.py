@@ -924,9 +924,10 @@ def _train_grpo_fallback(config, tasks):
 
     When ``config.distributed`` full-FT is requested (``use_lora=False`` under an
     ``accelerate launch`` process group) this dispatches to
-    :func:`_train_grpo_distributed`, which shards the policy + reference across all
-    ranks (ZeRO-3-equivalent) so no full 14B replica ever lives on one GPU. Every
-    single-process / LoRA / CPU path below is left byte-for-byte unchanged.
+    :func:`_train_grpo_distributed`, which shards the policy's gradients +
+    optimizer state across all ranks (FSDP SHARD_GRAD_OP / ZeRO-2 by default) so a
+    14B/32B full-FT fits on 8x MI300. Every single-process / LoRA / CPU path below
+    is left byte-for-byte unchanged.
     """
     from kore.policy.configs import grpo_distributed_enabled
 
@@ -1263,9 +1264,9 @@ _train_grpo_inprocess = _train_grpo_fallback
 
 
 # --------------------------------------------------------------------------- #
-# FULL-PARAMETER SHARDED GRPO (distributed, ZeRO-3-equivalent)
+# FULL-PARAMETER SHARDED GRPO (distributed)
 #
-# Sharding approach - chosen: torch FSDP FULL_SHARD (ZeRO-3-equivalent), with
+# Sharding approach - chosen: torch FSDP in SHARD_GRAD_OP (ZeRO-2) mode, with
 # DeepSpeed ZeRO-3 fully wired and selectable (``sharding_backend="deepspeed"``).
 # Why FSDP is the default for THIS loop (documented, deliberate):
 #   * The KORE objective uses an O(1-sample) MICRO-BATCHED backward - many
@@ -1277,13 +1278,19 @@ _train_grpo_inprocess = _train_grpo_fallback
 #     per-step sample count. FSDP maps onto the recipe with zero contortion.
 #   * FSDP is torch-native -> guaranteed ROCm/gfx942 support (no compiled ops to
 #     build, unlike DeepSpeed's fused/CPU-Adam kernels).
-#   * It reuses the SAME FULL_SHARD recipe the KORE SFT/DPO stages already run.
-# Generation robustness: both FSDP and ZeRO-3 GATHER each wrapped block's params
-# per-forward and reshard after, so ``model.generate`` works out of the box
-# (every decode step re-gathers). ``synced_gpus=True`` keeps ranks in lockstep on
-# ragged completion lengths. The frozen REFERENCE is prepared as a sharded eval
-# model (never a full replica per GPU). Cross-rank rewards are all-gathered so the
-# group-relative GRPO baseline is over the FULL group (all trajectories/ranks).
+#   * SHARD_GRAD_OP shards the two dominant full-FT memory terms (gradients +
+#     optimizer state) across ranks so a 14B/32B full-FT fits on 8x MI300, while
+#     leaving PARAMS resident per rank (never resharded after forward) - see
+#     ``build_fsdp_plugin`` for why that is the enabler for co-located online RL.
+# Generation: rather than generate ON the sharded policy (per-layer all-gathers
+# that interleave with ``generate``'s own collectives and deadlock on ragged
+# lengths), each step syncs the live policy weights into a PLAIN full-weight
+# per-rank replica (``summon_full_params`` + tensor copy, no forward) and rolls
+# out LOCALLY on that replica with ZERO FSDP collectives - so ``synced_gpus`` is
+# OFF and ragged decode can never deadlock. The frozen KL-anchor REFERENCE is
+# likewise a full per-rank replica (fits at 14B/32B; shard it for 70B). Cross-rank
+# rewards are all-gathered so the group-relative GRPO baseline is over the FULL
+# group (all trajectories/ranks).
 # --------------------------------------------------------------------------- #
 def merge_across_ranks(per_rank: list[list]) -> list:
     """Flatten a per-rank list-of-lists into one global list (rank-ordered)."""
@@ -1364,14 +1371,19 @@ def _rank_slice(n: int, rank: int, world: int) -> list[int]:
 
 
 def build_fsdp_plugin(config):
-    """Build an accelerate ``FullyShardedDataParallelPlugin`` (FULL_SHARD/ZeRO-3-eq).
+    """Build an accelerate ``FullyShardedDataParallelPlugin`` in SHARD_GRAD_OP (ZeRO-2) mode.
 
-    Shards params + grads + optimizer state across ranks, wraps one transformer
-    decoder block per FSDP unit (auto-detected from ``model_id`` when
-    ``fsdp_transformer_layer_cls`` is unset), reshards after forward (so
-    ``model.generate`` re-gathers per decode step), and routes activation
-    checkpointing through FSDP. ``cpu_offload`` moves params+optim to host RAM for
-    32B/70B. Heavy import kept local so ``import kore.policy.grpo`` stays torch-free.
+    Shards gradients + optimizer state across ranks but NOT params: SHARD_GRAD_OP
+    keeps params resident per rank and does NOT reshard after forward, so the
+    online rollout / logp forwards always see full 2-D weights (the reshard comment
+    below has the full rationale). Wraps one transformer decoder block per FSDP
+    unit (auto-detected from ``model_id`` when ``fsdp_transformer_layer_cls`` is
+    unset). Activation checkpointing is enabled on the MODEL (HF
+    ``gradient_checkpointing``) BEFORE ``prepare``, NOT through the FSDP plugin
+    (its external checkpoint_wrapper mismatches saved-tensor counts on an
+    FSDP1/``use_orig_params`` unit). ``cpu_offload`` moves params+optim to host RAM
+    for 32B/70B. Heavy import kept local so ``import kore.policy.grpo`` stays
+    torch-free.
     """
     from accelerate import FullyShardedDataParallelPlugin
 
@@ -1547,26 +1559,16 @@ def _accumulate_grpo_grads_distributed(local_terms, logp_fn, *, accelerator,
 
 
 def _summon_full_params_ctx(*models):
-    """Gather the ROOT FSDP unit's params (embed/lm_head) for ``generate()``.
+    """Gather the FULL (un-sharded) policy params so they can be copied out.
 
-    ``model.generate()`` calls methods other than ``forward`` (e.g. it reads the
-    input embedding directly), and FSDP only all-gathers on ``forward``. Under
-    ``FULL_SHARD`` that leaves the root module's ``embed_tokens``/``lm_head``
-    flattened -> ``RuntimeError: 'weight' must be 2-D``.
-
-    The CANONICAL fix (pytorch/pytorch#123962, huggingface/transformers#30228) is
-    ``summon_full_params(root, recurse=False)``: it un-sharded ONLY the root unit's
-    params for the duration, while the separately-wrapped decoder blocks keep
-    sharding/unsharding through their OWN ``forward`` all-gathers. This is
-    memory-efficient (layers stay sharded) and - crucially - does NOT touch the
-    nested units' FSDP state, so the subsequent sharded TRAINING forward re-gathers
-    cleanly. (``recurse=True`` unshards the whole tree and leaves the nested state
-    inconsistent -> ``embed_tokens`` on CPU at the next training forward:
-    "index is on cuda:N, other tensors on cpu".)
-
-    Because the decoder blocks still run collective all-gathers during generation,
-    the caller MUST keep ranks in lockstep (``synced_gpus=True``) and issue the
-    SAME number of generate calls on every rank (equal trajectories/turns). Non-FSDP
+    Used once per step to snapshot the sharded live policy into the plain
+    full-weight rollout replica: :func:`_sync_gen_replica` does the tensor copies
+    INSIDE this context (NO ``forward``/``generate`` ever runs under summon, which
+    is the canonical deadlock-free use of ``summon_full_params``). ``recurse=True``
+    un-shards the WHOLE tree on each rank: the ``embed_tokens``/``lm_head`` are
+    wrapped in a nested FSDP unit here, so ``recurse=False`` would not reach them
+    and the copy would see a flattened 1-D weight (``RuntimeError: 'weight' must be
+    2-D``). ``writeback=False`` since the rollout never mutates params. Non-FSDP
     models (LoRA / single-process / DeepSpeed) get a no-op context.
     """
     import contextlib
@@ -1722,11 +1724,14 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
 def _train_grpo_distributed(config, tasks):
     """Sharded FULL-PARAMETER multi-turn GRPO across an ``accelerate`` process group.
 
-    The policy (and frozen KL-anchor reference) are FULL-sharded across all ranks
-    (FSDP FULL_SHARD by default, DeepSpeed ZeRO-3 opt-in) so no full 14B replica
-    ever lives on one GPU. Per step:
-      1. each rank rolls out its strided slice of every Kevin group's ``G``
-         trajectories (serial refinement; ``synced_gpus`` generation);
+    The policy is sharded across all ranks (FSDP SHARD_GRAD_OP / ZeRO-2 by
+    default, DeepSpeed ZeRO-3 opt-in): gradients + optimizer state are split across
+    ranks so a 14B/32B full-FT fits on 8x MI300 (ZeRO-2 leaves params resident per
+    rank; ZeRO-3 shards them too). Per step:
+      1. the live policy weights are synced into a plain full-weight per-rank
+         replica, and each rank rolls out its strided slice of every Kevin group's
+         ``G`` trajectories LOCALLY on that replica (serial refinement, zero FSDP
+         collectives, so ``synced_gpus`` stays off);
       2. per-trajectory rewards + per-turn returns + correct-kernels are
          ALL-GATHERED so StarPO-S / dynamic-sampling and the group-relative
          advantage baseline are computed over the FULL group (all ranks);
@@ -2182,8 +2187,9 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         cands: list[tuple] = []  # (seq_detached, text, code)
         with torch.no_grad():
             # Fix 2: pass top_p (+temperature) so sampling matches the config.
-            # synced_gpus keeps all ranks in lockstep under ZeRO-3/FSDP sharded
-            # generation (default False -> single-process behavior unchanged).
+            # ``_grpo_synced_gpus`` stays OFF: generation runs on a full-weight
+            # (unsharded) model in both paths - the distributed loop uses a per-rank
+            # replica - so there are no per-decode FSDP collectives to synchronize.
             gen = model.generate(ids, max_new_tokens=config.max_response_length,
                                  do_sample=True, temperature=config.temperature,
                                  top_p=config.top_p, num_return_sequences=n_cand,
@@ -2368,7 +2374,8 @@ class _HFChatPolicy:
         ids = _truncate_prompt_ids(ids, self.config)  # Fix 3: honor max_prompt_length
         with torch.no_grad():
             # Fix 2: pass top_p (+temperature) so sampling matches the config.
-            # synced_gpus keeps ranks in lockstep under sharded generation.
+            # ``_grpo_synced_gpus`` stays OFF: rollout generation runs on a
+            # full-weight (unsharded) model, so there are no FSDP collectives.
             gen = self.model.generate(
                 ids, max_new_tokens=self.config.max_response_length, do_sample=True,
                 temperature=self.config.temperature, top_p=self.config.top_p,

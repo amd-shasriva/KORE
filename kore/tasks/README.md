@@ -1,6 +1,6 @@
 # `kore/tasks` - kernel task registry
 
-Every RL "environment instance" is a **kernel-optimization task**: a Triton kernel to make fast, an fp32 **reference oracle** for correctness, a **production vendor baseline** to beat (AITER / hipBLASLt / framework), a set of evaluation **shapes**, and a driver contract the verifier speaks. Tasks are discovered from `<task_id>/task.yaml` directories. Today the registry holds **~181 operators**: 15 hand-authored, ~151 generated (`gen_*`), 20 vendor-baselined (`genv_*`).
+Every RL "environment instance" is a **kernel-optimization task**: a Triton kernel to make fast, an fp32 **reference oracle** for correctness, a **production vendor baseline** to beat (AITER / hipBLASLt / framework), a set of evaluation **shapes**, and a driver contract the verifier speaks. Tasks are discovered from `<task_id>/task.yaml` directories. Today the registry holds **251 tasks** (249 train, 2 held-out): 24 hand-authored, 201 generated (`gen_*`, torch/framework baseline), 26 vendor-baselined (`genv_*`, real AITER/hipBLASLt baseline).
 
 The registry also defines the **authoritative train / held-out split** by operator family and architecture, so generalization can never be leaked.
 
@@ -54,24 +54,40 @@ class Task:
 ## Train / held-out split
 
 ```python
-TRAIN_ARCH = "gfx942"
-HELDOUT_FAMILIES = ("attention",)
+TRAIN_ARCH  = "gfx950"                          # primary target: CDNA4 (MI350X / MI355X)
+TRAIN_ARCHS = {"gfx950", "gfx942"}              # arches accepted into train (override: KORE_TRAIN_ARCHS)
+HELDOUT_FAMILIES = ("mla", "paged_attention")
+HELDOUT_TASKS    = {"mla_decode_bf16", "paged_attn_decode_bf16"}
 ```
 
-A task is held out iff its **operator family is reserved** (today: `attention`) **or** its `gpu_target != gfx942`. This is the single source of truth used by both datagen (never trains on held-out) and eval (measures zero-shot transfer to held-out).
+A task is held out if **any** of these hold (`registry.is_heldout`):
+
+1. its `task_id` is in `HELDOUT_TASKS`, **or**
+2. its `operator_family()` is in `HELDOUT_FAMILIES` (`mla` or `paged_attention`), **or**
+3. it targets a **foreign arch** (a `gpu_target` outside `TRAIN_ARCHS`).
+
+This is the single source of truth used by both datagen (never trains on held-out) and eval (measures zero-shot transfer to the held-out families).
 
 ```mermaid
 flowchart TD
-  T[Task] --> F{operator_family}
-  F -->|attention| HO[held-out: eval only]
-  F -->|other| A{gpu_target == gfx942?}
+  T[Task] --> ID{task_id in HELDOUT_TASKS?}
+  ID -->|yes| HO[held-out: eval only]
+  ID -->|no| F{"family in (mla, paged_attention)?"}
+  F -->|yes| HO
+  F -->|no| A{"gpu_target in TRAIN_ARCHS?"}
   A -->|no| HO
   A -->|yes| TR[train]
 ```
 
-`split_tasks(seed)` returns `{"train", "heldout", "seed"}`; the seed only reorders *within* a split - the held-out set is a fixed function of family + arch, never seed-dependent.
+**Core attention is trained, not held out.** Flash-attention prefill / decode / sliding-window / varlen / fp8 all TRAIN, so the product model is strong at attention. Only the two *structurally distinct* families are withheld to measure genuine cross-family transfer: **MLA** (DeepSeek latent attention) and **paged-KV decode** (a different KV-cache mechanism). Any doc that calls "the attention family" held-out is stale.
 
-> **Two family taxonomies exist by design.** `registry.operator_family` is the coarse split authority. `kore.eval.generalization.family_of` is a richer 8-family classifier used for analysis/LOFO. Don't conflate them in write-ups.
+**Why family-level, not task-level.** Reserving whole families (not just the two seed task ids) keeps any generated or mined MLA/paged variant out of training by its family, closing the last leakage path. `operator_family` therefore classifies `mla`/`paged` **before** the generic `attn` catch, so those variants never fall through into the trained `attention` bucket.
+
+**Why deterministic.** The held-out set is a pure function of family + arch, independent of any seed, so datagen can exclude it with no seed coordination. `split_tasks(seed)` returns `{"train", "heldout", "seed"}`; `seed` only reorders *within* a split (for sharding / CV folds) and never moves a task across the boundary.
+
+**Why gfx942 stays in train.** gfx942/CDNA3 shares the hardware lineage with the gfx950/CDNA4 target and runs correctly on-node, so previous-gen-tagged tasks and any in-flight gfx942 datagen keep training instead of being retroactively held out when the primary arch advanced to gfx950. A truly foreign arch (gfx1100, NVIDIA) is still held out.
+
+> **Two family taxonomies exist by design.** `registry.operator_family` is the coarse split authority (the `mla` / `paged_attention` / `attention` / ... buckets above). `kore.eval.generalization.family_of` is a richer 8-family classifier (attention, moe, gemm, norm, positional, quant, reduction, activation) used for offline leave-one-family-out analysis. Don't conflate them in write-ups.
 
 ---
 
@@ -81,15 +97,15 @@ flowchart TD
 flowchart LR
   GO[generate_ops.py] --> GEN["gen_*/ dirs"]
   GVO[generate_vendor_ops.py] --> GENV["genv_*/ dirs"]
-  HAND[15 hand-authored tasks] --> REG
+  HAND[24 hand-authored tasks] --> REG
   GEN --> REG[registry discovery]
   GENV --> REG
   REG --> TRAIN[train_tasks]
   REG --> HOLD[heldout_tasks]
 ```
 
-- `_genops.py` defines ~70 operators across `unary`, `binary`, `reduce`, `fusion` (multi-kernel headroom), and `gemm_fusion` (hipBLASLt + epilogue headroom) families.
-- `generate_ops.py` emits `gen_<op>_<dtype>/` tasks with a torch/framework baseline; `generate_vendor_ops.py` emits `genv_<op>_<dtype>/` graded against real AITER kernels with LLM-realistic shape tables.
+- `_genops.py` defines 67 operators across `unary`, `binary`, `reduce`, `fusion` (multi-kernel headroom), and `gemm_fusion` (hipBLASLt + epilogue headroom) families.
+- `generate_ops.py` emits `gen_<op>_<dtype>/` tasks with a torch/framework baseline, expanding each operator across `bf16`/`fp16`/`fp32` (67 x 3 = 201 tasks); `generate_vendor_ops.py` emits the 26 `genv_<op>_<dtype>/` tasks (14 vendor ops x their dtype sweeps) graded against real AITER kernels with LLM-realistic shape tables.
 
 ---
 

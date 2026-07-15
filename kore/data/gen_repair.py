@@ -181,12 +181,25 @@ def _order(txt: str, a: str, b: str) -> Optional[bool]:
 
 
 # --- detectors: each maps (broken_diff, fixed_diff) -> (class, before, after) --
+def _arch_is_fnuz(arch: Optional[str]) -> bool:
+    """True iff ``arch`` uses the FNUZ fp8 e4m3 encoding (CDNA2/CDNA3: gfx90a/gfx908/
+    gfx942). gfx950/CDNA4 (the KORE target) and unknown default to OCP e4m3fn."""
+    a = (arch or "").lower()
+    return "gfx942" in a or "gfx90a" in a or "gfx908" in a
+
+
 def _det_fp8(before, after, family):
-    if re.search(r"fnuz", after) and not re.search(r"fnuz", before):
-        bt = re.search(r"float8_?e\d\w*|e[45]m[23]\w*", before)
-        at = re.search(r"float8_?e\d\w*|e[45]m[23]\w*", after)
-        if bt and at:
-            return ("fp8_variant", bt.group(0), at.group(0))
+    # Detect an fp8 e4m3 ENCODING swap in EITHER direction (OCP e4m3fn <-> FNUZ
+    # e4m3fnuz). The arch-correct target is resolved at diagnosis time, so the
+    # detector only needs to recognize that the fix changed the encoding -- the old
+    # one-way "fix ADDED fnuz" rule mis-modeled gfx950, where the fix REMOVES fnuz
+    # (moves to OCP e4m3fn) (audit R2 datagen C1).
+    if bool(re.search(r"fnuz", before)) == bool(re.search(r"fnuz", after)):
+        return None  # no fnuz<->fn swap in the changed region
+    bt = re.search(r"float8_?e\d\w*|e[45]m[23]\w*", before)
+    at = re.search(r"float8_?e\d\w*|e[45]m[23]\w*", after)
+    if bt and at and bt.group(0) != at.group(0):
+        return ("fp8_variant", bt.group(0), at.group(0))
     return None
 
 
@@ -369,12 +382,14 @@ def _lead_in(failure_class: Optional[str], error_text: str) -> str:
     return f"{head}: {et}" if et else f"{head}."
 
 
-def _diagnose(finding: DiffFinding, family: str) -> tuple[str, str]:
+def _diagnose(finding: DiffFinding, family: str,
+              arch: Optional[str] = None) -> tuple[str, str]:
     """Concrete, grounded mechanism + one-line PROPOSED_CHANGE for a finding.
 
     Op-family aware: MFMA / ``tl.dot`` / multiple-of-64 reasoning is only emitted
     for gemm/attention kernels, never injected into a pointwise/reduction/quant
-    diagnosis where it does not apply."""
+    diagnosis where it does not apply. ``arch`` (default: the KORE gfx950 target)
+    selects the arch-correct fp8 encoding for the fp8_variant diagnosis."""
     cc, b, a = finding.change_class, finding.before, finding.after
     gemmish = family in ("gemm", "attention")
     if cc == "mask_predicate_flip":
@@ -444,10 +459,21 @@ def _diagnose(finding: DiffFinding, family: str) -> tuple[str, str]:
                 f"result. Applying `{a}` exactly once restores the correct magnitude.",
                 f"Apply the scale (`{a}`) exactly once.")
     if cc == "fp8_variant":
-        return (f"The fp8 encoding was `{b}` (OCP) instead of the gfx942 `{a}` (FNUZ); the "
-                f"exponent bias differs, so the bytes mismatched the production reference. "
-                f"Using `{a}` matches the hardware/AITER layout.",
-                f"Use the FNUZ fp8 encoding (`{a}`).")
+        # Arch-correct fp8 e4m3: OCP e4m3fn on gfx950/CDNA4 (the KORE target), FNUZ
+        # e4m3fnuz on gfx942/CDNA3. Teach the fix toward the arch-correct encoding
+        # regardless of which direction the raw diff went -- the old text hardcoded
+        # "use FNUZ / gfx942" and actively mis-taught gfx950 (audit R2 datagen C1).
+        fnuz_arch = _arch_is_fnuz(arch)
+        b_is_fnuz = "fnuz" in b.lower()
+        correct_tok, wrong_tok = (b, a) if (b_is_fnuz == fnuz_arch) else (a, b)
+        correct_name = "FNUZ" if fnuz_arch else "OCP"
+        wrong_name = "OCP" if fnuz_arch else "FNUZ"
+        archname = "gfx942/CDNA3" if fnuz_arch else "gfx950/CDNA4"
+        return (f"The fp8 encoding was `{wrong_tok}` ({wrong_name}) instead of the "
+                f"{archname} `{correct_tok}` ({correct_name}); the exponent bias and "
+                f"-0/inf handling differ, so the bytes mismatched the production "
+                f"reference. Using `{correct_tok}` matches the hardware/AITER layout.",
+                f"Use the {correct_name} fp8 encoding (`{correct_tok}`).")
     if cc == "missing_barrier":
         return (f"A synchronization barrier (`{a}`) between the shared-memory write and "
                 f"its dependent read was missing, letting wavefronts read stale/partial "
@@ -461,8 +487,8 @@ def _diagnose(finding: DiffFinding, family: str) -> tuple[str, str]:
                 f"Restore the normalization (`{a}`).")
     if cc == "block_k_multiple":
         return (f"The K tile `{b}` is not a multiple of 32, which is illegal for the "
-                f"fp8/MX scale groups on gfx942, so the kernel failed to build. `{a}` "
-                f"restores a valid K tile.",
+                f"fp8/MX scale groups (32-element microscaling blocks), so the kernel "
+                f"failed to build. `{a}` restores a valid K tile.",
                 f"Set the K tile to a multiple of 32 (`{a}`).")
     if cc == "block_size_multiple":
         if gemmish:
@@ -487,16 +513,18 @@ def _diagnose(finding: DiffFinding, family: str) -> tuple[str, str]:
 
 def analyze_repair_diff(broken_src: str, fixed_src: str,
                         failure_class: Optional[str], error_text: str,
-                        family: str = "generic") -> tuple[str, str]:
+                        family: str = "generic",
+                        arch: Optional[str] = None) -> tuple[str, str]:
     """Produce a REAL, evidence-based (ANALYSIS, PROPOSED_CHANGE) for the repair.
 
     Grounded ONLY in the broken->fixed diff: a specific mechanism when the change
     is a recognizable bug class, otherwise a minimal factual fallback naming the
-    verifier error and the one concrete token that changed."""
+    verifier error and the one concrete token that changed. ``arch`` (default: the
+    KORE gfx950 target) selects the arch-correct fp8 encoding in the diagnosis."""
     lead = _lead_in(failure_class, error_text)
     finding = classify_repair_diff(broken_src, fixed_src, failure_class, family)
     if finding is not None:
-        mech, proposed = _diagnose(finding, family)
+        mech, proposed = _diagnose(finding, family, arch)
         return f"{lead}\n{mech}", proposed
     tok = _salient_token_change(broken_src, fixed_src)
     if tok and (tok[0] or tok[1]):
@@ -530,7 +558,8 @@ def _op_appropriate_repair_prompt(prompt: str, family: str) -> str:
 
 
 def _diagnostic_assistant(failure_class: str, error_text: str, broken_src: str,
-                          fixed_src: str, family: str = "generic") -> str:
+                          fixed_src: str, family: str = "generic",
+                          arch: Optional[str] = None) -> str:
     """Self-diagnose-then-fix assistant turn in the CANONICAL contract
     (ANALYSIS / PROPOSED_CHANGE / FULL_KERNEL via :func:`format_assistant_turn`).
 
@@ -538,9 +567,10 @@ def _diagnostic_assistant(failure_class: str, error_text: str, broken_src: str,
     (see :func:`analyze_repair_diff`) — it names the concrete change class and the
     concrete token that changed — not a templated string. The VERIFIED fixed
     kernel is the FULL_KERNEL, so SFT learns to read the concrete failure and emit
-    the fix in the same shape it must produce at inference."""
+    the fix in the same shape it must produce at inference. ``arch`` selects the
+    arch-correct fp8 encoding in the diagnosis (default: the KORE gfx950 target)."""
     analysis, proposed = analyze_repair_diff(
-        broken_src, fixed_src, failure_class, error_text, family)
+        broken_src, fixed_src, failure_class, error_text, family, arch)
     return format_assistant_turn(analysis, proposed, fixed_src)
 
 
@@ -625,7 +655,8 @@ def make_repair_record(
 
     if diagnostic:
         assistant = _diagnostic_assistant(failure_class, error, broken_src,
-                                          fixed_src, family)
+                                          fixed_src, family,
+                                          getattr(task, "gpu_target", None))
     else:
         assistant = response
     messages = messages + [{"role": "assistant", "content": assistant}]

@@ -86,7 +86,7 @@ import triton.language as tl
 @triton.jit
 def _q(x_ptr, y_ptr, N, BLOCK: tl.constexpr):
     offs = tl.arange(0, BLOCK)
-    x = tl.load(x_ptr + offs).to(tl.float8_e4m3fnuz)
+    x = tl.load(x_ptr + offs).to(tl.float8_e4m3fn)
     tl.store(y_ptr + offs, x)
 """
 
@@ -138,11 +138,35 @@ def test_reduction_axis_named():
 
 
 def test_fp8_variant_named():
+    # GOOD_QUANT is the gfx950-correct OCP e4m3fn kernel; break_fp8_variant inserts
+    # the CDNA3 FNUZ variant, so the repair pair is fnuz(broken)->e4m3fn(fixed).
     broken, _ = mutate.break_fp8_variant(GOOD_QUANT)
     f = classify_repair_diff(broken, GOOD_QUANT, "snr_fail", "quant")
     assert f is not None and f.change_class == "fp8_variant"
-    analysis, _ = analyze_repair_diff(broken, GOOD_QUANT, "snr_fail", "err", "quant")
-    assert "fnuz" in analysis.lower()
+    analysis, proposed = analyze_repair_diff(broken, GOOD_QUANT, "snr_fail", "err", "quant")
+    # default arch = gfx950/CDNA4 -> the fix must teach the OCP e4m3fn encoding,
+    # never "use FNUZ" (audit R2 datagen C1).
+    assert "OCP" in analysis and "gfx950" in analysis and "FNUZ" in analysis
+    assert "OCP" in proposed and "fnuz" not in proposed.lower()
+
+
+def test_fp8_variant_diagnosis_is_arch_aware_and_bidirectional():
+    """The fp8 detector catches an encoding swap in BOTH directions, and the
+    diagnosis teaches the ARCH-correct encoding (OCP on gfx950, FNUZ on gfx942)."""
+    from kore.data.gen_repair import DiffFinding, _det_fp8, _diagnose
+    # bidirectional detection: fn->fnuz AND fnuz->fn both classify as fp8_variant
+    assert _det_fp8("to(tl.float8_e4m3fn)", "to(tl.float8_e4m3fnuz)", "quant")[0] == "fp8_variant"
+    assert _det_fp8("to(tl.float8_e4m3fnuz)", "to(tl.float8_e4m3fn)", "quant")[0] == "fp8_variant"
+    f = DiffFinding("fp8_variant", "float8_e4m3fnuz", "float8_e4m3fn")
+    # gfx950/CDNA4 (KORE target + the None default): OCP e4m3fn is correct
+    for arch in ("gfx950", None):
+        mech, prop = _diagnose(f, "quant", arch)
+        assert "OCP" in mech and "gfx950" in mech
+        assert "OCP" in prop and "fnuz" not in prop.lower()
+    # gfx942/CDNA3: FNUZ is correct -> the diagnosis flips
+    mech2, prop2 = _diagnose(f, "quant", "gfx942")
+    assert "FNUZ" in mech2 and "gfx942" in mech2
+    assert "FNUZ" in prop2 and "fnuz" in prop2.lower()
 
 
 def test_block_size_multiple_named():

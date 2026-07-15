@@ -228,8 +228,13 @@ class ToolExecutor:
         obs = self.env.step(src, full_validation=do_bench, multi_shape=multi_shape)
         # Reward mode honors KORE_REWARD_MODE ("residual" -> physics residual reward,
         # else vendor speedup); the non-agentic GRPO path is driven by config.reward_mode.
+        # KORE_REWARD_PHASE bridges the correctness->latency curriculum so a correct
+        # kernel is credited correctness-only in the correctness phase, matching the
+        # serial path's apply_reward_phase (audit R2 grpo C1/C2).
         _mode = os.environ.get("KORE_REWARD_MODE", "speedup")
-        rr = compute_kernel_reward(obs, src, self.task, mode=_mode, dtype=self.dtype)
+        _phase = os.environ.get("KORE_REWARD_PHASE", "all")
+        rr = compute_kernel_reward(obs, src, self.task, mode=_mode, dtype=self.dtype,
+                                   reward_phase=_phase)
         self.candidate_src = src
         self.candidate_reward = rr.reward
         self.candidate_correct = rr.correct

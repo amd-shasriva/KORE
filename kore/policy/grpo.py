@@ -332,13 +332,14 @@ def apply_reward_phase(rr, config):
     (their signal is correctness). The campaign runs GRPO twice (correctness
     phase, then latency phase) by flipping ``reward_phase``.
     """
-    from dataclasses import replace
+    from kore.reward.physics import mask_reward_phase
 
-    phase = getattr(config, "reward_phase", "all")
-    if phase == "correctness" and getattr(rr, "correct", False):
-        base = getattr(config, "correctness_weight", 0.3)
-        return replace(rr, reward=base, speedup=None, tier="correct_masked")
-    return rr
+    # Delegate to the shared curriculum mask so the serial and agentic paths apply
+    # IDENTICAL semantics (audit R2 grpo C1/C2): the agentic path routes every
+    # candidate through compute_kernel_reward(reward_phase=...), which calls the same
+    # helper, so a correct kernel is credited exactly the correctness base in phase-1.
+    return mask_reward_phase(rr, getattr(config, "reward_phase", "all"),
+                             getattr(config, "correctness_weight", 0.3))
 
 
 # --------------------------------------------------------------------------- #
@@ -529,6 +530,9 @@ def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inproc
     # accelerate-launched distributed subprocess (which inherits the environment).
     import os as _os
     _os.environ["KORE_REWARD_MODE"] = str(getattr(config, "reward_mode", "speedup"))
+    # Bridge the curriculum PHASE too, so the agentic tool path masks the speed term
+    # in the correctness phase exactly like the serial path (audit R2 grpo C1/C2).
+    _os.environ["KORE_REWARD_PHASE"] = str(getattr(config, "reward_phase", "all"))
     return _train_grpo_inprocess(config, tasks)
 
 

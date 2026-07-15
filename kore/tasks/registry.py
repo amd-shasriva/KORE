@@ -30,10 +30,13 @@ import os as _os
 TRAIN_ARCHS: frozenset = frozenset(
     _os.environ.get("KORE_TRAIN_ARCHS", "gfx950,gfx942").split(","))
 
-# Whole operator families reserved for the held-out generalization set. (None by
-# default now: the model TRAINS on core attention for product capability. Kept as a
-# lever for reserving a whole family if desired.)
-HELDOUT_FAMILIES: tuple[str, ...] = ()
+# Whole operator families reserved for the held-out generalization set. Core
+# attention (flash prefill/decode/varlen/fp8) TRAINS for product capability, but the
+# structurally-distinct MLA (latent attention) and paged-KV decode families are
+# reserved WHOLE -- so any generated/mined variant (not just the two seed task ids in
+# HELDOUT_TASKS) is kept out of TRAIN by family, closing the last MLA/paged leakage
+# path (audit R2). No core-attention task matches these (they lack "mla"/"paged").
+HELDOUT_FAMILIES: tuple[str, ...] = ("mla", "paged_attention")
 
 # Specific TASKS reserved for the held-out generalization eval (never trained on).
 # The policy trains on core attention (prefill / decode / sliding-window / varlen /
@@ -50,6 +53,15 @@ HELDOUT_TASKS: frozenset = frozenset({
 def operator_family(task: Task) -> str:
     """Coarse operator family for a task (used for the generalization split)."""
     op = (getattr(task, "operation", None) or getattr(task, "task_id", "") or "").lower()
+    # MLA (DeepSeek latent attention) and paged-KV decode are the held-out
+    # generalization probes -- classify them as their OWN families (checked BEFORE the
+    # generic "attn" catch, since "paged_attn_decode" also contains "attn") so any
+    # variant record is grouped + held out by family, not just the two exact task ids
+    # (audit R2: MLA/paged had no family class and fell through to a raw-string family).
+    if "mla" in op or "latent_attn" in op or "latent_attention" in op:
+        return "mla"
+    if "paged" in op:
+        return "paged_attention"
     if "attn" in op or "attention" in op:
         return "attention"
     if "topk" in op:

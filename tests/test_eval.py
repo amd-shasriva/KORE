@@ -324,8 +324,13 @@ def test_registry_heldout_split_is_partition():
     assert train.isdisjoint(held)
     assert train | held == allids
     assert len(held) >= 1
-    # >=1 WHOLE operator family reserved (the attention family here)
-    assert "attention" in reg.heldout_families()
+    # The reserved generalization families are the structurally-distinct MLA + paged-KV
+    # decode (audit R2). Core "attention" (flash prefill/decode) TRAINS -- it must NOT
+    # be held out (that was the old bug: paged-KV misclassified into the attention
+    # family that also trains).
+    hf = set(reg.heldout_families())
+    assert {"mla", "paged_attention"} <= hf
+    assert "attention" not in hf
 
 
 def test_registry_split_tasks_deterministic_and_stable_heldout():

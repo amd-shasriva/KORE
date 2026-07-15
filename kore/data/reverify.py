@@ -89,6 +89,10 @@ def reverify_win(win: dict, task, env, cfg) -> Optional[dict]:
     if not src:
         return None
     r = _evaluate(env, task, src, cfg)
+    if r.get("infra_error"):
+        return dict(win)  # TRANSIENT (OOM/timeout/crash): keep the original win
+                          # unchanged rather than permanently dropping a correct
+                          # kernel on infra noise (audit THEME F silent data loss).
     if not r.get("correct"):
         return None  # fails adversarial correctness now (v1 lucky-pass)
     sp = r.get("speedup")
@@ -114,10 +118,12 @@ def reverify_repair(repair: dict, task, env, cfg) -> Optional[dict]:
         return None
     try:
         obs = env.step(fixed, full_validation=True, multi_shape=True)
-    except Exception:  # noqa: BLE001
-        return None
+    except Exception:  # noqa: BLE001 - TRANSIENT: keep the original, don't drop
+        return dict(repair)
+    if getattr(obs, "infra_error", False):
+        return dict(repair)  # OOM/timeout/crash: keep original (audit THEME F)
     if not getattr(obs, "validation_passed", False):
-        return None  # no longer passes -> drop (honest)
+        return None  # no longer passes -> drop (honest v1 lucky-pass)
     out = dict(repair)
     out["child_snr_db"] = obs.snr_db
     return out

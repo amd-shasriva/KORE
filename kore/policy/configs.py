@@ -84,8 +84,15 @@ class SFTConfig(DistributedMixin):
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0             # gradient-norm clip (HF default; now explicit)
 
-    per_device_train_batch_size: int = 1
-    gradient_accumulation_steps: int = 16
+    # THROUGHPUT (audit R2 perf): per_device batch 1 starved the MI350X matrix cores
+    # (a 14B FSDP shard uses ~30GB of 288GB VRAM). Micro-batch 4 feeds the cores 4x
+    # and cuts accumulation micro-steps 4x, at the SAME effective batch (4*4*8=128 =
+    # the old 1*16*8) so the optimization recipe is unchanged. VRAM-safe with wide
+    # margin even accounting for the bf16+fp32 LM-head logit term at seq 16384
+    # (~117GB peak << 288GB). group_by_length (sft.py) minimises padding since packing
+    # is off on the SDPA runtime.
+    per_device_train_batch_size: int = 4
+    gradient_accumulation_steps: int = 4
     max_seq_length: int = 16384
     bf16: bool = True
     gradient_checkpointing: bool = True
@@ -127,8 +134,12 @@ class DPOConfig(DistributedMixin):
     warmup_ratio: float = 0.03
     weight_decay: float = 0.0
 
-    per_device_train_batch_size: int = 1
-    gradient_accumulation_steps: int = 16
+    # THROUGHPUT (audit R2 perf): micro-batch 2 (was 1) at the SAME effective batch
+    # (2*8*8=128 = the old 1*16*8). DPO concatenates chosen+rejected, so a micro-batch
+    # of 2 processes 4 sequences/step -- 2x the matrix-core feeding -- while the
+    # doubled logit term at seq 16384 stays VRAM-safe (~117GB peak << 288GB).
+    per_device_train_batch_size: int = 2
+    gradient_accumulation_steps: int = 8
     # NB: no ``max_prompt_length`` — trl>=0.29 removed it (the total ``max_length``
     # caps prompt+completion, and ``truncation_mode="keep_end"`` (dpo.py) keeps the
     # completion/kernel tail). GRPO keeps its own live ``max_prompt_length``.
@@ -379,8 +390,12 @@ class MidTrainConfig(DistributedMixin):
     # Exposing them makes a launch JSON authoritative and — critically — bounds the
     # checkpoint count (``save_total_limit``) so a 14B full-FT CPT run cannot fill
     # disk (the same guard SFT/DPO already have).
-    per_device_train_batch_size: int = 1
-    gradient_accumulation_steps: int = 16
+    # THROUGHPUT (audit R2 perf): micro-batch 4 (was 1) feeds the MI350X matrix cores
+    # 4x at the SAME effective batch (4*4*8=128 = the old 1*16*8). CPT chunks are
+    # uniform seq 8192, so padding is negligible; VRAM-safe with wide margin (~75GB
+    # peak << 288GB even with the LM-head logit term).
+    per_device_train_batch_size: int = 4
+    gradient_accumulation_steps: int = 4
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
     # packing MUST be False on the SDPA runtime: TRL bfd packing needs a flash-attn
@@ -516,7 +531,11 @@ def build_fsdp_kwargs(config) -> dict:
         # robust; see build_fsdp_kwargs docstring), which wraps the decoder block's
         # forward and is FSDP-safe. See build_fsdp_kwargs docs.
         "backward_prefetch": "backward_pre",
-        "forward_prefetch": False,
+        # forward_prefetch=True overlaps the NEXT layer's all-gather with the current
+        # layer's compute in the forward pass -- a free throughput win on the 8-GPU
+        # FSDP mesh where the model comfortably fits (audit R2 perf). Safe with the
+        # huge 288GB VRAM headroom (the extra prefetched shard is tiny).
+        "forward_prefetch": True,
         "use_orig_params": True,
         "sync_module_states": True,
         "cpu_ram_efficient_loading": True,

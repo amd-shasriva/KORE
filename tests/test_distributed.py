@@ -63,9 +63,12 @@ def test_midtrain_has_save_total_limit_and_live_knobs():
     mt = MidTrainConfig()
     # HIGH: bounds the 14B full-FT checkpoint count so CPT can't fill disk.
     assert mt.save_total_limit == 1
-    # Knobs previously hardcoded in midtrain.py are now config-driven.
-    assert mt.per_device_train_batch_size == 1
-    assert mt.gradient_accumulation_steps == 16
+    # Knobs previously hardcoded in midtrain.py are now config-driven. Throughput
+    # (audit R2 perf): micro-batch 4 feeds the MI350X matrix cores at the SAME
+    # effective batch (4*4*8 = 128 = the old 1*16*8).
+    assert mt.per_device_train_batch_size == 4
+    assert mt.gradient_accumulation_steps == 4
+    assert mt.per_device_train_batch_size * mt.gradient_accumulation_steps * 8 == 128
     # packing is False on the SDPA runtime: TRL bfd packing silently cross-contaminates
     # documents without a flash-attn backend (audit THEME B/C2).
     assert mt.packing is False

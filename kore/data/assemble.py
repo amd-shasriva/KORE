@@ -137,10 +137,16 @@ def assemble_multicap_sources(
 
     # Decontaminate the general-replay + generic-agentic slices against the held-out
     # eval sources (Pillar 5): a mined code/math row could carry a held-out attention
-    # kernel. One shared held-out n-gram set; safe no-op if sources unavailable.
+    # kernel. ALSO decontaminate against the RETENTION eval benchmarks (MMLU/HumanEval/
+    # LCB/IFEval/BFCL/MT) -- the general slices are ~45% of the SFT mix, so a mined row
+    # carrying an eval question is train-on-test that inflates the retention gate
+    # (audit R2 sft, mirroring the midtrain corpus fix). One shared n-gram set.
     if os.environ.get("KORE_DECONTAM", "1") != "0":
-        from kore.data.decontam import build_heldout_ngrams, decontaminate_chat_rows
-        _hn = build_heldout_ngrams(8)
+        from kore.data.decontam import (build_heldout_ngrams, decontaminate_chat_rows,
+                                        eval_benchmark_texts)
+        _extra = eval_benchmark_texts() if os.environ.get(
+            "KORE_DECONTAM_EVAL_BENCH", "1") != "0" else None
+        _hn = build_heldout_ngrams(8, extra_sources=_extra)
         _dropped = 0
         _slices = {"general_code": gc, "math_reasoning": gm, "general_chat": gch,
                    "agentic_tooluse": agentic_rows}

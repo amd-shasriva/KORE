@@ -535,7 +535,15 @@ def run(args) -> int:
         if args.force:
             for st in stages:
                 ctx["done_stages"].discard(st)
-            _log("plan", f"--force: will re-run {stages} regardless of manifest")
+            # --force is a CLEAN re-run: recompute the authoritative train/held-out
+            # split from the CURRENT registry rather than reusing a stale manifest
+            # split. Otherwise a prior run's split (e.g. computed before the held-out
+            # families changed) silently overrides the live config -- dropping the
+            # right generalization probes (MLA/paged) from eval and holding the wrong
+            # tasks out of training (audit R2: stale-manifest split on --force).
+            _apply_split(ctx)
+            _log("plan", f"--force: will re-run {stages} regardless of manifest; "
+                         f"recomputed split from the live registry")
 
     _log("plan", f"model={args.model} tasks={[t.task_id for t in tasks]} "
                  f"stages={stages} dry_run={dry}")

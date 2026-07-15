@@ -55,8 +55,14 @@ def soup_sweep(base_sd: dict, kore_sd: dict, alphas, eval_fn: Callable[[dict], d
         log.event("soup_alpha", alpha=a, kernel=scores.get(kernel_key, 0.0),
                   general={g: scores.get(g) for g in general_keys}, passed=not regressed)
     passed = [r for r in results if r["passed"]]
-    pool = passed or results
-    best = max(pool, key=lambda r: r["kernel"])
+    if passed:
+        best = max(passed, key=lambda r: r["kernel"])   # best kernel among gate-passing
+    else:
+        # No alpha satisfied the retention gate: fall back to the MOST base-ward
+        # (smallest alpha) point -- best general retention -- NOT max(kernel), which
+        # would ship the LEAST-retained specialist exactly when retention is hardest
+        # to satisfy (audit THEME C soup fallback bug).
+        best = min(results, key=lambda r: r["alpha"])
     log.metric("soup_best", best_alpha=best["alpha"], gate_satisfied=bool(passed),
                kernel=best["kernel"])
     return {"best_alpha": best["alpha"], "best": best, "sweep": results,

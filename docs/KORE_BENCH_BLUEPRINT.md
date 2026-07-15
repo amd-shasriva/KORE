@@ -1,7 +1,7 @@
 # KORE-Bench: the definitive open dataset of hard AMD ROCm/Triton kernel-optimization tasks
 
 **Goal.** A provably-best-in-world OPEN benchmark of *hard* GPU-kernel-optimization
-TASKS for AMD Instinct (MI300X / MI325X `gfx942`, MI355X `gfx950`), where every task is
+TASKS for **AMD Instinct MI350X (`gfx950` / CDNA4, the KORE target)**, where every task is
 graded against a **real production vendor baseline** (AITER / hipBLASLt / Composable
 Kernel / AOTriton), not torch-eager. 200-400 tasks spanning every operator family that
 matters for LLM training + inference. Serves both KORE RL training and the open-source /

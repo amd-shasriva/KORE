@@ -1,6 +1,6 @@
 # KORE
 
-**Kernel-Optimization Reinforcement Learning for AMD GPUs.** KORE trains a language model to write fast, provably-correct ROCm/Triton GPU kernels by descending a **physics-grounded roofline residual** - the measured distance to each kernel's Speed-of-Light lower bound - under a **verifiable correctness oracle**, on real AMD Instinct silicon (gfx942 / CDNA3, gfx950 / CDNA4).
+**Kernel-Optimization Reinforcement Learning for AMD GPUs.** KORE trains a language model to write fast, provably-correct ROCm/Triton GPU kernels by descending a **physics-grounded roofline residual** - the measured distance to each kernel's Speed-of-Light lower bound - under a **verifiable correctness oracle**, on real AMD Instinct MI350X silicon (gfx950 / CDNA4).
 
 > The thesis: don't reward *relative speedup vs. an arbitrary baseline* (which is gameable and operator-specific). Reward *absolute attainment of the hardware's physical limit* (`η = T_min / T_measured`), gate every reward behind an adversarial + metamorphic correctness oracle, and hold out two structurally-distinct attention variants (MLA latent attention and paged-KV decode) to measure zero-shot cross-family generalization while still training core attention for product capability.
 
@@ -198,7 +198,7 @@ PYTHONPATH=. python scripts/run_campaign.py \
   --stages datagen,agentic,build,sft,dpo,grpo,soup,eval
 ```
 
-**Full 14B campaign (8× MI300-class, FSDP, durable)** - see [below](#running-the-full-14b-campaign):
+**Full 14B campaign (8× MI350X, FSDP, durable)** - see [below](#running-the-full-14b-campaign):
 
 ```bash
 bash scripts/tmux_campaign.sh
@@ -208,7 +208,7 @@ bash scripts/tmux_campaign.sh
 
 ## Installation
 
-KORE targets **Python 3.10 + ROCm 7.x** on gfx942/gfx950. The exact verified, reproducible set is pinned in [`requirements-conductor.txt`](requirements-conductor.txt).
+KORE targets **Python 3.10 + ROCm 7.x** on gfx950 (AMD Instinct MI350X / CDNA4). The exact verified, reproducible set is pinned in [`requirements-conductor.txt`](requirements-conductor.txt).
 
 > **Order matters.** Install the ROCm build of torch **first** from the ROCm index. A bare `pip install torch transformers trl` pulls a **CUDA** wheel that silently disables the GPU (`torch.cuda.is_available() → False`).
 

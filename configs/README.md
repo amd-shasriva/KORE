@@ -20,7 +20,7 @@ The distributed launch config and the "locked" full-parameter recipes for each t
 
 ```yaml
 distributed_type: FSDP
-num_processes: 8                 # one rank per gfx942 GPU
+num_processes: 8                 # one rank per gfx950 (MI350X) GPU
 mixed_precision: bf16
 fsdp_config:
   fsdp_version: 1

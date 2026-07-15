@@ -202,9 +202,16 @@ def load_sft_dataset(path: Path, repair_weight: float = 1.0,
         messages = rec["messages"] if isinstance(rec, dict) and "messages" in rec else rec
         row = {"messages": messages}
         rows.append(row)
-        src = rec.get("_source") if isinstance(rec, dict) else None
-        if factor > 1 and src in repair_sources:
-            rows.extend([dict(row) for _ in range(factor - 1)])
+        # Up-weight TRUE repair turns only (by provenance kind), not the whole
+        # kernel bucket: after mixing, repairs AND optimization wins are both tagged
+        # _source="kernel_repair_opt", so keying on _source doubled wins too and
+        # reshaped the trained mix (audit THEME G/I1). Provenance kind is the honest
+        # signal and also catches DAgger repairs (which lacked the bucket tag).
+        if factor > 1 and isinstance(rec, dict):
+            prov = rec.get("_provenance") or {}
+            is_repair = (prov.get("kind") == "repair") or (rec.get("_source") == "repair")
+            if is_repair:
+                rows.extend([dict(row) for _ in range(factor - 1)])
     return Dataset.from_list(rows)
 
 

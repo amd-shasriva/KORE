@@ -250,6 +250,14 @@ def test_evolve_task_produces_verified_records():
     assert w.speedup is not None and w.speedup > 1.0
     assert w.final_source and w.operation == "gemm"
 
+    # CONVERGENT trajectory (audit R2 datagen C2): a clean system/user/assistant demo
+    # that ENDS on the winning kernel -- NOT the raw multi-generation exploration log.
+    roles = [m["role"] for m in w.trajectory]
+    assert roles == ["system", "user", "assistant"]         # exactly 3 turns, no dead-ends
+    asst = w.trajectory[-1]["content"]
+    assert "FULL_KERNEL:" in asst and w.final_source in asst  # ends on the verified winner
+    assert "ANALYSIS:" in asst                               # canonical contract
+
     assert len(res.groups) >= 1
     assert all(isinstance(g, RankedGroupRecord) for g in res.groups)
     g = res.groups[0]

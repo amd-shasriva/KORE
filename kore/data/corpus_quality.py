@@ -65,6 +65,15 @@ from typing import Iterable, List, Optional, Tuple
 MAX_LINE_LENGTH = 1000
 #: Drop if the mean non-empty line length exceeds this (minified / generated).
 MAX_MEAN_LINE_LENGTH = 100.0
+# Dense C/C++/CUDA/HIP kernel files (e.g. Composable-Kernel fp8/mxfp4 instance
+# tables) legitimately have long mean lines (config rows + column-ruler comments),
+# so they get a higher mean-line cap; only the hard MAX_LINE_LENGTH gate catches
+# true minification for them (audit THEME B/C3 — these encode the optimal gfx950
+# GEMM tilings and must NOT be dropped as "long_lines").
+MAX_MEAN_LINE_LENGTH_CODE = 400.0
+_CODE_LONGLINE_EXTS = frozenset({
+    ".hpp", ".cuh", ".cu", ".cpp", ".hip", ".h", ".cc", ".cxx", ".hh",
+})
 #: Drop if the alphanumeric fraction of non-whitespace chars is below this.
 MIN_ALNUM_FRACTION = 0.25
 #: Drop if fewer than this many non-empty, non-comment code lines remain.
@@ -270,7 +279,9 @@ def code_quality_reason(text: str, path=None) -> Optional[str]:
     nonempty = [ln for ln in lines if ln.strip()]
     max_line = max((len(ln) for ln in lines), default=0)
     mean_line = (sum(len(ln) for ln in nonempty) / len(nonempty)) if nonempty else 0.0
-    if max_line > MAX_LINE_LENGTH or mean_line > MAX_MEAN_LINE_LENGTH:
+    ext = p.suffix.lower() if p is not None else ""
+    mean_cap = MAX_MEAN_LINE_LENGTH_CODE if ext in _CODE_LONGLINE_EXTS else MAX_MEAN_LINE_LENGTH
+    if max_line > MAX_LINE_LENGTH or mean_line > mean_cap:
         return "long_lines"
 
     # 4. Alphanumeric fraction (over non-whitespace) ----------------------- #

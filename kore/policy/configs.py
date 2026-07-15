@@ -377,7 +377,12 @@ class MidTrainConfig(DistributedMixin):
     gradient_accumulation_steps: int = 16
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
-    packing: bool = True                    # CPT over plain text: pack docs (block-diagonal masked on this stack)
+    # packing MUST be False on the SDPA runtime: TRL bfd packing needs a flash-attn
+    # backend to build the block-diagonal mask, and silently falls back to plain SDPA
+    # (cross-document attention contamination) when flash-attn is absent -- which it is
+    # on this ROCm stack. False = each doc is a correctly-masked padded example (audit
+    # THEME B/C2). Re-enable only once flash_attention_2/flex_attention is wired.
+    packing: bool = False
     logging_steps: int = 10
     save_steps: int = 200
     save_total_limit: int = 1              # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill

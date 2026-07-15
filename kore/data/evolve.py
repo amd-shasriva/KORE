@@ -44,6 +44,7 @@ from kore.data.prompts import (
     SYSTEM_PROMPT,
     build_turn_prompt,
     extract_kernel,
+    format_assistant_turn,
     normalize_assistant,
 )
 from kore.data.schemas import RankedGroupRecord, WinRecord
@@ -498,9 +499,31 @@ def evolve_task(
             speedup = seed_wall / best_wall
         is_win = best_correct and best_src != seed_src and speedup is not None and speedup > 1.0
         if is_win:
+            # CONVERGENT transcript (audit R2 datagen C2): a WinRecord must teach the
+            # clean seed -> VERIFIED-winning-kernel demo in the canonical contract, NOT
+            # the raw multi-generation exploration ``trajectory`` (which interleaves
+            # dead-ends/failed candidates and may not even END on best_src when the win
+            # came from an OPERATOR mutation rather than the generator's text). Mirror
+            # gold_wins.mint_gold_win so evolve wins are SFT-shaped identically to gold.
+            from kore.data.gold_wins import _analysis as _win_analysis
+            _op = str(getattr(task, "operation", None) or task.task_id or "kernel")
+            _dt = task.dtype if getattr(task, "dtype", "") in (
+                "bf16", "fp16", "fp32", "fp8", "int8", "int4") else None
+            _win_asst = format_assistant_turn(
+                _win_analysis(_op, float(best_wall), float(best_snr or 0.0),
+                              float(speedup), dtype=_dt),
+                f"Adopt the fastest verified implementation for `{_op}` "
+                f"({speedup:.2f}x over the seed).",
+                best_src)
+            win_trajectory = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": build_turn_prompt(parent_source=seed_src,
+                                                              mode="exploit")},
+                {"role": "assistant", "content": _win_asst},
+            ]
             wins.append(WinRecord(
                 task_id=task.task_id,
-                trajectory=trajectory,
+                trajectory=win_trajectory,
                 initial_wall_us=seed_wall,
                 final_wall_us=best_wall,
                 speedup=speedup,

@@ -42,16 +42,17 @@ The five properties that make KORE-Bench provably the best kernel-optimization d
    does this - they all bench vs torch-eager on NVIDIA.
 2. **Headroom-verified.** A task is admitted only if a hand-written expert Triton/HIP kernel
    can get within, or beat, a defined fraction of the vendor kernel - i.e. the op has *real*
-   optimization headroom vs the vendor kernel on `gfx942/gfx950`. Ops where AITER is already
+   optimization headroom vs the vendor kernel on `gfx950` (the target). Ops where AITER is already
    at roofline and unbeatable in Triton are dropped or demoted to a `parity` tier.
-3. **gfx942/gfx950-correct numerics.** fp8 = **FNUZ** (`float8_e4m3fnuz`, max 240), not OCP
-   `e4m3fn`; MX (e2m1/e4m3 + e8m0/32) is **gfx950-only**; LDS ≤ 64 KB on gfx942 (160 KB on
-   gfx950). These traps are baked into the tasks.
+3. **gfx950/CDNA4-correct numerics.** fp8 = **OCP** (`float8_e4m3fn`, max 448), not legacy
+   FNUZ (`e4m3fnuz`, max 240, the gfx942 encoding); MX (e2m1/e4m3 + e8m0/32) is
+   **gfx950-only**; LDS ≤ 160 KiB on gfx950 (legacy gfx942 was 64 KB). These traps are baked
+   into the tasks.
 4. **Exhaustive, stratified coverage** across families × dtypes × shape-regimes × difficulty,
    with a completeness argument (§4) tied to the actual production op inventory (the ATOM
    `model_ops_guide` maps every LLM inference op to its AITER kernel - that map *is* our
    coverage target).
-5. **Leakage-safe, released as an artifact.** Whole families/shapes/arch held out; a public
+5. **Leakage-safe, released as an artifact.** Whole families/shapes plus a foreign-arch slice held out (gfx950 is the target, never held out); a public
    `KORE-Bench` release with a `fast_p` leaderboard vs vendor baselines that AMD and the
    community can run.
 
@@ -65,7 +66,7 @@ production shapes, difficulty tier)**.
 - **Difficulty tiers:** `T1` easy (single tile, 1 pass), `T2` medium (tiling/pipelining/online
   softmax), `T3` hard (multi-stage fusion, paged indirection, grouped/jagged), `T4` frontier
   (MLA/sparse/MX/comm-fused, HIP/CK often required to beat vendor).
-- **dtypes:** bf16, fp16, fp8=`e4m3fnuz`/`e5m2fnuz` (FNUZ), int8, mxfp4/mxfp8 (gfx950).
+- **dtypes:** bf16, fp16, fp8=`e4m3fn`/`e5m2` (OCP; legacy gfx942 used FNUZ `e4m3fnuz`/`e5m2fnuz`), int8, mxfp4/mxfp8 (gfx950).
 - **SNR gates:** bf16/fp16 30 dB (40 for pure fp32/GEMM-fp16), fp8/MX 25 dB.
 - **Baseline column** gives the EXACT vendor symbol. Sources: `aiter_ref.py`,
   `aiter_ref_attn.py`, ROCm/ATOM `docs/model_ops_guide.md`, ROCm/aiter `op_tests/`,
@@ -96,7 +97,7 @@ The workhorse. Baseline discipline: **bf16/fp16 dense → hipBLASLt via
 | G3 | dense GEMM fp16 | fp16 | prefill | hipBLASLt | fp32 (40 dB) | 4096³ (KF `gemm_fp16.yaml`) | T2 |
 | G4 | skinny/tall-M decode GEMV | bf16 | decode | hipBLASLt | fp32 | M∈{1,8,16,32,64}×{N=6144,K=4096}(qkv), {4096,4096}(o) | T3 (tiny-M occupancy) |
 | G5 | huge-N logits/LM-head | bf16 | decode+prefill | hipBLASLt `ParallelLMHead tgemm.mm` | fp32 | M∈{1,64,2048}×N=128256×K=4096 | T3 |
-| G6 | fp8 per-tensor GEMM | fp8 e4m3fnuz | prefill+decode | `tgemm.mm` w/ scale_a,scale_b (hipBLASLt) | fp32 of dequant | 4096³, M∈{1..64}×4096×4096 | T2 |
+| G6 | fp8 per-tensor GEMM | fp8 e4m3fn | prefill+decode | `tgemm.mm` w/ scale_a,scale_b (hipBLASLt) | fp32 of dequant | 4096³, M∈{1..64}×4096×4096 | T2 |
 | G7 | fp8 per-token/channel GEMM (a8w8) | fp8 | prefill+decode | `aiter.gemm_a8w8` / `gemm_a8w8_bpreshuffle` (CK) | fp32 of dequant | KORE `gemm_fp8_a8w8` shapes | T3 |
 | G8 | fp8 block-scale 1×128 GEMM | fp8 | prefill+decode | `aiter.gemm_a8w8_blockscale_bpreshuffle` (CK) | fp32 blockwise dequant | DeepSeek 7168×… (128-block) | T3 |
 | G9 | int8 W8A8 per-token GEMM | int8 | prefill+decode | `aiter.gemm_a8w8` (CK, `dtypes.i8`) | fp32 of dequant | 4096³, decode tiny-M | T2 |
@@ -135,7 +136,7 @@ open baseline**. **Decode → `aiter.pa_fwd_asm` / `pa_persistent_fwd` / `pa_dec
 | A11 | decode paged (KORE `paged_attn_decode`) | bf16 | decode | `aiter.paged_attention_rocm` / `pa_fwd_asm` | fp32 gather | bs∈{1,8,64,128}, S∈{1k,4k,16k,32k,128k}, page=16 | T3 |
 | A12 | decode paged persistent (block=1024) | bf16 | decode | `aiter.pa_persistent_fwd` | fp32 | bs∈{8,64}, S=32k, block=1024 | T4 |
 | A13 | decode paged Triton (gluon) | bf16 | decode | `torch.ops.aiter.pa_decode_gluon` | fp32 | bs∈{1,64}, D≠128 or SWA | T3 |
-| A14 | fp8-KV paged decode | fp8 e4m3fnuz/e5m2fnuz | decode | `pa_fwd_asm` w/ fp8 KV (`reshape_and_cache_with_pertoken_quant`) | fp32 dequant KV | bs∈{8,64}, S∈{4k,32k} | T4 |
+| A14 | fp8-KV paged decode | fp8 e4m3fn/e5m2 | decode | `pa_fwd_asm` w/ fp8 KV (`reshape_and_cache_with_pertoken_quant`) | fp32 dequant KV | bs∈{8,64}, S∈{4k,32k} | T4 |
 | A15 | GQA decode long-context | bf16 | decode | `pa_fwd_asm` | fp32 | (128,32,8,1,131072,128) | T3 |
 | A16 | MLA decode (DeepSeek-V3) | bf16 | decode | `aiter.mla.mla_decode_fwd` (ASM); KF `mla_deepseekv3_decode` | fp32 2-stage LSE | kv_lora=512,rope=64,qk=576,v=512,nhead=128,kv=1,page=16, S∈{512,4k,32k} | T4 |
 | A17 | MLA prefill | bf16 | prefill | `aiter.mla.mla_prefill_fwd` | fp32 | Sq=4096, DSV3 dims | T4 |
@@ -205,7 +206,7 @@ per_1x32, per_Channel`.
 
 | # | op × variant | dtype | regime | vendor baseline | oracle | shapes | tier |
 |---|---|---|---|---|---|---|---|
-| Q1 | dynamic per-token fp8 quant (KORE `quant_fp8_pertoken`) | fp8 e4m3fnuz | both | `aiter.dynamic_per_token_scaled_quant` | fp32 rowwise amax/scale | M×N∈{4096,8192}×{4096,7168} | T2 |
+| Q1 | dynamic per-token fp8 quant (KORE `quant_fp8_pertoken`) | fp8 e4m3fn | both | `aiter.dynamic_per_token_scaled_quant` | fp32 rowwise amax/scale | M×N∈{4096,8192}×{4096,7168} | T2 |
 | Q2 | per-tensor static fp8 quant | fp8 | both | `get_hip_quant(per_Tensor)` | fp32 | 4096×8192 | T1 |
 | Q3 | per-channel (colwise, W) fp8 quant | fp8 | load | `get_hip_quant(per_Channel)` | fp32 | N=4096 weights | T2 |
 | Q4 | block-scale 1×128 fp8 quant | fp8 | both | `get_hip_quant(per_1x128)` | fp32 blockwise | DSV3 128-block | T3 |
@@ -217,8 +218,8 @@ per_1x32, per_Channel`.
 | Q10 | fused dual-quant (KF skill) | fp8 | both | `fused_dual_quant_hbm_reuse` | fp32 | HBM-reuse | T3 |
 | Q11 | KV per-token quant write | fp8 | decode | `reshape_and_cache_with_pertoken_quant` | fp32 | paged KV | T3 |
 
-**Edges (mandatory):** amax→0 all-zero tile (no NaN), amax huge (clamp at FP8_MAX=240),
-denormal/underflow (1e-4), **wrong fp8 variant** (`e4m3fn` vs `e4m3fnuz` → SNR fail vs
+**Edges (mandatory):** amax→0 all-zero tile (no NaN), amax huge (clamp at FP8_MAX=448 for OCP `e4m3fn`; legacy gfx942 FNUZ clamps at 240),
+denormal/underflow (1e-4), **wrong fp8 variant** (legacy FNUZ `e4m3fnuz` instead of target OCP `e4m3fn` → SNR fail vs
 AITER), K%32≠0 for MX (reject).
 
 ### 1.6 RoPE family (target ~15 tasks)
@@ -330,7 +331,7 @@ plus the existing 146 `_genops` breadth tasks with framework baselines. Cut/merg
 | ID | Rows | What it gives | Convert-to-KORE recipe | License |
 |---|---|---|---|---|
 | `ScalingIntelligence/KernelBench` | 270 | L1(100 basic ops)/L2(100 fusions)/L3(50 archs)/L4(20) PyTorch reference `Model` modules + `get_inputs` | Each `Model.forward` → `reference.py` `*_ref` (fp32) + `get_inputs`; re-target baseline from torch-eager to the AITER/hipBLASLt op the module lowers to; emit `task.yaml` + generic `driver.py`. Adopt `fast_p@1.2` metric. | MIT |
-| `GPUMODE/KernelBook` | 18,162 | torch↔Triton pairs (Inductor-generated), license/star/commit metadata | Use as **seed_triton.py breadth** + SFT pairs only (NVIDIA-idiom, not MFMA-tuned); never for perf labels. Filter to permissive (`dataset_permissive.parquet`). Regenerate on gfx942 via `torch.compile` for AMD-flavored seeds. | per-repo (metadata-tagged); use permissive subset |
+| `GPUMODE/KernelBook` | 18,162 | torch↔Triton pairs (Inductor-generated), license/star/commit metadata | Use as **seed_triton.py breadth** + SFT pairs only (NVIDIA-idiom, not MFMA-tuned); never for perf labels. Filter to permissive (`dataset_permissive.parquet`). Regenerate on gfx950 via `torch.compile` for AMD-flavored seeds. | per-repo (metadata-tagged); use permissive subset |
 | `facebook/KernelLLM` (+ 8B model) | - | high-quality SFT kernel-gen data | SFT breadth; cross-check idioms | check card (Meta) |
 | `GPUMODE/categorized_triton_data_permissive` | filtered | MIT-only Triton snippets categorized | seed_triton breadth by category | MIT |
 | `ppbhatt500/kernelbook-triton-reasoning-traces` (+multiturn) | 170 | CoT traces for kernel gen | ReasoningTrace seeds (ConCuR curation) | check card |
@@ -383,7 +384,7 @@ gemm_fusion with a torch baseline) to the **vendor-baselined** families.
 op: gemm_fp8_blockscale          # unique task stem
 family: gemm                     # dispatches the family template
 variant: block_1x128             # sub-template selector
-dtypes: [fp8_e4m3fnuz]           # cartesian-expanded into tasks
+dtypes: [fp8_e4m3fn]             # OCP (gfx950 target); legacy gfx942 used e4m3fnuz
 regimes: [prefill, decode]       # cartesian-expanded
 shapes:
   minimal: {M: 8,   N: 512,  K: 512}
@@ -402,7 +403,7 @@ seed:                            # seed_triton generation
   template: gemm_blockscale      # per-family Triton skeleton
   headroom_note: "fuse dequant into MFMA epilogue"
 edges: [K_not_mult_32_reject, amax_zero, misaligned_ptr]
-arch: gfx942                     # or gfx950 (held out)
+arch: gfx950                     # target (gfx942 = legacy/reference)
 tier: T3
 provenance: {source: aiter_op_tests, test: test_gemm_a8w8.py, commit: <sha>}
 license: MIT
@@ -494,7 +495,7 @@ seed and the vendor kernel, and a demonstrated *reachable* target.
 ### 4.4 Difficulty stratification
 
 Every task carries `tier ∈ {T1,T2,T3,T4}` and `roofline_class ∈ {memory,compute,latency}`
-(arithmetic intensity vs the gfx942 MAF ridge: bf16≈650, fp8≈1300 TFLOPs). Target
+(arithmetic intensity vs the gfx950 MAF ridge: bf16≈1150, fp8≈2300 TFLOPs). Target
 distribution: T1 15%, T2 35%, T3 35%, T4 15% (skews harder than KernelBench, whose L1/L2 are
 mostly T1/T2). The `fast_p` leaderboard is reported per-tier so progress on hard families is
 visible (KernelBench collapses everything into one number and saturates at low `p`).
@@ -530,7 +531,7 @@ transfer. For the release we additionally:
 - **Runner**: `kore-bench run --impl {candidate,reference} --split {train,test}` producing a
   `fast_p@{1.0,1.2,1.5,2.0}` leaderboard **per family and per tier**, vs the vendor baseline.
 - **Repro**: pinned ROCm + AITER version (baselines updated with AITER v0.1.12+ MI355X
-  configs), gfx942 + gfx950 rows separated.
+  configs), gfx950 (target) + gfx942 (legacy) rows separated.
 - **License**: dataset artifacts under a permissive license (task specs original;
   seed/oracle code MIT/Apache); each imported seed retains upstream license in `manifest`.
 - **Community/AMD value**: the only public benchmark that grades kernels vs the exact
@@ -586,8 +587,8 @@ Each first-50 task must pass §4.3 headroom + §4.5 verification before counting
 ### 5.3 Acceptance gate for "definitive"
 
 Ship only when: every ATOM op-map row covered in every ✅ dtype×regime cell; every hard task
-headroom-verified; T1/T2/T3/T4 = 15/35/35/15; ≥1 family + gfx950 arch + ≥1 source-repo held
-out; fp8=FNUZ everywhere; MX labeled gfx950; all baselines are on-box vendor ops; leaderboard
+headroom-verified; T1/T2/T3/T4 = 15/35/35/15; ≥1 family + a foreign-arch slice + ≥1 source-repo held
+out; fp8=OCP e4m3fn everywhere (FNUZ only as the legacy gfx942 reference); MX labeled gfx950; all baselines are on-box vendor ops; leaderboard
 reproducible on pinned ROCm+AITER.
 
 ---

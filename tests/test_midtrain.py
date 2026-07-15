@@ -237,6 +237,37 @@ def test_corpus_docs_pathfilter_excludes_unrelated_md(tmp_path):
     assert "Random notes" not in joined  # unrelated changelog.md was filtered out
 
 
+def test_eval_benchmark_decontam_drops_train_on_test(tmp_path):
+    """audit R2 midtrain: the CPT corpus is decontaminated against the RETENTION eval
+    benchmarks, so a general-replay shard carrying a full eval prompt (train-on-test,
+    which would inflate the gate) is dropped while real kernels survive."""
+    from kore.data.decontam import decontaminate_corpus, eval_benchmark_texts
+
+    texts = eval_benchmark_texts()
+    assert len(texts) >= 10  # smoke benches loaded (MMLU/HumanEval/LCB/IFEval/BFCL/MT)
+    longest = max(texts, key=lambda t: len(t.split()))
+    kernel = (
+        "import triton\nimport triton.language as tl\n\n@triton.jit\n"
+        "def rmsnorm_kernel(x_ptr, w_ptr, y_ptr, N, eps, BLOCK: tl.constexpr):\n"
+        "    row = tl.program_id(0)\n    offs = tl.arange(0, BLOCK)\n"
+        "    mask = offs < N\n    x = tl.load(x_ptr + row * N + offs, mask=mask).to(tl.float32)\n"
+        "    var = tl.sum(x * x, axis=0) / N\n    inv = tl.rsqrt(var + eps)\n"
+        "    w = tl.load(w_ptr + offs, mask=mask).to(tl.float32)\n"
+        "    tl.store(y_ptr + row * N + offs, (x * inv * w).to(tl.bfloat16), mask=mask)\n"
+    )
+    rows = [
+        {"text": kernel, "source": "triton"},
+        {"text": longest, "source": "general_replay"},   # carries a full eval prompt
+    ]
+    kept, dc = decontaminate_corpus(list(rows), text_key="text", n=8, threshold=0.10,
+                                    extra_sources=texts)
+    assert dc["n_dropped_contaminated"] >= 1
+    assert any(r["source"] == "triton" for r in kept)     # legit kernel survives
+    # without the eval sources the same row is NOT dropped (proves the extra source did it)
+    kept2, dc2 = decontaminate_corpus(list(rows), text_key="text", n=8, threshold=0.10)
+    assert dc2["n_dropped_contaminated"] == 0
+
+
 def test_general_replay_fraction_is_about_15pct(tmp_path):
     repo_root, task_root = _make_tmp_sources(tmp_path)
     cfg = _make_config(max_seq_length=64, general_replay_frac=0.15)

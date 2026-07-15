@@ -1,4 +1,4 @@
-# KORE distributed full fine-tuning — FSDP full-shard (ZeRO-3 equivalent).
+# KORE distributed full fine-tuning - FSDP full-shard (ZeRO-3 equivalent).
 #
 # Used by scripts/launch_distributed.sh:
 #   accelerate launch --config_file configs/accelerate_fsdp.yaml \
@@ -8,7 +8,7 @@
 #
 # This shards params + grads + optimizer state across all 8 ranks (FULL_SHARD ==
 # ZeRO-3), keeps compute in bf16, wraps one transformer decoder block per FSDP
-# unit, and turns on activation checkpointing — the recipe that makes a 14B
+# unit, and turns on activation checkpointing - the recipe that makes a 14B
 # full-FT fit on 8x MI300 with no CPU offload.
 #
 # NOTE: kore.policy.sft / kore.policy.dpo ALSO set FSDP via HF TrainingArguments
@@ -33,7 +33,7 @@ main_process_ip: null
 main_process_port: null
 main_training_function: main
 mixed_precision: bf16      # bf16 COMPUTE. NB: with FSDP this still yields an fp32
-                          # optimizer MASTER — accelerate's prepare_model upcasts every
+                          # optimizer MASTER - accelerate's prepare_model upcasts every
                           # trainable flat-param to fp32 (DeepSpeed-ZeRO style) when
                           # mixed precision is on, so the model is loaded bf16 (half the
                           # host RAM) yet AdamW steps in fp32. Do NOT load the model fp32.

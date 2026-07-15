@@ -2,7 +2,7 @@
 
 Salvages the expensive, GPU-verified v1 datagen (``repair/``, ``wins/``,
 ``groups/``) and upgrades it to the v2 contract entirely OFFLINE, so a full v2
-dataset is one CPU ``build`` stage away — you do NOT re-run the (GPU + teacher)
+dataset is one CPU ``build`` stage away - you do NOT re-run the (GPU + teacher)
 datagen for data you already have.
 
 What it does (CPU only, idempotent, keeps ``.pre_normalize.bak`` backups):
@@ -10,13 +10,13 @@ What it does (CPU only, idempotent, keeps ``.pre_normalize.bak`` backups):
      (legacy ``<think>/<answer>`` and raw-teacher ``CHANGE:`` -> canonical
      ANALYSIS/PROPOSED_CHANGE/FULL_KERNEL), so the build stage emits canonical SFT
      rows while REUSING the verified records. Derived shards (``_gold_*`` /
-     ``_repair_*``) are skipped — the build stage re-mints them.
+     ``_repair_*``) are skipped - the build stage re-mints them.
   2. Contract-normalizes the already-built ``sft/multicap.jsonl`` + ``dpo/pairs.jsonl``
      (belt-and-suspenders; the recommended flow rebuilds them).
   3. Reports data coverage (``kore.data.coverage``).
 
 All verified scalar fields (snr_db / wall_us / speedup / preferences / failure_class)
-are preserved byte-for-byte — only assistant *text* is re-rendered. ``groups/`` are
+are preserved byte-for-byte - only assistant *text* is re-rendered. ``groups/`` are
 left as-is (candidate SOURCES only; the build stage wraps them canonically and
 attaches provenance + in-context prompts).
 
@@ -42,7 +42,7 @@ def _shards(data_root: Path, sub: str) -> list[Path]:
     d = data_root / sub
     if not d.is_dir():
         return []
-    # skip derived shards (rebuilt by the build stage) — only touch raw records
+    # skip derived shards (rebuilt by the build stage) - only touch raw records
     return [p for p in sorted(d.glob("*.jsonl")) if not p.name.startswith("_")]
 
 

@@ -164,7 +164,7 @@ def _render_kb_context(wins: list[dict]) -> str:
     """Render retrieved wins as a few-shot 'prior winning kernels' block."""
     if not wins:
         return ""
-    parts = ["\n\n## Prior winning kernels (reference — adapt, do not copy blindly)"]
+    parts = ["\n\n## Prior winning kernels (reference - adapt, do not copy blindly)"]
     for i, w in enumerate(wins, 1):
         su = w.get("speedup")
         head = f"### Example {i}: {w.get('task_id', 'win')}"
@@ -339,7 +339,7 @@ class AgentHarness:
                 messages.append({
                     "role": "user",
                     "content": (
-                        f"No progress after {stall} turns — abandon the current "
+                        f"No progress after {stall} turns - abandon the current "
                         "candidate lineage. Re-seed a FRESH 1-shot design from the "
                         "task/seed below and try a structurally different approach."
                         + build_agent_user_prompt(self.task, self.seed_src)
@@ -400,5 +400,5 @@ class AgentHarness:
 def _safe_seed(task) -> str:
     try:
         return task.seed_source
-    except Exception:  # noqa: BLE001 — FakeEnv tasks may have no seed file
+    except Exception:  # noqa: BLE001 - FakeEnv tasks may have no seed file
         return ""

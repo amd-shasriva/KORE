@@ -2,7 +2,7 @@
 
 Elementwise silu, 2D-tiled, fp32 math, tl.float32 store. A correct-but-naive starting
 point the KORE policy learns to optimize against the framework production baseline.
-Regenerate via kore/tasks/generate_ops.py — do not hand-edit.
+Regenerate via kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 

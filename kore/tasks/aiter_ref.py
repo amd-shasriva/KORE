@@ -119,7 +119,7 @@ def _mark_baseline(kind: str) -> None:
 def aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """Production RMSNorm baseline: AITER CK ``rms_norm`` if its kernels load, else
     the torch framework RMSNorm (``F.rms_norm``), which on ROCm is a real fused
-    kernel — the documented framework production bar when AITER is unavailable."""
+    kernel - the documented framework production bar when AITER is unavailable."""
     try:
         out = _aiter_fn("rms_norm")(x, weight, eps)
         _mark_baseline("aiter_vendor")
@@ -177,7 +177,7 @@ def aiter_gelu_tanh_and_mul(x: torch.Tensor) -> torch.Tensor:
     """AITER ``gelu_tanh_and_mul(out, input)`` (in-place into out): GeGLU.
 
     Input is (M, 2*inter); returns GELU-tanh(x[:, :inter]) * x[:, inter:] as
-    (M, inter) — the LLM-standard gated activation. Falls back to the torch
+    (M, inter) - the LLM-standard gated activation. Falls back to the torch
     framework GeGLU when AITER is unavailable.
     """
     inter = x.shape[-1] // 2
@@ -249,7 +249,7 @@ def hipblaslt_gemm_bf16(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
     On ROCm, ``torch.matmul`` for bf16 dense matmul dispatches straight to
     **hipBLASLt** (the vendor tuned GEMM library that the serving stack uses),
-    so this *is* the real production bar — not an unfused torch loop. A[M,K] @
+    so this *is* the real production bar - not an unfused torch loop. A[M,K] @
     B[K,N] -> [M,N], fp32 accumulate, bf16 output.
     """
     _mark_baseline("hipblaslt_vendor")

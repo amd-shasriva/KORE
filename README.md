@@ -1,6 +1,6 @@
 # KORE
 
-**Kernel-Optimization Reinforcement Learning for AMD GPUs.** KORE trains a language model to write fast, provably-correct ROCm/Triton GPU kernels by descending a **physics-grounded roofline residual** — the measured distance to each kernel's Speed-of-Light lower bound — under a **verifiable correctness oracle**, on real AMD Instinct silicon (gfx942 / CDNA3, gfx950 / CDNA4).
+**Kernel-Optimization Reinforcement Learning for AMD GPUs.** KORE trains a language model to write fast, provably-correct ROCm/Triton GPU kernels by descending a **physics-grounded roofline residual** - the measured distance to each kernel's Speed-of-Light lower bound - under a **verifiable correctness oracle**, on real AMD Instinct silicon (gfx942 / CDNA3, gfx950 / CDNA4).
 
 > The thesis: don't reward *relative speedup vs. an arbitrary baseline* (which is gameable and operator-specific). Reward *absolute attainment of the hardware's physical limit* (`η = T_min / T_measured`), gate every reward behind an adversarial + metamorphic correctness oracle, and hold out an entire operator family to measure zero-shot cross-family generalization.
 
@@ -30,7 +30,7 @@
 Prior LLM-for-kernels work (Kevin, Dr.Kernel, KernelBench, GEAK) rewards **relative speedup** against a reference and checks correctness with a handful of random inputs. Both are fragile:
 
 - **Relative speedup is not transferable and is gameable.** "2× faster than torch-eager" means nothing physical; it depends on the baseline, and a policy can farm it with timing hacks.
-- **Random-input correctness has lucky passes.** A kernel that is wrong only on zeros / denormals / activation kinks / all-equal rows sails through `torch.randn` checks — a correctness reward hack.
+- **Random-input correctness has lucky passes.** A kernel that is wrong only on zeros / denormals / activation kinks / all-equal rows sails through `torch.randn` checks - a correctness reward hack.
 
 KORE replaces both with hardware truth:
 
@@ -42,7 +42,7 @@ KORE replaces both with hardware truth:
 | Generalization claim | in-distribution | **held-out operator family** (attention) for zero-shot cross-family eval |
 | Capability retention | not measured | **retention gate** after every stage (MMLU/HumanEval/IFEval/BFCL/LiveCodeBench/MT-Bench) |
 
-The physical premise was pre-registered and falsification-tested before any training — see [`Kore-prelim-analysis`](../Kore-prelim-analysis/) and [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md). Headline P0 result: the runtime residual `T_measured − T_min` reconstructs from named PMC terms (memory-stall + occupancy-deficit) with **R² = 0.978** on gfx950 — the "named gradient" a residual-descent reward would exploit is real in the hardware.
+The physical premise was pre-registered and falsification-tested before any training - see [`Kore-prelim-analysis`](../Kore-prelim-analysis/) and [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md). Headline P0 result: the runtime residual `T_measured − T_min` reconstructs from named PMC terms (memory-stall + occupancy-deficit) with **R² = 0.978** on gfx950 - the "named gradient" a residual-descent reward would exploit is real in the hardware.
 
 ---
 
@@ -64,14 +64,14 @@ named residual   N = (stall_frac + occupancy_deficit) · T_measured
 η      = T_min / T_measured                  PMC-free fallback (flagged no_pmc);  η ≤ ρ_phys ≤ 1
 ```
 
-**Reward ladder** (`kore/reward/`). Strictly lexicographic and anti-hackable — a faster wrong kernel can never outscore a correct one:
+**Reward ladder** (`kore/reward/`). Strictly lexicographic and anti-hackable - a faster wrong kernel can never outscore a correct one:
 
 ```
 hack  <  compile_fail  <  incorrect  <  correct
                                          └─ correct tier: correctness_weight + physics_weight·ρ_phys (+ format)
 ```
 
-**Correctness oracle** (`kore/verify/`). Four prongs — random (statistical), **adversarial** (deterministic edge regimes), **metamorphic** (algebraic self-consistency), and **determinism** — so a kernel wrong on any enumerated regime is rejected with certainty ("no lucky pass").
+**Correctness oracle** (`kore/verify/`). Four prongs - random (statistical), **adversarial** (deterministic edge regimes), **metamorphic** (algebraic self-consistency), and **determinism** - so a kernel wrong on any enumerated regime is rejected with certainty ("no lucky pass").
 
 **Generalization** (`kore/eval/generalization.py`). The **attention** family is reserved: trained never, evaluated zero-shot, to measure genuine cross-operator transfer.
 
@@ -181,13 +181,13 @@ Full CLI, stage dispatch, and the resume mechanism are documented in [`scripts/R
 
 ## Quick start
 
-**Preflight (no GPU)** — imports every stage and prints the resolved plan:
+**Preflight (no GPU)** - imports every stage and prints the resolved plan:
 
 ```bash
 PYTHONPATH=. python scripts/run_campaign.py --dry-run --tasks rmsnorm_aiter,gemm_bf16
 ```
 
-**Single-GPU LoRA bring-up** — a real (small) end-to-end campaign:
+**Single-GPU LoRA bring-up** - a real (small) end-to-end campaign:
 
 ```bash
 PYTHONPATH=. python scripts/run_campaign.py \
@@ -196,7 +196,7 @@ PYTHONPATH=. python scripts/run_campaign.py \
   --stages datagen,agentic,build,sft,dpo,grpo,soup,eval
 ```
 
-**Full 14B campaign (8× MI300-class, FSDP, durable)** — see [below](#running-the-full-14b-campaign):
+**Full 14B campaign (8× MI300-class, FSDP, durable)** - see [below](#running-the-full-14b-campaign):
 
 ```bash
 bash scripts/tmux_campaign.sh
@@ -267,7 +267,7 @@ Full-parameter FSDP across 8 GPUs (no LoRA, no CPU offload, bf16), 16k sequence 
 
 The campaign writes `data/<root>/campaign_manifest.json` recording `done_stages` and real checkpoint paths. On restart, a stage is skipped only if it is in `done_stages` **and** its on-disk artifact exists (`_artifact_ok`). Datagen additionally resumes at **shard** granularity (`shard_done` skips any non-empty `{kind}/{task}.jsonl`).
 
-This makes the run robust to **ephemeral nodes**: files persist under your account, so if a reservation ends mid-run, just re-reserve and re-launch — it continues where it stopped.
+This makes the run robust to **ephemeral nodes**: files persist under your account, so if a reservation ends mid-run, just re-reserve and re-launch - it continues where it stopped.
 
 ```bash
 # after re-reserving the node:
@@ -306,17 +306,17 @@ Consolidated catalog (see subpackage READMEs for specifics):
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `AMD_LLM_API_KEY` | — | Claude gateway subscription key (in `.env.local`) |
+| `AMD_LLM_API_KEY` | - | Claude gateway subscription key (in `.env.local`) |
 | `KORE_REWARD_MODE` | `speedup` | `residual` selects the physics roofline reward |
 | `KORE_VERIFIED_CORRECTNESS` | off | enable enumerated adversarial correctness battery |
 | `KORE_COMPILE_BASELINE` | off | grade vs. compiler-fused baseline (anti speedup-inflation) |
 | `KORE_BENCH_COLD` | `1` | cold-cache (L2-flushed) timing |
 | `KORE_PROFILE_REWARD_WEIGHT` | `0` | enable rocprofv3 PMC dense reward shaping |
-| `KORE_EVAL_FULL` / `KORE_EVAL_N` | — / `300` | pull real HF retention splits, capped per bench |
+| `KORE_EVAL_FULL` / `KORE_EVAL_N` | - / `300` | pull real HF retention splits, capped per bench |
 | `KORE_GENERAL_REPLAY_HF` | off | use real HF datasets for anti-forgetting replay |
 | `KORE_PEAK_BF16` / `KORE_PEAK_FP8` / `KORE_PEAK_HBM_BW` | datasheet | override roofline peaks with calibrated values |
 | `KORE_DATAGEN_WORKERS` | `32` (conductor) | teacher-bound datagen concurrency |
-| `HIP_VISIBLE_DEVICES` | — | GPU pinning (ROCm: use HIP only, not ROCR) |
+| `HIP_VISIBLE_DEVICES` | - | GPU pinning (ROCm: use HIP only, not ROCR) |
 
 ---
 

@@ -15,7 +15,7 @@ and emits them as training data. Three ideas from the review are combined:
     search preserves *diverse* strong kernels rather than collapsing onto one.
     Multiple islands evolve in parallel with periodic ring migration
     (:func:`migrate`), and the top elites are fed back as few-shot exemplars to
-    the generator — FunSearch/AlphaEvolve best-shot multi-parent prompting.
+    the generator - FunSearch/AlphaEvolve best-shot multi-parent prompting.
 
   * **Value-model prefilter**. Each generation proposes several candidates; the
     cheap value model (``kore.value.rerank.rank_candidates``) ranks them and only
@@ -68,7 +68,7 @@ class DMABBandit:
 
     (each unplayed arm is tried once first). A two-sided Page-Hinkley test runs on
     the reward stream; when it fires (the reward distribution has drifted) the
-    bandit statistics are *restarted* so it re-explores — this is what makes it
+    bandit statistics are *restarted* so it re-explores - this is what makes it
     "dynamic" and robust to non-stationary rewards (D-MAB).
 
     ``pulls`` / ``reward_sums`` accumulate across restarts (for reporting/tests);
@@ -203,7 +203,7 @@ def _speedup_bin(speedup: Optional[float], bins) -> int:
 
 
 def behavior_descriptor(op_family: str, speedup: Optional[float], correct: bool, bins) -> tuple:
-    """(op_family, speedup_bin, correctness) — the MAP-Elites cell key."""
+    """(op_family, speedup_bin, correctness) - the MAP-Elites cell key."""
     return (op_family, _speedup_bin(speedup, bins) if correct else -1, bool(correct))
 
 
@@ -409,7 +409,7 @@ def evolve_task(
             msgs = _fewshot_messages(task, elites, parent_src, feedback, mode, cfg.max_shots)
             trajectory.append(msgs[-1])
             resp = generator.generate(msgs)
-            # store the canonical contract (Pillar 0) — raw teacher text may be loosely
+            # store the canonical contract (Pillar 0) - raw teacher text may be loosely
             # shaped; build_sft also canonicalizes at the boundary as a backstop.
             trajectory.append({"role": "assistant", "content": normalize_assistant(resp)})
             gsrc = extract_kernel(resp)

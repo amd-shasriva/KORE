@@ -92,7 +92,7 @@ def generate_agentic_trajectories(
     Each episode is an independent :class:`AgentHarness` run driven by
     ``teacher``. When ``keep_only_useful`` is set, only successful or repair
     trajectories are retained (attempts that never reached correctness are
-    dropped) — the SFT-quality subset.
+    dropped) - the SFT-quality subset.
     """
     total = max(0, n)
     with log.stage("generate_agentic_trajectories", task=getattr(task, "task_id", None),

@@ -1,22 +1,22 @@
-"""Policy prompt/response format — PURE, dependency-free, unit-testable.
+"""Policy prompt/response format - PURE, dependency-free, unit-testable.
 
 The policy is a reasoning+code model that iteratively optimizes a ROCm kernel
 across turns. This module owns the *contract* between the policy and the env:
 
-  - ``SYSTEM_PROMPT`` — gfx950/CDNA4 kernel discipline, one change per turn, and the
+  - ``SYSTEM_PROMPT`` - gfx950/CDNA4 kernel discipline, one change per turn, and the
     ANALYSIS / PROPOSED_CHANGE / FULL_KERNEL response contract.
-  - ``build_transcript`` — assemble the multi-turn chat (prior kernels + the
+  - ``build_transcript`` - assemble the multi-turn chat (prior kernels + the
     *summarized* verifier feedback) that is fed to the model each turn.
-  - ``parse_response`` — pull the optional ``think`` scratchpad plus the
+  - ``parse_response`` - pull the optional ``think`` scratchpad plus the
     ``analysis`` / ``proposed_change`` / ``kernel`` out of a model response.
-  - ``summarize_cot`` — bound the chain-of-thought length so context does not
+  - ``summarize_cot`` - bound the chain-of-thought length so context does not
     grow without limit across turns (Kevin: summarize CoT between turns). It
     keeps the ANALYSIS/PROPOSED_CHANGE conclusion and drops the verbose
     ``<think>`` scratchpad rather than blindly slicing the middle out.
-  - ``check_change_consistency`` — a pure claim<->code gate: does the change the
+  - ``check_change_consistency`` - a pure claim<->code gate: does the change the
     ANALYSIS names (num_warps/num_stages/BLOCK_*/tl.dot/LDS/...) actually appear
     in the prev->new kernel diff? (catches "describe but don't implement").
-  - ``build_turn_feedback`` — render an ``Observation`` into the compact
+  - ``build_turn_feedback`` - render an ``Observation`` into the compact
     compile / SNR / wall feedback the policy sees on its next turn.
 
 DEEP CoT (additive, backward-compatible): the contract now *invites* an OPTIONAL
@@ -47,8 +47,8 @@ _FULL_KERNEL = "FULL_KERNEL"
 # Optional deep-reasoning scratchpad. The block is OPTIONAL and, when present,
 # comes BEFORE the structured sections. It is captured separately by
 # ``parse_response`` and stripped before kernel/section extraction so it can never
-# contaminate the parsed kernel (it may legitimately quote forbidden ops — e.g.
-# "do NOT fall back to torch.matmul" — as counter-citations).
+# contaminate the parsed kernel (it may legitimately quote forbidden ops - e.g.
+# "do NOT fall back to torch.matmul" - as counter-citations).
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 _THINK_RE = re.compile(r"<think\s*>(.*?)</think\s*>", re.DOTALL | re.IGNORECASE)
@@ -77,7 +77,7 @@ hand-roll the inner product with scalar FMAs.
 accumulator MUST be fp32 to hold precision across the reduction/K loop.
   - CDNA4 fp8 is OCP e4m3fn/e5m2 (torch.float8_e4m3fn, range +/-448), NOT the \
 CDNA3 fnuz variant; CDNA4 also adds native fp6 and fp4/mxfp4 matrix ops at up to \
-2x/4x the fp8 rate — prefer the OCP fp8 path (and tl.dot on fp8) for quantized GEMMs.
+2x/4x the fp8 rate - prefer the OCP fp8 path (and tl.dot on fp8) for quantized GEMMs.
   - Prefer num_warps in {4, 8}; tune num_stages for software pipelining / LDS \
 double-buffering of global loads.
   - Respect the memory hierarchy VGPR -> LDS -> L2 -> HBM; watch for VGPR spills \
@@ -100,41 +100,41 @@ per turn makes the speedup attributable and keeps the search stable.
 
 DEEP REASONING (encouraged, optional): before the sections below, you MAY open a \
 <think>...</think> scratchpad and reason as long and as branchily as the problem \
-deserves — there is NO length limit and it will NOT be counted against you. Do \
+deserves - there is NO length limit and it will NOT be counted against you. Do \
 real engineering in it: read the profile/feedback, diagnose the TRUE bottleneck \
 (compute- vs memory- vs latency-bound), estimate the roofline / arithmetic \
 intensity / bytes moved / achieved-vs-peak occupancy, form a hypothesis, predict \
 its effect BEFORE you make it, argue the counter-case (why it might regress: VGPR \
 spills, LDS overflow, lower occupancy, bank conflicts), and revise. Everything \
 inside <think> is ignored by the parser and stripped from later turns' context, \
-so it is a free space to think — but it must still converge to the three required \
+so it is a free space to think - but it must still converge to the three required \
 sections below.
 
-RESPONSE FORMAT — after any optional <think> scratchpad, respond with these \
+RESPONSE FORMAT - after any optional <think> scratchpad, respond with these \
 three sections, in this order (they are what gets parsed, so they are required):
 
 ANALYSIS:
 <the decisive synthesis: the true bottleneck WITH its evidence (roofline / \
 occupancy / bandwidth), and the single change you will make and why. Be as \
-thorough as the problem needs — do not truncate it artificially.>
+thorough as the problem needs - do not truncate it artificially.>
 
 PROPOSED_CHANGE:
 <one sentence naming the single change you are making this turn>
 
 FULL_KERNEL:
 ```python
-<the ENTIRE kernel source, ready to run — not a diff, not a snippet>
+<the ENTIRE kernel source, ready to run - not a diff, not a snippet>
 ```
 """
 
 
 # The response-format block, reused verbatim by the data-generation writer
 # prompts (kore/data/prompts.py) so the teacher is asked for EXACTLY the contract
-# the policy is trained to emit. Single source of truth — do not fork this.
+# the policy is trained to emit. Single source of truth - do not fork this.
 OUTPUT_CONTRACT = """\
-## Reasoning (optional, encouraged) — BEFORE the required sections below:
+## Reasoning (optional, encouraged) - BEFORE the required sections below:
 You MAY open with a <think> ... </think> scratchpad and reason deeply and at
-length — there is NO length cap. Do evidence-grounded engineering:
+length - there is NO length cap. Do evidence-grounded engineering:
 profile -> diagnose the true bottleneck (compute vs memory vs latency) ->
 hypothesize -> estimate the effect (roofline / arithmetic intensity / bytes
 moved / occupancy) -> transform -> argue the counter-case (VGPR spills, LDS
@@ -142,18 +142,18 @@ overflow, occupancy loss, bank conflicts) -> revise. Branch, cite concrete
 numbers, and self-correct. Everything inside <think> is ignored by the kernel
 parser and is stripped from later-turn context, so think freely.
 
-## Output Format (required) — after any <think>, respond with EXACTLY these sections, in order:
+## Output Format (required) - after any <think>, respond with EXACTLY these sections, in order:
 ANALYSIS:
 <the decisive synthesis: the current bottleneck WITH its evidence (roofline /
 occupancy / bandwidth / data placement) and the one change you will make. Be as
-thorough as the problem needs — do NOT truncate it to a fixed length.>
+thorough as the problem needs - do NOT truncate it to a fixed length.>
 
 PROPOSED_CHANGE:
 <one sentence naming the single change (imperative, specific)>
 
 FULL_KERNEL:
 ```python
-<the COMPLETE modified kernel source — full file, ready to run, not a diff>
+<the COMPLETE modified kernel source - full file, ready to run, not a diff>
 ```
 """
 
@@ -210,14 +210,14 @@ def summarize_cot(text: str, max_chars: int = 2000) -> str:
     Context grows every turn; we summarize prior-turn reasoning so the transcript
     stays within the model's window. This is *smarter than a head/tail char slice*:
 
-      1. drop the verbose ``<think>`` scratchpad — that is the part that explodes
+      1. drop the verbose ``<think>`` scratchpad - that is the part that explodes
          context; the terse conclusion is what actually needs to carry over;
       2. if a structured ANALYSIS/PROPOSED_CHANGE conclusion is present, keep
          THAT (dropping only the scratchpad) rather than a blind slice;
       3. otherwise fall back to the original head/tail elision.
 
     The result is always at most ``max_chars`` characters. NOTE: this is only used
-    for PRIOR-turn context — the trained assistant turn keeps its full CoT (see
+    for PRIOR-turn context - the trained assistant turn keeps its full CoT (see
     ``format_assistant_turn(..., think=...)`` and ``build_transcript``).
     """
     text = (text or "").strip()
@@ -324,7 +324,7 @@ def _extract_kernel(text: str) -> str:
     any_fence = re.search(r"```(?:python|py)?\s*\n(.*?)```", body, flags=re.DOTALL)
     if any_fence:
         return any_fence.group(1)
-    # Last resort: a fenced block anywhere (incl. inside the scratchpad) — keeps
+    # Last resort: a fenced block anywhere (incl. inside the scratchpad) - keeps
     # the pre-deep-CoT behavior for responses that ONLY carried code in <think>.
     orig_fence = re.search(r"```(?:python|py)?\s*\n(.*?)```", text, flags=re.DOTALL)
     return orig_fence.group(1) if orig_fence else ""
@@ -361,7 +361,7 @@ def wrap_full_kernel(source: str) -> str:
     """Wrap a kernel body in just the FULL_KERNEL block (DPO/RFT completions).
 
     Preference completions compare kernels, so they carry only the FULL_KERNEL
-    section (a pure, contract-shaped completion) — the canonical single-section form.
+    section (a pure, contract-shaped completion) - the canonical single-section form.
     """
     return f"{_FULL_KERNEL}:\n```python\n{(source or '').strip()}\n```\n"
 
@@ -371,12 +371,12 @@ def normalize_assistant(content: str) -> str:
 
     Handles every historical shape found in the KORE data (so existing shards can
     be upgraded in place without regeneration):
-      * repair ``<think>…</think><answer>FULL_KERNEL:…</answer>`` (LLM-VeriOpt) —
+      * repair ``<think>…</think><answer>FULL_KERNEL:…</answer>`` (LLM-VeriOpt) -
         the ``<think>`` reasoning becomes ANALYSIS;
       * gold-win ``ANALYSIS: … FULL_KERNEL:\\n<src>`` with no PROPOSED_CHANGE and no
-        code fence — the fence is added;
-      * data-gen ``CHANGE:`` — mapped to PROPOSED_CHANGE;
-      * raw teacher text — parsed and re-emitted.
+        code fence - the fence is added;
+      * data-gen ``CHANGE:`` - mapped to PROPOSED_CHANGE;
+      * raw teacher text - parsed and re-emitted.
     Idempotent on already-canonical content. Returns the content unchanged if no
     kernel can be extracted (nothing safe to normalize).
     """
@@ -462,13 +462,13 @@ _NUMERIC_KNOB_RE = re.compile(
 
 @dataclass(frozen=True)
 class ChangeConsistency:
-    """Result of :func:`check_change_consistency` — truthy iff consistent.
+    """Result of :func:`check_change_consistency` - truthy iff consistent.
 
     Usable directly as a gate (``if check_change_consistency(...):``) via
     ``__bool__``, while exposing the per-knob breakdown for stricter callers:
-      * ``claimed``  — knobs the ANALYSIS named;
-      * ``applied``  — claimed knobs that actually changed in the diff;
-      * ``missing``  — claimed knobs that did NOT change (require ``not missing``
+      * ``claimed``  - knobs the ANALYSIS named;
+      * ``applied``  - claimed knobs that actually changed in the diff;
+      * ``missing``  - claimed knobs that did NOT change (require ``not missing``
                        for an all-knobs-must-land gate).
     """
 
@@ -525,9 +525,9 @@ def check_change_consistency(analysis: str, prev_kernel: str, new_kernel: str,
     """Does the change the ANALYSIS *names* actually appear in the kernel diff?
 
     A pure, CPU-only claim<->code gate. It scans ``analysis`` (+ optional
-    ``proposed_change``) for concrete knobs it recognizes — num_warps, num_stages,
+    ``proposed_change``) for concrete knobs it recognizes - num_warps, num_stages,
     BLOCK_*/tiling, GROUP_M/swizzle, vectorization, tl.dot/MFMA, LDS/shared-memory,
-    fp32 accumulator, masking, cache modifiers — and checks each against the
+    fp32 accumulator, masking, cache modifiers - and checks each against the
     ``prev_kernel`` -> ``new_kernel`` diff, using BOTH a numeric value change and
     the identifying token being added/removed (so it catches new-knob /
     structural rewrites a pure value scan would miss).
@@ -538,7 +538,7 @@ def check_change_consistency(analysis: str, prev_kernel: str, new_kernel: str,
       * knob(s) named but NONE changed -> INCONSISTENT (unsupported claim).
 
     Symmetric in the sense that an EMPTY diff (``prev_kernel == new_kernel``) with
-    any named knob is always inconsistent — the textbook "describe but don't
+    any named knob is always inconsistent - the textbook "describe but don't
     implement" turn.
     """
     claim = f"{analysis or ''}\n{proposed_change or ''}".lower()
@@ -631,7 +631,7 @@ def build_task_prompt(task: Any) -> str:
 
     Single source of truth shared by GRPO rollouts, eval, AND DPO-pair construction,
     so preferences are learned in the SAME context the policy sees at inference (a
-    seed kernel to improve + the ANALYSIS/PROPOSED_CHANGE/FULL_KERNEL contract) — not
+    seed kernel to improve + the ANALYSIS/PROPOSED_CHANGE/FULL_KERNEL contract) - not
     a bare "optimize task X" one-shot. ``task`` is any object exposing ``dtype``,
     ``operation``, ``gpu_target``, ``backend``, ``comparison_baseline``, ``seed_source``.
     """
@@ -681,7 +681,7 @@ def _assistant_content(turn: dict, max_cot_chars: int) -> str:
     This is the CONTEXT-carryover path: the ``<think>`` scratchpad is dropped and
     the ANALYSIS is summarized (``format_assistant_turn`` is called WITHOUT
     ``think=``), so re-rendering old turns cannot explode the context window. The
-    durable artifacts — the PROPOSED_CHANGE and the full FULL_KERNEL source — are
+    durable artifacts - the PROPOSED_CHANGE and the full FULL_KERNEL source - are
     kept intact. (The freshly generated / trained turn is NOT rendered here, so it
     retains its full CoT.)
     """

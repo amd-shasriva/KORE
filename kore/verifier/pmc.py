@@ -17,12 +17,12 @@ gfx950-only low-precision MFMA op counters live in a separate collection pass):
 
 Two counter families matter for gfx942 correctness (see ``COUNTER_META``):
 
-* **Raw hardware counters** (``SQ_*``, ``GRBM_*``, ``TCC_*``) — what ``--pmc``
+* **Raw hardware counters** (``SQ_*``, ``GRBM_*``, ``TCC_*``) - what ``--pmc``
   collects. TCC counters are per-L2-channel and indexed ``[0-31]``; the ``_sum``
   suffix (e.g. ``TCC_HIT_sum``) is the ROCm-provided aggregate across channels.
-* **MFMA op counts** — gfx942 exposes the FLOP-weighted matrix throughput as
+* **MFMA op counts** - gfx942 exposes the FLOP-weighted matrix throughput as
   ``SQ_INSTS_VALU_MFMA_MOPS_{BF16,F16,F32,F64,I8}`` ("ops in the unit of 512"),
-  which — unlike the issue-count family ``SQ_INSTS_VALU_MFMA_{F16,F32,F64,I8}`` —
+  which - unlike the issue-count family ``SQ_INSTS_VALU_MFMA_{F16,F32,F64,I8}`` -
   DOES have a BF16 member. There is direct MFMA-busy timing via
   ``SQ_VALU_MFMA_BUSY_CYCLES``.
 
@@ -84,7 +84,7 @@ COUNTER_SETS = {
     # ------------------------------------------------------------------- #
     # "grounding": the REAL bottleneck counters for MI300X/gfx942 roofline
     # reasoning (Pillar 4). Every name below is from the ROCm MI300 counter
-    # reference. Spans SQ + GRBM + TCC, so it is NOT single-pass — collect via
+    # reference. Spans SQ + GRBM + TCC, so it is NOT single-pass - collect via
     # GROUNDING_PASSES (see module note) and merge the per-pass dicts.
     # ------------------------------------------------------------------- #
     "grounding": [
@@ -131,26 +131,26 @@ COUNTER_SETS = {
 # per-block slot budget is arch/firmware dependent -> validate on-device with
 # ``rocprofv3 --list-avail`` if a pass ever fails to schedule.
 GROUNDING_PASSES: list[list[str]] = [
-    # pass 1 — SQ issue/stall/busy + waves, plus GRBM active cycles
+    # pass 1 - SQ issue/stall/busy + waves, plus GRBM active cycles
     [
         "SQ_WAVES", "SQ_BUSY_CYCLES", "SQ_VALU_MFMA_BUSY_CYCLES",
         "SQ_INSTS_VALU", "SQ_INSTS_VMEM", "SQ_INSTS_SALU",
         "SQ_WAIT_INST_ANY", "SQ_WAIT_INST_LDS",
         "GRBM_GUI_ACTIVE", "GRBM_COUNT",
     ],
-    # pass 2 — SQ MFMA op mix + LDS insts + VMEM active cycles
+    # pass 2 - SQ MFMA op mix + LDS insts + VMEM active cycles
     [
         "SQ_INSTS_VALU_MFMA_MOPS_BF16", "SQ_INSTS_VALU_MFMA_MOPS_F16",
         "SQ_INSTS_VALU_MFMA_MOPS_F32", "SQ_INSTS_LDS", "SQ_ACTIVE_INST_VMEM",
     ],
-    # pass 3 — TCC L2 hit/miss + read traffic
+    # pass 3 - TCC L2 hit/miss + read traffic
     ["TCC_HIT_sum", "TCC_MISS_sum", "TCC_EA0_RDREQ_sum", "TCC_EA0_RDREQ_32B_sum"],
-    # pass 4 — TCC write traffic
+    # pass 4 - TCC write traffic
     ["TCC_EA0_WRREQ_sum", "TCC_EA0_WRREQ_64B_sum"],
-    # pass 5 — gfx950/CDNA4 low-precision MFMA op mix (OCP-FP8 / MXFP6 / MXFP4 /
+    # pass 5 - gfx950/CDNA4 low-precision MFMA op mix (OCP-FP8 / MXFP6 / MXFP4 /
     #          XF32). These counters exist ONLY on gfx950; on a gfx942 node the
     #          pass yields no CSV and is silently skipped (collection merges the
-    #          rest — see KoreEnv.collect_counters), so this is arch-safe.
+    #          rest - see KoreEnv.collect_counters), so this is arch-safe.
     [
         "SQ_INSTS_VALU_MFMA_MOPS_F8", "SQ_INSTS_VALU_MFMA_MOPS_F6F4",
         "SQ_INSTS_VALU_MFMA_MOPS_XF32",
@@ -175,7 +175,7 @@ def counter_passes(name: str = "grounding") -> list[list[str]]:
 # grounded-reasoning teacher/demo can name what each number measures.
 # --------------------------------------------------------------------------- #
 COUNTER_META: dict[str, tuple[str, str]] = {
-    # SQ — instruction issue / occupancy / stalls
+    # SQ - instruction issue / occupancy / stalls
     "SQ_WAVES": ("Wavefronts dispatched to the SQ (new + restored)", "waves"),
     "SQ_BUSY_CYCLES": ("Cycles the sequencer reported busy", "cycles"),
     "SQ_VALU_MFMA_BUSY_CYCLES": ("Cycles the MFMA (matrix-core) ALU was busy", "cycles"),
@@ -202,14 +202,14 @@ COUNTER_META: dict[str, tuple[str, str]] = {
     "SQ_WAIT_INST_ANY": ("Quad-cycles waiting to issue ANY instruction", "qcycles"),
     "SQ_WAIT_INST_LDS": ("Quad-cycles waiting to issue an LDS instruction", "qcycles"),
     "SQ_ACTIVE_INST_VMEM": ("Quad-cycles the arbiter worked on a VMEM instruction", "qcycles"),
-    # GRBM — device-level cycle counters
+    # GRBM - device-level cycle counters
     "GRBM_GUI_ACTIVE": ("GPU active cycles (graphics/compute engine busy)", "cycles"),
     "GRBM_COUNT": ("Free-running GPU cycles", "cycles"),
-    # TCC (L2) — hits/misses
+    # TCC (L2) - hits/misses
     "TCC_HIT_sum": ("L2 cache hits, summed over channels", "requests"),
     "TCC_MISS_sum": ("L2 cache misses, summed over channels", "requests"),
     "TCC_REQ_sum": ("All L2 cache requests, summed over channels", "requests"),
-    # TCC EA<->HBM — request counts (32B or 64B each)
+    # TCC EA<->HBM - request counts (32B or 64B each)
     "TCC_EA0_RDREQ_sum": ("EA->HBM read requests (32B or 64B), summed", "requests"),
     "TCC_EA0_RDREQ_32B_sum": ("EA->HBM 32B read requests, summed", "requests"),
     "TCC_EA0_WRREQ_sum": ("EA->HBM write requests (32B or 64B), summed", "requests"),
@@ -484,7 +484,7 @@ def mfma_ops(counters: dict) -> int:
 def mfma_busy_fraction(counters: dict) -> Optional[float]:
     """Fraction of active GPU cycles the MFMA ALU was busy, in [0, 1].
 
-    ``SQ_VALU_MFMA_BUSY_CYCLES / GRBM_GUI_ACTIVE`` — the most direct matrix-core
+    ``SQ_VALU_MFMA_BUSY_CYCLES / GRBM_GUI_ACTIVE`` - the most direct matrix-core
     utilization signal on gfx942. None if either counter is absent.
     """
     busy = _counter(counters, "SQ_VALU_MFMA_BUSY_CYCLES")

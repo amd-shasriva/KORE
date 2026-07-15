@@ -1,4 +1,4 @@
-"""KORE stage gates — enforce "specialize without regressing" (KORE.pdf Sec 5).
+"""KORE stage gates - enforce "specialize without regressing" (KORE.pdf Sec 5).
 
 The KORE definition of best-in-world is *conjunctive*: top kernel numbers **AND**
 matching-or-beating the base model on **every** general benchmark. A candidate
@@ -8,11 +8,11 @@ training campaign can hard-stop (or auto-reject a checkpoint) the moment
 specialization silently regresses a general capability.
 
 Two gates:
-  - :class:`StageGate` — the full promotion gate. PASS iff (a) the targeted
+  - :class:`StageGate` - the full promotion gate. PASS iff (a) the targeted
     *kernel* metric(s) strictly improve AND (b) NO *general* metric drops by more
     than ``epsilon``. Used to promote a checkpoint to the next stage / crown a
     new best.
-  - :func:`retention_gate` — the general-only guardrail (no kernel-improvement
+  - :func:`retention_gate` - the general-only guardrail (no kernel-improvement
     requirement): PASS iff no general metric regresses beyond ``epsilon`` vs base.
     Cheap to run every step as an early tripwire.
 
@@ -199,7 +199,7 @@ def retention_gate(
 ) -> GateResult:
     """General-only guardrail: PASS iff no shared general metric regresses > epsilon.
 
-    Unlike :class:`StageGate` this imposes NO kernel-improvement requirement — it
+    Unlike :class:`StageGate` this imposes NO kernel-improvement requirement - it
     is the cheap early tripwire you run every training step against the base
     model's general scores (e.g. the output of
     :func:`kore.eval.retention.run_retention_suite`'s ``scores``). Only keys

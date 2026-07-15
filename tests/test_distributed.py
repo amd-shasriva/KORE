@@ -224,7 +224,7 @@ def test_build_fsdp_kwargs_explicit_layer_cls_overrides_autodetect():
 
 def test_fsdp_config_never_sets_activation_checkpointing():
     # Activation checkpointing is owned by the Trainer stage (HF gradient_checkpointing
-    # + use_reentrant=False), never by fsdp_config — regardless of the flag — because
+    # + use_reentrant=False), never by fsdp_config - regardless of the flag - because
     # the FSDP-plugin external wrapper mismatches saved-tensor counts on FSDP1.
     for gc in (True, False):
         cfg = SFTConfig(use_lora=False, distributed=True, gradient_checkpointing=gc)

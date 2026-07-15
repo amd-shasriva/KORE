@@ -1,7 +1,7 @@
 """Reference + inputs for the bf16 row-softmax task.
 
 Numerically-stable softmax over the last dim (subtract row-max, exp, normalize),
-bf16 in/out with fp32 math — the softmax used in attention scores / logits.
+bf16 in/out with fp32 math - the softmax used in attention scores / logits.
 
 Correctness oracle: exact torch-fp32 ``softmax``.
 Perf baseline (driver --impl reference): ``torch.softmax`` which on ROCm lowers

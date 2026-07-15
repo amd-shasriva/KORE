@@ -1,7 +1,7 @@
 """GENERATED seed Triton kernel for the row_l2 (bf16) row reduction.
 
 Per-row reduction [M,N]->[M], fp32 accumulate, tl.bfloat16 store. Regenerate via
-kore/tasks/generate_ops.py — do not hand-edit.
+kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 

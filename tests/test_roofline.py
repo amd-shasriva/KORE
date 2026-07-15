@@ -18,7 +18,7 @@ from kore.verifier import pmc
 # constants
 # --------------------------------------------------------------------------- #
 def test_mi300x_constants_match_datasheet():
-    # gfx942 / CDNA3 bundle (previous gen) — always available in the arch table.
+    # gfx942 / CDNA3 bundle (previous gen) - always available in the arch table.
     mi = R.MI300X
     assert mi["hbm_bw_bytes_per_s"] == pytest.approx(5.325e12, rel=1e-3)
     assert mi["peak_flops_bf16"] == pytest.approx(1.3074e15, rel=1e-3)
@@ -32,7 +32,7 @@ def test_mi300x_constants_match_datasheet():
 
 
 def test_mi350x_constants_match_datasheet():
-    # gfx950 / CDNA4 — the KORE target hardware (default ACTIVE arch).
+    # gfx950 / CDNA4 - the KORE target hardware (default ACTIVE arch).
     mi = R.MI350X
     assert mi["arch"] == "gfx950"
     assert mi["hbm_bw_bytes_per_s"] == pytest.approx(8.0e12, rel=1e-3)   # HBM3E 8 TB/s

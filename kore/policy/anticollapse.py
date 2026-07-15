@@ -1,4 +1,4 @@
-"""Anti-collapse ladder for multi-turn GRPO — PURE, unit-testable.
+"""Anti-collapse ladder for multi-turn GRPO - PURE, unit-testable.
 
 GRPO's group-relative advantage degenerates when a whole group shares the same
 reward: the std -> 0 and every advantage collapses to ~0, so there is no
@@ -119,7 +119,7 @@ def avspo_advantages(returns: list[float], tau: float, k: int = 2,
 
     guaranteeing a variance FLOOR: a near-degenerate group still produces a
     finite, usable learning signal instead of collapsing to ~0. The ``k`` virtual
-    samples exist ONLY in the normalization stats — they get NO policy-gradient
+    samples exist ONLY in the normalization stats - they get NO policy-gradient
     term (the returned list has exactly ``len(returns)`` entries, one per real
     rollout). With ``tau <= 0`` (disabled) or a group whose std already meets the
     floor, this is exactly :func:`group_reward_std`-normalized GRPO.
@@ -201,7 +201,7 @@ def gtpo_codesim_shaping(codes: list[str], references: list[str],
 
     This rewards candidates that are structurally close to a known-good kernel
     even though none passed, restoring a non-degenerate signal. With no
-    references, returns all zeros (no-op — the group stays collapsed and is
+    references, returns all zeros (no-op - the group stays collapsed and is
     dropped by StarPO-S).
     """
     if not references:

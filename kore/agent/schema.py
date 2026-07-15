@@ -6,7 +6,7 @@ the compact ``tool_trace``, the best kernel + its reward, turns-to-best, the
 success flag, and provenance. It follows the same dataclass + symmetric
 ``to_dict``/``from_dict`` pattern as :mod:`kore.data.schemas` and round-trips
 through that module's ``write_jsonl``/``read_jsonl`` (which are imported here,
-not re-implemented — schemas.py is left untouched).
+not re-implemented - schemas.py is left untouched).
 """
 
 from __future__ import annotations

@@ -12,7 +12,7 @@ that returns a reward :class:`Observation`. Hardening (see audits):
   The subprocess runs in its own session with a process limit; on timeout the
   whole process group is killed (no leaked grandchildren / GPU holders).
 * **Infra vs kernel.** Timeouts, OOM-kills, segfaults, and missing-dependency
-  imports are classified as ``infra_error`` — never cached, never fed to the
+  imports are classified as ``infra_error`` - never cached, never fed to the
   policy as a kernel-correctness signal.
 * **Trustworthy timing.** Each (shape, impl) is benched several times; the
   coefficient of variation is recorded and high-variance speedups are damped.
@@ -53,7 +53,7 @@ def _ev(level: str, name: str, **fields) -> None:
     ``KoreLogger.event`` hard-codes INFO; per-shape verifier detail must ride at
     DEBUG so it never spams INFO while a run is going, so we route through the
     logger's emit with the level we want but keep ``kind="event"`` for
-    machine-readable JSONL. This is additive-only — pure observability.
+    machine-readable JSONL. This is additive-only - pure observability.
     """
     _LOG._emit(level, name, fields, kind="event")
 
@@ -73,7 +73,7 @@ _COMPILE_ERR = re.compile(
     r"NameError|out of resource|OutOfResources|AssertionError)",
     re.IGNORECASE,
 )
-# Infrastructure failure (NOT the kernel's fault) — never cache, never train on.
+# Infrastructure failure (NOT the kernel's fault) - never cache, never train on.
 _INFRA_ERR = re.compile(
     r"(hipError|HIP error|out of memory|hipErrorOutOfMemory|CUDA error|"
     r"no CUDA-capable|device-side assert|ECC|Xid|"
@@ -105,7 +105,7 @@ def _preexec():  # pragma: no cover - runs in child only
         resource.setrlimit(resource.RLIMIT_NPROC, (hard, hard))
     except (ValueError, OSError):
         pass
-    # Deliberately NOT setting RLIMIT_AS — ROCm/HIP reserve huge virtual address
+    # Deliberately NOT setting RLIMIT_AS - ROCm/HIP reserve huge virtual address
     # space and an AS cap breaks legitimate GPU kernels.
 
 
@@ -182,7 +182,7 @@ class KoreEnv:
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
 
-        # Only cache DETERMINISTIC terminal verdicts — never transient infra errors.
+        # Only cache DETERMINISTIC terminal verdicts - never transient infra errors.
         cacheable = (obs.compiled or obs.error_text) and not obs.infra_error
         if self.use_replay and self._cache_obj is not None and cacheable:
             self._cache_obj.put(task.task_id, source, obs)
@@ -204,9 +204,9 @@ class KoreEnv:
         if self._gpu is not None:
             # ABSOLUTE physical GPU id for the compile/bench subprocess. Set BOTH
             # HIP_ and CUDA_VISIBLE_DEVICES to it (and drop any inherited list) so the
-            # subprocess sees exactly this one physical GPU as its device 0 — no
+            # subprocess sees exactly this one physical GPU as its device 0 - no
             # double-remap from a restricted parent visible-device list.
-            # str(): subprocess env values MUST be strings — an int gpu id (e.g.
+            # str(): subprocess env values MUST be strings - an int gpu id (e.g.
             # KoreEnv(gpu=5)) would make subprocess.Popen raise inside os.fsencode.
             env["HIP_VISIBLE_DEVICES"] = str(self._gpu)
             env["CUDA_VISIBLE_DEVICES"] = str(self._gpu)
@@ -343,7 +343,7 @@ class KoreEnv:
             kind2, _ = self._classify(out2, rc2, timed2)
             snr2 = None
             # A transient INFRA error (timeout/OOM/HIP flake) on the re-run is NOT
-            # evidence the kernel is non-deterministic — treat it as inconclusive and
+            # evidence the kernel is non-deterministic - treat it as inconclusive and
             # keep the (already-verified) correct verdict, so a one-off flake can
             # never cache a correct kernel as incorrect (preserves infra-vs-kernel).
             if kind2 == "infra":
@@ -570,7 +570,7 @@ class KoreEnv:
 
         Compilation + correctness are deterministic, so many workers can share a GPU
         for them (oversubscription uses the idle cores). But wall-clock TIMING needs
-        the GPU to itself — concurrent kernels/L2-flushes inflate and destabilize the
+        the GPU to itself - concurrent kernels/L2-flushes inflate and destabilize the
         measurement (CV blows up). Workers pinned to the same physical GPU take an
         exclusive lock on ``/tmp/kore_timing_gpu_<id>.lock`` around timing only, so
         speedups stay clean while compiles keep running in parallel. Disable with
@@ -681,7 +681,7 @@ class KoreEnv:
         (median-of-medians, CV%, poisoned).
 
         ``poisoned`` (candidate only) is True when the driver's POST-TIMING
-        correctness re-verification failed — i.e. the kernel produced correct output
+        correctness re-verification failed - i.e. the kernel produced correct output
         for the correctness calls but garbage while being timed (the invocation-count
         timing hack). The timed window (warmup/iters) is RANDOMIZED per run so a
         stateful kernel cannot know which call indices are timed vs verified.

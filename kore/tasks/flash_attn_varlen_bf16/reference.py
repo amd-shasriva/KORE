@@ -1,7 +1,7 @@
 """Reference + inputs for bf16 variable-length causal (GQA) flash attention.
 
 Varlen (ragged-batch) prefill: sequences of DIFFERENT lengths are packed into one
-tensor with ``cu_seqlens`` (cumulative offsets), so there is no padding waste — the
+tensor with ``cu_seqlens`` (cumulative offsets), so there is no padding waste - the
 real serving path for mixed-length prompts (``flash_attn_varlen_func``). Each
 sequence attends only within itself (causal). Correctness oracle: per-sequence
 exact fp32 causal SDPA; the SNR gate measures the flash kernel's online-softmax

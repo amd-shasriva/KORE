@@ -3,10 +3,10 @@
 The matched-budget bake-off (:mod:`kore.eval.bakeoff`) scores a
 ``PolicyFn(task, feedback=None) -> kernel_src``. Two policies matter:
 
-  - :func:`seed_policy`  — returns the task's frozen seed kernel. It measures the
+  - :func:`seed_policy`  - returns the task's frozen seed kernel. It measures the
     *starting point*, not anything training produced. Evaluating only this is the
     audited bug: the campaign reported the seed's fast_p as if it were KORE's.
-  - :func:`model_policy` — wraps a *real trained checkpoint* via
+  - :func:`model_policy` - wraps a *real trained checkpoint* via
     :func:`kore.policy.serve.load_generate` + the KORE response parser
     (:func:`kore.policy.format.parse_response`). It builds the multi-turn
     transcript the policy was trained on (task prompt + summarized prior-turn

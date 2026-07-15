@@ -1,5 +1,5 @@
 """GENERATED driver shim for gemm_sigmoid (fp32). See kore/tasks/_genops.py.
-Do not hand-edit — regenerate via kore/tasks/generate_ops.py."""
+Do not hand-edit - regenerate via kore/tasks/generate_ops.py."""
 import os
 import sys
 

@@ -2,8 +2,8 @@
 
 Unlike the generated elementwise/fusion tasks (torch-eager baseline), these tasks
 grade the policy against the ACTUAL production vendor kernel AMD's serving stack
-calls — ``aiter.rms_norm`` / ``aiter.layer_norm`` / ``aiter.silu_and_mul`` /
-``aiter.gelu_tanh_and_mul`` — the honest "beat the vendor library" bar. Each task
+calls - ``aiter.rms_norm`` / ``aiter.layer_norm`` / ``aiter.silu_and_mul`` /
+``aiter.gelu_tanh_and_mul`` - the honest "beat the vendor library" bar. Each task
 is authored semi-automatically from a per-op template + a model-shape/dtype sweep,
 so the vendor-baselined suite scales without hundreds of hand-written files.
 
@@ -27,7 +27,7 @@ VENDOR_OPS: tuple[str, ...] = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul",
                                "rope_gptj", "rope_partial", "embedding_gather")
 
 # ops whose vendor BASELINE mutates its inputs in place (so the bench loop must
-# feed a fresh clone each timed call — see _genops._run_bench mutates_input path).
+# feed a fresh clone each timed call - see _genops._run_bench mutates_input path).
 VENDOR_MUTATES_INPUT: frozenset[str] = frozenset({"fused_add_rmsnorm"})
 
 # Real production shapes (hidden dims / gated-MLP widths) per op class, per the
@@ -510,7 +510,7 @@ def _make_adversarial_inputs(op: str, get_inputs, dtype: str = "bf16"):
 
     if op == "topk_softmax":
         # Constant gates create expert TIES (softmax uniform), so different correct
-        # routers legitimately disagree — the generic fills would false-reject. Use
+        # routers legitimately disagree - the generic fills would false-reject. Use
         # strictly-DISTINCT integer ramps (bf16/fp16-exact for E<=256) so the top-k
         # selection is unambiguous, exercising softmax numerics + selection order.
         tdt = getattr(torch, DTYPES[dtype][0])
@@ -759,7 +759,7 @@ def gemm_a8w8(xq: torch.Tensor, wq: torch.Tensor,
 
 _FUSED_ADD_RMSNORM_SEED = '''"""GENERATED vendor-baselined fused add-RMSNorm seed ({dtype}) vs aiter.fused_add_rms_norm_cu.
 added = x + residual (the new residual); y = RMSNorm(added) * weight. One program
-per row, fp32 accumulate, {tldt} store. Returns (y, added) — the candidate writes
+per row, fp32 accumulate, {tldt} store. Returns (y, added) - the candidate writes
 NEW tensors (the vendor baseline is in-place). Regenerate via generate_vendor_ops.py."""
 from __future__ import annotations
 import torch, triton, triton.language as tl

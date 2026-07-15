@@ -6,7 +6,7 @@ Correctness (no --bench-mode): candidate ``quant(x) -> (xq, scale)``.
   * allclose = candidate scales match the oracle scales (LOOSE rtol: the fused
            kernel recomputes silu_mul, so its rowamax differs from the fp32 oracle
            by a hair) AND the candidate dequant matches the ORACLE dequant to fp8
-           rounding (>=35 dB) — so a bogus scale or a wrong activation cannot pass.
+           rounding (>=35 dB) - so a bogus scale or a wrong activation cannot pass.
 Bench (--bench-mode):
     --impl reference  -> AITER silu_and_mul + dynamic_per_token quant (2-kernel bar)
     --impl candidate  -> the kernel written to kernel.py

@@ -1,4 +1,4 @@
-"""Pillar 0 — prompt/response contract unification + offline normalization.
+"""Pillar 0 - prompt/response contract unification + offline normalization.
 
 Verifies the single source of truth (kore.policy.format) is used everywhere and
 that legacy shards can be upgraded to the canonical contract without touching

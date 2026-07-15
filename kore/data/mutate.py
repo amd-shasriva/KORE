@@ -427,7 +427,7 @@ def break_atomic_to_store(src: str) -> tuple[str, FailureHint]:
 # OPTIMIZATION operators (for the evolutionary datagen loop, evolve.py).
 #
 # Unlike the breakers above, these produce a plausibly-BETTER variant of a
-# working kernel — the moves an autotuner/FunSearch loop would try (tile change,
+# working kernel - the moves an autotuner/FunSearch loop would try (tile change,
 # vectorization width, pipeline depth, num_warps sweep). They are exposed via the
 # operator registry so the D-MAB bandit can *learn* which move to apply next
 # (reward = verified improvement) instead of choosing uniformly. Each guarantees
@@ -616,7 +616,7 @@ def apply_random_breakage(
     a fallback), trying candidates in random order until one *actually* changes
     the source. Guaranteed to return a changed source.
 
-    Returns ``(broken_src, failure_class, mutator_name)`` — the first two are the
+    Returns ``(broken_src, failure_class, mutator_name)`` - the first two are the
     ``(broken_src, failure_class)`` pair from the spec; the third names the
     mutator used, kept for provenance/back-compat with ``gen_repair``.
     """

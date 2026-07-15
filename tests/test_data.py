@@ -426,7 +426,7 @@ def test_make_repair_record_diagnostic_format():
     assert rec.failure_class == "snr_fail"
     content = rec.messages[-1]["content"]
     assert rec.messages[-1]["role"] == "assistant"
-    # CANONICAL diagnose-then-fix contract (ANALYSIS / PROPOSED_CHANGE / FULL_KERNEL) —
+    # CANONICAL diagnose-then-fix contract (ANALYSIS / PROPOSED_CHANGE / FULL_KERNEL) -
     # NOT the old <think>/<answer> shape (Pillar 0: single contract shared with inference)
     assert "<think>" not in content and "<answer>" not in content
     assert content.startswith("ANALYSIS:")

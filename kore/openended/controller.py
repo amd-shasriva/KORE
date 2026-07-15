@@ -6,7 +6,7 @@ task-frontier policy: each task-group is selected at the policy's *competence
 frontier* (proposer: learnability ``4p(1-p)`` + performance-headroom regret +
 archive novelty), and every group's measured outcome (solve-rate, best speedup)
 is fed back into the MAP-Elites task archive so the curriculum co-evolves with the
-policy — the "verifiably-grounded open-ended kernel discovery" paradigm made real
+policy - the "verifiably-grounded open-ended kernel discovery" paradigm made real
 inside the training loop.
 
 Grounding: the controller only ever returns task_ids that are ACTUALLY registered

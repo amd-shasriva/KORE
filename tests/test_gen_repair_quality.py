@@ -1,7 +1,7 @@
 """CPU-only tests for EVIDENCE-BASED repair diagnosis (KORE Stage 1 quality gate).
 
 The audited failure these lock down: the repair chain-of-thought used to be 100%
-TEMPLATED — it emitted one of two fixed strings and never named the actual bug.
+TEMPLATED - it emitted one of two fixed strings and never named the actual bug.
 These tests assert the diagnosis is derived from the real broken->fixed diff, names
 the concrete changed token for several synthetic bug classes (inverted mask, bf16
 accumulator, off-by-one, ...), stays grounded (its cited tokens are actually in the

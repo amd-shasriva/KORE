@@ -11,7 +11,7 @@ a distinct GPU (``HIP_VISIBLE_DEVICES``) with its OWN teacher stream, so N worke
 shard already exists (non-empty) is skipped, so a crash/restart never redoes work.
 
 No pipeline shortcut: identical generators (``generate_repairs`` / ``generate_groups``
-/ ``generate_wins`` / ``generate_agentic_trajectories``) at identical counts — only the
+/ ``generate_wins`` / ``generate_agentic_trajectories``) at identical counts - only the
 scheduling is parallelized. Spawn start-method (never fork) so each worker gets a clean
 interpreter and pins its GPU BEFORE importing torch.
 """

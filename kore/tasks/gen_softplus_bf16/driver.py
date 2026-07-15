@@ -1,5 +1,5 @@
 """GENERATED driver shim for softplus (bf16). See kore/tasks/_genops.py.
-Do not hand-edit — regenerate via kore/tasks/generate_ops.py."""
+Do not hand-edit - regenerate via kore/tasks/generate_ops.py."""
 import os
 import sys
 

@@ -8,7 +8,7 @@ bounded by ``[min_steps, max_steps]``.
 
 Pure and deterministic. In distributed training the monitored metric MUST be a
 cross-rank-identical value (e.g. the gathered group reward mean) so every rank
-takes the same stop decision in lockstep — otherwise ranks desynchronize.
+takes the same stop decision in lockstep - otherwise ranks desynchronize.
 """
 
 from __future__ import annotations

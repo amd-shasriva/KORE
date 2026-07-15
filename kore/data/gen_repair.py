@@ -63,7 +63,7 @@ def _error_text(obs) -> str:
 # --------------------------------------------------------------------------- #
 # Evidence-based repair diagnosis (structured diff analyzer)
 #
-# Problem (audited): the repair chain-of-thought used to be 100% TEMPLATED — it
+# Problem (audited): the repair chain-of-thought used to be 100% TEMPLATED - it
 # emitted one of two fixed strings and never named the actual bug. This block
 # replaces that with a DETERMINISTIC analyzer that reads the real difference
 # between the BROKEN (parent) source and the VERIFIED FIXED (child) source and
@@ -85,7 +85,7 @@ class DiffFinding:
 _CMP_INVERSE = {"<": ">=", ">=": "<", ">": "<=", "<=": ">"}
 
 # A bounds-style comparison (optionally indexed / with a +BLOCK term) on a line
-# that concerns masking or offsets — the only place a flipped predicate matters.
+# that concerns masking or offsets - the only place a flipped predicate matters.
 _PRED_RE = re.compile(
     r"(\(?\s*[A-Za-z_]\w*(?:\[[^\]]*\])?(?:\s*[+\-]\s*[A-Za-z0-9_]+)?\s*)"
     r"(<=|>=|<|>)"
@@ -105,7 +105,7 @@ def _changed_regions(broken: str, fixed: str) -> tuple[str, str, float]:
     """Return (broken_diff_text, fixed_diff_text, similarity_ratio).
 
     The diff texts are ONLY the lines that differ, so every detector reasons
-    strictly about what changed — never about unchanged code."""
+    strictly about what changed - never about unchanged code."""
     b = broken.splitlines()
     f = fixed.splitlines()
     sm = difflib.SequenceMatcher(a=b, b=f, autojunk=False)
@@ -369,7 +369,7 @@ def classify_repair_diff(broken_src: str, fixed_src: str,
                 if hit:
                     return DiffFinding(*hit)
         return None
-    except Exception:  # analysis must never crash datagen — degrade to fallback
+    except Exception:  # analysis must never crash datagen - degrade to fallback
         return None
 
 
@@ -396,7 +396,7 @@ def _diagnose(finding: DiffFinding, family: str,
         return (f"The bounds mask used `{b}` where the correct predicate is `{a}`. "
                 f"Inverting the comparison keeps only the out-of-range lanes and masks "
                 f"out every valid element, so the load/store returns the `other` fill "
-                f"instead of the real data — the reduction/output collapses toward zero. "
+                f"instead of the real data - the reduction/output collapses toward zero. "
                 f"Restoring `{a}` selects exactly the in-range lanes.",
                 f"Flip the bounds predicate back to `{a}`.")
     if cc == "tail_mask_widened":
@@ -477,7 +477,7 @@ def _diagnose(finding: DiffFinding, family: str,
     if cc == "missing_barrier":
         return (f"A synchronization barrier (`{a}`) between the shared-memory write and "
                 f"its dependent read was missing, letting wavefronts read stale/partial "
-                f"LDS — a nondeterministic correctness failure. Restoring `{a}` orders the "
+                f"LDS - a nondeterministic correctness failure. Restoring `{a}` orders the "
                 f"access.",
                 f"Restore the barrier (`{a}`).")
     if cc == "dropped_normalization":
@@ -498,7 +498,7 @@ def _diagnose(finding: DiffFinding, family: str,
                     f"the kernel failed to build. `{a}` restores a valid tile.",
                     f"Set the tile size to a valid multiple of 64 (`{a}`).")
         # pointwise/reduction/norm/quant: the binding constraint is only that
-        # ``tl.arange`` needs a power-of-two length — NOT any MFMA multiple-of-64.
+        # ``tl.arange`` needs a power-of-two length - NOT any MFMA multiple-of-64.
         return (f"The tile size `{b}` is not a power of two, which `tl.arange` requires, "
                 f"so the kernel failed to build. `{a}` restores a valid tile.",
                 f"Set the tile size to a power of two (`{a}`).")
@@ -564,8 +564,8 @@ def _diagnostic_assistant(failure_class: str, error_text: str, broken_src: str,
     (ANALYSIS / PROPOSED_CHANGE / FULL_KERNEL via :func:`format_assistant_turn`).
 
     The ANALYSIS is a REAL diagnosis derived from the actual broken->fixed diff
-    (see :func:`analyze_repair_diff`) — it names the concrete change class and the
-    concrete token that changed — not a templated string. The VERIFIED fixed
+    (see :func:`analyze_repair_diff`) - it names the concrete change class and the
+    concrete token that changed - not a templated string. The VERIFIED fixed
     kernel is the FULL_KERNEL, so SFT learns to read the concrete failure and emit
     the fix in the same shape it must produce at inference. ``arch`` selects the
     arch-correct fp8 encoding in the diagnosis (default: the KORE gfx950 target)."""
@@ -594,7 +594,7 @@ def make_repair_record(
     the canonical diagnose-then-fix contract (ANALYSIS / PROPOSED_CHANGE / FULL_KERNEL
     via :func:`format_assistant_turn`), folding the verifier's ``error_text`` into the
     ANALYSIS so SFT learns to self-diagnose. The emitted fix is always the VERIFIED
-    kernel only — the "only emit verified fixes" rule is unchanged."""
+    kernel only - the "only emit verified fixes" rule is unchanged."""
     failure_class = _failure_class(broken_obs)
     if failure_class is None:
         return None
@@ -712,7 +712,7 @@ def generate_repairs(
             if _failure_class(broken_obs) is None:
                 log.debug("injected breakage did not fail verifier; skipping",
                           task=task.task_id, idx=attempts, mutator=_name)
-                continue  # breakage didn't actually break — skip
+                continue  # breakage didn't actually break - skip
             _ctx.attempt = {"idx": attempts, "mutator": _name,
                             "broke_verified_fail": True}
             rec = make_repair_record(task, teacher, env, broken_src, broken_obs,
@@ -775,7 +775,7 @@ def mine_natural_failures(
                           task=task.task_id, idx=attempts, mode=mode)
                 continue
             if _failure_class(obs) is None:
-                continue  # it worked — not a repair opportunity
+                continue  # it worked - not a repair opportunity
             _ctx.attempt = {"idx": attempts, "mutator": f"natural:{mode}",
                             "broke_verified_fail": True}
             rec = make_repair_record(task, teacher, env, cand_src, obs,

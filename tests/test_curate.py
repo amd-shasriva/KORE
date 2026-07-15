@@ -1,4 +1,4 @@
-"""Pillar 6 — curation & balancing."""
+"""Pillar 6 - curation & balancing."""
 
 from __future__ import annotations
 

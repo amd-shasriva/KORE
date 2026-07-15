@@ -53,7 +53,7 @@ class DistributedMixin:
     ``fsdp`` mirrors HF ``TrainingArguments.fsdp`` (e.g. ``"full_shard auto_wrap"``,
     ``"full_shard auto_wrap offload"``). ``fsdp_transformer_layer_cls`` names the
     decoder block to shard/wrap; when ``None`` it is auto-detected from
-    ``model_id`` (Qwen3 / Qwen2 / Llama families — covers the 14B/32B/70B bases).
+    ``model_id`` (Qwen3 / Qwen2 / Llama families - covers the 14B/32B/70B bases).
     """
 
     distributed: bool = False
@@ -143,7 +143,7 @@ class DPOConfig(DistributedMixin):
     # doubled logit term at seq 16384 stays VRAM-safe (~117GB peak << 288GB).
     per_device_train_batch_size: int = 2
     gradient_accumulation_steps: int = 8
-    # NB: no ``max_prompt_length`` — trl>=0.29 removed it (the total ``max_length``
+    # NB: no ``max_prompt_length`` - trl>=0.29 removed it (the total ``max_length``
     # caps prompt+completion, and ``truncation_mode="keep_end"`` (dpo.py) keeps the
     # completion/kernel tail). GRPO keeps its own live ``max_prompt_length``.
     max_length: int = 16384
@@ -186,12 +186,12 @@ class GRPOConfig(DistributedMixin):
     per_turn_as_sample: bool = True
 
     # --- GRPO objective (DAPO clip-higher + importance ratio + multi-epoch) ---
-    # NB: ``kl_coef`` was REMOVED — the only KL/anchor the native loop applies is
+    # NB: ``kl_coef`` was REMOVED - the only KL/anchor the native loop applies is
     # the k3 retention anchor ``ref_anchor_coef`` (see below); there was never a
     # second, separate KL coefficient, and the step log used to mislabel the
     # anchor as ``kl_coef``. Kevin's "KL = 0" is expressed by ``ref_anchor_coef``.
     # KORE's importance ratio is length-normalized (token-MEAN logprob), i.e. the
-    # GSPO *sequence* ratio, not DAPO's per-token ratio — so DAPO's 0.2/0.28
+    # GSPO *sequence* ratio, not DAPO's per-token ratio - so DAPO's 0.2/0.28
     # token-level clip bounds never bind (a legit sequence ratio sits within ~1%
     # of 1.0). We therefore (a) run on-policy (ppo_epochs=1) so old_logp==new_logp
     # and the ratio is ~1 by construction (no off-policy drift to clip), and
@@ -212,7 +212,7 @@ class GRPOConfig(DistributedMixin):
     # --- Dynamic training horizon (adaptive steps) --------------------------------
     # Instead of a fixed step count, keep training WHILE the monitored signal (the
     # rollout reward / held-out fast_p) is still climbing, and stop early once it
-    # plateaus — so a run neither wastes compute after convergence nor stops before
+    # plateaus - so a run neither wastes compute after convergence nor stops before
     # the policy has actually moved. See kore.policy.dynamic.DynamicStepController.
     adaptive_steps: bool = False           # off by default (fixed total_steps)
     min_steps: int = 100                   # never stop before this many steps
@@ -225,7 +225,7 @@ class GRPOConfig(DistributedMixin):
     warmup_ratio: float = 0.0              # WIRED: linear LR warmup over warmup_ratio*total_steps
     max_grad_norm: float = 0.5             # Kevin: grad-norm clip 0.5
     # NB: ``per_device_train_batch_size`` / ``gradient_accumulation_steps`` were
-    # REMOVED — the native loop uses an O(1-sample) MICRO-BATCHED backward that
+    # REMOVED - the native loop uses an O(1-sample) MICRO-BATCHED backward that
     # accumulates one grad term per rollout sample and steps once per PPO epoch,
     # so a per-device batch size + a separate accumulation count are meaningless
     # (accumulation is inherent, and the effective batch is the kept rollout set).
@@ -239,7 +239,7 @@ class GRPOConfig(DistributedMixin):
     temperature: float = 0.9               # Kevin: 0.9
     top_p: float = 1.0                     # WIRED: passed to model.generate
 
-    # NB: ``rollout_backend`` / ``tensor_parallel_size`` were REMOVED — KORE runs
+    # NB: ``rollout_backend`` / ``tensor_parallel_size`` were REMOVED - KORE runs
     # ONE self-contained in-process transformers+PEFT loop on local AMD GPUs.
     # There is no vLLM rollout server and no tensor-parallel/distributed rollout
     # path in this loop, so those flags implied capabilities that don't exist.
@@ -271,7 +271,7 @@ class GRPOConfig(DistributedMixin):
     ds_config: Optional[str] = None          # explicit DeepSpeed JSON config path (overrides builder)
     # Generate in lockstep across ranks: REQUIRED under ZeRO-3/FSDP so ranks that
     # finish a rollout early keep issuing (dummy) forwards until every rank is done
-    # — otherwise the collective per-forward all-gather deadlocks on ragged lengths.
+    # - otherwise the collective per-forward all-gather deadlocks on ragged lengths.
     synced_gpus: bool = True
 
     # --- Anti-collapse ladder (see anticollapse.py) ---
@@ -390,7 +390,7 @@ class MidTrainConfig(DistributedMixin):
     use_lora: bool = False                  # full-FT (large ROCm distribution shift)
 
     # Batch / optimization / checkpoint knobs (previously hardcoded in midtrain.py).
-    # Exposing them makes a launch JSON authoritative and — critically — bounds the
+    # Exposing them makes a launch JSON authoritative and - critically - bounds the
     # checkpoint count (``save_total_limit``) so a 14B full-FT CPT run cannot fill
     # disk (the same guard SFT/DPO already have).
     # THROUGHPUT (audit R2 perf): micro-batch 4 (was 1) feeds the MI350X matrix cores
@@ -425,7 +425,7 @@ class MultiCapSFTConfig(SFTConfig):
     # kernel generator, a chat model, and an orchestrator). ~38% kernel / ~12%
     # agentic / ~50% general (chat+code+math). The large, co-mixed general plurality
     # (esp. chat 0.27) is what keeps IFEval/MT-Bench up while the kernel+agentic
-    # slices specialize — the literature-backed guard against specialization collapse.
+    # slices specialize - the literature-backed guard against specialization collapse.
     frac_kernel_repair_opt: float = 0.28   # was 0.35
     frac_kernel_qa: float = 0.10
     frac_agentic_tooluse: float = 0.12     # was 0.10
@@ -448,7 +448,7 @@ class SoupConfig:
 
 
 # --------------------------------------------------------------------------- #
-# FSDP wiring helpers (pure — no torch/transformers, safe on CPU / in tests)
+# FSDP wiring helpers (pure - no torch/transformers, safe on CPU / in tests)
 # --------------------------------------------------------------------------- #
 
 # HF decoder-block class names by model family. Auto-wrap needs the exact class
@@ -495,7 +495,7 @@ def build_fsdp_kwargs(config) -> dict:
       * Activation (gradient) checkpointing is enabled by the Trainer stage via
         HF's ``TrainingArguments.gradient_checkpointing`` +
         ``gradient_checkpointing_kwargs={"use_reentrant": True}`` (layer-internal,
-        FSDP-safe) — NOT via ``fsdp_config``. The FSDP-plugin (external
+        FSDP-safe) - NOT via ``fsdp_config``. The FSDP-plugin (external
         checkpoint_wrapper) path mismatches saved-tensor counts on an
         FSDP1/``use_orig_params`` unit and raises ``CheckpointError``. REENTRANT is
         deliberate: the ROCm stack has no ``flash_attn`` wheel so training runs on
@@ -509,9 +509,9 @@ def build_fsdp_kwargs(config) -> dict:
       * fp32 MASTER weights are automatic: the model is loaded in bf16 (compute
         dtype), but with accelerate ``mixed_precision: bf16`` the FSDP prepare step
         UPCASTS every trainable flat-parameter to fp32 (accelerate mimics
-        DeepSpeed ZeRO's fp32 partition — see ``Accelerator.prepare_model``), so the
+        DeepSpeed ZeRO's fp32 partition - see ``Accelerator.prepare_model``), so the
         optimizer steps on an fp32 master while forward/backward run in bf16. Do NOT
-        load the model in fp32 to "get" a master — it is already fp32; fp32 loading
+        load the model in fp32 to "get" a master - it is already fp32; fp32 loading
         only doubles load-time host memory for an identical result. (Gradient
         reduce-scatter stays bf16, matching the DeepSpeed default.)
     """
@@ -530,7 +530,7 @@ def build_fsdp_kwargs(config) -> dict:
         # FSDP1 + use_orig_params unit mismatches the saved-tensor count between
         # forward and recompute (torch.utils.checkpoint CheckpointError "different
         # number of tensors ..."). Instead each Trainer stage enables HF's own
-        # layer-internal gradient checkpointing (use_reentrant=True — SDPA-swap
+        # layer-internal gradient checkpointing (use_reentrant=True - SDPA-swap
         # robust; see build_fsdp_kwargs docstring), which wraps the decoder block's
         # forward and is FSDP-safe. See build_fsdp_kwargs docs.
         "backward_prefetch": "backward_pre",
@@ -545,7 +545,7 @@ def build_fsdp_kwargs(config) -> dict:
         "limit_all_gathers": True,
         # FULL_STATE_DICT so ``trainer.save_model()`` consolidates a plain HF
         # checkpoint that the NEXT stage loads with ``from_pretrained``
-        # (midtrain->sft->dpo->grpo->soup handoff) and that serving can load —
+        # (midtrain->sft->dpo->grpo->soup handoff) and that serving can load -
         # matching GRPO's own save path. A sharded state dict is only reloadable
         # under an identical FSDP mesh, which the cross-stage handoff is not. At
         # 14B the rank-0 gather is cheap; for 32B/70B keep it consolidated too
@@ -607,7 +607,7 @@ def preferred_attn_impl() -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Sharded full-parameter GRPO wiring (pure — no torch/accelerate/deepspeed here,
+# Sharded full-parameter GRPO wiring (pure - no torch/accelerate/deepspeed here,
 # so ``kore.policy.configs`` still imports on CPU with NO heavy deps). The heavy
 # accelerate/DeepSpeed plugin objects are built lazily inside ``kore.policy.grpo``.
 # --------------------------------------------------------------------------- #
@@ -654,15 +654,15 @@ def grpo_sharding_backend(config) -> str:
 def build_deepspeed_config(config) -> dict:
     """Build a DeepSpeed ZeRO config dict for the sharded full-FT GRPO RL loop.
 
-    ZeRO-3 shards params + grads + optimizer state across ranks and — critically
-    for the online generate->train loop — GATHERS params per-forward, so
+    ZeRO-3 shards params + grads + optimizer state across ranks and - critically
+    for the online generate->train loop - GATHERS params per-forward, so
     ``model.generate`` (rollouts) works out of the box on the sharded engine (the
     property that makes ZeRO-3 the natural online-RL sharding choice, used by TRL).
 
     If ``config.ds_config`` points at a JSON file it is loaded and returned
     verbatim (full user control). Otherwise a ZeRO-``zero_stage`` config is
     synthesized from the KORE knobs (``bf16``, ``cpu_offload``, ``max_grad_norm``).
-    Pure/JSON only — no torch/deepspeed import — so it is unit-testable on CPU.
+    Pure/JSON only - no torch/deepspeed import - so it is unit-testable on CPU.
     """
     import json as _json
 

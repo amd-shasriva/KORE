@@ -4,7 +4,7 @@ Why this exists
 ---------------
 The SFT ``kernel_repair_opt`` slice is `build_sft(repair + wins)`. But `wins`
 is the thinnest family (one greedy trajectory per task, ~1/task), while `groups`
-holds thousands of verified candidates that `build_sft` **ignores** — they only
+holds thousands of verified candidates that `build_sft` **ignores** - they only
 feed DPO ranking. That means KORE's best measured kernels are used to teach
 *ranking* but never *generation*.
 
@@ -16,9 +16,9 @@ frames a slower correct sibling as the parent to improve, and emits a
 (`SYSTEM_PROMPT` + `build_turn_prompt` + an ``ANALYSIS: … FULL_KERNEL:`` turn).
 
 The records are written to ``<data_root>/wins/_gold_from_groups.jsonl`` so the
-campaign build stage picks them up through the same path as real wins — dedup by
+campaign build stage picks them up through the same path as real wins - dedup by
 source hash, leakage split by (operation, arch), and the RFT/ReST-EM speedup
-gate (`speedup >= tau`, per-task cap) — so only genuinely faster-than-baseline
+gate (`speedup >= tau`, per-task cap) - so only genuinely faster-than-baseline
 gold kernels survive into SFT. This is rejection-sampling on already-verified
 data: the *code* is gold (measured fastest-correct), the reasoning is a short,
 measurement-grounded ANALYSIS (no fabricated mechanism).
@@ -61,7 +61,7 @@ def _best(cands: list[dict]) -> dict:
 def _analysis(op: str, wall: float, snr: float, speedup: float,
               counters: Optional[dict] = None, parent_counters: Optional[dict] = None,
               parent_wall_us: Optional[float] = None, dtype: Optional[str] = None) -> str:
-    """The ANALYSIS body (no header — format_assistant_turn adds it).
+    """The ANALYSIS body (no header - format_assistant_turn adds it).
 
     When rocprofv3 counters were collected for BOTH the parent and the winner, the
     reasoning is a GROUNDED PROFILE(parent)->DIAGNOSE->TRANSFORM->MEASURE(winner) chain
@@ -71,7 +71,7 @@ def _analysis(op: str, wall: float, snr: float, speedup: float,
     """
     base = (
         f"For `{op}`, this is the fastest CORRECT implementation verified for this "
-        f"shape — measured {wall:.1f}us at SNR {snr:.0f} dB, {speedup:.2f}x faster than the "
+        f"shape - measured {wall:.1f}us at SNR {snr:.0f} dB, {speedup:.2f}x faster than the "
         f"parent variant below. It keeps fp32 accumulation and the public entry-point signature, "
         f"and uses 64-multiple BLOCK sizes suited to the CDNA wavefront."
     )
@@ -197,7 +197,7 @@ def mint_gold_wins(
             continue
         try:
             w = mint_gold_win(g, arch, snr_gate, min_speedup)
-        except Exception as e:  # noqa: BLE001 — one bad group must not abort
+        except Exception as e:  # noqa: BLE001 - one bad group must not abort
             log.debug("gold_skip", task=tid, err=str(e)[:120])
             w = None
         if w is not None:

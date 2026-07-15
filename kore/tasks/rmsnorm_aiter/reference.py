@@ -1,7 +1,7 @@
 """Reference + inputs for the AMD-correct bf16 RMSNorm task.
 
 Correctness oracle: exact torch-fp32 RMSNorm (mathematically exact).
-Perf baseline (in driver, --impl reference): AITER ``rms_norm`` (CK) — the
+Perf baseline (in driver, --impl reference): AITER ``rms_norm`` (CK) - the
 kernel the production serving stack actually calls, NOT unfused torch.
 """
 

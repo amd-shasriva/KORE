@@ -209,14 +209,14 @@ def train_from_table(
 #
 # The pointwise regressor fits an absolute E[log speedup]; the ranking head fits
 # the *order within a group of siblings* (the candidates generated for one
-# parent) — which is what the top-k bench selector actually consumes. Both are
+# parent) - which is what the top-k bench selector actually consumes. Both are
 # kept: the pointwise heads gate validity, the ranking head orders the survivors.
 # --------------------------------------------------------------------------- #
 def _synth_source(bm: int, bn: int, bk: int, warps: int, stages: int,
                   use_dot: bool, fp32_acc: bool) -> str:
     """A tiny but structurally-real Triton kernel string whose SCHEDULE knobs
     (block sizes, warps, stages, tl.dot/MFMA, fp32 accumulate) are recoverable by
-    features.extract_schedule_features — so the ranker is schedule-conditioned."""
+    features.extract_schedule_features - so the ranker is schedule-conditioned."""
     acc = "float32" if fp32_acc else "bfloat16"
     inner = "acc += tl.dot(x, x)" if use_dot else "acc += x * x"
     return (
@@ -394,7 +394,7 @@ def refit_online(
     with an embedded ``obs`` Observation (as produced by the env replay cache).
     ``history`` is the accumulated buffer of prior rows; the model is retrained on
     ``history + new_rows`` (GBT can't warm-start, so a full refit on the growing
-    buffer is the robust online update — same 3-head + sklearn/numpy fallback).
+    buffer is the robust online update - same 3-head + sklearn/numpy fallback).
 
     If rows carry a ``group_id`` and ``fit_ranker`` is set, the pairwise ranking
     head is refit too. Returns ``(model, buffer)`` so the caller can thread the

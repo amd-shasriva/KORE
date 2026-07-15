@@ -192,7 +192,7 @@ def test_score_is_validity_gated():
 
 
 # --------------------------------------------------------------------------- #
-# rerank: P0 CONTRACT — rank_candidates(items, task=None) + untrained fallback
+# rerank: P0 CONTRACT - rank_candidates(items, task=None) + untrained fallback
 # --------------------------------------------------------------------------- #
 _GOOD_KERNEL = """
 import triton

@@ -71,7 +71,7 @@ class KoreConfig:
     reward_hack: float = -1.5
 
     # --- reward-shaping upgrades (literature review) -----------------------
-    # P1 — bounded continuous sub-threshold shaping (LLM-VeriOpt style).
+    # P1 - bounded continuous sub-threshold shaping (LLM-VeriOpt style).
     # A compiled-but-incorrect kernel earns a small credit proportional to how
     # close its worst-shape SNR is to the correctness gate, instead of a flat 0
     # (sparse reward -> early-RL collapse). The credit is bounded in
@@ -81,13 +81,13 @@ class KoreConfig:
     subthreshold_shaping: bool = True
     eps_shape: float = 0.05  # invariant: 0 < eps_shape + format_weight < correctness_weight
 
-    # P2 — format-compliance term (Compiler-R1 style). Small bonus for emitting a
+    # P2 - format-compliance term (Compiler-R1 style). Small bonus for emitting a
     # valid FULL_KERNEL contract (parses to a kernel), small penalty for malformed
     # output. Symmetric magnitude, applied only to the incorrect/correct tiers and
     # bounded so tiny (<< every inter-tier gap) it can never flip tier ordering.
     format_weight: float = 0.02  # invariant: 2*format_weight < smallest inter-tier gap
 
-    # P3 — correctness->latency curriculum phase for compute_reward:
+    # P3 - correctness->latency curriculum phase for compute_reward:
     #   "full"        : correctness_weight + speedup (default; current behavior)
     #   "correctness" : zero the speed term -> every correct kernel == correctness_weight
     #                   (run a correctness-only GRPO phase first)
@@ -99,11 +99,11 @@ class KoreConfig:
     # Diagnosis (Dr.Kernel 2026 "lazy optimization"): a purely LINEAR speed term
     # (reward = correctness_weight + su) gives almost no reward *contrast* in the
     # 0.7-1.1x band the policy stalls in, so GRPO's group-relative advantage barely
-    # distinguishes a 0.95x kernel from a 1.05x one — the model learns "be correct"
+    # distinguishes a 0.95x kernel from a 1.05x one - the model learns "be correct"
     # and stops. Two fixes (both preserve lexicographic dominance: every correct
     # kernel still scores >= correctness_weight > any incorrect kernel):
     #   1. speedup_log: shape the speed term as w*su for su<=1 (linear, non-negative)
-    #      and w*(1+ln(su)) for su>1 — continuous at su=1, monotonic, but with a
+    #      and w*(1+ln(su)) for su>1 - continuous at su=1, monotonic, but with a
     #      steeper effective slope right at the baseline crossover.
     #   2. fast_p_bonus: significance-gated DISCRETE bonuses for actually BEATING the
     #      baseline at 1.0x / 1.2x / 1.5x. This is the strong signal that makes ">1x"
@@ -136,12 +136,12 @@ class KoreConfig:
     # --- P6: distributionally-robust speed aggregation (the method contribution) --
     # How the per-shape speedup sweep is reduced to the scalar the speed reward
     # optimizes. KORE optimizes the WORST shapes vs the production vendor baseline
-    # (AITER/hipBLASLt), not the average — so a kernel must be fast on the hardest
+    # (AITER/hipBLASLt), not the average - so a kernel must be fast on the hardest
     # shape, not just on average. This is the CVaR_alpha family:
     #   "worst" : min over shapes (CVaR_{alpha->0}); the robust objective (DEFAULT,
     #             byte-identical to the previous reward).
     #   "cvar"  : geometric mean of the worst ceil(cvar_alpha*N) shapes (CVaR_alpha)
-    #             — a softer, denser-gradient robust objective for the trained arm.
+    #             - a softer, denser-gradient robust objective for the trained arm.
     #   "mean"  : geometric-mean speedup over all shapes (average-case ablation arm).
     # Env-overridable so it propagates to the accelerate-launched training subprocs.
     speed_aggregation: str = field(
@@ -183,7 +183,7 @@ class KoreConfig:
         lexicographic reward ladder or let a shaping term lead the objective.
 
         These are the invariants the reward code documents but previously never
-        enforced — a bad KORE_PROFILE_REWARD_WEIGHT or an edited weight could
+        enforced - a bad KORE_PROFILE_REWARD_WEIGHT or an edited weight could
         silently invert tiers or let the profiler bonus outweigh a real speed win.
         """
         assert self.speed_aggregation.lower() in ("worst", "mean", "cvar"), (

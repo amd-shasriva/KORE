@@ -200,7 +200,7 @@ class ToolExecutor:
         harness discards the dead candidate/committed lineage and restarts from
         the task's seed kernel. The best *correct* kernel found so far is
         PRESERVED (``best_src``/``best_reward`` are untouched) so a reset can
-        never lose real progress — it only stops the policy from patching a
+        never lose real progress - it only stops the policy from patching a
         kernel that is going nowhere.
         """
         self.committed_src = self.seed_src
@@ -260,7 +260,7 @@ class ToolExecutor:
         try:
             handler = getattr(self, f"_tool_{name}")
             return handler(args)
-        except Exception as e:  # noqa: BLE001 — tools must never crash the loop
+        except Exception as e:  # noqa: BLE001 - tools must never crash the loop
             return {"ok": False, "tool": name, "error": f"executor error: {e}"}
 
     # -- individual tools ------------------------------------------------- #
@@ -481,9 +481,9 @@ _REFLECT_FIELDS = ("root_cause", "evidence", "planned_fix")
 def _reflection_score(reflections: list[dict], trace: list[dict]) -> float:
     """Bounded [0,1] quality of the episode's reflections (GEAK/Reflexion).
 
-    Each reflection scores on two halves: (a) COMPLETENESS — the fraction of
+    Each reflection scores on two halves: (a) COMPLETENESS - the fraction of
     ``root_cause``/``evidence``/``planned_fix`` fields that are non-empty; and
-    (b) GROUNDING — whether it references the ACTUAL error text surfaced by a
+    (b) GROUNDING - whether it references the ACTUAL error text surfaced by a
     failed tool call this episode (not a generic guess). Averaged over
     reflections; 0.0 when there were none. Pure and bounded so, at
     ``W_REFLECT``, it can never dominate the verified kernel reward.

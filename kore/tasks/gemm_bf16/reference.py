@@ -1,13 +1,13 @@
 """Reference + inputs for the dense bf16 GEMM task.
 
 Dense matmul ``Y = A @ B`` with A[M,K], B[K,N], bf16 inputs, fp32 accumulation,
-bf16 output — the workhorse of prefill (square, compute-bound) and decode
+bf16 output - the workhorse of prefill (square, compute-bound) and decode
 (tiny-M GEMV, memory-bound) serving.
 
 Correctness oracle: exact torch-fp32 matmul of the (fp32-upcast) bf16 inputs, so
 the gate measures the kernel's fp32-accumulation fidelity, not input rounding.
 Perf baseline (driver --impl reference): ``torch.matmul`` which on ROCm dispatches
-to hipBLASLt — the real vendor GEMM the serving stack calls.
+to hipBLASLt - the real vendor GEMM the serving stack calls.
 """
 
 from __future__ import annotations

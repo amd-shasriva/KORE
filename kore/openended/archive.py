@@ -4,8 +4,8 @@ Mirrors the ``kore.data.evolve.MapElitesArchive`` pattern, but the elites here
 are *tasks* (descriptors), not kernels: each behavior niche
 (``task_space.descriptor_key``) keeps the single most **informative** task seen
 for that niche, plus its outcome history. "Informative" = high learnability
-(``4*p*(1-p)``) plus remaining performance-headroom regret — i.e. the task the
-policy could still learn the most from — so the archive tracks the *competence
+(``4*p*(1-p)``) plus remaining performance-headroom regret - i.e. the task the
+policy could still learn the most from - so the archive tracks the *competence
 frontier* per region of behavior space rather than collapsing onto one family.
 
 APIs: :meth:`add`/:meth:`update` (niching + fitness-gated replacement, history

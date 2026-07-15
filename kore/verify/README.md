@@ -1,4 +1,4 @@
-# `kore/verify` — the correctness oracle
+# `kore/verify` - the correctness oracle
 
 The "verifiable" half of KORE's verifiably-grounded reward. Random-input checking has **lucky passes**: a kernel wrong only on a measure-zero slice of the input domain (exact zeros, denormals, inf-adjacent saturation, all-equal rows, activation kinks) sails through `torch.randn` trials. This package replaces that with a **four-prong equivalence oracle** that is far harder to reward-hack.
 
@@ -59,7 +59,7 @@ def equivalence_verdict(prong_results, tol) -> VerificationResult          # pur
 def false_accept_probability(defect_fraction, n_elements) -> float          # (1-p)^m
 ```
 
-**Adversarial patterns** (`adversarial.py`): `zeros`, `ones`, `neg_ones`, `all_equal_const`, `large_pos/neg`, `small_pos`, `denormal`, `signed_ramp`, `sign_alternating`, `sparse_spikes`, `inf_adjacent_pos/neg`, `activation_knots` (0, ±1, ±3, ±6, ±0.5, 2.0), `mixed_magnitude` — emitted per operand slot for multi-arg ops.
+**Adversarial patterns** (`adversarial.py`): `zeros`, `ones`, `neg_ones`, `all_equal_const`, `large_pos/neg`, `small_pos`, `denormal`, `signed_ramp`, `sign_alternating`, `sparse_spikes`, `inf_adjacent_pos/neg`, `activation_knots` (0, ±1, ±3, ±6, ±0.5, 2.0), `mixed_magnitude` - emitted per operand slot for multi-arg ops.
 
 **Metamorphic relations** (`metamorphic.py`): elementwise → row/col permutation, locality, reshape invariance; reduction → permutation invariance/equivariance, locality; generic → none (no safe identity).
 

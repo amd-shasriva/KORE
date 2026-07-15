@@ -3,12 +3,12 @@
 Prior kernel-generation RL (Kevin-32B, AutoTriton, KernelBench-style agents)
 rewards only two things: correctness and *wall-clock* speedup. That signal is
 SPARSE and, worse, FLAT across the "correct-but-slow" regime the policy stalls
-in — a 0.7x kernel and a 0.95x kernel look almost the same to the advantage
+in - a 0.7x kernel and a 0.95x kernel look almost the same to the advantage
 estimator, so the model learns "be correct" and stops optimizing.
 
 KORE adds a DENSE reward grounded in AMD hardware performance counters
 (rocprofv3 PMC). The idea: wall-clock speedup is the *effect*; the *causes* are
-measurable — pipeline stalls (SQ_WAIT_*), issued-instruction efficiency, and
+measurable - pipeline stalls (SQ_WAIT_*), issued-instruction efficiency, and
 memory traffic (SQ_INSTS_VMEM / TCP-TCC). A kernel that moves toward the
 hardware roofline (fewer stalls per issued instruction, less memory traffic than
 the vendor baseline) is genuinely closer to being fast, even before it crosses
@@ -20,11 +20,11 @@ Anti-hacking (this is a NEW reward surface, so it is designed defensively):
     [0, 1]; absolute counter magnitudes (which scale with problem size and are
     trivially inflatable) never enter the reward.
   * The term is only ever applied on the CORRECT tier, so a kernel cannot lower
-    its stall/traffic counters by "doing less" — it must still produce the right
+    its stall/traffic counters by "doing less" - it must still produce the right
     answer on every shape (and pass the determinism re-check).
   * The caller keeps ``profile_reward_weight`` strictly below the fast_p bonuses,
     so actually beating the baseline (wall-clock) always dominates a merely
-    counter-efficient kernel — the profiler reward SHAPES, it never leads.
+    counter-efficient kernel - the profiler reward SHAPES, it never leads.
 
 All functions here are pure and CPU-testable; GPU collection lives in
 ``kore.verifier.pmc`` and is wired in by ``KoreEnv``.
@@ -141,15 +141,15 @@ def roofline_dense_score(
     roofline-anchored signal, so the dense reward still has gradient when reference
     counters are unavailable (the common case in the GRPO rollout, whose public
     ``collect_counters`` only profiles the candidate). Blends up to three bounded,
-    hardware-grounded components — the arithmetic mean of whichever can be computed:
+    hardware-grounded components - the arithmetic mean of whichever can be computed:
 
       * roofline attainment  ``A = attained_fraction(measured_ms, flops, bytes)/100``
-        clamped to ``[0, 1]`` — the fraction of the MI300X (gfx942) roofline the
+        clamped to ``[0, 1]`` - the fraction of the MI300X (gfx942) roofline the
         kernel actually reached (0 == idle, 1 == on the roofline; >1 from cache
         reuse is clamped). This is the "far-from-roofline -> low, near-roofline ->
         high" signal that gives gradient in the flat correct-but-slow band where the
         wall-clock speedup reward is uninformative.
-      * issue efficiency     ``I = 1 - stall_fraction(cand)`` — the ALU-busy fraction
+      * issue efficiency     ``I = 1 - stall_fraction(cand)`` - the ALU-busy fraction
         from the candidate's OWN rocprofv3 counters (a kernel that spends its cycles
         stalled on ``SQ_WAIT_*`` is, by definition, far from any roofline).
       * baseline-relative    ``E = profile_efficiency_score(cand, ref)`` when the
@@ -159,7 +159,7 @@ def roofline_dense_score(
     Returns ``None`` when NO component is computable, so the caller can no-op (dense
     term 0.0). Every component is bounded to ``[0, 1]`` and RELATIVE to the roofline
     or the baseline; raw counter magnitudes (which scale with problem size and are
-    trivially inflatable) never enter the score. Pure / CPU-testable — the only
+    trivially inflatable) never enter the score. Pure / CPU-testable - the only
     dependency, :func:`kore.analysis.roofline.attained_fraction`, is imported lazily
     so this module stays import-light and free of any cycle.
     """

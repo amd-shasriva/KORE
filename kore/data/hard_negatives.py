@@ -11,14 +11,14 @@ call it): given a task's correct kernel source it returns a cheating variant plu
 an explicit ``reward_hack:<kind>`` label.
 
 Detection layers (see ``docs/DATASET_SPEC.md`` §4.2 and the report):
-  - **Layer A — ``kore.reward.reward.scan_for_hacks``** (pre-execution static gate,
+  - **Layer A - ``kore.reward.reward.scan_for_hacks``** (pre-execution static gate,
     owned by the reward module): catches ``vendor_call``, ``torch_delegation`` and
     ``try_except_fallback`` today.
-  - **Layer B — ``static_hack_scan`` (here)**: extra static heuristics that catch
+  - **Layer B - ``static_hack_scan`` (here)**: extra static heuristics that catch
     ``copy_reference``, ``hardcoded_shape``, ``partial_compute``, ``timing_hack``
     and ``reference_recycling``. These are the patterns the parent must fold into
     ``scan_for_hacks`` (documented in ``SCAN_FOR_HACKS_GAPS`` below).
-  - **Layer C — execution-time correctness gate** (multi-shape + held-out shape +
+  - **Layer C - execution-time correctness gate** (multi-shape + held-out shape +
     ≥5-seed fuzz + candidate-runs-first / NaN-poisoned output + strict SNR):
     the only reliable gate for ``wrong_dtype_accum`` (looks close), and the
     definitive gate for the compile+run hacks.

@@ -127,7 +127,7 @@ def build_sft(records: Iterable[Any]) -> list[dict]:
     Assistant turns are canonicalized at this boundary (:func:`_canonicalize_chat`)
     so both fresh datagen and reused v1 shards emit the single ANALYSIS/PROPOSED_CHANGE/
     FULL_KERNEL contract. Each row carries a ``_provenance`` block (kind / task / op /
-    arch / measured speedup + snr / verified) — ignored by the trainer, consumed by
+    arch / measured speedup + snr / verified) - ignored by the trainer, consumed by
     curation, available for audit. ``mixing._tag`` shallow-copies rows, so it survives
     into the final multicap shard.
     """
@@ -154,7 +154,7 @@ def build_sft(records: Iterable[Any]) -> list[dict]:
 #
 # Audit fix: v1 DPO "chosen" kernels were anchored to the SEED / seed-relative
 # improvements that could STILL be slower than the production vendor baseline
-# (hipBLASLt/AITER/torch) — e.g. a GEMM "win" at 0.598x hipBLASLt. DPO thus learned
+# (hipBLASLt/AITER/torch) - e.g. a GEMM "win" at 0.598x hipBLASLt. DPO thus learned
 # "prefer the less-bad kernel", never "prefer the kernel that beats production".
 # The policy below re-anchors preferences to the production baseline, preserves the
 # per-pair margin (so the trainer can margin-weight/filter), drops near-tie speed
@@ -289,7 +289,7 @@ def _is_correctness_pair(chosen_c: dict, rejected_c: dict) -> bool:
 
     Reward-hack hard negatives (``hard_negative`` label), repair pairs
     (``failure_class`` on the broken side), and any pair missing a comparable wall
-    time on either side are correctness pairs — kept at neutral weight, never
+    time on either side are correctness pairs - kept at neutral weight, never
     dropped, never treated as a speed signal. This is what preserves the mined
     reward-hack negatives untouched.
     """
@@ -427,7 +427,7 @@ def build_dpo(records: Iterable[Any], prompt_fn=None, *,
     Each ``[chosen_idx, rejected_idx]`` preference becomes a DPO row whose
     ``prompt`` is a chat-message list and whose ``chosen``/``rejected`` are each a
     single-message assistant completion list wrapping the candidate source under
-    the FULL_KERNEL contract — i.e. ``trl.DPOTrainer``'s conversational schema:
+    the FULL_KERNEL contract - i.e. ``trl.DPOTrainer``'s conversational schema:
 
         {"prompt": [ ...chat... ],
          "chosen":   [{"role": "assistant", "content": "FULL_KERNEL:..."}],
@@ -632,7 +632,7 @@ def dedup_near_source(records: Iterable[Any], per_fingerprint_cap: int = 1,
     ``kore.data.dedup``). Keeps the highest-scoring record per structural cluster
     (fastest :class:`WinRecord`), up to ``per_fingerprint_cap``.
 
-    Apply this to WIN/gold records — NOT to repair records: each broken->fixed
+    Apply this to WIN/gold records - NOT to repair records: each broken->fixed
     transition is a distinct lesson even when the fixed kernels converge, so
     collapsing repairs by fixed-kernel structure would delete real signal.
     """
@@ -672,7 +672,7 @@ def _group_key(rec: Any, by: tuple = ("operation", "arch")) -> str:
             # Resolve arch<-gpu, and CANONICALIZE the CDNA3/CDNA4 lineage: a record
             # tagged gfx942 (previous gen) and its gfx950 sibling are the same op
             # family on the same hardware lineage, so they must land in the SAME
-            # split — otherwise gemm|gfx942 and gemm|gfx950 fracture into different
+            # split - otherwise gemm|gfx942 and gemm|gfx950 fracture into different
             # groups and the op family leaks across train/val (audit C1/C5). A
             # genuinely foreign arch (e.g. gfx1100) keeps its own key.
             val = val or d.get("gpu")

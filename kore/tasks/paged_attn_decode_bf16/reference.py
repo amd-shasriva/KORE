@@ -8,7 +8,7 @@ Correctness oracle: exact fp32 attention that gathers K/V from the paged cache
 (honouring the block table + per-sequence context length, including a partial
 last page) and does non-causal softmax attention. Perf baseline (driver
 ``--impl reference``): AITER ROCm custom paged attention
-(``aiter.paged_attention_rocm``) — the real paged-decode serving bar.
+(``aiter.paged_attention_rocm``) - the real paged-decode serving bar.
 
 KV-cache layout (AITER / vLLM, x = 16 // itemsize = 8 for bf16):
     key_cache   : [num_blocks, KV, D // x, block_size, x]

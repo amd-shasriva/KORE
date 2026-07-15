@@ -25,7 +25,7 @@ log = get_logger("data.teacher")
 # Bounded exponential-backoff retry defaults for the network-backed teachers.
 # Sized to ride out multi-minute gateway hiccups / rate-limit windows: a multi-day
 # datagen makes tens of thousands of teacher calls and WILL hit transient 5xx /
-# timeouts / rate limits — the run must not die on one. 8 attempts with the backoff
+# timeouts / rate limits - the run must not die on one. 8 attempts with the backoff
 # below span ~4-5 minutes of resilience per call before giving up.
 _MAX_RETRIES = 8          # total attempts = _MAX_RETRIES
 _BACKOFF_BASE = 1.0       # seconds; delay = _BACKOFF_BASE * 2**attempt
@@ -350,7 +350,7 @@ class ClaudeTeacher:
 
 class ResilientTeacher:
     """Wrap a teacher so a TRANSIENT total-failure (all retries exhausted on one
-    call) SKIPS that sample (returns "") instead of crashing the whole run — but a
+    call) SKIPS that sample (returns "") instead of crashing the whole run - but a
     SUSTAINED outage (``max_consecutive_failures`` in a row) still raises, so we
     never silently produce empty datagen (no silent degradation).
 
@@ -378,7 +378,7 @@ class ResilientTeacher:
         except Exception as e:  # noqa: BLE001 - retries already exhausted inside inner
             self._consec += 1
             self._total_skipped += 1
-            log.error("teacher.generate exhausted retries — SKIPPING this sample "
+            log.error("teacher.generate exhausted retries - SKIPPING this sample "
                       "(resilient); will hard-stop if the outage is sustained",
                       exc_type=type(e).__name__, exc=str(e)[:200],
                       consecutive_failures=self._consec,
@@ -386,7 +386,7 @@ class ResilientTeacher:
             if self._consec >= self._max_consec:
                 raise RuntimeError(
                     f"teacher unavailable: {self._consec} consecutive generation "
-                    f"failures (sustained outage) — stopping so the run can resume "
+                    f"failures (sustained outage) - stopping so the run can resume "
                     f"later rather than produce empty data") from e
             return ""
 

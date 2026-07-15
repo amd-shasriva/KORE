@@ -3,7 +3,7 @@
 The serving prologue for an fp8 (W8A8) GEMM: ``RMSNorm(x) * w`` followed by a
 dynamic per-token fp8 quant, fused into ONE kernel instead of two AITER kernels
 plus a full-tensor HBM round trip. The fp8 e4m3 encoding is arch-selected via
-``FP8_DTYPE`` (OCP ``e4m3fn`` on gfx950/CDNA4 MI350X/MI355X — the native format;
+``FP8_DTYPE`` (OCP ``e4m3fn`` on gfx950/CDNA4 MI350X/MI355X - the native format;
 FNUZ ``e4m3fnuz`` on gfx942/CDNA3).
 
 Oracle: fp32 RMSNorm, then the exact torch per-token quant (codes + scales)

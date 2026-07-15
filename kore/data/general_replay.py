@@ -53,7 +53,7 @@ HF_SOURCES: dict[str, list[dict]] = {
             "split": "train",
             "qa_keys": ("input", "output"),
         },
-        {   # fallback: Magicoder Evol-Instruct (2023) — proven, cached offline.
+        {   # fallback: Magicoder Evol-Instruct (2023) - proven, cached offline.
             "path": "ise-uiuc/Magicoder-Evol-Instruct-110K",
             "config": None,
             "split": "train",
@@ -63,7 +63,7 @@ HF_SOURCES: dict[str, list[dict]] = {
     "math": [
         {
             # OpenThoughts3-1.2M (2025 SOTA reasoning): 850k math + 250k code + 100k
-            # science LONG-CoT traces (QwQ-32B). Primary math+reasoning source — the
+            # science LONG-CoT traces (QwQ-32B). Primary math+reasoning source - the
             # long chain-of-thought (tiling/indexing/numerics reasoning) transfers to
             # kernels AND closes the reasoning-CoT retention gap so domain SFT/RL
             # doesn't erode the base model's chain-of-thought.
@@ -317,7 +317,7 @@ def _load_from_hf(kind: str, n: int, seed: int) -> list[dict]:
             rows = _load_one_spec(spec, kind, n, seed)
             if rows:
                 return rows
-        except Exception as e:  # noqa: BLE001 — try the next candidate
+        except Exception as e:  # noqa: BLE001 - try the next candidate
             errors.append(f"{spec.get('path')}: {type(e).__name__}: {e}")
             continue
     raise RuntimeError(f"all HF sources for {kind!r} failed: {'; '.join(errors)}")
@@ -381,7 +381,7 @@ def load_general_replay(
     if use_hf:
         try:
             pool = _load_from_hf(kind, n, seed)
-        except Exception as e:  # noqa: BLE001 — degrade to offline bundle
+        except Exception as e:  # noqa: BLE001 - degrade to offline bundle
             print(f"[general_replay] HF source for {kind!r} unavailable "
                   f"({type(e).__name__}: {e}); using bundled samples")
             pool = []

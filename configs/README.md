@@ -1,4 +1,4 @@
-# `configs/` — FSDP & per-stage full-FT recipes
+# `configs/` - FSDP & per-stage full-FT recipes
 
 The distributed launch config and the "locked" full-parameter recipes for each training stage. `scripts/run_campaign.py --full-ft` overlays the run's dynamic fields (model / dataset / output dir) onto these templates, writes the resolved config into `<data-root>/launch/`, and shells out to `scripts/launch_distributed.sh` → `accelerate launch`.
 
@@ -38,11 +38,11 @@ Scaling notes are inline: flip `fsdp_offload_params: true` for 32B, add nodes (`
 
 ## Stage recipes (highlights)
 
-**`sft_14b_full.json`** — full-FT, `max_seq_length=16384`, `num_train_epochs=3`, `per_device_train_batch_size=1`, `gradient_accumulation_steps=16`, `repair_loss_weight=2.0`.
+**`sft_14b_full.json`** - full-FT, `max_seq_length=16384`, `num_train_epochs=3`, `per_device_train_batch_size=1`, `gradient_accumulation_steps=16`, `repair_loss_weight=2.0`.
 
-**`dpo_14b_full.json`** — `beta=0.1`, `loss_type="ipo"`, `max_length=16384`, `max_prompt_length=8192`, `learning_rate=5e-6`.
+**`dpo_14b_full.json`** - `beta=0.1`, `loss_type="ipo"`, `max_length=16384`, `max_prompt_length=8192`, `learning_rate=5e-6`.
 
-**`grpo_14b_full.json`** — the full paradigm, all levers on:
+**`grpo_14b_full.json`** - the full paradigm, all levers on:
 
 ```jsonc
 {
@@ -58,6 +58,6 @@ Scaling notes are inline: flip `fsdp_offload_params: true` for 32B, add nodes (`
 }
 ```
 
-> GRPO distributed effectively uses ZeRO-2 (SHARD_GRAD_OP) at rollout time so `model.generate()` works under sharding — see [`kore/policy`](../kore/policy/README.md) FSDP notes.
+> GRPO distributed effectively uses ZeRO-2 (SHARD_GRAD_OP) at rollout time so `model.generate()` works under sharding - see [`kore/policy`](../kore/policy/README.md) FSDP notes.
 
 Every field maps to a `GRPOConfig` dataclass field (`kore/policy/configs.py`). See [`scripts/README.md`](../scripts/README.md) for how these are launched and [`docs/DISTRIBUTED.md`](../docs/DISTRIBUTED.md) for sizing.

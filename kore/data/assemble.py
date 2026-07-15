@@ -95,11 +95,11 @@ def assemble_multicap_sources(
     teacher; the ~45% general half comes from general_replay.
 
     ``kernel_records`` overrides the on-disk repair+wins scan with an explicit
-    record list — used by the campaign to build SFT from a leakage-split TRAIN
+    record list - used by the campaign to build SFT from a leakage-split TRAIN
     partition only (so held-out op families never leak into training).
 
     ``extra_records`` folds in additional kernel-bucket records produced *after*
-    the base scan — the on-policy DAgger repairs, evolutionary ``WinRecord``s and
+    the base scan - the on-policy DAgger repairs, evolutionary ``WinRecord``s and
     on-policy relabeled wins. They are appended to (not substituted for) the
     kernel repair/opt bucket so the multi-capability SFT mix always INCLUDES the
     DAgger repairs the on-policy loop mined on the current policy's own failures.
@@ -242,7 +242,7 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
     visits.
 
     Preference quality (audit fix): the ranked-group ("base") pairs are built through
-    the baseline-anchored, margin-weighted :func:`build_datasets.build_dpo` policy —
+    the baseline-anchored, margin-weighted :func:`build_datasets.build_dpo` policy -
     sub-baseline "wins" (chosen slower than production) are relabelled/dropped,
     noise-band near-ties are dropped, and high-margin compute-bound pairs are
     up-weighted. Pass ``pref_policy`` (a :class:`build_datasets.DPOPrefPolicy`) or the
@@ -250,12 +250,12 @@ def build_dpo_with_hard_negatives(data_root, tasks, *, correct_source_fn=None,
     ``subbaseline_mode`` / ``weighting`` / ``baseline_speedup_fn`` overrides (all
     default to the ``KORE_PREF_*`` env, frontier defaults ON). The hard negatives are
     built with the SAME policy but are correctness pairs, so anchoring is a safe no-op
-    on them — every hard-negative pair is preserved at neutral weight.
+    on them - every hard-negative pair is preserved at neutral weight.
 
     ``hard_target`` (e.g. 0.12): when set, the abundant ranked-group ("base")
     pairs are deterministically SUBSAMPLED (seeded, order-preserving) so the
     reward-hack hard negatives reach at least this fraction of the total. Every
-    hard-negative pair is kept — only the redundant base pairs are thinned (DPO
+    hard-negative pair is kept - only the redundant base pairs are thinned (DPO
     converges well below the tens-of-thousands of group pairs available), so the
     crucial anti-reward-hacking signal is not diluted below the spec floor.
 

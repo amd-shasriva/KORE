@@ -429,7 +429,7 @@ def test_extract_first_json_and_code_fence():
 
 
 # ---------------------------------------------------------------------------
-# FULL bench loading (HF datasets) — monkeypatched, CPU/offline
+# FULL bench loading (HF datasets) - monkeypatched, CPU/offline
 # ---------------------------------------------------------------------------
 #
 # Every test here monkeypatches ``datasets.load_dataset`` so NO network is

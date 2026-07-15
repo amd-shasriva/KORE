@@ -276,7 +276,7 @@ def _win_script():
         _mk_call("test", {"kernel_src": "cand __WRONG__"}),    # turn 1: incorrect -> repair
         _mk_call("test", {"kernel_src": "cand fixed"}),         # turn 2: correct
         _mk_call("bench", {"kernel_src": "cand __FAST__"}) + "\n" + _mk_call("keep", {}),  # turn 3
-        "All done — no further changes.",                       # turn 4: no tool call -> stop
+        "All done - no further changes.",                       # turn 4: no tool call -> stop
     ]
 
 

@@ -6,7 +6,7 @@ Standard LayerNorm over the last dim with learnable weight + bias:
 AITER CK kernel). bf16 in/out, fp32 reductions.
 
 Correctness oracle: exact torch-fp32 ``F.layer_norm``.
-Perf baseline (driver --impl reference): AITER ``layer_norm`` (CK) — the kernel
+Perf baseline (driver --impl reference): AITER ``layer_norm`` (CK) - the kernel
 the production serving stack calls.
 """
 

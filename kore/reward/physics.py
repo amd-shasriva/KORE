@@ -159,7 +159,7 @@ def observation_from_measure(m, dtype: str = "bf16") -> Observation:
     """Build an :class:`Observation` from a ``KernelMeasure``-like object.
 
     Occupancy is carried by the :class:`PhysicsSignal` (see
-    :func:`physics_from_measure`), not the Observation — the Observation only needs
+    :func:`physics_from_measure`), not the Observation - the Observation only needs
     the correctness-gate inputs that :func:`compute_reward` consumes.
     """
     return Observation(

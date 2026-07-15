@@ -9,7 +9,7 @@ AITER HIP ``rope_fwd`` kernel with rotate_style=NEOX, reuse_freqs_front_part=Tru
 nope_first=False (verified on-box).
 
 Correctness oracle: the exact torch-fp32 NEOX rope above.
-Perf baseline (driver --impl reference): AITER ``rope_fwd`` — the vendor HIP rope
+Perf baseline (driver --impl reference): AITER ``rope_fwd`` - the vendor HIP rope
 the serving stack calls. ``freqs`` (the raw angles) are fed to both.
 """
 

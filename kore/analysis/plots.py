@@ -149,7 +149,7 @@ def fig_monotone_valley(rep: dict, out: Path) -> None:
             xs = [m["eta"] * 100 for m in ms]
             ys = [dom(m) * 100 for m in ms]
             ax.plot(xs, ys, marker="o", label=t, alpha=0.8)
-    ax.set_xlabel("SOL attainment η (%)  — improvement direction →")
+    ax.set_xlabel("SOL attainment η (%)  - improvement direction →")
     ax.set_ylabel("dominant residual term  max(stall, occ-deficit)  (%)")
     frac = rep["checks"]["c"].get("frac")
     pairs = rep["checks"]["c"].get("in_valley_pairs")
@@ -183,7 +183,7 @@ def fig_correct_but_slow(rep: dict, out: Path) -> None:
     ax.set_ylabel("seed speedup vs its PRODUCTION baseline")
     ax.set_title(f"All seeds are CORRECT. Seed speedup vs the real production baseline\n"
                  f"({n_aiter}/{len(names)} measured against AITER/hipBLASLt vendor kernels; "
-                 f"seeds sit below the vendor bar — the correct-but-slow wall)")
+                 f"seeds sit below the vendor bar - the correct-but-slow wall)")
     from matplotlib.patches import Patch
     ax.legend(handles=[Patch(color=ACCENT, label="AITER vendor (CK kernel)"),
                        Patch(color=BLUE, label="hipBLASLt vendor (GEMM)"),

@@ -28,7 +28,7 @@ def _log_decision(rr: "RewardResult") -> None:
 
     Per-candidate detail rides at DEBUG so it never spams INFO; a flagged hack
     is surfaced at INFO (event) + WARN (reason) so cheating is impossible to
-    miss. This is additive — it never touches the value being returned. NB: we
+    miss. This is additive - it never touches the value being returned. NB: we
     deliberately do NOT log inside ``scan_for_hacks`` (the hot regex path);
     only the final decision is recorded here.
     """
@@ -60,7 +60,7 @@ class Observation:
     cv_pct: Optional[float] = None
     flagged_hack: bool = False
     hack_reason: Optional[str] = None
-    infra_error: bool = False   # timeout/OOM/segfault/import — NOT a kernel signal
+    infra_error: bool = False   # timeout/OOM/segfault/import - NOT a kernel signal
     # P5: baseline-relative hardware-counter efficiency in [0,1] (rocprofv3), or
     # None when profiling is off/unavailable. Consumed as a bounded dense bonus.
     profile_efficiency: Optional[float] = None
@@ -123,7 +123,7 @@ _HACK_PATTERNS = [
      "imports the sibling driver/reference module to reach the oracle/baseline"),
     (r"\b(?:ref_fn|baseline_fn|matmul_ref)\s*\(",
      "calls the reference oracle / vendor baseline function instead of computing"),
-    # dynamic import / code exec — an escape hatch to reach vendor libs / the oracle.
+    # dynamic import / code exec - an escape hatch to reach vendor libs / the oracle.
     (r"\bimportlib\b|__import__\s*\(|\bexec\s*\(|\beval\s*\(", "uses dynamic import/exec to escape"),
     (r"\bctypes\b|\bcffi\b|\bCDLL\b|dlopen|LoadLibrary", "loads a native lib via ctypes/cffi"),
     # forging the verifier verdict on stdout (incl. the bench timing line).
@@ -154,7 +154,7 @@ _HACK_PATTERNS = [
     # (pure vendor delegation). `@decorator` lines start with @ (no operand before),
     # so requiring an operand char before @ excludes decorators.
     # NB: horizontal-whitespace only ([^\S\n]) so a decorator stack (`)\n@triton.jit`
-    # / `tl\n@triton.jit`) is NOT matched — only an operand `@` operand on ONE line.
+    # / `tl\n@triton.jit`) is NOT matched - only an operand `@` operand on ONE line.
     (r"[\w\)\]][^\S\n]*@[^\S\n]*[\w\(]", "uses the @ matmul operator (delegates to the vendor GEMM)"),
     # module-table access to reach torch/vendor/oracle while dodging import scans.
     (r"\bsys\.modules\b", "reaches libraries via sys.modules (delegation/escape channel)"),
@@ -218,7 +218,7 @@ def _aggregate_speedup(obs: Observation, cfg) -> Optional[float]:
     KORE's contribution is a *distributionally-robust* speed objective against the
     PRODUCTION vendor baseline: rather than the average-case speedup, it optimizes
     the worst shapes, so the policy must be fast on the hardest shape a practitioner
-    hits — not just on average. This exposes the whole CVaR_alpha family (worst =
+    hits - not just on average. This exposes the whole CVaR_alpha family (worst =
     CVaR_{a->0}, mean = CVaR_1) at a single point; all downstream shaping (log term,
     fast_p bonuses, significance) then applies to the chosen aggregate.
 
@@ -227,7 +227,7 @@ def _aggregate_speedup(obs: Observation, cfg) -> Optional[float]:
       "mean"  : geometric-mean speedup over all shapes (average-case ablation arm).
 
     Geometric mean (mean-of-logs) is used for cvar/mean so the family is linear in
-    ln(ratio) — consistent with the log-speedup shaping — and scale-correct for
+    ln(ratio) - consistent with the log-speedup shaping - and scale-correct for
     ratios. Degrades to the single-shape / scalar case identically to _worst_speedup,
     so the default ("worst") is byte-identical to the previous reward.
     """
@@ -266,11 +266,11 @@ def _subthreshold_credit(obs: Observation, dtype: str, cfg,
                          snr_threshold: Optional[float]) -> float:
     """P1: bounded, continuous credit for a compiled-but-INCORRECT kernel.
 
-    Returns ``eps_shape * clamp(worst_snr / snr_threshold, 0, 1)`` — a dense
+    Returns ``eps_shape * clamp(worst_snr / snr_threshold, 0, 1)`` - a dense
     signal proportional to progress toward the correctness gate, so early RL
     isn't stuck on a flat-zero reward. The value lies in ``[0, eps_shape]`` and,
     because a kernel in the incorrect tier has worst-shape SNR *below* the gate,
-    it is in practice strictly ``< eps_shape < correctness_weight`` — it can
+    it is in practice strictly ``< eps_shape < correctness_weight`` - it can
     never reach, let alone cross, the correct tier. Returns 0 when shaping is
     off, when there is no SNR signal, or (by construction of the caller) for a
     flagged hack / compile-fail / infra error.
@@ -295,7 +295,7 @@ def _format_component(response: Optional[str], cfg) -> float:
     ``response`` is the RAW policy output (the FULL_KERNEL contract), NOT the
     already-extracted kernel. Returns ``+format_weight`` when the response parses
     to a non-empty kernel (valid contract), ``-format_weight`` when it is
-    malformed, and 0 when no response is supplied (the default — preserves the
+    malformed, and 0 when no response is supplied (the default - preserves the
     exact legacy reward for every current caller). The magnitude is kept far
     below every inter-tier gap, so this term can never flip tier ordering.
     """
@@ -349,8 +349,8 @@ def _speedup_term(su_scored: float, su_raw: float, obs: Observation, cfg,
         trustworthy = (obs.cv_pct is None) or (obs.cv_pct <= cfg.cv_threshold_pct)
         excessive = "excessive_speedup" in flags
         # Require the speedup to clear the threshold by the measurement noise floor
-        # (not just tie it): a kernel that merely PARITIES the baseline (1.00x) — or
-        # beats it only within combined timing noise — must not farm the crossover
+        # (not just tie it): a kernel that merely PARITIES the baseline (1.00x) - or
+        # beats it only within combined timing noise - must not farm the crossover
         # bonus. margin = 1 + noise_floor_pct/100 (e.g. 1.0x threshold -> need 1.02x).
         margin = 1.0 + float(getattr(cfg, "noise_floor_pct", 0.0) or 0.0) / 100.0
         if (not sig_only) or (trustworthy and not excessive):
@@ -378,17 +378,17 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     Tier order (a strictly better outcome in an earlier tier ALWAYS dominates):
         hack < compile_fail < incorrect (shaped) < correct-but-slow < correct-fast.
     Correctness is scored with the Kevin reward ``correctness_weight + speedup``
-    (linear, capped) — NOT log — so a correct kernel is *never* punished below an
+    (linear, capped) - NOT log - so a correct kernel is *never* punished below an
     incorrect one, even when slower than the production baseline.
 
     Shaping upgrades (all bounded so lexicographic dominance holds absolutely):
-      * P1 sub-threshold shaping — a compiled-but-incorrect kernel gets a small
+      * P1 sub-threshold shaping - a compiled-but-incorrect kernel gets a small
         continuous credit in ``[0, eps_shape]`` toward the correctness gate,
         never enough to reach the correct tier. Never applied to a hack/compile
         failure/infra error.
-      * P2 format term — pass the raw ``response`` (FULL_KERNEL contract) to add
+      * P2 format term - pass the raw ``response`` (FULL_KERNEL contract) to add
         a tiny ``±format_weight`` bonus/penalty on the incorrect/correct tiers.
-      * P3 curriculum ``phase`` — ``"correctness"`` zeroes the speed term (every
+      * P3 curriculum ``phase`` - ``"correctness"`` zeroes the speed term (every
         correct kernel scores ``correctness_weight``); ``"full"``/``"latency"``
         (default) use ``correctness_weight + speedup``. Falls back to
         ``cfg.reward_phase`` when ``phase`` is None.
@@ -398,7 +398,7 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     flags: list[str] = []
     phase = (phase or getattr(cfg, "reward_phase", "full") or "full").lower()
 
-    # Tier -1: infrastructure error (timeout/OOM/segfault/import) — not the
+    # Tier -1: infrastructure error (timeout/OOM/segfault/import) - not the
     # kernel's fault; caller must NOT cache it and should resample.
     if obs.infra_error:
         flags.append("infra")
@@ -448,7 +448,7 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     # capped to bound measurement-error outliers. base>0 guarantees every correct
     # kernel (even a slow one, speedup>0) strictly beats the incorrect tier.
     # A correct kernel always parses to a kernel, so its format term is +format_weight
-    # (never a penalty) — correct-fast vs correct-slow stays a pure speed ordering.
+    # (never a penalty) - correct-fast vs correct-slow stays a pure speed ordering.
     base = cfg.correctness_weight
     fmt = _format_component(response, cfg)
     su = _aggregate_speedup(obs, cfg)  # distributionally-robust (default: worst-shape)

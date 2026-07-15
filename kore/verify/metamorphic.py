@@ -4,7 +4,7 @@ A *metamorphic* check exploits algebraic identities the TRUE operator must satis
 any input, without needing the reference output. They are candidate-only
 self-consistency checks and are deterministic, so a candidate that violates one is
 rejected with certainty. Crucially they catch **structural** cheats that point-value
-checks miss — e.g. a "pointwise" kernel that secretly mixes elements across a row, or
+checks miss - e.g. a "pointwise" kernel that secretly mixes elements across a row, or
 a reduction that is not actually order-invariant.
 
 Relations by op class

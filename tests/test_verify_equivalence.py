@@ -272,7 +272,7 @@ def test_correct_elementwise_kernel_is_accepted():
 def test_correct_fp32_accumulate_reordering_is_accepted():
     # reference: naive fp32 row sum in NATURAL order (the "obvious" implementation).
     # Computing at the candidate's own precision keeps the overflow/saturation regimes
-    # (inf_adjacent) fair — both saturate identically.
+    # (inf_adjacent) fair - both saturate identically.
     def ref(x):
         acc = np.zeros(x.shape[0], dtype=np.float32)
         for j in range(x.shape[1]):

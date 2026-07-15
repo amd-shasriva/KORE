@@ -41,10 +41,10 @@ DTYPES: dict[str, tuple[str, str, float]] = {
     "bf16": ("bfloat16", "tl.bfloat16", 30.0),
     "fp16": ("float16", "tl.float16", 30.0),
     "fp32": ("float32", "tl.float32", 40.0),
-    # fp8 e4m3 — OCP e4m3fn on gfx950/CDNA4 (MI350X/MI355X, the native CDNA4
+    # fp8 e4m3 - OCP e4m3fn on gfx950/CDNA4 (MI350X/MI355X, the native CDNA4
     # format; gfx942/CDNA3 used FNUZ). Used by quantized GEMM vendor ops. The
     # oracle dequantizes the SAME fp8 operands, so the gate measures the kernel's
-    # fp32 accumulation fidelity (bf16 output) — a ~25 dB bar, not the quant error.
+    # fp32 accumulation fidelity (bf16 output) - a ~25 dB bar, not the quant error.
     "fp8": ("float8_e4m3fn", "tl.float8e4nv", 25.0),
     # int8 symmetric (W8A8): int8-in / bf16-out quantized GEMM (per-row/col scales).
     "int8": ("int8", "tl.int8", 25.0),
@@ -62,7 +62,7 @@ _FUSED_BASELINE_CACHE: dict = {}
 
 def _compile_baseline_enabled() -> bool:
     """Grade fusion/gemm_fusion against the COMPILER-FUSED baseline (honest bar)
-    when KORE_COMPILE_BASELINE is truthy — closes the 'beat unfused eager' speedup
+    when KORE_COMPILE_BASELINE is truthy - closes the 'beat unfused eager' speedup
     inflation. Off by default so unit tests / CPU dry-runs stay eager + cheap."""
     return os.environ.get("KORE_COMPILE_BASELINE", "").strip().lower() in (
         "1", "true", "yes", "on")
@@ -80,7 +80,7 @@ def _fused_baseline(fn, key: str):
         try:
             import torch
             _FUSED_BASELINE_CACHE[key] = torch.compile(fn)
-        except Exception:  # noqa: BLE001 — torch.compile unavailable/unsupported
+        except Exception:  # noqa: BLE001 - torch.compile unavailable/unsupported
             _FUSED_BASELINE_CACHE[key] = fn
     return _FUSED_BASELINE_CACHE[key]
 
@@ -130,7 +130,7 @@ class FusionSpec:
     """A pointwise FUSION of 2-3 ops. The Triton seed computes the whole chain in
     ONE pass (one HBM round-trip); the torch baseline runs it as SEPARATE eager
     ops (multiple kernels / round-trips), so there is GENUINE speedup headroom vs
-    torch-eager — unlike a single elementwise op where torch is already near
+    torch-eager - unlike a single elementwise op where torch is already near
     roofline. This is the honest high-headroom operator class (KernelBench-L2 style)."""
     tl_expr: str                      # fp32 Triton expr in terms of `a`, `b`(, `c`)
     torch_fn: Callable                # torch composition (multi-kernel) baseline+oracle
@@ -487,7 +487,7 @@ _UNARY_TMPL = '''"""GENERATED seed Triton kernel for the {op} ({dtype}) activati
 
 Elementwise {op}, 2D-tiled, fp32 math, {tldt} store. A correct-but-naive starting
 point the KORE policy learns to optimize against the framework production baseline.
-Regenerate via kore/tasks/generate_ops.py — do not hand-edit.
+Regenerate via kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 
@@ -519,7 +519,7 @@ def {op}(x: torch.Tensor) -> torch.Tensor:
 _BINARY_TMPL = '''"""GENERATED seed Triton kernel for the {op} ({dtype}) binary op.
 
 Elementwise {op}(a, b), 2D-tiled, fp32 math, {tldt} store. Regenerate via
-kore/tasks/generate_ops.py — do not hand-edit.
+kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 
@@ -553,7 +553,7 @@ def {op}(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 _REDUCE_TMPL = '''"""GENERATED seed Triton kernel for the {op} ({dtype}) row reduction.
 
 Per-row reduction [M,N]->[M], fp32 accumulate, {tldt} store. Regenerate via
-kore/tasks/generate_ops.py — do not hand-edit.
+kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 
@@ -589,7 +589,7 @@ _FUSION2_TMPL = '''"""GENERATED seed Triton kernel for the {op} ({dtype}) fusion
 
 Pointwise FUSION out = f(a, b) computed in ONE pass. torch-eager runs this as
 separate kernels, so a fused kernel saves HBM round-trips -> real speedup headroom.
-Regenerate via kore/tasks/generate_ops.py — do not hand-edit.
+Regenerate via kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 
@@ -623,7 +623,7 @@ def {op}(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 _FUSION3_TMPL = '''"""GENERATED seed Triton kernel for the {op} ({dtype}) fusion.
 
 Pointwise FUSION out = f(a, b, c) computed in ONE pass (vs torch-eager multi-kernel).
-Regenerate via kore/tasks/generate_ops.py — do not hand-edit.
+Regenerate via kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 
@@ -662,7 +662,7 @@ C = act(A @ B [+ bias]) in ONE kernel (fp32 accumulate, {tldt} store). torch run
 this as matmul (-> hipBLASLt) + bias + activation = SEPARATE kernels, so fusing
 saves HBM round-trips of the [M,N] output -> real headroom vs the vendor path.
 Grouped tiling + K-mask (ROCm/gfx942-safe, libdevice-free act). Regenerate via
-kore/tasks/generate_ops.py — do not hand-edit.
+kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 
@@ -795,7 +795,7 @@ def _time_median(fn, warmup: int, iters: int) -> float:
 
     Same protocol as :func:`_time_fn` (L2 flush per iter under KORE_BENCH_COLD,
     CUDA-event timing, median of sorted samples) but RETURNS the median instead of
-    printing — so a single process can time several impls/runs back-to-back."""
+    printing - so a single process can time several impls/runs back-to-back."""
     import torch
     cold = os.environ.get("KORE_BENCH_COLD", "1") != "0"
     for _ in range(warmup):
@@ -864,7 +864,7 @@ def _adversarial_fills(inputs):
         "large": lambda t: torch.full_like(t, 1.0e3),
         "neg_large": lambda t: torch.full_like(t, -1.0e3),
         "small": lambda t: torch.full_like(t, 1.0e-3),
-        # Alternating ±1. Build the parity in int64 (torch.arange) — NOT via a
+        # Alternating ±1. Build the parity in int64 (torch.arange) - NOT via a
         # cumsum in the tensor's own dtype: an fp16/bf16 cumsum over a large tensor
         # overflows (fp16 caps at 65504) to inf, and inf % 2 == nan, which silently
         # poisoned the input with NaNs and false-rejected correct fp16 kernels.
@@ -905,7 +905,7 @@ def _clone_inputs(inputs):
 def _compare_outputs(out, ref_out):
     """SNR/max_diff/allclose over single-tensor OR multi-output (tuple) results.
 
-    Returns ``(worst_snr_db, max_abs_diff, allclose_all)`` — the worst SNR and the
+    Returns ``(worst_snr_db, max_abs_diff, allclose_all)`` - the worst SNR and the
     logical-AND of allclose across every output tensor.
 
     NON-FINITE-AWARE: a correct kernel must reproduce the reference's NaN/Inf
@@ -1013,7 +1013,7 @@ def _run_bench_both(ref, task_dir, shape, warmup, iters, repeat) -> int:
     (one torch import) does all ``repeat`` timed runs for BOTH impls, printing
     ``CAND_median_ms:`` / ``REF_median_ms:`` per run. Because candidate and reference
     are timed BACK-TO-BACK within each run, any machine load (GPU oversubscription)
-    hits both equally, so the speedup RATIO stays fair even under heavy concurrency —
+    hits both equally, so the speedup RATIO stays fair even under heavy concurrency -
     unlike separate per-impl processes whose windows can see different contention.
     Warmup/iters are randomized per run (same window for both impls in a run) to
     defeat fixed-call-index bench sniffing. Median-of-medians + CV are computed by
@@ -1037,7 +1037,7 @@ def _run_bench_all_shapes(ref, task_dir, shape_specs, warmup, iters, repeat) -> 
     Emits a ``SHAPE_BEGIN <spec>`` marker before each shape's CAND_/REF_median_ms
     block (blocks are in the given order). This collapses the per-shape process
     spawns into one, so under the per-GPU timing lock the exclusive window shrinks to
-    a single import + the tiny GPU timing — max throughput with clean, honest
+    a single import + the tiny GPU timing - max throughput with clean, honest
     measurements. Timing math per shape is identical to :func:`_run_bench_both`."""
     import random
     for spec in shape_specs:

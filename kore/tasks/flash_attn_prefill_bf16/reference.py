@@ -6,7 +6,7 @@ softmax attention the flash kernel approximates; the SNR gate measures the flash
 kernel's online-softmax numerical fidelity, not a different algorithm.
 
 Perf baseline (driver ``--impl reference``): AITER ``flash_attn_func`` (CK/ASM
-FMHA) — the real prefill serving bar.
+FMHA) - the real prefill serving bar.
 
 Layout (matches AITER ``flash_attn_func``): q ``[B, S, H, D]``, k/v
 ``[B, S, KV, D]`` (KV<=H, H % KV == 0), causal aligned to the bottom-right.

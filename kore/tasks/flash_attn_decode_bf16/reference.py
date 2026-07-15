@@ -3,7 +3,7 @@
 Decode = a single query token (seq_q = 1) attending over a long KV context.
 Correctness oracle: exact fp32 non-causal SDPA with grouped-query attention (the
 lone query attends to the full KV window). Perf baseline (driver
-``--impl reference``): AITER ``flash_attn_func`` with seq_q=1 — the real decode
+``--impl reference``): AITER ``flash_attn_func`` with seq_q=1 - the real decode
 attention bar.
 
 Layout (matches AITER ``flash_attn_func``): q ``[B, 1, H, D]``, k/v

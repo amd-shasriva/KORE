@@ -3,22 +3,22 @@
 The v1 datagen produced ~27.6k GPU-verified kernels, but their speedups were measured
 against a WEAK baseline (torch-eager) with the adversarial correctness battery OFF.
 This module REUSES those kernels (the expensive teacher output) and only RE-MEASURES
-them under v2 rigor — the strong ``torch.compile``/vendor baseline + the adversarial
-correctness battery — so v1 data gets HONEST v2 numbers WITHOUT re-running datagen.
+them under v2 rigor - the strong ``torch.compile``/vendor baseline + the adversarial
+correctness battery - so v1 data gets HONEST v2 numbers WITHOUT re-running datagen.
 It is GPU-bound (``KoreEnv.step``) but teacher-free and fully resumable.
 
 Per record type (reusing the verified gen_groups primitives):
-  * groups  — re-evaluate every candidate -> re-rank (rank_candidates) -> re-build
+  * groups  - re-evaluate every candidate -> re-rank (rank_candidates) -> re-build
     preferences (build_preferences w/ the noise margin). A candidate that no longer
     compiles / passes adversarial correctness sinks in the ranking, so preferences
     stay honest. Optionally attaches rocprof counters for the rank-0 candidate.
-  * wins    — re-evaluate final_source vs the STRONG baseline; DROP the win if it no
+  * wins    - re-evaluate final_source vs the STRONG baseline; DROP the win if it no
     longer beats it (speedup <= 1.0) or fails adversarial correctness (an honest
     "was only fast vs eager" cull). Otherwise update speedup/snr/wall.
-  * repair  — re-verify the FIXED kernel under adversarial rigor; DROP if it no longer
+  * repair  - re-verify the FIXED kernel under adversarial rigor; DROP if it no longer
     passes (a v1 lucky-pass), else keep (the correctness lesson survives).
 
-Derived shards (``_gold_*`` / ``_repair_*``) are skipped — the build stage re-mints
+Derived shards (``_gold_*`` / ``_repair_*``) are skipped - the build stage re-mints
 them from the re-verified groups. Rigor is supplied by the environment
 (``verify_rigor.set_rigorous_verification`` sets KORE_VERIFIED_CORRECTNESS /
 KORE_COMPILE_BASELINE / KORE_SHAPE_AUGMENT, inherited by the verifier subprocess).
@@ -328,7 +328,7 @@ def run_reverify(data_root, task_ids, gpu_ids, *, ground: bool = False,
 
     ``gpu_ids`` is the list of per-worker device ids (e.g. ``[0..7]`` repeated
     ``workers_per_gpu`` times = one entry per worker). Uses a SHARED task queue so
-    every worker stays busy pulling the next task until all are done — no tail
+    every worker stays busy pulling the next task until all are done - no tail
     draining where light-task workers idle while heavy shards finish.
     """
     import multiprocessing as mp

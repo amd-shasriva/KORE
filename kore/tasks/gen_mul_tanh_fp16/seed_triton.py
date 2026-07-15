@@ -2,7 +2,7 @@
 
 Pointwise FUSION out = f(a, b) computed in ONE pass. torch-eager runs this as
 separate kernels, so a fused kernel saves HBM round-trips -> real speedup headroom.
-Regenerate via kore/tasks/generate_ops.py — do not hand-edit.
+Regenerate via kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 

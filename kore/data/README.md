@@ -1,8 +1,8 @@
-# `kore/data` — the training-data factory
+# `kore/data` - the training-data factory
 
 Turns teachers (frontier LLMs) and policies into **verified** kernel-optimization training data, typed and sharded to JSONL, then assembles it into leakage-aware SFT/DPO corpora with anti-forgetting general replay. Includes evolutionary datagen and the iterative on-policy DPO/DAgger loop.
 
-Every record is *verified before it is kept* — a repair is only recorded if the fix actually passes the oracle; no silent empty data.
+Every record is *verified before it is kept* - a repair is only recorded if the fix actually passes the oracle; no silent empty data.
 
 ---
 
@@ -30,7 +30,7 @@ Four interchangeable backends behind one `TeacherClient` protocol:
 | `HFTeacher` | a local transformers model |
 | `ClaudeTeacher` | Anthropic frontier model via **AMD's internal LLM gateway** |
 
-`ClaudeTeacher` reads `AMD_LLM_API_KEY` (+ `AMD_NTID`, optional `AMD_LLM_GATEWAY_URL`, `KORE_TEACHER_MODEL`) from `.env.local`. All network teachers use bounded exponential-backoff retry (8 attempts) and drop truncated completions (`finish_reason=length`) rather than store half-written kernels. `ResilientTeacher` wraps any backend: a single exhausted call returns `""` (skip the sample), but **15 consecutive failures raise** — a sustained outage stops the run resumably instead of silently producing empty data.
+`ClaudeTeacher` reads `AMD_LLM_API_KEY` (+ `AMD_NTID`, optional `AMD_LLM_GATEWAY_URL`, `KORE_TEACHER_MODEL`) from `.env.local`. All network teachers use bounded exponential-backoff retry (8 attempts) and drop truncated completions (`finish_reason=length`) rather than store half-written kernels. `ResilientTeacher` wraps any backend: a single exhausted call returns `""` (skip the sample), but **15 consecutive failures raise** - a sustained outage stops the run resumably instead of silently producing empty data.
 
 ---
 
@@ -56,9 +56,9 @@ flowchart TB
 
 Generators: `gen_repair` (inject breakage → teacher fix → keep only if verified), `gen_groups` (n_parents × k candidates, ranked correct>speed>SNR with a noise-margin gate), `gen_wins` (greedy multi-turn, keep if net >2% faster), `gen_agentic` (tool-use trajectories). `evolve.py` adds a D-MAB bandit (UCB1 + Page-Hinkley) over mutation operators with MAP-Elites islands and a value prefilter.
 
-**Agentic slice — two ways to fill it.** The live `gen_agentic` path drives the teacher + GPU harness per task (tens of GPU-hours). `synth_agentic.py` is the **CPU-only alternative**: it *reconstructs* faithful Hermes tool-use trajectories from the already-verified `repair` / `wins` / `groups` records, so every `role:"tool"` result carries a **real measured** number (verifier SNR, walltime, error text) with **no GPU and no teacher**. It maps 1:1 onto the live curriculum — `repair`→`test(broken)→reflect→test(fixed)→keep`, `wins`→`bench(seed)→bench(optimized)→keep`, `groups`→`bench(candidates)→keep(fastest)` — and writes `agentic/_synth_{repair,wins,groups}.jsonl` which `assemble._agentic_rows` picks up (the SFT mixer then blends the web tool-use replay on top). Select the mode with `run_campaign.py --agentic {live,synth,both}` (`--synth-agentic-cap`, default 4000).
+**Agentic slice - two ways to fill it.** The live `gen_agentic` path drives the teacher + GPU harness per task (tens of GPU-hours). `synth_agentic.py` is the **CPU-only alternative**: it *reconstructs* faithful Hermes tool-use trajectories from the already-verified `repair` / `wins` / `groups` records, so every `role:"tool"` result carries a **real measured** number (verifier SNR, walltime, error text) with **no GPU and no teacher**. It maps 1:1 onto the live curriculum - `repair`→`test(broken)→reflect→test(fixed)→keep`, `wins`→`bench(seed)→bench(optimized)→keep`, `groups`→`bench(candidates)→keep(fastest)` - and writes `agentic/_synth_{repair,wins,groups}.jsonl` which `assemble._agentic_rows` picks up (the SFT mixer then blends the web tool-use replay on top). Select the mode with `run_campaign.py --agentic {live,synth,both}` (`--synth-agentic-cap`, default 4000).
 
-**Gold wins — rebalancing the thinnest family.** `gen_wins` yields ~1 trajectory/task, so pure-optimization demos are scarce next to `repair`. `gold_wins.py` mints extra optimization-win `WinRecord`s from the **rank-0** (robustly-best, correct) candidate in each ranked `group` — code that `build_sft` otherwise sees only via DPO. It frames a slower correct sibling as the parent and emits the real-wins format (`SYSTEM_PROMPT` + `build_turn_prompt` + `ANALYSIS: … FULL_KERNEL:`), writing `wins/_gold_from_groups.jsonl`. The build stage mints these **before** the raw gather, so they pass the SAME dedup + leakage split + **RFT speedup gate** as real wins — only genuinely-faster-than-parent gold survives. On by default (`--gold-wins` / `--no-gold-wins`, `--gold-wins-cap` default 3000). This is rejection-sampling (ReST-EM) on already-verified data: gold *code*, measurement-grounded reasoning, zero new GPU.
+**Gold wins - rebalancing the thinnest family.** `gen_wins` yields ~1 trajectory/task, so pure-optimization demos are scarce next to `repair`. `gold_wins.py` mints extra optimization-win `WinRecord`s from the **rank-0** (robustly-best, correct) candidate in each ranked `group` - code that `build_sft` otherwise sees only via DPO. It frames a slower correct sibling as the parent and emits the real-wins format (`SYSTEM_PROMPT` + `build_turn_prompt` + `ANALYSIS: … FULL_KERNEL:`), writing `wins/_gold_from_groups.jsonl`. The build stage mints these **before** the raw gather, so they pass the SAME dedup + leakage split + **RFT speedup gate** as real wins - only genuinely-faster-than-parent gold survives. On by default (`--gold-wins` / `--no-gold-wins`, `--gold-wins-cap` default 3000). This is rejection-sampling (ReST-EM) on already-verified data: gold *code*, measurement-grounded reasoning, zero new GPU.
 
 ---
 

@@ -1,9 +1,9 @@
 """KORE observability: one structured logger for the whole pipeline.
 
-Goal: when a run is going, you can watch *everything* move — every datagen
+Goal: when a run is going, you can watch *everything* move - every datagen
 attempt, teacher call (latency/tokens/retries), per-shape compile/SNR/bench,
 every RL step (reward mean/std, advantages, KL, grad-norm, GPU mem), and every
-campaign stage with timers/progress/ETA — as both human-readable console lines
+campaign stage with timers/progress/ETA - as both human-readable console lines
 and machine-readable JSONL events.
 
 Design:

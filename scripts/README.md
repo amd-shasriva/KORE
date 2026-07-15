@@ -1,4 +1,4 @@
-# `scripts/` — campaign orchestration & launchers
+# `scripts/` - campaign orchestration & launchers
 
 Everything needed to run KORE end-to-end: the campaign orchestrator, the portable conductor + tmux launchers, the FSDP launch helper, and smoke tests.
 
@@ -8,7 +8,7 @@ Everything needed to run KORE end-to-end: the campaign orchestrator, the portabl
 
 | Script | Purpose |
 | --- | --- |
-| `run_campaign.py` | The orchestrator — 9 stages, manifest resume, retention gates, CLI |
+| `run_campaign.py` | The orchestrator - 9 stages, manifest resume, retention gates, CLI |
 | `run_conductor_14b.sh` | **Portable** full-14B launcher (repo-root-relative, loads `.env.local`, project venv) |
 | `tmux_campaign.sh` | Run the conductor launcher in a durable detached tmux session |
 | `run_full_14b.sh` | Legacy full-14B launcher with **hardcoded** dev-node paths (`/root/Kore-rl/kore`) |
@@ -33,7 +33,7 @@ flowchart LR
   M -.-> SFT
 ```
 
-**Resume logic.** After each stage the manifest records `done_stages` and the real checkpoint path (atomic write). On restart a stage is skipped only if it is in `done_stages` **and** `_artifact_ok(stage)` finds its on-disk artifact — so a stale "done" flag with a missing checkpoint correctly re-runs. `--force --stages <s>` re-runs regardless. Datagen additionally resumes at shard level (see [`kore/data`](../kore/data/README.md)).
+**Resume logic.** After each stage the manifest records `done_stages` and the real checkpoint path (atomic write). On restart a stage is skipped only if it is in `done_stages` **and** `_artifact_ok(stage)` finds its on-disk artifact - so a stale "done" flag with a missing checkpoint correctly re-runs. `--force --stages <s>` re-runs regardless. Datagen additionally resumes at shard level (see [`kore/data`](../kore/data/README.md)).
 
 **Retention gates** run after midtrain/sft/dpo/grpo; a FAIL hard-stops the campaign (see [`kore/eval`](../kore/eval/README.md)).
 
@@ -75,7 +75,7 @@ bash scripts/tmux_campaign.sh --status     # status without attaching
 
 ## Ephemeral-node resume playbook
 
-Files persist under your account, and the campaign is manifest + shard resumable. If a reservation ends mid-run: re-reserve the node, then re-run `bash scripts/tmux_campaign.sh` — it continues from where it stopped.
+Files persist under your account, and the campaign is manifest + shard resumable. If a reservation ends mid-run: re-reserve the node, then re-run `bash scripts/tmux_campaign.sh` - it continues from where it stopped.
 
 ---
 

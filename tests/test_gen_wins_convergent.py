@@ -103,7 +103,7 @@ def test_every_feedback_speedup_is_consistent():
     turns = [_turn(80, "a"), _turn(64, "b"), _turn(40, "c")]
     built = build_convergent_trajectory(_body("seed"), 100.0, 999.0, turns,
                                         include_regression_lesson=False)
-    # 100/80=1.25, 100/64=1.5625, footer 100/40=2.5 — all internally consistent
+    # 100/80=1.25, 100/64=1.5625, footer 100/40=2.5 - all internally consistent
     _assert_consistent(built["messages"], 100.0)
     assert abs(built["speedup"] - 2.5) < 1e-9
 

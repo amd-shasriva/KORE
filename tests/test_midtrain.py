@@ -139,7 +139,7 @@ def test_chunk_text_respects_budget_and_hard_splits():
 
 
 # --------------------------------------------------------------------------- #
-# corpus builder — tmp source tree
+# corpus builder - tmp source tree
 # --------------------------------------------------------------------------- #
 def test_corpus_wellformed_and_deterministic(tmp_path):
     repo_root, task_root = _make_tmp_sources(tmp_path)
@@ -290,7 +290,7 @@ def test_general_replay_zero_when_frac_zero(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# corpus builder — REAL repo paths (guarded)
+# corpus builder - REAL repo paths (guarded)
 # --------------------------------------------------------------------------- #
 def test_corpus_from_real_repos_if_present(tmp_path):
     roots = discover_repo_roots()
@@ -310,7 +310,7 @@ def test_corpus_from_real_repos_if_present(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# campaign wiring — dry-run import-correctness
+# campaign wiring - dry-run import-correctness
 # --------------------------------------------------------------------------- #
 def _load_run_campaign():
     path = _REPO_ROOT / "scripts" / "run_campaign.py"

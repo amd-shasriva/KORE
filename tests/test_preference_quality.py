@@ -2,15 +2,15 @@
 
 Guards the three audit fixes in the Stage-2 preference pipeline:
 
-  (1) BASELINE ANCHORING — a speed preference is only a "good" (up-weighted) signal
+  (1) BASELINE ANCHORING - a speed preference is only a "good" (up-weighted) signal
       when ``chosen`` genuinely BEATS the production vendor baseline. A "win" that is
       faster than the rejected peer but STILL slower than production (e.g. a GEMM at
       0.598x hipBLASLt) is relabelled ``sub_baseline`` (never presented as good) or
-      dropped — it is not learned as "this is the kernel to emit".
-  (2) MARGIN PRESERVED — build_dpo carries a per-pair ``margin`` + ``weight`` +
+      dropped - it is not learned as "this is the kernel to emit".
+  (2) MARGIN PRESERVED - build_dpo carries a per-pair ``margin`` + ``weight`` +
       ``anchor`` (and mirrors them in ``_provenance``), and ``normalize`` must NOT
       strip them; near-tie speed pairs inside the measurement-noise band are dropped.
-  (3) SIGNAL CONCENTRATION — high-margin compute-bound (gemm/attention/moe/quant)
+  (3) SIGNAL CONCENTRATION - high-margin compute-bound (gemm/attention/moe/quant)
       pairs are up-weighted over low-headroom elementwise near-ties, and per-family
       low-margin near-ties are capped.
 

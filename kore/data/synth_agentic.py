@@ -1,5 +1,5 @@
 """Synthesize native agentic (Hermes tool-use) SFT trajectories from ALREADY-
-VERIFIED KORE records — CPU-only, GPU-free, grounded in real measurements.
+VERIFIED KORE records - CPU-only, GPU-free, grounded in real measurements.
 
 Why this exists
 ---------------
@@ -7,14 +7,14 @@ The agentic SFT slice teaches the multi-turn tool-use *skill*: call
 build/test/bench, read the ``role:"tool"`` result, reflect on a failure, and
 keep/revert. Generating it with the live :class:`~kore.agent.harness.AgentHarness`
 re-executes real GPU tools for every turn of every trajectory
-(``n_traj x turns x tasks``) — tens of GPU-hours.
+(``n_traj x turns x tasks``) - tens of GPU-hours.
 
 But the *results* the agent would read are exactly the measurements we ALREADY
 have on disk from datagen:
 
-  * ``repair`` — a broken kernel + the verifier error + the FIXED kernel's SNR.
-  * ``wins``   — a seed kernel + measured seed/final walltimes + speedup + SNR.
-  * ``groups`` — several ranked candidates, each with a measured walltime + SNR.
+  * ``repair`` - a broken kernel + the verifier error + the FIXED kernel's SNR.
+  * ``wins``   - a seed kernel + measured seed/final walltimes + speedup + SNR.
+  * ``groups`` - several ranked candidates, each with a measured walltime + SNR.
 
 This module reconstructs faithful Hermes tool-use trajectories from those
 verified records using the EXACT executor result schema
@@ -51,7 +51,7 @@ log = get_logger("data.synth_agentic")
 
 # Fallback ONLY when a source record carries no arch. Matches the registry's
 # TRAIN_ARCH so the synthesized slice stays consistent with the rest of the
-# corpus (kernel/repair/QA prompts) — the KORE target is gfx950/CDNA4 (MI350X).
+# corpus (kernel/repair/QA prompts) - the KORE target is gfx950/CDNA4 (MI350X).
 DEFAULT_ARCH = "gfx950"
 
 # --------------------------------------------------------------------------- #
@@ -72,7 +72,7 @@ def _last_fence(text: str) -> Optional[str]:
 
 
 def _largest_fence(text: str) -> Optional[str]:
-    """The biggest code block — robust way to grab the full kernel out of a
+    """The biggest code block - robust way to grab the full kernel out of a
     prompt that also contains a signature/reference snippet."""
     f = _fences(text)
     return max(f, key=len) if f else None
@@ -176,7 +176,7 @@ def _step(messages: list[dict], trace: list[dict], turn: int, name: str,
 # --------------------------------------------------------------------------- #
 def _root_cause(failure_class: str, err: str) -> str:
     if failure_class == "compile_fail":
-        return "the kernel did not compile — a build/type/indexing error, not a numeric one"
+        return "the kernel did not compile - a build/type/indexing error, not a numeric one"
     if failure_class == "snr_fail":
         return "the kernel compiled but the output is numerically wrong (low SNR vs reference)"
     return err[:160] or "the kernel failed the verifier"
@@ -218,7 +218,7 @@ def synth_from_repair(rec: dict, arch: Optional[str] = None) -> Optional[Agentic
     ]
     trace: list[dict] = []
 
-    # Turn 0 — reproduce the failure (real measured failure signal).
+    # Turn 0 - reproduce the failure (real measured failure signal).
     if fclass == "compile_fail":
         r0 = {"ok": False, "tool": "test", "compiled": False, "correct": False,
               "error": err or "compilation failed"}
@@ -228,7 +228,7 @@ def synth_from_repair(rec: dict, arch: Optional[str] = None) -> Optional[Agentic
     _step(messages, trace, 0, "test", {"kernel_src": broken}, r0,
           thinking="Reproduce the reported failure on the current kernel before changing anything.")
 
-    # Turn 1 — reflect on the real error, then verify the fixed kernel (real SNR).
+    # Turn 1 - reflect on the real error, then verify the fixed kernel (real SNR).
     reflection = {
         "root_cause": _root_cause(fclass, err),
         "evidence": (err or "verifier rejected the kernel")[:200],
@@ -240,10 +240,10 @@ def synth_from_repair(rec: dict, arch: Optional[str] = None) -> Optional[Agentic
           thinking=(real_think[:800] or "Apply the targeted fix and re-verify correctness."),
           reflection=reflection)
 
-    # Turn 2 — keep.
+    # Turn 2 - keep.
     _step(messages, trace, 2, "keep", {},
           {"ok": True, "tool": "keep", "kept": True, "improved": True, "correct": True},
-          thinking="Correctness restored on all shapes — commit this kernel.")
+          thinking="Correctness restored on all shapes - commit this kernel.")
 
     return AgenticTrajectoryRecord(
         task_id=str(rec.get("task_id", "repair")),
@@ -297,7 +297,7 @@ def synth_from_win(rec: dict, arch: Optional[str] = None) -> Optional[AgenticTra
 
     _step(messages, trace, 2, "keep", {},
           {"ok": True, "tool": "keep", "kept": True, "improved": True, "correct": True},
-          thinking="Faster and still correct — commit it.")
+          thinking="Faster and still correct - commit it.")
 
     return AgenticTrajectoryRecord(
         task_id=str(rec.get("task_id", "win")),
@@ -347,7 +347,7 @@ def synth_from_group(rec: dict, arch: Optional[str] = None,
 
     _step(messages, trace, len(seq), "keep", {},
           {"ok": True, "tool": "keep", "kept": True, "improved": True, "correct": True},
-          thinking="This candidate has the lowest walltime and is still correct — commit it.")
+          thinking="This candidate has the lowest walltime and is still correct - commit it.")
 
     return AgenticTrajectoryRecord(
         task_id=str(rec.get("task_id", "group")),
@@ -430,7 +430,7 @@ def synthesize_agentic(
     budgets = {k: max(0, int(round(cap * frac))) for k, frac in mix}
     built: dict[str, list[AgenticTrajectoryRecord]] = {k: [] for k in _SYNTH_FN}
     # Held-out generalization tasks (paged-KV decode, MLA) must NEVER be synthesized
-    # into agentic SFT trajectories — otherwise they leak into training and invalidate
+    # into agentic SFT trajectories - otherwise they leak into training and invalidate
     # the eval split (audit C2). The kernel repair/win/group slices are already
     # train-filtered; this closes the agentic bypass at the source.
     from kore.tasks.registry import HELDOUT_TASKS
@@ -451,7 +451,7 @@ def synthesize_agentic(
                 continue
             try:
                 out = fn(r, arch)
-            except Exception as e:  # noqa: BLE001 — one bad record must not abort
+            except Exception as e:  # noqa: BLE001 - one bad record must not abort
                 log.debug("synth_skip", kind=kind, err=str(e)[:120])
                 out = None
             if out is not None and _valid(out):

@@ -1,6 +1,6 @@
 """GENERATED vendor-baselined fused add-RMSNorm seed (bf16) vs aiter.fused_add_rms_norm_cu.
 added = x + residual (the new residual); y = RMSNorm(added) * weight. One program
-per row, fp32 accumulate, tl.bfloat16 store. Returns (y, added) — the candidate writes
+per row, fp32 accumulate, tl.bfloat16 store. Returns (y, added) - the candidate writes
 NEW tensors (the vendor baseline is in-place). Regenerate via generate_vendor_ops.py."""
 from __future__ import annotations
 import torch, triton, triton.language as tl

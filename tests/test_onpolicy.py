@@ -207,6 +207,25 @@ def test_iterative_dpo_aggregation_grows_the_set():
     assert all(rd.ref_model_id is None for rd in rounds)
 
 
+def test_iterative_dpo_folds_extra_curated_pairs_every_round():
+    """audit R2 dpo C2: the curated reward-hack hard-negative / repair pairs are
+    folded into EVERY round's training set alongside the on-policy group pairs, so
+    iterative DPO keeps the anti-hack correctness contrast (not speed pairs only)."""
+    extra = [
+        {"prompt": "p", "chosen": "correct kernel", "rejected": "import aiter\naiter.x()"},
+        {"prompt": "q", "chosen": "fixed kernel", "rejected": "broken kernel"},
+    ]
+    base = iterative_dpo(2, _fast_slow_policy_factory, FakeTask(),
+                         lambda t: FakeEnv(), n_parents=2, k=3, seed=0)
+    withx = iterative_dpo(2, _fast_slow_policy_factory, FakeTask(),
+                          lambda t: FakeEnv(), n_parents=2, k=3, seed=0,
+                          extra_pairs=extra)
+    # each round carries the on-policy pairs PLUS the curated extras
+    for rb, rx in zip(base, withx):
+        assert rx.n_pairs == rb.n_pairs + len(extra)
+        assert extra[0] in rx.dpo_pairs and extra[1] in rx.dpo_pairs
+
+
 def test_iterative_dpo_no_aggregation_uses_latest_round_only():
     rounds = iterative_dpo(3, _fast_slow_policy_factory, FakeTask(),
                            lambda t: FakeEnv(), n_parents=2, k=3, seed=0,

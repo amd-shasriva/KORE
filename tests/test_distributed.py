@@ -89,6 +89,34 @@ def test_dpo_truncation_defaults_keep_end():
     assert build_trl_dpo_kwargs(d)["truncation_mode"] == "keep_start"
 
 
+def test_dpo_loss_arity_guard_reconciles_type_and_weights():
+    """audit R2 dpo C1: loss_type and loss_weights can never reach TRL with a
+    len mismatch. A composite loss gets matching weights (synthesized if missing);
+    a scalar loss carries NO weights (a lingering multi-weight list is the crash)."""
+    from kore.policy.dpo import build_trl_dpo_kwargs
+
+    def kw(**over):
+        c = DPOConfig()
+        for a, v in over.items():
+            setattr(c, a, v)
+        return build_trl_dpo_kwargs(c)
+
+    # composite RPO loss + matching weights -> preserved
+    r = kw(loss_type=["sigmoid", "sft"], loss_weights=[1.0, 1.0])
+    assert r["loss_type"] == ["sigmoid", "sft"] and r["loss_weights"] == [1.0, 1.0]
+    # composite loss with MISSING weights -> synthesized equal weights (no crash)
+    r = kw(loss_type=["ipo", "sft"])
+    assert r["loss_type"] == ["ipo", "sft"] and r["loss_weights"] == [1.0, 1.0]
+    # composite loss with MISMATCHED weights -> reconciled to equal weights
+    assert kw(loss_type=["sigmoid", "sft"], loss_weights=[1.0])["loss_weights"] == [1.0, 1.0]
+    # scalar loss + lingering multi-weight list -> weights DROPPED (the arity crash)
+    r = kw(loss_type="ipo", loss_weights=[1.0, 1.0])
+    assert r["loss_type"] == "ipo" and "loss_weights" not in r
+    # scalar loss alone, and no-loss config -> no stray loss_weights
+    assert "loss_weights" not in kw(loss_type="sigmoid")
+    assert "loss_type" not in kw() and "loss_weights" not in kw()
+
+
 def test_build_assistant_masked_template_injects_and_is_safe():
     from kore.policy.sft import build_assistant_masked_template
 

@@ -86,9 +86,46 @@ def _obs_incorrect() -> Observation:
     )
 
 
+def _obs_high_variance() -> Observation:
+    # correct + would-be 10x, but the timing is NOISY (cv far above threshold): the
+    # integrity gate damps it to <=1x so it can't farm fast_p.
+    return Observation(
+        compiled=True, snr_db=90.0, wall_ms=0.1, baseline_ms=1.0,
+        wall_by_shape={"s": 0.1}, baseline_by_shape={"s": 1.0},
+        snr_by_shape={"s": 90.0}, validation_passed=True, cv_pct=99.0,
+    )
+
+
+def _obs_excessive() -> Observation:
+    # correct but an implausible ~1000x ratio (measurement artifact) -> capped.
+    return Observation(
+        compiled=True, snr_db=90.0, wall_ms=0.001, baseline_ms=1.0,
+        wall_by_shape={"s": 0.001}, baseline_by_shape={"s": 1.0},
+        snr_by_shape={"s": 90.0}, validation_passed=True,
+    )
+
+
 def _benign_policy(task, feedback):
     # No anti-hacking triggers (no torch.nn / aiter / try: / pass-inheritance).
     return "def matmul(a, b):\n    return real_kernel(a, b)\n"
+
+
+def test_bakeoff_fastp_gates_noisy_and_excessive_speedups():
+    """audit R2 soup-eval C2: fast_p must run on the timing-INTEGRITY-gated speedup,
+    not the raw ratio -- a noisy (high-cv) bench is damped to <=1x and an excessive
+    measurement artifact is capped, so neither can farm the headline metric."""
+    from kore.config import CONFIG
+    cap = float(CONFIG.excessive_speedup_flag)
+
+    hv = bakeoff.evaluate_policy(_benign_policy, ["t1"], budget=1,
+                                 dry_run={"t1": [_obs_high_variance()]})
+    assert hv["num_correct"] == 1          # still counts as CORRECT
+    assert hv["fast_p"][1.0] == 0.0        # but damped -> cannot farm fast_p with noise
+
+    ex = bakeoff.evaluate_policy(_benign_policy, ["t1"], budget=1,
+                                 dry_run={"t1": [_obs_excessive()]})
+    assert ex["per_task"][0]["best_speedup"] == cap   # capped, NOT the raw ~1000x
+    assert ex["fast_p"][1.0] == 1.0                    # a capped 10x still beats 1x honestly
 
 
 def test_bakeoff_dry_run_per_policy_fastp():

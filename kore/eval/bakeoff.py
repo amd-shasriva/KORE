@@ -111,6 +111,24 @@ def _make_measure_fn(
     return measure
 
 
+def _integrity_gated_speedup(rr, cfg: KoreConfig) -> Optional[float]:
+    """The timing-INTEGRITY-gated speedup for ranking + fast_p, mirroring the reward's
+    ``su_scored`` (reward.py): an ``excessive_speedup`` measurement artifact is capped
+    at ``cfg.excessive_speedup_flag`` and a ``high_variance`` (noisy) timing is damped
+    to <=1x. Returns ``None`` when there is no measured speedup. Correctness is
+    unaffected -- a damped kernel still counts as correct, it just cannot farm fast_p
+    with a glitch/noise (audit R2 soup-eval C2)."""
+    su = getattr(rr, "speedup", None)
+    if su is None:
+        return None
+    flags = getattr(rr, "flags", ()) or ()
+    if "excessive_speedup" in flags:
+        su = min(su, float(cfg.excessive_speedup_flag))
+    if "high_variance" in flags:
+        su = min(su, 1.0)
+    return su
+
+
 def _run_task(
     policy_fn: PolicyFn,
     task,
@@ -145,16 +163,23 @@ def _run_task(
         obs = measure(task, kernel_source, turn)
         rr = compute_reward(obs, kernel_source, dtype=dtype, mode="eval", cfg=cfg)
         benches_used += 1
+        # Gate the speedup that feeds fast_p on timing INTEGRITY, exactly like the
+        # reward's su_scored: an excessive-ratio measurement artifact is capped and a
+        # high-variance (noisy) timing is damped to <=1x. rr.speedup itself is the RAW
+        # worst-shape ratio, so ranking/fast_p on it would let a timing glitch or a
+        # noisy bench farm the headline metric (audit R2 soup-eval C2).
+        su_gated = _integrity_gated_speedup(rr, cfg)
         trajectory.append({
             "turn": turn,
             "correct": rr.correct,
             "speedup": rr.speedup,
+            "speedup_gated": su_gated,
             "reward": rr.reward,
             "flags": list(rr.flags),
         })
-        if rr.correct and rr.speedup is not None:
-            if best_speedup is None or rr.speedup > best_speedup:
-                best_speedup = rr.speedup
+        if rr.correct and su_gated is not None:
+            if best_speedup is None or su_gated > best_speedup:
+                best_speedup = su_gated
                 best_reward = rr.reward
                 best_obs = obs
                 benches_to_best = benches_used

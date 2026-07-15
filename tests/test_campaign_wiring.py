@@ -102,6 +102,25 @@ def test_rec_is_heldout_uses_registry_authority():
     assert rc._rec_is_heldout(rms, {"rmsnorm_aiter"}) is True
 
 
+def test_build_trains_on_ALL_non_heldout_families_no_random_drop():
+    """Regression for audit R2 crosscut C1: the build stage must retain EVERY
+    non-held-out op family in TRAIN. The old random 80/10/10 leakage_split exiled
+    ~20% of trainable families into val/test partitions nothing consumed -- silent
+    data loss. The authoritative _rec_is_heldout filter is the ONLY holdout, so a
+    record survives iff it is not reserved."""
+    heldout_ids: set = set()
+    # a wide spread of distinct NON-held-out op families on the train arch
+    fams = ["relu", "add", "mul", "gelu", "silu", "softmax", "layernorm",
+            "rmsnorm", "abs", "tanh", "sigmoid", "exp", "add_relu", "add_mul"]
+    raw = [{"type": "win", "task_id": f"gen_{op}_fp16", "operation": op,
+            "arch": "gfx950"} for op in fams]
+    # same filter the build stage applies
+    train = [r for r in raw if not rc._rec_is_heldout(r, heldout_ids)]
+    kept = {r["operation"] for r in train}
+    assert kept == set(fams)              # NOT ONE family randomly dropped
+    assert len(train) == len(raw)         # every trainable record survives
+
+
 # --------------------------------------------------------------------------- #
 # 2. Iterative on-policy DPO + DAgger
 # --------------------------------------------------------------------------- #

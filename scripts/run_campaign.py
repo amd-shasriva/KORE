@@ -1027,14 +1027,14 @@ def _stage_build(ctx):
         return
     from kore.data.assemble import (build_dpo_with_hard_negatives, build_multicap_dataset,
                                     summarize_multicap)
-    from kore.data.build_datasets import dedup_by_source_hash, leakage_split
+    from kore.data.build_datasets import dedup_by_source_hash
     from kore.data.schemas import read_jsonl
     from kore.data.teacher import make_teacher
 
     # 0. Gold-win mining (CPU, no GPU): reconstruct optimization-win demos from the
     #    verified rank-0 candidates in `groups` and write them alongside the real
-    #    wins, so the raw gather below folds them through the SAME leakage-split +
-    #    RFT speedup gate. Rebalances the thin wins family against repair.
+    #    wins, so the raw gather below folds them through the SAME held-out
+    #    enforcement + RFT speedup gate. Rebalances the thin wins family vs repair.
     if getattr(ctx["args"], "gold_wins", True):
         from kore.data.gold_wins import mint_gold_wins
         from kore.tasks.registry import TRAIN_ARCH
@@ -1068,20 +1068,24 @@ def _stage_build(ctx):
     raw = dedup_by_source_hash(raw)
     _log("build", f"gathered {len(raw)} deduped raw records")
 
-    # 2. leakage-aware split by (operation, arch), then enforce the AUTHORITATIVE
-    #    registry held-out split at the record level (item 1). ``ctx['eval_task_ids']``
-    #    is fixed by registry.split_tasks (see _apply_split) — the held-out family +
-    #    arch-specific tasks — so any record whose family/arch/id is reserved is
-    #    moved out of TRAIN, guaranteeing training never sees the eval distribution.
-    train, val, test = leakage_split(raw, by=("operation", "arch"))
+    # 2. Enforce the AUTHORITATIVE registry held-out split at the record level
+    #    (item 1). ``ctx['eval_task_ids']`` is fixed by registry.split_tasks (see
+    #    _apply_split) -- the reserved held-out family + arch-specific tasks -- so any
+    #    record whose family/arch/id is reserved is DROPPED from TRAIN, guaranteeing
+    #    training never sees the eval distribution.
+    #    We deliberately do NOT do a random 80/10/10 op-family leakage_split here:
+    #    this is a per-op SPECIALIST model, so every NON-held-out op family must be
+    #    trained on. The old leakage_split exiled a random ~20% of trainable families
+    #    into val/test partitions that nothing downstream consumed -- silently
+    #    dropping whole operations from SFT/DPO for zero benefit (audit R2 crosscut C1).
+    #    The authoritative _rec_is_heldout filter below is the single, correct holdout.
     heldout_ids = set(ctx.get("eval_task_ids") or [])
-    leaked = [r for r in train if _rec_is_heldout(r, heldout_ids)]
-    train = [r for r in train if not _rec_is_heldout(r, heldout_ids)]
-    test = test + leaked
-    leaked_ids = sorted({_rec_dict(r).get("task_id") for r in test if _rec_dict(r).get("task_id")})
-    _log("build", f"leakage split: train={len(train)} val={len(val)} test={len(test)}; "
+    held = [r for r in raw if _rec_is_heldout(r, heldout_ids)]
+    train = [r for r in raw if not _rec_is_heldout(r, heldout_ids)]
+    held_task_ids = sorted({_rec_dict(r).get("task_id") for r in held if _rec_dict(r).get("task_id")})
+    _log("build", f"held-out enforcement: train={len(train)} held-out-removed={len(held)}; "
                   f"registry held-out(eval) tasks={sorted(heldout_ids)} "
-                  f"(records with reserved family/arch moved out: {leaked_ids})")
+                  f"(records with reserved family/arch removed from train: {held_task_ids})")
 
     # 3. build SFT/DPO from the TRAIN partition only, over the TRAIN-split tasks.
     try:

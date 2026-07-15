@@ -79,6 +79,27 @@ def test_manifest_threads_train_and_eval_ids(tmp_path):
     assert ctx2["eval_task_ids"] == ["flash_attn_decode_bf16"]
 
 
+def test_apply_split_overrides_a_stale_manifest_split():
+    """audit R2: on a --force clean re-run the authoritative split must be recomputed
+    from the LIVE registry, not reused from a stale manifest. _apply_split replaces any
+    pre-seeded (stale) eval/train ids with the correct held-out probes (MLA/paged)."""
+    ctx = {
+        "tasks": [get_task("rmsnorm_aiter"), get_task("gemm_bf16"),
+                  get_task("mla_decode_bf16"), get_task("paged_attn_decode_bf16")],
+        "args": _args(["--tasks", "x"]),
+        # STALE split as if loaded from a prior run's manifest (pre-MLA/paged fix)
+        "eval_task_ids": ["flash_attn_decode_bf16", "flash_attn_prefill_bf16"],
+        "train_task_ids": ["mla_decode_bf16"],  # stale: MLA wrongly in train
+    }
+    rc._apply_split(ctx)
+    ev = set(ctx["eval_task_ids"])
+    tr = set(ctx["train_task_ids"])
+    assert {"mla_decode_bf16", "paged_attn_decode_bf16"} <= ev   # correct probes held out
+    assert "flash_attn_decode_bf16" not in ev                    # stale entry gone
+    assert "mla_decode_bf16" not in tr and "paged_attn_decode_bf16" not in tr  # not trained
+    assert {"rmsnorm_aiter", "gemm_bf16"} <= tr
+
+
 def test_rec_is_heldout_uses_registry_authority():
     # Core attention (flash decode) now TRAINS (product capability); the structurally
     # distinct paged-KV decode is the held-out generalization probe (registry HELDOUT_TASKS).

@@ -53,6 +53,34 @@ def test_incorrect_delegated_matches_base():
     assert abs(rr.reward - base.reward) < 1e-12
 
 
+# --------- correctness->latency curriculum mask (serial + agentic) ---------- #
+def test_reward_phase_mask_applies_on_the_agentic_dispatch():
+    """compute_kernel_reward applies the correctness->latency curriculum mask inline,
+    so the AGENTIC tool path honors the same phase curriculum as the serial GRPO
+    path -- previously the mask was serial-only and the agentic reward always kept
+    the speed term (audit R2 grpo C1/C2)."""
+    from kore.reward.physics import compute_kernel_reward, mask_reward_phase
+
+    class _T:
+        dtype = "bf16"; task_id = "t"; operation = "relu"; gpu_target = "gfx950"
+
+    src = "def relu(x): return x"
+    obs = Observation(compiled=True, validation_passed=True, snr_by_shape={"s": 40.0},
+                      wall_by_shape={"s": 0.1}, baseline_by_shape={"s": 1.0}, dtype="bf16")
+    full = compute_kernel_reward(obs, src, _T(), dtype="bf16")               # phase=all
+    assert full.correct and full.speedup and full.speedup > 1.0             # speed present
+    masked = compute_kernel_reward(obs, src, _T(), dtype="bf16", reward_phase="correctness")
+    assert masked.correct and masked.tier == "correct_masked"
+    assert masked.reward == CONFIG.correctness_weight and masked.speedup is None
+    # latency / all phases keep the full reward (speed term restored)
+    lat = compute_kernel_reward(obs, src, _T(), dtype="bf16", reward_phase="latency")
+    assert lat.reward == full.reward and lat.speedup == full.speedup
+    # the shared helper leaves incorrect tiers untouched (correctness IS the signal)
+    bad = compute_reward(Observation(compiled=True, snr_db=1.0, wall_ms=1.0,
+                                     validation_passed=False, dtype="bf16"), "x=1", dtype="bf16")
+    assert mask_reward_phase(bad, "correctness", 0.3) is bad
+
+
 # --------------------- physics credit on the correct tier ------------------- #
 def test_monotonic_in_named_residual_removed():
     obs = _correct_obs(wall_ms=1.0)

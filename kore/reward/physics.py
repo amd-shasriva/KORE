@@ -228,10 +228,27 @@ def physics_signal_from_obs(task, obs, arch: Optional[str] = None) -> Optional[P
     return PhysicsSignal(t_min_ms=worst[1], measured_ms=worst[2])
 
 
+def mask_reward_phase(rr: RewardResult, phase: str,
+                      correctness_weight: float) -> RewardResult:
+    """Correctness->latency curriculum mask (item 8), shared by the serial
+    (``grpo.apply_reward_phase``) and agentic (``compute_kernel_reward``) paths so the
+    curriculum is IDENTICAL on both. In the ``"correctness"`` phase a correct kernel is
+    credited exactly the correctness base (speed term removed) so phase-1 trains
+    correctness only; ``"latency"``/``"all"`` keep the full reward. Incorrect / compile-
+    fail / hack tiers are untouched (their signal is already correctness)."""
+    from dataclasses import replace
+
+    if str(phase).lower() == "correctness" and getattr(rr, "correct", False):
+        return replace(rr, reward=float(correctness_weight), speedup=None,
+                       tier="correct_masked")
+    return rr
+
+
 def compute_kernel_reward(obs: Observation, source: str, task, *, mode: str = "speedup",
                           dtype: str = "fp32", cfg=CONFIG, snr_threshold: Optional[float] = None,
                           physics_weight: float = DEFAULT_PHYSICS_WEIGHT,
-                          response: Optional[str] = None) -> RewardResult:
+                          response: Optional[str] = None,
+                          reward_phase: str = "all") -> RewardResult:
     """Single dispatch point for the kernel reward used by the live training loop.
 
     ``mode="residual"`` scores with the physics residual-descent reward (roofline
@@ -240,12 +257,20 @@ def compute_kernel_reward(obs: Observation, source: str, task, *, mode: str = "s
     (default) is the vendor-relative reward. BOTH share identical anti-hack /
     compile / correctness gating (``compute_residual_reward`` delegates to
     ``compute_reward``), so the tier ordering is byte-identical either way.
+
+    ``reward_phase`` applies the correctness->latency curriculum mask (item 8) INSIDE
+    the dispatch, so the AGENTIC tool path (which routes every candidate through here)
+    honors the same phase curriculum as the serial GRPO path -- previously the mask
+    was serial-only and the agentic reward always included the speed term, making the
+    correctness phase a no-op agentically (audit R2 grpo C1/C2).
     """
     if mode == "residual":
         sig = physics_signal_from_obs(task, obs)
         if sig is not None:
-            return compute_residual_reward(
+            rr = compute_residual_reward(
                 obs, sig, source=source, dtype=dtype, cfg=cfg,
                 physics_weight=physics_weight, snr_threshold=snr_threshold, response=response)
-    return compute_reward(obs, source, dtype=dtype, cfg=cfg,
-                          snr_threshold=snr_threshold, response=response)
+            return mask_reward_phase(rr, reward_phase, cfg.correctness_weight)
+    rr = compute_reward(obs, source, dtype=dtype, cfg=cfg,
+                        snr_threshold=snr_threshold, response=response)
+    return mask_reward_phase(rr, reward_phase, cfg.correctness_weight)

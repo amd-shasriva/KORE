@@ -146,6 +146,9 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
         gradient_checkpointing_kwargs={"use_reentrant": True},
         dataset_text_field="text",
         packing=bool(config.packing),
+        dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
+        dataloader_pin_memory=getattr(config, "dataloader_pin_memory", True),
+        dataset_num_proc=getattr(config, "dataset_num_proc", 32),
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         save_total_limit=config.save_total_limit,  # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill

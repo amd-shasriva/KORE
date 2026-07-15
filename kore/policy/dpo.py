@@ -68,16 +68,16 @@ def build_trl_dpo_kwargs(config) -> dict:
     testable on CPU. Two knobs counter deterministic-preference overfitting on
     hard negatives (a real risk once preferences come from on-policy relabeling):
 
-      * ``loss_type`` — the trl DPO loss variant. ``"ipo"`` uses the IPO
+      * ``loss_type`` - the trl DPO loss variant. ``"ipo"`` uses the IPO
         (bounded, MSE-style) objective which does not push the implicit reward gap
         to infinity on easy/near-deterministic pairs. Others: ``"sigmoid"``
         (vanilla DPO, default), ``"hinge"``, etc.
-      * ``label_smoothing`` — conservative-DPO (cDPO): treats preference labels as
+      * ``label_smoothing`` - conservative-DPO (cDPO): treats preference labels as
         soft (``1 - eps`` / ``eps``), so a noisy/mislabeled hard negative can't
         dominate the gradient.
 
     Both are read via ``getattr`` so a plain ``DPOConfig`` (which has neither
-    field) still works — set them as attributes (per round, alongside a refreshed
+    field) still works - set them as attributes (per round, alongside a refreshed
     ``ref_model_id``) for iterative DPO. FSDP kwargs are merged for the
     distributed full-FT path; activation checkpointing uses HF's layer-internal
     REENTRANT path (robust to the intermittent flash_attention_2 -> SDPA per-worker
@@ -144,14 +144,14 @@ def build_trl_dpo_kwargs(config) -> dict:
     label_smoothing = getattr(config, "label_smoothing", None)
     if label_smoothing:
         kwargs["label_smoothing"] = float(label_smoothing)
-    # LD-DPO length desensitization (down-weight the verbose tail) — optional guard
+    # LD-DPO length desensitization (down-weight the verbose tail) - optional guard
     # against length-driven degeneration on long code.
     ld_alpha = getattr(config, "ld_alpha", None)
     if ld_alpha is not None:
         kwargs["ld_alpha"] = float(ld_alpha)
     # Truncation guard: with max_prompt_length gone in trl>=0.29, if a pair ever
     # exceeds max_length the TRL default "keep_start" slices input_ids[:, :max_length]
-    # — cutting the COMPLETION's tail (trains the model to stop mid-kernel; verified
+    # - cutting the COMPLETION's tail (trains the model to stop mid-kernel; verified
     # against trl 0.29.1 DPOTrainer._truncate_inputs). We DEFAULT to "keep_end", which
     # keeps input_ids[:, -max_length:] (the kernel body + <|im_end|> stop) and drops
     # the prompt head instead. A config may still override it explicitly.
@@ -244,7 +244,7 @@ def train(config: DPOConfig) -> dict:
     # Distributed full-FT (FSDP) vs the legacy single-process / LoRA path. FSDP is
     # only for full-FT (use_lora=False) launched distributed; LoRA and single
     # process keep the current path. DPO never set device_map, so nothing to strip
-    # there — under FSDP the model is loaded plain and the Trainer wraps it.
+    # there - under FSDP the model is loaded plain and the Trainer wraps it.
     fsdp_kwargs = build_fsdp_kwargs(config)
 
     tokenizer = AutoTokenizer.from_pretrained(config.model_id)
@@ -289,7 +289,7 @@ def train(config: DPOConfig) -> dict:
     model.config.use_cache = False
 
     # Reference model. For full-FT we ALWAYS load an EXPLICIT reference (the frozen
-    # ``ref_model_id`` for iterative DPO, else ``model_id`` — the SFT/prev-round
+    # ``ref_model_id`` for iterative DPO, else ``model_id`` - the SFT/prev-round
     # checkpoint). trl then FSDP-shards + freezes it via ``accelerator.prepare_model``.
     # We must NOT leave ref_model=None under full-FT: trl would then deep-copy the
     # policy into an UNSHARDED reference (a second full 14B on ONE GPU) -> ROCm
@@ -306,7 +306,7 @@ def train(config: DPOConfig) -> dict:
 
     # Drop any kwargs the INSTALLED trl DPOConfig doesn't accept: TRL renames/removes
     # fields across versions (e.g. it dropped `max_prompt_length` in 0.29, which is why
-    # KORE no longer emits it — `max_length` caps prompt+completion and
+    # KORE no longer emits it - `max_length` caps prompt+completion and
     # truncation_mode="keep_end" preserves the tail). This guard keeps a future trl
     # bump from hard-failing the whole DPO stage on one unknown kwarg.
     import inspect
@@ -325,11 +325,11 @@ def train(config: DPOConfig) -> dict:
     class _ObsCallback(TrainerCallback):
         def on_log(self, args, state, control, logs=None, **kwargs):
             logs = logs or {}
-            if "loss" not in logs:  # skip eval/summary logs — train-step only
+            if "loss" not in logs:  # skip eval/summary logs - train-step only
                 return
             # logps/chosen + rewards/chosen are the LIKELIHOOD-DISPLACEMENT alarms:
             # if logps_chosen trends DOWN or rewards_chosen goes/stays NEGATIVE while
-            # rewards_margin grows, the policy is degenerating (v1's failure) — stop
+            # rewards_margin grows, the policy is degenerating (v1's failure) - stop
             # and raise beta / lower LR / increase the sft weight.
             log.event("dpo_step", step=int(state.global_step), loss=logs.get("loss"),
                       lr=logs.get("learning_rate"),
@@ -399,7 +399,7 @@ def dpo_config_from_dict(d: dict) -> DPOConfig:
 
     ``loss_type`` / ``label_smoothing`` (IPO / cDPO knobs, not fields on the base
     dataclass) are accepted here and attached as attributes so the JSON config
-    path — and per-round iterative DPO — can select them without a schema change.
+    path - and per-round iterative DPO - can select them without a schema change.
     """
     d = dict(d)
     lora = d.pop("lora", None)

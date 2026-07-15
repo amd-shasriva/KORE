@@ -1,11 +1,11 @@
-# `kore/reward` — the reward ladder and physics reward
+# `kore/reward` - the reward ladder and physics reward
 
 Two reward functions share one anti-hack skeleton:
 
-1. **Lexicographic speedup reward** (`reward.py`) — the default. A strictly ordered ladder where correctness always dominates speed, with worst-shape vendor speedup and optional PMC dense shaping.
-2. **Physics residual-descent reward** (`physics.py`) — the KORE paradigm. On the correct tier it replaces relative speedup with *absolute roofline attainment*, so the policy is rewarded for approaching the hardware's physical limit rather than beating an arbitrary baseline.
+1. **Lexicographic speedup reward** (`reward.py`) - the default. A strictly ordered ladder where correctness always dominates speed, with worst-shape vendor speedup and optional PMC dense shaping.
+2. **Physics residual-descent reward** (`physics.py`) - the KORE paradigm. On the correct tier it replaces relative speedup with *absolute roofline attainment*, so the policy is rewarded for approaching the hardware's physical limit rather than beating an arbitrary baseline.
 
-Both are byte-for-byte identical below the correct tier — only the continuous term granted to a *correct* kernel differs.
+Both are byte-for-byte identical below the correct tier - only the continuous term granted to a *correct* kernel differs.
 
 ---
 
@@ -93,7 +93,7 @@ def compute_kernel_reward(obs, source, task, *, mode="speedup"|"residual",
                           physics_weight=1.0, ...) -> RewardResult
 ```
 
-> **What the live GRPO run actually optimizes.** In training, `physics_signal_from_obs` supplies only `(t_min_ms, measured_ms)` — so the reward uses the **η fallback** (absolute distance to the roofline), which is dense and physics-grounded but does *not* require per-rollout PMC. The full `ρ_phys` stall/occupancy decomposition is validated offline (P0, R²≈0.98) and is available per-rollout only when `KORE_PROFILE_REWARD_WEIGHT > 0` (rocprofv3 is too slow to run on every candidate). This is a deliberate speed/fidelity trade, documented in [`docs/P0_RESULTS.md`](../../docs/P0_RESULTS.md).
+> **What the live GRPO run actually optimizes.** In training, `physics_signal_from_obs` supplies only `(t_min_ms, measured_ms)` - so the reward uses the **η fallback** (absolute distance to the roofline), which is dense and physics-grounded but does *not* require per-rollout PMC. The full `ρ_phys` stall/occupancy decomposition is validated offline (P0, R²≈0.98) and is available per-rollout only when `KORE_PROFILE_REWARD_WEIGHT > 0` (rocprofv3 is too slow to run on every candidate). This is a deliberate speed/fidelity trade, documented in [`docs/P0_RESULTS.md`](../../docs/P0_RESULTS.md).
 
 ---
 

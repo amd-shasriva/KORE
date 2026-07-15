@@ -5,20 +5,20 @@ a speedup that evaporates once the loopholes are excluded (the well-known
 3.13x -> 1.49x collapse). KORE already defends every hack class in-loop
 (:mod:`kore.reward.timing_integrity`), but a publishable claim needs a single,
 consolidated, maximum-scrutiny RE-EVALUATION of the CHAMPION kernels at the end of
-a run — the "robust-kbench" bar.
+a run - the "robust-kbench" bar.
 
 This gate re-benchmarks each champion (the best kernel discovered per task) under
 strictly harder conditions than training and only certifies the ones that survive:
 
-  * HELD-OUT shapes — scaled + non-power-of-two "odd" variants the kernel was never
+  * HELD-OUT shapes - scaled + non-power-of-two "odd" variants the kernel was never
     benchmarked on (catches shape-overfit / tile-memorization).
-  * VERIFIED correctness — the enumerated adversarial gate + determinism re-check
+  * VERIFIED correctness - the enumerated adversarial gate + determinism re-check
     (KORE_VERIFIED_CORRECTNESS=1) + more reseeded trials.
-  * HONEST baseline — the compiler-fused bar (KORE_COMPILE_BASELINE=1) so a
+  * HONEST baseline - the compiler-fused bar (KORE_COMPILE_BASELINE=1) so a
     "speedup" over unfused eager can't survive.
   * COLD cache + post-timing correctness re-verification (already in the driver).
   * NO replay cache (every re-eval is fresh) and the static hack scan.
-  * COLLAPSE detection — if the re-measured speedup falls below ``collapse_ratio``
+  * COLLAPSE detection - if the re-measured speedup falls below ``collapse_ratio``
     of the training-claimed speedup, the champion is flagged as collapsed (hacked
     or overfit) and NOT certified.
 
@@ -150,7 +150,7 @@ def _scrutiny_config():
     cfg = copy.copy(CONFIG)
     try:
         cfg.verifier_determinism_check = True
-    except Exception:  # noqa: BLE001 — frozen config: env-var defenses still apply
+    except Exception:  # noqa: BLE001 - frozen config: env-var defenses still apply
         pass
     return cfg
 
@@ -246,7 +246,7 @@ def run_champion_reeval(champions: list[Champion], *, max_shapes: int = 8,
         try:
             v = reeval_champion(champ, max_shapes=max_shapes, min_speedup=min_speedup,
                                collapse_ratio=collapse_ratio, config=config)
-        except Exception as e:  # noqa: BLE001 — one bad champion can't abort the gate
+        except Exception as e:  # noqa: BLE001 - one bad champion can't abort the gate
             v = champion_verdict(champ.task_id, champ.claimed_speedup, None,
                                  correct=False, hack_free=True, high_variance=False)
             v.reason = f"re-eval error: {type(e).__name__}: {e}"

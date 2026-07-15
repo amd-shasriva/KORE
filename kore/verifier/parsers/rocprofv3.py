@@ -54,7 +54,7 @@ class KernelPMC:
 
     @property
     def total_vgpr(self) -> Optional[int]:
-        """Total VGPRs/lane (architected + MFMA accumulator) — the occupancy input.
+        """Total VGPRs/lane (architected + MFMA accumulator) - the occupancy input.
 
         On CDNA3 the register file is shared by regular and accumulator VGPRs, so
         occupancy is driven by their sum. None if neither was reported.
@@ -65,7 +65,7 @@ class KernelPMC:
 
     @property
     def num_warps(self) -> Optional[int]:
-        """Wavefronts per workgroup (``ceil(workgroup_size / 64)``) — the occupancy
+        """Wavefronts per workgroup (``ceil(workgroup_size / 64)``) - the occupancy
         input. None if the workgroup size was not reported. CDNA is wave64."""
         if not self.workgroup_size or self.workgroup_size <= 0:
             return None

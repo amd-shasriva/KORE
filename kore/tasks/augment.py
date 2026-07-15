@@ -1,6 +1,6 @@
 """Shape augmentation: multiply per-operator coverage for stronger generalization.
 
-Data scale in kernel-RL is not just #operators — it is also the diversity of
+Data scale in kernel-RL is not just #operators - it is also the diversity of
 SHAPES per operator. A policy tuned on one shape memorizes a tile config; a policy
 graded on small/medium/large + non-aligned shapes must learn shape-robust code
 (this is exactly how KernelBench / TritonBench stress generalization).

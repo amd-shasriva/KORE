@@ -34,7 +34,7 @@ from kore.reward.reward import Observation
 
 
 # --------------------------------------------------------------------------- #
-# operator registry (mutate) — the bandit's action set
+# operator registry (mutate) - the bandit's action set
 # --------------------------------------------------------------------------- #
 _KERNEL = """
 import triton

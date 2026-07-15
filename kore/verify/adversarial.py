@@ -1,11 +1,11 @@
 """Adversarial / structured input battery for the equivalence oracle.
 
-Random ``randn`` sampling — what the shipped SNR gate uses — under-samples exactly
+Random ``randn`` sampling - what the shipped SNR gate uses - under-samples exactly
 the regimes where numerical kernels break: exact zeros, sign boundaries, overflow
 knots, denormals, all-equal rows, sparse spikes. A *lucky-pass* kernel is one that is
 wrong only on such a thin slice and never gets caught by random draws. This module
 enumerates those regimes DETERMINISTICALLY, so a kernel that is wrong on any of them
-is rejected with certainty (not luck) — the provable half of the oracle for the
+is rejected with certainty (not luck) - the provable half of the oracle for the
 checkable op class.
 
 Pure numpy generation with a lazy torch cast (so importing this module never needs a
@@ -27,7 +27,7 @@ def dtype_extremes(dtype: str) -> tuple[float, float, float]:
     """Return ``(big, small, tiny)`` magnitudes safe for ``dtype``.
 
     ``big`` is a large finite value chosen so that even an amplifying op (``x*x``, a
-    128-wide row sum) stays finite in ``dtype`` — so it stresses magnitude without
+    128-wide row sum) stays finite in ``dtype`` - so it stresses magnitude without
     *gratuitously* overflowing benign kernels. ``small`` is a small-but-normal value
     and ``tiny`` a denormal-ish subnormal magnitude. (The dedicated ``inf_adjacent``
     regime, at the dtype's max finite value, is where overflow/saturation is probed.)

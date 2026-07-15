@@ -1,4 +1,4 @@
-"""Pillar 1 — data-time verification rigor toggling."""
+"""Pillar 1 - data-time verification rigor toggling."""
 
 from __future__ import annotations
 

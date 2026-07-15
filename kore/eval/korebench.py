@@ -3,7 +3,7 @@ hardened kernel-generation benchmark report.
 
 Assembles the pieces KORE already has into ONE reproducible artifact:
   * matched-budget evaluation (kore.eval.bakeoff) of a policy over the task suite,
-  * the headline DISTRIBUTIONALLY-ROBUST metric — WORST-SHAPE win-rate vs the
+  * the headline DISTRIBUTIONALLY-ROBUST metric - WORST-SHAPE win-rate vs the
     PRODUCTION vendor baseline (AITER/hipBLASLt / framework path), i.e. the
     fraction of operators whose *hardest* shape still beats the vendor library,
   * fast_p curve + geometric-mean speedup vs that baseline,

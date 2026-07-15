@@ -1,7 +1,7 @@
 """GENERATED seed Triton kernel for the sub (bf16) binary op.
 
 Elementwise sub(a, b), 2D-tiled, fp32 math, tl.bfloat16 store. Regenerate via
-kore/tasks/generate_ops.py — do not hand-edit.
+kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 

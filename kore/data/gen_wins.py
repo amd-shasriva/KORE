@@ -7,7 +7,7 @@ keep it as the new best only if it is correct AND meaningfully faster
 if the loop achieved any net speedup over the initial kernel.
 
 CRITICAL (audited): the *stored* trajectory is NOT the raw search log. Raw greedy
-search oscillates — the wall bounces, most turns are dead-ends/regressions, and a
+search oscillates - the wall bounces, most turns are dead-ends/regressions, and a
 naive dump stores non-convergent noise as a "win", with footer metrics that don't
 even multiply out and analyses that describe changes the emitted code never made.
 :func:`build_convergent_trajectory` reconstructs a CLEAN win from the recorded
@@ -20,7 +20,7 @@ turns:
      the footer (initial / final / speedup) so they are internally consistent and
      multiply out exactly;
   4. optionally fold one real regression into an explicit 2-turn "tried X,
-     measured slower, reverted" lesson — genuine negative signal, not noise.
+     measured slower, reverted" lesson - genuine negative signal, not noise.
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ def _fmt_correct_feedback(wall_us: Optional[float], speedup: Optional[float],
 
 def _feedback(obs, rr) -> str:
     # error_text is Optional[str]: it is None for a compiled-but-incorrect kernel
-    # (an SNR failure carries no error string), so guard before slicing — otherwise
+    # (an SNR failure carries no error string), so guard before slicing - otherwise
     # a correctness miss (common on the tighter fp16 SNR thresholds) crashes the
     # whole wins shard with 'NoneType' is not subscriptable.
     err = obs.error_text or ""
@@ -90,7 +90,7 @@ def _feedback(obs, rr) -> str:
         )
     wall_us = obs.wall_ms * 1000.0 if obs.wall_ms is not None else None
     # wall_ms/speedup can be None when timing is unmeasurable on this stack
-    # (e.g. fp8 on ROCm) — format defensively so the wins shard isn't lost.
+    # (e.g. fp8 on ROCm) - format defensively so the wins shard isn't lost.
     return _fmt_correct_feedback(wall_us, rr.speedup)
 
 
@@ -218,7 +218,7 @@ def _lesson_messages(pivot_src: str, pivot_wall: Optional[float],
         parent_source=pivot_src,
         feedback=_fmt_correct_feedback(
             pivot_wall, pivot_sp,
-            "Incremental tuning has plateaued — try a structural change."),
+            "Incremental tuning has plateaued - try a structural change."),
         mode="explore",
     )
     # 2. assistant emits the (real) regression candidate. Keep the teacher's own
@@ -234,7 +234,7 @@ def _lesson_messages(pivot_src: str, pivot_wall: Optional[float],
     # 3. feedback: it measured slower -> revert.
     r_sp = _self_speedup(initial_wall, r_wall)
     u2 = (f"Correct? YES. wall={_us(r_wall)} speedup={_x(r_sp)}. That is SLOWER than "
-          f"the previous {_us(pivot_wall)} — the structural change regressed. Revert to "
+          f"the previous {_us(pivot_wall)} - the structural change regressed. Revert to "
           f"the faster kernel and try a different optimization.")
     # 4. assistant reverts to the pivot kernel (net no change to the best).
     a2 = format_assistant_turn(
@@ -261,9 +261,9 @@ def build_convergent_trajectory(
     """Reconstruct a clean, convergent win from raw evolve ``turns``.
 
     Returns a dict with ``messages`` (the stored chat), ``initial_wall_us``,
-    ``final_wall_us``, ``speedup``, ``final_source`` and ``snr_db`` — all mutually
+    ``final_wall_us``, ``speedup``, ``final_source`` and ``snr_db`` - all mutually
     consistent (``initial == final * speedup`` exactly, feedback numbers match the
-    kept turns) — or ``None`` when there is no net, verified, convergent win.
+    kept turns) - or ``None`` when there is no net, verified, convergent win.
     """
     # 1. Walk the raw turns; keep the strictly-improving path; log regressions.
     best_wall, best_src, best_snr = initial_wall, seed_src, initial_snr

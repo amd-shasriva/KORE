@@ -7,7 +7,7 @@ bf16 activation is quantized to fp8 (arch ``FP8_DTYPE``) with its own scale
 so that ``x[m] ~= xq[m] * scale[m]``.
 
 The fp8 e4m3 encoding is arch-selected: OCP ``e4m3fn`` on gfx950/CDNA4
-(MI350X/MI355X — native), FNUZ ``e4m3fnuz`` on gfx942/CDNA3.
+(MI350X/MI355X - native), FNUZ ``e4m3fnuz`` on gfx942/CDNA3.
 
 Correctness oracle: the exact torch quant above (codes + scales). The gate
 checks (a) SNR of the dequantized activation vs the original, and (b) that the

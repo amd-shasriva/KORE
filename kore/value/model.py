@@ -107,7 +107,7 @@ class PairwiseRanker:
     the same group with realized utility ``u_i > u_j`` the loss pushes
     ``s_i > s_j``; each pair is throughput-weighted by the utility margin (and,
     optionally, by per-sample weights) so the ranker spends its capacity ordering
-    the *fast* kernels at the top of the group — the part of the ranking the GRPO
+    the *fast* kernels at the top of the group - the part of the ranking the GRPO
     top-k selector actually benches.
 
     This is the listwise/pairwise supervision the pointwise regressor lacks: it

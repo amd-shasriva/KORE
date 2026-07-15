@@ -4,15 +4,15 @@ Mints tasks at the *policy's competence frontier* rather than uniformly, so the
 task distribution co-evolves with the policy. Each candidate descriptor is scored
 by three signals:
 
-  * **learnability** ``4*p*(1-p)`` where ``p`` is the measured solve-rate — the
+  * **learnability** ``4*p*(1-p)`` where ``p`` is the measured solve-rate - the
     classic UED/PLR "not too easy, not too hard" curve that peaks at ``p=0.5``
     (the ``4*`` normalizes the peak to ``1.0``). This is the primary signal.
 
-  * **headroom regret** — how much verified performance is *still on the table*
+  * **headroom regret** - how much verified performance is *still on the table*
     for this task (normalized ``[0,1]``): a proxy for how much the policy could
     still learn to speed it up. High regret => worth revisiting.
 
-  * **novelty** — distance from the current task archive's occupied niches, so
+  * **novelty** - distance from the current task archive's occupied niches, so
     the proposer expands into unexplored regions of behavior space.
 
 Guardrails against collapse: descriptors with strong evidence of being
@@ -47,7 +47,7 @@ class DescriptorStats:
 
     ``solve_rate`` (``p``) and ``headroom_regret`` are measured; ``novelty`` is
     filled in relative to an archive at scoring time (an explicit value here acts
-    as an override for testing). ``attempts`` gates the collapse guardrail — a
+    as an override for testing). ``attempts`` gates the collapse guardrail - a
     descriptor with no attempts yet is never rejected as trivial/unsolvable.
     """
 
@@ -72,7 +72,7 @@ def clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
 
 
 def learnability(p: float) -> float:
-    """UED/PLR learnability ``4*p*(1-p)`` — 0 at p in {0,1}, peaks at 1.0 at p=0.5."""
+    """UED/PLR learnability ``4*p*(1-p)`` - 0 at p in {0,1}, peaks at 1.0 at p=0.5."""
     p = clamp(p)
     return 4.0 * p * (1.0 - p)
 

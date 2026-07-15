@@ -7,7 +7,7 @@ dy, compute the input/weight gradients
     dx_j = r*w_j*dy_j - (r^3 * x_j * c) / N
     dw_j = sum_m (dy_{m,j} * x_{m,j} * r_m)         (reduce over tokens)
 
-The dw reduction over the token (M) axis is the interesting part — a good kernel
+The dw reduction over the token (M) axis is the interesting part - a good kernel
 fuses the per-row dx with a blocked/atomic dw accumulation instead of PyTorch's
 generic autograd graph. Backward/training kernels were a whole missing category
 in the suite (it was inference-only).

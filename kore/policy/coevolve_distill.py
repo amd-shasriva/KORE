@@ -12,19 +12,19 @@ a JSONL log via :func:`kore.data.schemas.write_jsonl`, so it round-trips lossles
 back through :func:`~kore.data.schemas.read_jsonl`.
 
 Design (mirrors the datagen conventions):
-  * FILTER  — keep only verified (if required) wins that beat baseline by
+  * FILTER  - keep only verified (if required) wins that beat baseline by
     ``min_speedup`` (a "win" elsewhere in KORE = correct AND speedup > 1).
-  * MAP     — win dict ``{"descriptor", "kernel_src", "speedup", ...}`` ->
+  * MAP     - win dict ``{"descriptor", "kernel_src", "speedup", ...}`` ->
     ``WinRecord`` with a minimal but valid two-turn chat ``trajectory`` (a user
     turn stating the task + an assistant turn wrapping the final kernel in the
     repo's ``FULL_KERNEL:`` code-block convention, so it re-parses with
     :func:`kore.data.prompts.extract_kernel`).
-  * DEDUP   — by a stable hash of ``(task_id, final_source)`` so re-emitting the
+  * DEDUP   - by a stable hash of ``(task_id, final_source)`` so re-emitting the
     same kernel never bloats the set; the highest-``speedup`` record per hash wins
     (like :func:`kore.data.rejection.stratified_rft_select`'s fastest-instance
     dedup), deduping across the existing file's contents on load.
 
-Everything is pure/CPU: no ``torch`` import (not even lazily — the descriptor is
+Everything is pure/CPU: no ``torch`` import (not even lazily - the descriptor is
 read purely via attribute access), so it is fully unit-testable without a GPU.
 """
 

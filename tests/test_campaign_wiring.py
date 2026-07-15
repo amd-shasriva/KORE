@@ -5,7 +5,7 @@ we only assert that the campaign WIRES the newly-implemented research capabiliti
 together correctly:
 
   * the AUTHORITATIVE registry train/held-out split threads through ctx + manifest
-    (item 1) — training stages get TRAIN tasks, eval gets the held-out family;
+    (item 1) - training stages get TRAIN tasks, eval gets the held-out family;
   * ``--dpo-rounds > 1`` drives ``iterative_dpo`` (on-policy DPO + DAgger, item 2)
     while ``== 1`` keeps the single-pass DPO;
   * the evolutionary datagen stage is callable and writes wins/groups shards (item 3);
@@ -475,7 +475,7 @@ def test_full_ft_sft_invokes_launcher_and_sets_distributed(monkeypatch, tmp_path
 
 
 def test_lora_sft_stays_in_process_no_launcher(monkeypatch, tmp_path):
-    # the DEFAULT (LoRA) path never shells out — pure single-process one command.
+    # the DEFAULT (LoRA) path never shells out - pure single-process one command.
     calls = _capture_subprocess(monkeypatch)
     monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
     import kore.policy.sft as sft_mod
@@ -549,7 +549,7 @@ def _grpo_launcher_supported(monkeypatch):
 
 def test_grpo_supported_by_launcher_detection(monkeypatch):
     # _stage_supports_launcher flips True for grpo the moment the sibling ships
-    # grpo_config_from_dict (the JSON `-m` builder) — no campaign change needed.
+    # grpo_config_from_dict (the JSON `-m` builder) - no campaign change needed.
     import kore.policy.grpo as grpo_mod
 
     monkeypatch.setattr(grpo_mod, "grpo_config_from_dict", lambda d: object(),
@@ -638,7 +638,7 @@ def _run_grpo_capture_cfg(monkeypatch, tmp_path, argv):
     import kore.policy.grpo as grpo_mod
 
     seen = []
-    # NOTE: no `backend=` kwarg — Fix 3 removed the verl-era backend switch, so the
+    # NOTE: no `backend=` kwarg - Fix 3 removed the verl-era backend switch, so the
     # campaign must call train_grpo(cfg, tasks=...) only. A stray backend arg would
     # blow up this signature.
     monkeypatch.setattr(grpo_mod, "train_grpo",
@@ -698,7 +698,7 @@ def test_grpo_backend_flag_removed():
 
 # --------------------------------------------------------------------------- #
 # 10. Full-FT midtrain: shells out to the FSDP launcher (JSON `-m` entry now
-#     ships via midtrain_config_from_dict) — real full-parameter sharded.
+#     ships via midtrain_config_from_dict) - real full-parameter sharded.
 # --------------------------------------------------------------------------- #
 def test_full_ft_midtrain_invokes_launcher_full_param(monkeypatch, tmp_path):
     calls = _capture_subprocess(monkeypatch)
@@ -731,7 +731,7 @@ def test_full_ft_midtrain_invokes_launcher_full_param(monkeypatch, tmp_path):
 
 
 def test_lora_midtrain_stays_in_process_no_launcher(monkeypatch, tmp_path):
-    # the DEFAULT (LoRA) path never shells out — pure single-process one command.
+    # the DEFAULT (LoRA) path never shells out - pure single-process one command.
     import kore.policy.midtrain as mt
 
     calls = _capture_subprocess(monkeypatch)

@@ -3,10 +3,10 @@
 A :class:`TaskDescriptor` is a concrete, gradable KORE task drawn from the
 existing parametric op registries:
 
-  * ``kore.tasks._genops`` — the generated op space (``unary`` / ``binary`` /
+  * ``kore.tasks._genops`` - the generated op space (``unary`` / ``binary`` /
     ``reduce`` / ``fusion`` / ``gemm_fusion`` families, torch-eager / hipBLASLt
     baselines).
-  * ``kore.tasks.vendor_ops`` — the vendor-baselined ops (graded vs real AITER
+  * ``kore.tasks.vendor_ops`` - the vendor-baselined ops (graded vs real AITER
     kernels), family ``vendor_<op>`` to match ``registry.operator_family`` /
     the generated ``op_family`` yaml field.
 
@@ -14,11 +14,11 @@ A descriptor = ``(source, family, op, dtype, shape_regime)``; its *difficulty
 features* are derived (not stored) via :func:`descriptor_features`. Those
 features double as the MAP-Elites behavior descriptor:
 
-  * ``family``               — coarse operator family (categorical)
-  * ``arithmetic_intensity`` — ``compute-bound`` (gemm) vs ``memory-bound``
-  * ``fusion_depth``         — number of fused sub-ops (int)
-  * ``dtype_precision``      — ``16b`` (bf16/fp16) vs ``32b`` (fp32)
-  * ``shape_scale``          — ``small`` / ``medium`` / ``large`` by problem volume
+  * ``family``               - coarse operator family (categorical)
+  * ``arithmetic_intensity`` - ``compute-bound`` (gemm) vs ``memory-bound``
+  * ``fusion_depth``         - number of fused sub-ops (int)
+  * ``dtype_precision``      - ``16b`` (bf16/fp16) vs ``32b`` (fp32)
+  * ``shape_scale``          - ``small`` / ``medium`` / ``large`` by problem volume
 
 :func:`descriptor_key` reduces those to the archive niche tuple.
 
@@ -294,7 +294,7 @@ def static_difficulty(desc: TaskDescriptor) -> float:
 
 
 # --------------------------------------------------------------------------- #
-# Mutation (perturb shape / dtype / fusion-depth) — the frontier operator
+# Mutation (perturb shape / dtype / fusion-depth) - the frontier operator
 # --------------------------------------------------------------------------- #
 MUTATION_KINDS = ("shape", "dtype", "fusion")
 

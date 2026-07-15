@@ -3,11 +3,11 @@
 "Cover 100% of everything" has two senses; this module owns the first and reports
 on the second:
 
-  1. DATA coverage — every TRAIN task must have non-empty ``repair`` + ``groups`` +
+  1. DATA coverage - every TRAIN task must have non-empty ``repair`` + ``groups`` +
      ``wins`` shards. A task with a missing/empty shard is a hole: the policy never
      sees repair transitions, preferences, or a win demo for that operator. The
      shipped data had ~5-28 tasks short of full coverage.
-  2. SPACE coverage — the op x dtype frontier the task generator emits (see
+  2. SPACE coverage - the op x dtype frontier the task generator emits (see
      ``kore.tasks.generate_ops.FAMILY_DTYPES``). Reported here per (family, dtype)
      so gaps (e.g. no generated fp8/int8 elementwise) are visible.
 

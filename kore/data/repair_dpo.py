@@ -3,8 +3,8 @@
 Each ``repair`` record is a proven correctness contrast: a broken kernel + the
 exact verifier error + a teacher fix that PASSED the oracle. `build_dpo` only
 consumes ``RankedGroupRecord``s, so this module packages each repair as a
-two-candidate ranked group — ``candidates=[fixed, broken]`` with the single
-preference ``[0, 1]`` (fixed preferred over broken) — and writes them to
+two-candidate ranked group - ``candidates=[fixed, broken]`` with the single
+preference ``[0, 1]`` (fixed preferred over broken) - and writes them to
 ``<data_root>/groups/_repair_pairs.jsonl``. The campaign build stage's raw
 gather then folds them through the SAME leakage split + `build_dpo` path as the
 real ranked groups, adding a clean "correct kernel > broken kernel" signal on
@@ -107,7 +107,7 @@ def mint_repair_dpo(
             continue
         try:
             g = mint_repair_pair(r, arch)
-        except Exception as e:  # noqa: BLE001 — one bad record must not abort
+        except Exception as e:  # noqa: BLE001 - one bad record must not abort
             log.debug("repair_dpo_skip", task=tid, err=str(e)[:120])
             g = None
         if g is not None:

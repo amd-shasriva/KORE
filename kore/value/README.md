@@ -1,6 +1,6 @@
-# `kore/value` — the bench-prefilter surrogate
+# `kore/value` - the bench-prefilter surrogate
 
-Benchmarking a kernel on real silicon is the expensive step. This package is a **cheap 3-head cost model** (Ansor/NLTSP-style) that ranks candidate kernels *before* they hit the GPU, so GRPO benches only the top-k of N generated candidates per turn — roughly a 4× measurement-efficiency win.
+Benchmarking a kernel on real silicon is the expensive step. This package is a **cheap 3-head cost model** (Ansor/NLTSP-style) that ranks candidate kernels *before* they hit the GPU, so GRPO benches only the top-k of N generated candidates per turn - roughly a 4× measurement-efficiency win.
 
 ---
 
@@ -23,7 +23,7 @@ class ValueModel:
 utility = p_compile * p_snr_pass * exp(e_log_speedup)
 ```
 
-Three heads — P(compile), P(SNR pass), E[log speedup] — trained with sklearn `HistGradientBoosting` (numpy fallback if sklearn is absent), throughput-weighted (`sample_weight = max(speedup, 0.1)`) so fast kernels dominate the fit. An optional `PairwiseRanker` learns within-group ordering.
+Three heads - P(compile), P(SNR pass), E[log speedup] - trained with sklearn `HistGradientBoosting` (numpy fallback if sklearn is absent), throughput-weighted (`sample_weight = max(speedup, 0.1)`) so fast kernels dominate the fit. An optional `PairwiseRanker` learns within-group ordering.
 
 **Features** (`features.py`): operator / dtype / shape / parent stats / PMC bottleneck (problem context) plus schedule features parsed from the kernel source (BLOCK sizes, `num_warps`, `num_stages`, `tl.dot` presence, tiling multiples, …).
 

@@ -4,7 +4,7 @@ Quantized inference GEMM: activation A and weight W are both fp8 e4m3 with
 per-tensor fp32 scales, output bf16. Computes ``Y = (A_deq) @ (W_deq)^T``.
 
 fp8 format is arch-selected via ``FP8_DTYPE``: OCP ``e4m3fn`` on gfx950/CDNA4
-(MI350X/MI355X — the native format AITER/hipBLASLt use there); FNUZ
+(MI350X/MI355X - the native format AITER/hipBLASLt use there); FNUZ
 ``e4m3fnuz`` on gfx942/CDNA3. The two differ in exponent bias / -0/inf encoding,
 so the candidate + oracle must use the SAME (arch) dtype.
 

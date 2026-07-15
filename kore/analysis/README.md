@@ -1,4 +1,4 @@
-# `kore/analysis` — roofline physics & the P0 study
+# `kore/analysis` - roofline physics & the P0 study
 
 Offline diagnostics that establish (and stress-test) the physical premise behind KORE's reward. Nothing here trains a policy; these modules **measure** and **falsify**. This is the code behind the [`Kore-prelim-analysis`](../../../Kore-prelim-analysis/) study and [`docs/P0_RESULTS.md`](../../docs/P0_RESULTS.md).
 
@@ -23,7 +23,7 @@ T_min = max( W_flops / P_peak ,  Q_bytes / B_peak )
 η     = T_min / T_measured        ∈ (0, 1]
 ```
 
-`flops_bytes(operation, dims, dtype)` returns `(W, Q)` — exact for GEMM/batched-GEMM/norms/activations, first-order for attention/MoE, with a safe memory-bound fallback for generic elementwise ops. `roofline(...)` returns a `Roofline` with `arithmetic_intensity`, `t_compute_ms`, `t_mem_ms`, `t_min_ms`, and `bound ∈ {compute, memory}`. Peaks default to gfx950/gfx942 datasheets and are overridable via `KORE_PEAK_BF16` / `KORE_PEAK_FP8` / `KORE_PEAK_HBM_BW`.
+`flops_bytes(operation, dims, dtype)` returns `(W, Q)` - exact for GEMM/batched-GEMM/norms/activations, first-order for attention/MoE, with a safe memory-bound fallback for generic elementwise ops. `roofline(...)` returns a `Roofline` with `arithmetic_intensity`, `t_compute_ms`, `t_mem_ms`, `t_min_ms`, and `bound ∈ {compute, memory}`. Peaks default to gfx950/gfx942 datasheets and are overridable via `KORE_PEAK_BF16` / `KORE_PEAK_FP8` / `KORE_PEAK_HBM_BW`.
 
 ---
 
@@ -61,7 +61,7 @@ flowchart TD
 - **Test B:** coefficient stability across folds.
 - **Test C:** family decodability from the residual latent (nearest-centroid LOO).
 
-**Result:** pooled in-sample R² = 0.978 (raw) but **median out-of-family R² = 0.107 (raw) / negative (normalized)**; families are separable in residual space. **Verdict: the residual value is operator-specific, not a universal latent.** KORE therefore trains on the dense per-family signal and frames the contribution as the *combination* + diagnosis-conditioned control, not a universal residual manifold. This is the honest, falsification-tested scope — see [`docs/P0_RESULTS.md`](../../docs/P0_RESULTS.md).
+**Result:** pooled in-sample R² = 0.978 (raw) but **median out-of-family R² = 0.107 (raw) / negative (normalized)**; families are separable in residual space. **Verdict: the residual value is operator-specific, not a universal latent.** KORE therefore trains on the dense per-family signal and frames the contribution as the *combination* + diagnosis-conditioned control, not a universal residual manifold. This is the honest, falsification-tested scope - see [`docs/P0_RESULTS.md`](../../docs/P0_RESULTS.md).
 
 ```python
 @dataclass
@@ -83,6 +83,6 @@ python -m kore.analysis.p0_sol --dry-run --tasks gemm_bf16,rmsnorm_aiter
 python -m kore.analysis.residual_transfer --report data/p0_study_final.json --out data/residual_transfer.json
 ```
 
-The bridge to the live reward: `physics_from_measure(KernelMeasure) → PhysicsSignal → compute_residual_reward` — the same math the training reward uses (see [`kore/reward`](../reward/README.md)).
+The bridge to the live reward: `physics_from_measure(KernelMeasure) → PhysicsSignal → compute_residual_reward` - the same math the training reward uses (see [`kore/reward`](../reward/README.md)).
 
 See also: [`tasks`](../tasks/README.md), [`verifier`](../verifier/README.md) (PMC), [`eval/generalization`](../eval/README.md).

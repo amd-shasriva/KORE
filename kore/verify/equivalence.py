@@ -6,19 +6,19 @@ accepts a candidate kernel when it clears an SNR threshold on a handful (5) of
 reseeded random trials plus one determinism re-check. That gate is cheap and
 effective, but it leaves a well-known reward-hacking surface open:
 
-  * **Lucky pass** — a kernel that is wrong on a thin slice of the input domain
+  * **Lucky pass** - a kernel that is wrong on a thin slice of the input domain
     (e.g. exactly ``x == 0``, denormals, near-``inf`` magnitudes, all-equal rows)
     can clear an SNR gate whose random draws essentially never land in that slice.
-  * **Edge-case miss** — the naive random distribution (``randn``) under-samples the
+  * **Edge-case miss** - the naive random distribution (``randn``) under-samples the
     structured regimes where numerical kernels actually break (overflow knots,
     activation kinks at ``0/±1/±3/±6``, masked tail elements, sparse spikes).
 
 This module replaces/augments the single-SNR verdict with a **multi-pronged
 equivalence oracle** that is far stronger and much harder to hack. It is:
 
-  * **Self-contained** — new files under ``kore/verify/`` only; nothing here is wired
+  * **Self-contained** - new files under ``kore/verify/`` only; nothing here is wired
     into the live reward yet.
-  * **CPU-testable** — the *decision logic* (:func:`equivalence_verdict`) is a pure
+  * **CPU-testable** - the *decision logic* (:func:`equivalence_verdict`) is a pure
     function over arrays of candidate/reference outputs, so the entire accept/reject
     behaviour is unit-testable on CPU with numpy (no GPU, no Triton). ``torch`` is
     imported lazily, only inside the GPU-facing orchestration paths.
@@ -30,9 +30,9 @@ The four prongs
    aggregate SNR floor. This drives the statistical false-accept probability down
    exponentially in the number of element comparisons.
 2. **Adversarial (deterministic / exhaustive over a curated set).** A fixed battery
-   of structured inputs — zeros, ones, ``±1``, all-equal, large/small magnitudes,
+   of structured inputs - zeros, ones, ``±1``, all-equal, large/small magnitudes,
    denormals, ``±inf``-adjacent, sign-alternating, sparse spikes, a signed ramp, and
-   activation-knot boundaries — that deterministically exercises exactly the regimes
+   activation-knot boundaries - that deterministically exercises exactly the regimes
    random sampling misses. See :func:`kore.verify.adversarial.adversarial_inputs`.
 3. **Metamorphic (deterministic / structural).** Algebraic relations the *true* op
    must satisfy regardless of its point values (elementwise permutation- &
@@ -50,8 +50,8 @@ What is PROVABLE vs STATISTICAL (read :func:`false_accept_probability` too)
 Floating-point kernels cannot be bit-exact against an fp64 oracle, so this oracle is
 "sound-ish", not a formal proof of functional equality. Concretely:
 
-  * **PROVABLE (deterministic prongs).** For the *checkable op class* — pure
-    elementwise unary/binary maps and order-invariant per-row reductions — a
+  * **PROVABLE (deterministic prongs).** For the *checkable op class* - pure
+    elementwise unary/binary maps and order-invariant per-row reductions - a
     candidate that is wrong on ANY point in the curated adversarial set, or that
     violates ANY metamorphic identity, or that is non-deterministic, is rejected
     **with certainty** (no luck involved): those prongs re-run the same fixed inputs
@@ -73,7 +73,7 @@ Honest false-accept characterisation. A wrong kernel is accepted only if it
 simultaneously (a) is deterministic, (b) satisfies every metamorphic identity of the
 op class, (c) agrees with the oracle on every adversarial regime, AND (d) differs from
 the oracle on a random-domain set of measure so small that all ``m`` comparisons stay
-in tolerance — a joint event bounded by ``(1 - p)**m`` in the statistical prong and
+in tolerance - a joint event bounded by ``(1 - p)**m`` in the statistical prong and
 identically zero in the deterministic prongs for the enumerated regimes. The returned
 :class:`VerificationResult` reports the worst per-element relative error, the worst
 SNR, which prongs passed, and the numeric false-accept bound at a reference defect
@@ -380,7 +380,7 @@ def equivalence_verdict(prong_results: Sequence[ProngSamples],
 
     ``prong_results`` is a list of :class:`ProngSamples`; each carries the raw
     ``(actual, expected)`` output pairs for one prong (see the prong table above).
-    No GPU / torch / kernel execution happens here — this is exactly the surface the
+    No GPU / torch / kernel execution happens here - this is exactly the surface the
     unit tests drive with synthetic arrays.
 
     A candidate is ``verified`` iff **every required prong passes**. A prong passes iff
@@ -448,7 +448,7 @@ def equivalence_verdict(prong_results: Sequence[ProngSamples],
         first = next((p for p in prongs if not p.passed and p.required), None)
         detail = "rejected by prong(s): " + ", ".join(failed)
         if first and first.detail:
-            detail += f" — {first.detail}"
+            detail += f" - {first.detail}"
 
     return VerificationResult(
         verified=verified, confidence=confidence, prongs=prongs,
@@ -465,7 +465,7 @@ def _call(fn: Callable, inputs: tuple):
     """Call ``fn(*inputs)`` and return the output, or an Exception instance."""
     try:
         return fn(*inputs)
-    except Exception as exc:  # noqa: BLE001 — a crashing candidate is a rejection
+    except Exception as exc:  # noqa: BLE001 - a crashing candidate is a rejection
         return exc
 
 
@@ -502,13 +502,13 @@ def verify_equivalence(
         on ``device`` (``"cpu"`` for tests, ``"cuda"`` in the live loop); outputs are
         moved to CPU/float64 for the verdict.
     input_gen
-        ``(shape, dtype, seed, device) -> tuple[inputs]`` — matches the KORE task
+        ``(shape, dtype, seed, device) -> tuple[inputs]`` - matches the KORE task
         ``get_inputs`` convention (extended with an explicit ``device``/``dtype``).
     shape
         Passed straight to ``input_gen`` / the generators (a dict like ``{"M":..,
         "N":..}`` or a tuple). Defaults to ``(64, 128)`` when omitted.
     op_class
-        ``"elementwise"`` | ``"reduction"`` | ``"generic"`` — selects the adversarial
+        ``"elementwise"`` | ``"reduction"`` | ``"generic"`` - selects the adversarial
         battery layout and the metamorphic identity set.
     arity
         Number of input operands. Inferred from ``input_gen`` output if omitted.

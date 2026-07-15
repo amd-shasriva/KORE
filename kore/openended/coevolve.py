@@ -15,12 +15,12 @@ paradigm. Each generation:
 
 The loop is PURE orchestration: the policy, the measurement (env), and the
 distillation sink are INJECTED, so it is fully unit-testable on CPU with mocks and
-GPU-agnostic. It is deliberately decoupled from run_campaign/grpo — a driver script
+GPU-agnostic. It is deliberately decoupled from run_campaign/grpo - a driver script
 wires a real served policy + KoreEnv + the GRPO update into these hooks.
 
 Why kernels make open-endedness actually work (the paradigm claim): the task space
 is infinitely + cheaply generatable, every task is ground-truth VERIFIABLE, and
-carries a CONTINUOUS performance-headroom regret signal — which simultaneously
+carries a CONTINUOUS performance-headroom regret signal - which simultaneously
 solves UED's regret-estimation problem and the unverifiable-reward problem that
 block open-ended RL in other domains.
 """

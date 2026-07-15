@@ -1,4 +1,4 @@
-"""Pillar 4 — profiler-counter-grounded reasoning."""
+"""Pillar 4 - profiler-counter-grounded reasoning."""
 
 from __future__ import annotations
 

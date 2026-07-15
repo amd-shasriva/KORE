@@ -6,7 +6,7 @@ Correctness (no --bench-mode): candidate ``quant(x, w) -> (xq, scale)``.
   * allclose = candidate scales match the oracle scales (LOOSE rtol: the fused
            kernel recomputes the normed value, so its rowamax legitimately differs
            from the fp32 oracle by a hair) AND the candidate dequant matches the
-           ORACLE dequant to fp8 rounding (>=35 dB) — so a kernel cannot pass by
+           ORACLE dequant to fp8 rounding (>=35 dB) - so a kernel cannot pass by
            emitting a bogus scale or a wrong RMSNorm.
 Bench (--bench-mode):
     --impl reference  -> AITER rms_norm + dynamic_per_token quant (the 2-kernel bar)

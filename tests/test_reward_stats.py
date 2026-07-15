@@ -62,7 +62,7 @@ def test_scan_blocks_post_verdict_and_aliased_delegation():
 
 def test_scan_blocks_mode_sniffing_and_timing_manipulation():
     """A kernel that detects the bench-vs-correctness split (or manipulates the
-    timed region) can fake a speedup while staying 'correct' — must be rejected."""
+    timed region) can fake a speedup while staying 'correct' - must be rejected."""
     # mode-sniffing via the driver CLI
     assert scan_for_hacks("import sys\nif '--bench-mode' in sys.argv:\n    fast_path()") is not None
     assert scan_for_hacks("import argparse\np=argparse.ArgumentParser()") is not None
@@ -184,7 +184,7 @@ def test_reward_hack_beats_nothing():
     rr = compute_reward(obs, "import aiter\nout = aiter.rms_norm(x)", dtype="bf16")
     assert rr.correct is False and "hack" in rr.flags
     # CHANGED: a flagged hack is now punished STRICTLY harder than a compile
-    # failure (reward_hack < reward_compile_fail) — cheating is the unique floor.
+    # failure (reward_hack < reward_compile_fail) - cheating is the unique floor.
     assert rr.reward == CONFIG.reward_hack
     assert CONFIG.reward_hack < CONFIG.reward_compile_fail
     # A hack that "passes" every gate still gets NO shaping/format credit.
@@ -272,7 +272,7 @@ def test_subthreshold_shaping_is_continuous_and_monotonic():
 
 def test_subthreshold_shaping_can_be_disabled():
     """With shaping off, a compiled-but-incorrect kernel is flat reward_incorrect
-    (the legacy sparse behavior) — proves the knob works."""
+    (the legacy sparse behavior) - proves the knob works."""
     cfg = dataclasses.replace(CONFIG, subthreshold_shaping=False)
     rr = compute_reward(_obs_incorrect(20.0), "x=1", dtype=_DT, cfg=cfg)
     assert rr.tier == "incorrect" and rr.reward == cfg.reward_incorrect
@@ -407,7 +407,7 @@ def test_aggregation_single_shape_and_default_no_behavior_change():
 
 
 # --------------------------------------------------------------------------- #
-# P4: speedup reshape — breaks the "correct-but-slow" plateau at the 1x crossover
+# P4: speedup reshape - breaks the "correct-but-slow" plateau at the 1x crossover
 # --------------------------------------------------------------------------- #
 def test_fast_p_bonus_creates_reward_jump_at_baseline_crossover():
     """The central plateau fix: crossing 1.0x must be a DISTINCT high-value event,
@@ -437,7 +437,7 @@ def test_speedup_reshape_preserves_lexicographic_dominance():
 
 def test_fast_p_bonus_withheld_when_timing_untrustworthy():
     """A fast speedup with high timing variance (cv > threshold) must NOT earn the
-    fast_p bonus — otherwise the policy farms bonuses via noisy/lucky timings."""
+    fast_p bonus - otherwise the policy farms bonuses via noisy/lucky timings."""
     noisy = Observation(compiled=True, validation_passed=True, snr_by_shape={"s": 99.0},
                         wall_by_shape={"s": 0.5}, baseline_by_shape={"s": 1.0},  # 2x
                         cv_pct=CONFIG.cv_threshold_pct + 5.0)  # noisy
@@ -460,7 +460,7 @@ def test_log_shape_monotonic_and_continuous_at_one():
 # --------------------------------------------------------------------------- #
 def test_full_lexicographic_ordering_with_shaping_on():
     """hack < compile_fail < incorrect(shaped, every SNR) < correct-slow
-    < correct-fast — swept across SNRs, speeds, phases, and format status."""
+    < correct-fast - swept across SNRs, speeds, phases, and format status."""
     hack = compute_reward(_obs_correct(5.0), "y = torch.matmul(a, b)", dtype=_DT)
     compile_fail = compute_reward(Observation(compiled=False, dtype=_DT), "x=1", dtype=_DT)
     assert hack.tier == "hack" and compile_fail.tier == "compile_fail"

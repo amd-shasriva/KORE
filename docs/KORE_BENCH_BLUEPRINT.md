@@ -3,7 +3,7 @@
 **Goal.** A provably-best-in-world OPEN benchmark of *hard* GPU-kernel-optimization
 TASKS for AMD Instinct (MI300X / MI325X `gfx942`, MI355X `gfx950`), where every task is
 graded against a **real production vendor baseline** (AITER / hipBLASLt / Composable
-Kernel / AOTriton), not torch-eager. 200–400 tasks spanning every operator family that
+Kernel / AOTriton), not torch-eager. 200-400 tasks spanning every operator family that
 matters for LLM training + inference. Serves both KORE RL training and the open-source /
 AMD community.
 
@@ -19,14 +19,14 @@ authoring harness that produces them at scale, and the release plan for KORE-Ben
 
 A KORE task is a directory `kore/tasks/<id>/`:
 
-- `task.yaml` — metadata: `task_id, operation, dtype, backend, gpu_target,
+- `task.yaml` - metadata: `task_id, operation, dtype, backend, gpu_target,
   seed_kernel_name, snr_threshold, shapes{minimal, primary, validation[]}, targets{snr_db,
   comparison_baseline}`.
-- `reference.py` — the correctness **oracle**: `parse_shape`, `get_inputs(shape, device,
+- `reference.py` - the correctness **oracle**: `parse_shape`, `get_inputs(shape, device,
   seed)`, a torch-**fp32** `*_ref(...)`, and (for vendor tasks) the inputs pre-shaped to the
   vendor's exact layout.
-- `seed_triton.py` — a *compiling but naive* starter kernel (the policy's edit target).
-- `driver.py` — the verifier contract:
+- `seed_triton.py` - a *compiling but naive* starter kernel (the policy's edit target).
+- `driver.py` - the verifier contract:
   - correctness: writes candidate to `kernel.py`, runs ≥5 reseeded trials, prints
     `SNR: <db>` / `allclose: <bool>` / `max_diff`.
   - `--bench-mode --impl {reference|candidate}`: cold-cache (L2-flushed) CUDA-event median
@@ -39,9 +39,9 @@ The five properties that make KORE-Bench provably the best kernel-optimization d
    the production serving stack calls (AITER `flash_attn_varlen_func`, hipBLASLt via
    `tgemm.mm`, CK `gemm_a8w8`, AOTriton SDPA). Beating torch is worthless; beating AITER is
    best-in-world. No other public kernel benchmark (KernelBench, TritonBench, KernelBook)
-   does this — they all bench vs torch-eager on NVIDIA.
+   does this - they all bench vs torch-eager on NVIDIA.
 2. **Headroom-verified.** A task is admitted only if a hand-written expert Triton/HIP kernel
-   can get within, or beat, a defined fraction of the vendor kernel — i.e. the op has *real*
+   can get within, or beat, a defined fraction of the vendor kernel - i.e. the op has *real*
    optimization headroom vs the vendor kernel on `gfx942/gfx950`. Ops where AITER is already
    at roofline and unbeatable in Triton are dropped or demoted to a `parity` tier.
 3. **gfx942/gfx950-correct numerics.** fp8 = **FNUZ** (`float8_e4m3fnuz`, max 240), not OCP
@@ -49,7 +49,7 @@ The five properties that make KORE-Bench provably the best kernel-optimization d
    gfx950). These traps are baked into the tasks.
 4. **Exhaustive, stratified coverage** across families × dtypes × shape-regimes × difficulty,
    with a completeness argument (§4) tied to the actual production op inventory (the ATOM
-   `model_ops_guide` maps every LLM inference op to its AITER kernel — that map *is* our
+   `model_ops_guide` maps every LLM inference op to its AITER kernel - that map *is* our
    coverage target).
 5. **Leakage-safe, released as an artifact.** Whole families/shapes/arch held out; a public
    `KORE-Bench` release with a `fast_p` leaderboard vs vendor baselines that AMD and the
@@ -57,7 +57,7 @@ The five properties that make KORE-Bench provably the best kernel-optimization d
 
 ---
 
-## 1. THE COMPLETE OPERATOR TAXONOMY (target 200–400 tasks)
+## 1. THE COMPLETE OPERATOR TAXONOMY (target 200-400 tasks)
 
 Notation for each row: **op × variant × dtype × regime → (vendor baseline, oracle,
 production shapes, difficulty tier)**.
@@ -109,11 +109,11 @@ The workhorse. Baseline discipline: **bf16/fp16 dense → hipBLASLt via
 | G16 | epilogue-fused GEMM (bias/act) | bf16/fp16 | prefill | torch matmul+bias+act chain (multi-kernel → hipBLASLt) | fp32 | `_genops` gemm_fusion 7 variants × {bf16,fp16} | T2 |
 | G17 | GEMM + fp8 dequant/requant epilogue | fp8 | prefill | `tgemm.mm` + fused scale | fp32 | 4096³ | T3 |
 
-**Shape edges (mandatory across G1–G17):** `K=4095` (fp8 illegal → must guard/reject),
+**Shape edges (mandatory across G1-G17):** `K=4095` (fp8 illegal → must guard/reject),
 `K=8191`, `M=1`/`N=1` (GEMV), `M=17`/`M=4097` (tail-mask), giant `K=28672`. Transposed
 operands `A^T,B^T,both`; non-contiguous/sliced; weight `[N,K]` vs `[K,N]` (`trans_b`).
 
-### 1.2 Attention family (target ~80 tasks — the richest)
+### 1.2 Attention family (target ~80 tasks - the richest)
 
 Baselines: **prefill → `aiter.flash_attn_varlen_func` (CK/ASM FMHA) or
 `aiter.flash_attn_func`; AOTriton SDPA (`F.scaled_dot_product_attention` on ROCm) as the
@@ -193,7 +193,7 @@ Baselines: `aiter.rms_norm`, `rmsnorm2d_fwd`, `rmsnorm2d_fwd_with_add`,
 | N8 | fused-add LayerNorm | bf16 | both | `layernorm2d_fwd_with_add` | fp32 | 4096×8192 | T2 |
 | N9 | AllReduce + RMSNorm (comm-fused) | bf16 | both | `tensor_model_parallel_fused_allreduce_rmsnorm` | fp32 (single-GPU AR=identity) | TP=1 measurement | T4 |
 
-**Edges:** zero-variance row (must not NaN — `break_eps`), large-mean+small-var
+**Edges:** zero-variance row (must not NaN - `break_eps`), large-mean+small-var
 (catastrophic cancellation), N non-pow2.
 
 ### 1.5 Quantization family (target ~30 tasks)
@@ -255,7 +255,7 @@ Note: AITER ships only **gated** GELU/SiLU, so standalone activations use the fr
 | AC7 | gated activations (24 `_genops` unary) | bf16/fp16/fp32 | both | torch framework op | fp32 | 4096×8192 | T1 |
 
 (The `_genops.py` unary/binary/reduce/fusion catalog already covers the breadth tail here
-— 146 tasks. These stay as T1 breadth with torch-framework baselines.)
+- 146 tasks. These stay as T1 breadth with torch-framework baselines.)
 
 ### 1.8 Sampling / softmax / top-k family (target ~20 tasks)
 
@@ -275,7 +275,7 @@ Baselines: `aiter.ops.triton.softmax.softmax`, `aiter.ops.triton.topk.topk`,
 | S8 | temperature exponential sample | fp32 | decode | `aiter.mixed_sample_outer_exponential` | fp32 gumbel-max | (M,vocab), temps | T3 |
 | S9 | rejection sample (spec-decode) | int | decode | Triton `rejection_greedy_sample_kernel` | ref sequential accept | draft×target | T4 |
 
-### 1.9 Cross-entropy / loss family (target ~15 tasks — training-side)
+### 1.9 Cross-entropy / loss family (target ~15 tasks - training-side)
 
 Baselines: Liger `LigerCrossEntropyLoss`, `LigerFusedLinearCrossEntropyLoss`,
 `LigerKLDIVLoss`, `LigerJSD`, `LigerFusedLinearJSD`, chunked-loss DPO/CPO/ORPO/SimPO/KTO.
@@ -319,11 +319,11 @@ variants labeled and held for a distributed harness.
 **Taxonomy totals (target):** GEMM 70, Attention 80, MoE 45, Norm 35, Quant 30, RoPE 15,
 Activation 25, Sampling 20, Loss 15, KV-cache 15, Comm 8 ≈ **358 hand-baselined tasks**,
 plus the existing 146 `_genops` breadth tasks with framework baselines. Cut/merge to the
-200–400 window by dtype/regime pruning where headroom verification (§4.3) fails.
+200-400 window by dtype/regime pruning where headroom verification (§4.3) fails.
 
 ---
 
-## 2. SOURCING AT SCALE — exact IDs, repos, conversion recipe, license
+## 2. SOURCING AT SCALE - exact IDs, repos, conversion recipe, license
 
 ### 2.1 HuggingFace datasets
 
@@ -331,7 +331,7 @@ plus the existing 146 `_genops` breadth tasks with framework baselines. Cut/merg
 |---|---|---|---|---|
 | `ScalingIntelligence/KernelBench` | 270 | L1(100 basic ops)/L2(100 fusions)/L3(50 archs)/L4(20) PyTorch reference `Model` modules + `get_inputs` | Each `Model.forward` → `reference.py` `*_ref` (fp32) + `get_inputs`; re-target baseline from torch-eager to the AITER/hipBLASLt op the module lowers to; emit `task.yaml` + generic `driver.py`. Adopt `fast_p@1.2` metric. | MIT |
 | `GPUMODE/KernelBook` | 18,162 | torch↔Triton pairs (Inductor-generated), license/star/commit metadata | Use as **seed_triton.py breadth** + SFT pairs only (NVIDIA-idiom, not MFMA-tuned); never for perf labels. Filter to permissive (`dataset_permissive.parquet`). Regenerate on gfx942 via `torch.compile` for AMD-flavored seeds. | per-repo (metadata-tagged); use permissive subset |
-| `facebook/KernelLLM` (+ 8B model) | — | high-quality SFT kernel-gen data | SFT breadth; cross-check idioms | check card (Meta) |
+| `facebook/KernelLLM` (+ 8B model) | - | high-quality SFT kernel-gen data | SFT breadth; cross-check idioms | check card (Meta) |
 | `GPUMODE/categorized_triton_data_permissive` | filtered | MIT-only Triton snippets categorized | seed_triton breadth by category | MIT |
 | `ppbhatt500/kernelbook-triton-reasoning-traces` (+multiturn) | 170 | CoT traces for kernel gen | ReasoningTrace seeds (ConCuR curation) | check card |
 | `BonnieWang/KernelBenchX` | 176 specs | Triton-gen task specs + LLM kernel corpus | additional task specs → `reference.py` | check card |
@@ -341,16 +341,16 @@ plus the existing 146 `_genops` breadth tasks with framework baselines. Cut/merg
 | Repo | Local path | What to mine | KORE mapping | License |
 |---|---|---|---|---|
 | **ROCm/aiter** | (clone) | `op_tests/test_*.py` (test_gemm_a8w8, test_mha, test_mla, test_moe, test_quant, test_pa_v1, test_rmsnorm2d, test_rope, test_layernorm, test_silu_and_mul, test_topk_softmax, test_pa_sparse_prefill_opus) | Each op_test = **exact shapes + input gen + the vendor call + a torch reference** → directly becomes `reference.py` oracle + `driver.py` `--impl reference` binding. This is the single richest source of vendor-baselined tasks. | MIT |
-| **ROCm/ATOM** | — | `docs/model_ops_guide.md` = the op→AITER-kernel map (§1 baselines) | Coverage target + baseline bindings | MIT-ish (check) |
-| **ROCm/composable_kernel** | — | CK example gemms/fmha/grouped-gemm, tuned configs | HIP/CK stage-2 baselines + shape lists | MIT |
-| **ROCm/hipBLASLt** | — | GEMM problem sizes, epilogues | dense/fp8 GEMM baseline via `tgemm.mm` | MIT |
-| **ROCm/aotriton** | — | FlashAttention fwd/bwd (V3 API, hdim≤256, varlen `PaddedVarlen`/`StridedVarlen`) | open attention baseline for A22/A21 (via torch SDPA on ROCm) | MIT |
-| **ROCm/triton** | — | AMD Triton tutorials (matmul, fa, grouped) | seed_triton starters | MIT |
+| **ROCm/ATOM** | - | `docs/model_ops_guide.md` = the op→AITER-kernel map (§1 baselines) | Coverage target + baseline bindings | MIT-ish (check) |
+| **ROCm/composable_kernel** | - | CK example gemms/fmha/grouped-gemm, tuned configs | HIP/CK stage-2 baselines + shape lists | MIT |
+| **ROCm/hipBLASLt** | - | GEMM problem sizes, epilogues | dense/fp8 GEMM baseline via `tgemm.mm` | MIT |
+| **ROCm/aotriton** | - | FlashAttention fwd/bwd (V3 API, hdim≤256, varlen `PaddedVarlen`/`StridedVarlen`) | open attention baseline for A22/A21 (via torch SDPA on ROCm) | MIT |
+| **ROCm/triton** | - | AMD Triton tutorials (matmul, fa, grouped) | seed_triton starters | MIT |
 | **vllm-project/vllm** | `repos/vllm` | `vllm/model_executor/layers/{fused_moe,quantization,rotary_embedding}`, ROCm attention backends | production shapes + which aiter op each layer calls | Apache-2.0 |
-| **sgl-project/sglang** | — | ROCm kernels, block-scale GEMM, MoE, AR | shapes + baselines | Apache-2.0 |
-| **flagos-ai/FlagGems** | — | 216 Triton ops incl. `flash_attention_forward`, `flash_mla`, `fused_moe`, `moe_align_block_size(_triton)`, `grouped_topk`, `moe_sum`, `per_token_group_quant_fp8`, `rms_norm`, `rotary_embedding`, `scaled_softmax_*`, `topk` | seed_triton + a **second cross-check oracle**; ops list = coverage checklist | Apache-2.0 |
-| **linkedin/Liger-Kernel** | — | RMSNorm, RoPE, SwiGLU, GeGLU, CrossEntropy, **FusedLinearCrossEntropy**, KLDiv, JSD, chunked DPO/CPO/ORPO/SimPO/KTO, Softmax, Sparsemax | the loss/norm/activation seeds + baselines (training-side family §1.9) | BSD-2 |
-| **AMD-AGI/Primus-Turbo** | — | `grouped_gemm_mxfp8_kernel`, `mxfp8_quant_kernels`, `swiglu_quant_kernel` (KF `mxfp8_grouped_gemm` provenance) | gfx950 MX grouped-GEMM tasks | check |
+| **sgl-project/sglang** | - | ROCm kernels, block-scale GEMM, MoE, AR | shapes + baselines | Apache-2.0 |
+| **flagos-ai/FlagGems** | - | 216 Triton ops incl. `flash_attention_forward`, `flash_mla`, `fused_moe`, `moe_align_block_size(_triton)`, `grouped_topk`, `moe_sum`, `per_token_group_quant_fp8`, `rms_norm`, `rotary_embedding`, `scaled_softmax_*`, `topk` | seed_triton + a **second cross-check oracle**; ops list = coverage checklist | Apache-2.0 |
+| **linkedin/Liger-Kernel** | - | RMSNorm, RoPE, SwiGLU, GeGLU, CrossEntropy, **FusedLinearCrossEntropy**, KLDiv, JSD, chunked DPO/CPO/ORPO/SimPO/KTO, Softmax, Sparsemax | the loss/norm/activation seeds + baselines (training-side family §1.9) | BSD-2 |
+| **AMD-AGI/Primus-Turbo** | - | `grouped_gemm_mxfp8_kernel`, `mxfp8_quant_kernels`, `swiglu_quant_kernel` (KF `mxfp8_grouped_gemm` provenance) | gfx950 MX grouped-GEMM tasks | check |
 | **KernelForge** | `repos/KernelForge-main/tasks/*.yaml` + `knowledge_base/skills/*.json` | 8 production task specs (MLA, VSA, SLA-bwd, MoE-MXFP4, MXFP8 grouped, gemm fp16) + 37 skills | direct port to `task.yaml`; skills → edge-case + tuning-hint source | internal |
 | **GEAK-eval** | `repos/GEAK-eval/.../ROCm_v1` (31), `TritonBench_G_v1` (184) | real AMD ROCm kernels (gemm, layernorm, moe_gemm, rmsnorm fwd/bwd, flashattention_fwd, chained_dot_fp8, matmul_MXFP) + Triton breadth | **highest-value AMD seed set**; use ROCm_v1 as held-out AMD eval, TritonBench_G as SFT/held-out | check GEAK license |
 
@@ -369,7 +369,7 @@ For an AITER `op_tests/test_X.py`:
 
 ---
 
-## 3. AUTHORING HARNESS — semi-automatic task generation
+## 3. AUTHORING HARNESS - semi-automatic task generation
 
 **Principle:** one declarative **task-spec** row → auto-generated
 `reference.py + driver.py + seed_triton.py + task.yaml` from a **per-family template** + a
@@ -430,10 +430,10 @@ license: MIT
 
 | Component | Templated (auto) | Hand-authored (per family, once) | Truly per-task hand-work |
 |---|---|---|---|
-| task.yaml | ✅ from spec | — | shape choices in spec |
-| driver.py | ✅ generic `driver_main` | baseline wrapper + edge guards (once) | — |
+| task.yaml | ✅ from spec | - | shape choices in spec |
+| driver.py | ✅ generic `driver_main` | baseline wrapper + edge guards (once) | - |
 | reference.py get_inputs | ✅ family template | quant/layout helper (once) | rare bespoke input (jagged MoE trace) |
-| reference.py oracle | ✅ named builder | the fp32 oracle math (once/family) | — |
+| reference.py oracle | ✅ named builder | the fp32 oracle math (once/family) | - |
 | seed_triton.py | ✅ skeleton | family Triton skeleton (once) | for T4 (MLA/sparse/MX), a real HIP/CK seed is hand-written |
 | vendor binding | ✅ from `baseline.symbol` | wrapper in `aiter_ref*.py` (once/op) | ASM dispatch quirks (MLA, persistent PA) |
 
@@ -441,13 +441,13 @@ license: MIT
 ~100% templated once the family skeleton + oracle + wrapper exist. T3 (paged attn, MoE, FLCE)
 need a hand-written oracle + wrapper but templated driver/yaml. **T4 (MLA, sparse, MX
 grouped, comm-fused) require a hand-authored seed and often a hand-written HIP/CK reference**
-— these are the ~40–60 genuinely-hand-crafted tasks; the other ~300 are semi-auto.
+- these are the ~40-60 genuinely-hand-crafted tasks; the other ~300 are semi-auto.
 
 ### 3.4 Reuse of existing code
 
 - `_genops.py` `driver_main`, `_snr_db`, `_flush_l2`, `_time_fn`, `_load_candidate`
-  (anti-hack module caching) are the driver core — extend, don't rewrite.
-- `aiter_ref.py` / `aiter_ref_attn.py` are the wrapper library — grow it op-by-op.
+  (anti-hack module caching) are the driver core - extend, don't rewrite.
+- `aiter_ref.py` / `aiter_ref_attn.py` are the wrapper library - grow it op-by-op.
 - `base.py:Task.from_dir` already parses the yaml schema; `registry.py` already does the
   family + held-out split. New families just need `operator_family()` cases.
 
@@ -470,7 +470,7 @@ cells → the completeness is *checkable*, not asserted.
 A task is invalid unless `driver.py --impl reference` calls a **real vendor kernel** (AITER
 symbol / hipBLASLt via `tgemm.mm` / CK / AOTriton SDPA). Framework-torch baselines are
 allowed **only** for ops AITER genuinely doesn't provide standalone (dense softmax, standalone
-GELU, elementwise breadth) — and these are explicitly labeled `baseline_class: framework` and
+GELU, elementwise breadth) - and these are explicitly labeled `baseline_class: framework` and
 capped at the T1/T2 breadth tier. An anti-cheat static gate (from `DATASET_SPEC.md` §4.2)
 rejects candidates that call the vendor lib / copy the reference.
 
@@ -481,7 +481,7 @@ Triton (and for T4, HIP/CK) kernel is benchmarked vs the vendor baseline on the 
 shape. Classify:
 - `headroom` (keep, primary tier): expert kernel ≥ 1.1× *or* the vendor kernel is Triton
   (beatable) *or* a documented fusion removes an HBM round-trip → real optimization target.
-- `parity` (keep, labeled `parity`): expert kernel lands 0.9–1.1×; still valuable as a "match
+- `parity` (keep, labeled `parity`): expert kernel lands 0.9-1.1×; still valuable as a "match
   the ASM" task (e.g. MLA decode vs ASM `.co`) but flagged so `fast_p` thresholds are set
   realistically.
 - `no_headroom` (drop or demote): vendor kernel is a hand-tuned ASM at roofline and no Triton
@@ -519,7 +519,7 @@ tasks as held-out. For the release we additionally:
   as eval-only to prevent memorization.
 - Publish a frozen `test` split hash so leaderboard submissions can't train on it.
 
-### 4.7 Release as an open artifact — **KORE-Bench**
+### 4.7 Release as an open artifact - **KORE-Bench**
 
 - **Package**: `tasks/` dirs (task.yaml + reference.py + seed_triton.py + driver.py) + a
   `manifest.jsonl` (per-task: family, dtype, regime, tier, baseline symbol, shapes, arch,
@@ -531,7 +531,7 @@ tasks as held-out. For the release we additionally:
 - **License**: dataset artifacts under a permissive license (task specs original;
   seed/oracle code MIT/Apache); each imported seed retains upstream license in `manifest`.
 - **Community/AMD value**: the only public benchmark that grades kernels vs the exact
-  production AITER/hipBLASLt/CK/AOTriton kernels on Instinct silicon — usable to (a) track
+  production AITER/hipBLASLt/CK/AOTriton kernels on Instinct silicon - usable to (a) track
   Triton-vs-vendor gaps AMD wants closed, (b) train/eval kernel-gen models, (c) file the
   headroom cases upstream to AITER.
 
@@ -566,18 +566,18 @@ Each first-50 task must pass §4.3 headroom + §4.5 verification before counting
 
 ### 5.2 Path to hundreds
 
-- **Phase A (weeks 1–3): harness.** Build `author.py`, `oracles.py`, per-family seed
+- **Phase A (weeks 1-3): harness.** Build `author.py`, `oracles.py`, per-family seed
   templates, extend `driver_main`; grow `aiter_ref*.py` wrappers for the first-50 baselines.
   Port the 8 KernelForge task specs. → ~50 tasks, harness proven.
-- **Phase B (weeks 3–6): auto-expand cells.** Cartesian-expand the first-50 specs across
+- **Phase B (weeks 3-6): auto-expand cells.** Cartesian-expand the first-50 specs across
   dtypes × regimes × shape-edges via `author.py`; mine AITER `op_tests/test_*.py` into specs
   (test_gemm_a8w8, test_mha, test_mla, test_moe, test_quant, test_pa, test_rmsnorm2d,
   test_rope, test_layernorm, test_silu_and_mul, test_topk_softmax). → ~200 tasks.
-- **Phase C (weeks 6–9): frontier T4 + breadth.** Hand-author MLA (decode/prefill/fp8),
+- **Phase C (weeks 6-9): frontier T4 + breadth.** Hand-author MLA (decode/prefill/fp8),
   sparse MLA (DSV4), VSA block-sparse, SLA bwd, MX grouped-GEMM (gfx950), comm-fused; port
   Liger losses (FLCE/JSD/DPO) and FlagGems MoE/quant ops; fold in KernelBench L1/L2 re-
-  baselined + GEAK ROCm_v1 as held-out. → **300–400 tasks**.
-- **Phase D (weeks 9–10): release.** Run `coverage_report.py` to green every ✅ cell; freeze
+  baselined + GEAK ROCm_v1 as held-out. → **300-400 tasks**.
+- **Phase D (weeks 9-10): release.** Run `coverage_report.py` to green every ✅ cell; freeze
   held-out `test` split; publish KORE-Bench artifact + `fast_p` leaderboard.
 
 ### 5.3 Acceptance gate for "definitive"

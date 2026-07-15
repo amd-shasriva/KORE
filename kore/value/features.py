@@ -16,11 +16,11 @@ Design analogue (KORE.pdf Sec 4.5):
 
 Two feature families are concatenated into one fixed-length vector:
   1. PROBLEM/CONTEXT features (operation, shape, dtype, parent stats, PMC
-     bottleneck) — what the move is being applied *to*.
+     bottleneck) - what the move is being applied *to*.
   2. CANDIDATE-SCHEDULE features extracted from the kernel SOURCE itself (BLOCK
      sizes, num_warps/num_stages, tiling area, vectorization width, tl.dot/MFMA
      presence, LDS/pipeline hints, loop structure). This is the Ansor/NLTSP move:
-     the cost model is *action-conditioned* — it sees the actual schedule the
+     the cost model is *action-conditioned* - it sees the actual schedule the
      candidate encodes, not only the problem it targets. When a move carries no
      source these features are all zero, so the vector layout (and every existing
      model) stays backward-compatible.

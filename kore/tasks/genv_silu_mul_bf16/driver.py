@@ -1,5 +1,5 @@
 """GENERATED vendor driver shim for silu_mul (bf16). See kore/tasks/_genops.py.
-Do not hand-edit — regenerate via kore/tasks/generate_vendor_ops.py."""
+Do not hand-edit - regenerate via kore/tasks/generate_vendor_ops.py."""
 import os
 import sys
 

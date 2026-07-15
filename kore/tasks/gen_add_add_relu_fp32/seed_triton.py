@@ -1,7 +1,7 @@
 """GENERATED seed Triton kernel for the add_add_relu (fp32) fusion.
 
 Pointwise FUSION out = f(a, b, c) computed in ONE pass (vs torch-eager multi-kernel).
-Regenerate via kore/tasks/generate_ops.py — do not hand-edit.
+Regenerate via kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 

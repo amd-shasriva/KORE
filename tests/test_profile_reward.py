@@ -97,7 +97,7 @@ def test_parses_rocprofv3_long_format(tmp_path):
 
 def test_profile_reward_never_dominates_fast_p():
     """A counter-efficient SLOW kernel must not out-reward a kernel that actually
-    beats the baseline — the profiler shapes, it never leads."""
+    beats the baseline - the profiler shapes, it never leads."""
     cfg = dataclasses.replace(CONFIG, profile_reward_weight=0.15)
     slow_but_efficient = compute_reward(_obs(0.9, prof=1.0), "x=1", dtype="bf16", cfg=cfg)
     genuinely_fast = compute_reward(_obs(1.3, prof=0.0), "x=1", dtype="bf16", cfg=cfg)

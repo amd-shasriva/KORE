@@ -43,7 +43,7 @@ The default (LoRA) run is a pure single-process ONE-command path. Passing
 THE HOOD: the campaign sets ``distributed=True`` on every training config and
 shells out to ``scripts/launch_distributed.sh`` (``accelerate launch`` with the
 shipped ``configs/accelerate_fsdp.yaml``) for the stages whose ``-m`` JSON entry
-supports it — the user never writes a config or runs accelerate.
+supports it - the user never writes a config or runs accelerate.
 
     # LoRA bring-up (single process, one command):
     PYTHONPATH=. python scripts/run_campaign.py --model Qwen/Qwen3-14B \
@@ -124,7 +124,7 @@ def _write_rows(path: Path, rows: list) -> None:
 # config and, for stages whose ``-m kore.policy.<stage> <config.json>`` entry can
 # read a JSON config, shells out to ``scripts/launch_distributed.sh`` (which runs
 # ``accelerate launch --config_file configs/accelerate_fsdp.yaml``). The user
-# never writes a config or invokes accelerate — the campaign spawns the sharded
+# never writes a config or invokes accelerate - the campaign spawns the sharded
 # processes. LoRA (the default) stays the pure single-process one-command path.
 # --------------------------------------------------------------------------- #
 
@@ -158,11 +158,11 @@ def _full_ft(ctx) -> bool:
 def _stage_supports_launcher(stage: str) -> bool:
     """True iff ``python -m kore.policy.<stage> <config.json>`` reads a JSON config.
 
-    All four training stages — ``midtrain``/``sft``/``dpo``/``grpo`` — ship that
+    All four training stages - ``midtrain``/``sft``/``dpo``/``grpo`` - ship that
     JSON ``__main__`` (detected via their ``<stage>_config_from_dict`` builder), so
     ``--full-ft`` shells each out to the FSDP launcher for real full-parameter
     sharded training. Detecting via the builder means a stage flips ON
-    automatically — and the campaign starts shelling it out — the moment its entry
+    automatically - and the campaign starts shelling it out - the moment its entry
     ships (no campaign change needed), and never silently degrades if one is
     absent.
     """
@@ -206,7 +206,7 @@ def _launch_distributed(ctx, stage: str, overrides: dict, *, run_name: str | Non
     # CalledProcessError handler below with the reproduce command.
     ds = cfg.get("dataset_path")
     if ds and not Path(ds).exists() and stage in ("sft", "dpo"):
-        _log(stage, f"WARNING: training dataset not found at {ds} — the build stage must "
+        _log(stage, f"WARNING: training dataset not found at {ds} - the build stage must "
                     f"run + write it first; the launcher will fail if it is truly missing.")
     _log(stage, f"full-FT: engaging FSDP under the hood (ONE command) -> {' '.join(cmd)} "
                 f"(config: model={cfg.get('model_id')} out={cfg.get('output_dir')}"
@@ -240,14 +240,14 @@ def _warn_inprocess_fullft(stage: str) -> None:
     _log(stage, f"WARNING: --full-ft for '{stage}' is NOT orchestrated via the campaign's "
                 f"one-command FSDP launcher: kore.policy.{stage} has no "
                 f"`-m kore.policy.{stage} <config.json>` JSON entrypoint. "
-                f"Running IN-PROCESS with distributed=True set on the config — this "
+                f"Running IN-PROCESS with distributed=True set on the config - this "
                 f"will NOT shard and cannot full-FT a 14B. See "
                 f"docs/DISTRIBUTED.md#full-ft-per-stage-status for the exact status + the "
                 f"manual sharded launch.")
 
 
 # --------------------------------------------------------------------------- #
-# Fix 6: dry-run import-check — fail fast on a missing symbol / signature drift
+# Fix 6: dry-run import-check - fail fast on a missing symbol / signature drift
 # --------------------------------------------------------------------------- #
 # (module, attribute, required, [param names that MUST exist on the callable]).
 # ``required=False`` symbols are provided by a parallel track (the serving
@@ -311,7 +311,7 @@ _IMPORT_CHECKS = [
     ("kore.eval.policies", "model_policy", True, ["checkpoint"]),
     # Fix 4 (dry-run fidelity): the REAL-RUN-ONLY symbols the audit found were
     # imported lazily inside each stage body (so a dry-run never touched them and
-    # drift could slip past the preflight). Import-check them here too — datagen /
+    # drift could slip past the preflight). Import-check them here too - datagen /
     # agentic generators, JSONL IO, the teacher, the DAgger SFT fold, the agentic
     # harness + tool reward, the anti-collapse ladder, and the value reranker.
     ("kore.data.gen_repair", "generate_repairs", True, ["task", "teacher", "env", "n"]),
@@ -362,7 +362,7 @@ def _dry_import_check() -> None:
                 sig = inspect.signature(obj)
                 missing = [p for p in params if p not in sig.parameters]
                 if missing:
-                    sink.append(f"{mod}.{attr}: signature drift — missing params {missing}")
+                    sink.append(f"{mod}.{attr}: signature drift - missing params {missing}")
             except (TypeError, ValueError):
                 pass  # some builtins/objects have no introspectable signature
     for w in warnings:
@@ -563,7 +563,7 @@ def run(args) -> int:
                 _log("plan", f"unknown stage '{st}', skipping")
                 continue
             if (not dry) and st in ctx["done_stages"] and _artifact_ok(ctx, st):
-                _log(st, "already complete (artifact present) — skipping [resume]")
+                _log(st, "already complete (artifact present) - skipping [resume]")
                 _emit_event(ctx, st, "skipped", 0.0, _artifact_of(ctx, st))
                 continue
 
@@ -610,9 +610,9 @@ def _apply_split(ctx) -> None:
     fixed function of operator family + arch, so it is independent of ``seed`` (the
     seed only reorders within each split). From the campaign's selected task set:
 
-      * ``train_tasks`` = selected tasks that are NOT held out — every training
+      * ``train_tasks`` = selected tasks that are NOT held out - every training
         stage (datagen/evolve/agentic/build/sft/dpo/grpo) runs on these ONLY;
-      * ``eval_tasks``  = the held-out generalization tasks — eval runs on these.
+      * ``eval_tasks``  = the held-out generalization tasks - eval runs on these.
         We prefer any selected held-out tasks; if none of the selected tasks are
         held out (the common bring-up case, e.g. ``--tasks rmsnorm_aiter,gemm_bf16``)
         we fall back to the registry's full held-out set so eval still measures
@@ -631,7 +631,7 @@ def _apply_split(ctx) -> None:
     held_selected = [t for t in selected if is_heldout(t)]
     eval_tasks = held_selected or list(split["heldout"])
 
-    if not train:  # degenerate: every selected task is held out — train on them
+    if not train:  # degenerate: every selected task is held out - train on them
         _log("plan", "WARNING: every selected task is held out; training on the "
                      "full selection (no train/eval split available)")
         train = list(selected)
@@ -750,7 +750,7 @@ def _stage_reverify(ctx):
     heldout = set(ctx.get("eval_task_ids") or [])
     task_ids = sorted(t for t in seen if t not in heldout)
     if not task_ids:
-        _log("reverify", "no existing shards to re-verify (fresh run) — skipping")
+        _log("reverify", "no existing shards to re-verify (fresh run) - skipping")
         return
     phys = _gpu_ids(ctx) or [0]
     # Oversubscribe: reverify is compile/CPU-bound with ~idle GPUs, so run K workers
@@ -777,10 +777,10 @@ def _stage_datagen(ctx):
         _log("datagen", "would generate repair/groups/wins per task (teacher + GPU env), "
                         "parallel-sharded across GPUs when --datagen-workers != 1")
         return
-    # Pillar 1: MAXIMUM verification rigor for the data pass — adversarial correctness
+    # Pillar 1: MAXIMUM verification rigor for the data pass - adversarial correctness
     # battery + shape augmentation + strong torch.compile baseline + cold-L2 timing.
-    # Set here (not globally) so it propagates to every verifier subprocess — incl.
-    # parallel datagen workers, which inherit os.environ — without slowing GRPO rollouts.
+    # Set here (not globally) so it propagates to every verifier subprocess - incl.
+    # parallel datagen workers, which inherit os.environ - without slowing GRPO rollouts.
     if getattr(ctx["args"], "rigorous_verify", True):
         from kore.data.verify_rigor import rigor_status, set_rigorous_verification
         set_rigorous_verification(True)
@@ -867,7 +867,7 @@ def _log_datagen_coverage(ctx):
 def _stage_agentic_synth(ctx):
     """CPU-only: reconstruct agentic tool-use trajectories from verified records.
 
-    No teacher, no GPU — reads the already-generated repair/wins/groups shards
+    No teacher, no GPU - reads the already-generated repair/wins/groups shards
     and writes native Hermes trajectories into ``data/agentic`` (which the SFT
     build then blends with the web tool-use replay). Turns the tens-of-GPU-hours
     agentic stage into a minutes-long CPU pass with real measured tool results.
@@ -881,7 +881,7 @@ def _stage_agentic_synth(ctx):
     _log("agentic", f"synthesized native tool-use from verified records "
                     f"(repair={summary.get('repair', 0)}, wins={summary.get('wins', 0)}, "
                     f"groups={summary.get('groups', 0)}, total={summary.get('total', 0)}) "
-                    f"— CPU-only, real measurements, arch={TRAIN_ARCH}")
+                    f"- CPU-only, real measurements, arch={TRAIN_ARCH}")
     LOG.event("agentic_synth", cap=cap, **summary)
 
 
@@ -934,9 +934,9 @@ def _stage_agentic(ctx):
 def _stage_evolve(ctx):
     """Optional Stage: evolutionary datagen (item 3).
 
-    Runs :func:`kore.data.evolve.evolve_task` per TRAIN task — a D-MAB (UCB1 +
+    Runs :func:`kore.data.evolve.evolve_task` per TRAIN task - a D-MAB (UCB1 +
     Page-Hinkley) bandit over mutation operators, MAP-Elites islands with ring
-    migration, and a value-model bench prefilter — to MANUFACTURE verified wins
+    migration, and a value-model bench prefilter - to MANUFACTURE verified wins
     and ranked preference groups. They are written as EXTRA ``wins``/``groups``
     shards so the build stage folds them in via its existing glob (dedup handles
     any overlap with the teacher-generated datagen).
@@ -998,7 +998,7 @@ def _rec_arch(rec):
 def _rec_is_heldout(rec, heldout_ids: set) -> bool:
     """True iff a record belongs to the AUTHORITATIVE held-out split (item 1).
 
-    Uses the registry's split logic — a record is held out if its ``task_id`` is
+    Uses the registry's split logic - a record is held out if its ``task_id`` is
     reserved, its arch is not the train arch, or its operator family is one of the
     reserved held-out families. This SUBSUMES the ad-hoc ``_force_holdout`` (which
     hard-coded gfx950 + "first op family") with the registry as the single
@@ -1107,7 +1107,7 @@ def _stage_build(ctx):
     group_records = [r for r in train if _rec_type(r) == "ranked_group"]
 
     # Near-duplicate dedup on WINS only (Pillar 5): collapse winning kernels that
-    # differ solely by renaming/whitespace/comments, keeping the fastest — the
+    # differ solely by renaming/whitespace/comments, keeping the fastest - the
     # shipped data had ~148 kernels recurring >=50x. Repairs are left intact: each
     # broken->fixed transition is a distinct lesson even when fixed kernels converge.
     from kore.data.build_datasets import dedup_near_source
@@ -1118,7 +1118,7 @@ def _stage_build(ctx):
     kernel_records = _non_wins + _wins
 
     # RFT / rejection sampling (ReST-EM): train SFT on the policy's HIGH-reward
-    # kernels only — keep all repair turns (they teach correctness) but REJECT the
+    # kernels only - keep all repair turns (they teach correctness) but REJECT the
     # sub-tau (slower-than-baseline) wins, keeping only the stratified, deduped >tau
     # wins. This concentrates mass on the >1x region by EXCLUSION (robust to the
     # mixer's content-hash dedup, unlike row duplication). rft_oversample>0 enables;
@@ -1159,8 +1159,8 @@ def _stage_build(ctx):
             f"~0.45); enable --use-hf or expand replay_samples -- an SFT mix with ~0% "
             f"general data wrecks retention (audit R2 sft C1)")
 
-    # Pillar 3: build DPO prompts IN THE INFERENCE CONTEXT — the GRPO turn-1
-    # transcript (system + seed-kernel task prompt) — so preferences are learned in
+    # Pillar 3: build DPO prompts IN THE INFERENCE CONTEXT - the GRPO turn-1
+    # transcript (system + seed-kernel task prompt) - so preferences are learned in
     # the same context the policy sees at deployment, not a bare one-shot. Map task
     # id -> transcript; unknown ids fall back to the generic prompt inside build_dpo.
     from kore.policy.format import build_task_prompt, build_transcript
@@ -1292,7 +1292,7 @@ def _stage_sft(ctx):
     dataset = ctx["data_root"] / "sft" / "multicap.jsonl"
     # Fix 1: --lora keeps the 14B validation run single-GPU-feasible (single
     # process). --full-ft engages REAL FSDP full fine-tuning via the launcher
-    # (accelerate) UNDER THE HOOD — still ONE user command.
+    # (accelerate) UNDER THE HOOD - still ONE user command.
     if _full_ft(ctx) and _stage_supports_launcher("sft"):
         ctx["sft_ckpt"] = _launch_distributed(ctx, "sft", {
             "model_id": sft_base, "dataset_path": str(dataset),
@@ -1530,7 +1530,7 @@ def _stage_grpo(ctx):
                      f"(held-out eval-only={sorted(eval_ids)})")
 
     # Fix 1: under --full-ft the GRPO RL stage runs FULL-PARAMETER + SHARDED
-    # (ZeRO-3 / FSDP) via the one-command launcher — there is NO LoRA shortcut for
+    # (ZeRO-3 / FSDP) via the one-command launcher - there is NO LoRA shortcut for
     # the RL stage under --full-ft. GRPO now ships the JSON `-m` entry
     # (grpo_config_from_dict + __main__), so --full-ft shells the RL stage out to
     # scripts/launch_distributed.sh exactly like sft/dpo (each curriculum phase =
@@ -1554,7 +1554,7 @@ def _stage_grpo(ctx):
     # exactly like sft/dpo (detected via `grpo_config_from_dict`, so this flips on
     # automatically the moment the sibling entry lands). If a full-FT run is asked
     # for on a build where the entry is not yet present, fall back in-process with
-    # a LOUD warning (distributed=True + use_lora=False still set) — NEVER a silent
+    # a LOUD warning (distributed=True + use_lora=False still set) - NEVER a silent
     # LoRA degrade.
     launcher_ok = _stage_supports_launcher("grpo")
     if fullft and not launcher_ok:
@@ -1603,7 +1603,7 @@ def _stage_grpo(ctx):
         return train_grpo(cfg, tasks=train_task_ids)
 
     if curriculum:
-        # Phase 1: correctness-only GRPO (mask the speed term) — learn to be correct.
+        # Phase 1: correctness-only GRPO (mask the speed term) - learn to be correct.
         p1_out = str(Path(ctx["args"].grpo_out) / "phase1_correctness")
         _log("grpo", f"curriculum phase-1 (correctness) init={init} -> {p1_out}")
         phase1_ckpt = _run_grpo(model_id=init, output_dir=p1_out,
@@ -1729,14 +1729,14 @@ def _retention_gate(ctx, *, stage, candidate, base):
     Uses ``retention_gate`` on the retention-suite ``scores`` of base vs candidate;
     a FAIL raises ``SystemExit`` with the formatted report (a real, enforced gate).
     The ONLY swallowed case is an unprovisioned serving backend (no GPU / no
-    ``load_generate``), which is logged LOUDLY as "gate NOT enforced" — never a
+    ``load_generate``), which is logged LOUDLY as "gate NOT enforced" - never a
     blanket except.
     """
     if ctx["dry"]:
         _log(stage, "would run retention gate (no general-bench regression vs base)")
         return
     if not getattr(ctx["args"], "retention_gate", True):
-        _log(stage, "retention gate SKIPPED (--no-retention-gate) — for fast "
+        _log(stage, "retention gate SKIPPED (--no-retention-gate) - for fast "
                     "smoke/debug only; a real run MUST enforce it")
         _emit_event(ctx, stage, "gate_skipped", 0.0, None)
         return
@@ -1748,21 +1748,21 @@ def _retention_gate(ctx, *, stage, candidate, base):
     try:
         from kore.policy.serve import load_generate
     except ImportError as e:
-        _log(stage, f"WARNING: retention gate NOT enforced — serving backend not "
+        _log(stage, f"WARNING: retention gate NOT enforced - serving backend not "
                     f"provisioned (kore.policy.serve.load_generate unavailable: {e})")
         _emit_event(ctx, stage, "gate_not_enforced", 0.0, None)
         return
     # Fix 5: the ONLY tolerated failure is the serving backend not being
-    # provisioned — i.e. an ImportError raised when load_generate tries to import
+    # provisioned - i.e. an ImportError raised when load_generate tries to import
     # vLLM/torch on a box without them. A CUDA OOM (RuntimeError /
     # torch.cuda.OutOfMemoryError) or a corrupt-checkpoint load error (OSError)
-    # is a REAL failure and MUST propagate to fail the run — never swallow it, or
+    # is a REAL failure and MUST propagate to fail the run - never swallow it, or
     # the hard-stop retention gate silently disables itself.
     try:
         base_gen = load_generate(base)
         cand_gen = load_generate(candidate)
     except ImportError as e:
-        _log(stage, f"WARNING: retention gate NOT enforced — serving backend not "
+        _log(stage, f"WARNING: retention gate NOT enforced - serving backend not "
                     f"provisioned (torch/vLLM unavailable: {e})")
         _emit_event(ctx, stage, "gate_not_enforced", 0.0, None)
         return
@@ -1771,7 +1771,7 @@ def _retention_gate(ctx, *, stage, candidate, base):
     # Per-benchmark drop tolerance. 0.005 (0.5%) was far too strict for the
     # high-variance LLM-judge benchmarks (e.g. mtbench swings ~±0.05 between runs),
     # so a domain-shift continued-pretrain trips it on judge NOISE while the real
-    # capability benchmarks hold — and SFT's ~45% general-data mix recovers it
+    # capability benchmarks hold - and SFT's ~45% general-data mix recovers it
     # downstream anyway. Use a principled default (2%) that still catches genuine
     # catastrophic forgetting; overridable via --retention-epsilon.
     epsilon = float(getattr(ctx["args"], "retention_epsilon", 0.02))
@@ -1821,7 +1821,7 @@ def build_parser() -> argparse.ArgumentParser:
     # How to produce the agentic tool-use SFT slice:
     #   live  = run the teacher+GPU AgentHarness per task (tens of GPU-hours).
     #   synth = reconstruct trajectories from ALREADY-verified repair/wins/groups
-    #           records (CPU-only, minutes, real measurements) — see synth_agentic.
+    #           records (CPU-only, minutes, real measurements) - see synth_agentic.
     #   both  = synth first, then live on top.
     # Default "synth": reconstruct native build/test/bench/pmc trajectories CPU-side
     # from verified repair/wins/groups (reliable, zero-GPU, always populates the

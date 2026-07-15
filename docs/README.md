@@ -1,4 +1,4 @@
-# `docs/` — deep-dive documentation
+# `docs/` - deep-dive documentation
 
 Long-form docs that complement the per-package READMEs. Start with the [repository README](../README.md) for the overview.
 

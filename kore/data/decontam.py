@@ -4,16 +4,16 @@ A credible "best dataset in the world" must PROVE the training data never
 contains the held-out generalization set. KORE reserves whole operator families
 (``attention``) + any arch-specific task as held-out (see
 ``kore.tasks.registry``), but today two leaks exist:
-  1. the midtrain corpus ingests ALL ``kore/tasks/*.py`` — including the held-out
-     attention kernels — as raw text (``source == "kore_tasks"``);
+  1. the midtrain corpus ingests ALL ``kore/tasks/*.py`` - including the held-out
+     attention kernels - as raw text (``source == "kore_tasks"``);
   2. nothing checks general-replay / mined corpus chunks for a copied held-out
      kernel.
 
 Two gates, both import-light (registry is imported lazily so this module stays
 usable in CPU tests without the task tree loaded eagerly):
 
-  * :func:`is_contaminated_record` — a labeled record whose op family is held out.
-  * :func:`build_heldout_ngrams` + :func:`contaminated_by_text` — n-gram
+  * :func:`is_contaminated_record` - a labeled record whose op family is held out.
+  * :func:`build_heldout_ngrams` + :func:`contaminated_by_text` - n-gram
     containment of arbitrary text against the held-out reference sources (catches
     a held-out kernel copied into a corpus/replay chunk).
 """
@@ -189,7 +189,7 @@ def decontaminate_chat_rows(rows: Iterable[dict], n: int = 8,
                             heldout_ngrams: Optional[set] = None) -> tuple[list[dict], dict]:
     """Drop chat rows ({"messages": [...]}) whose combined text overlaps held-out src.
 
-    For the general-replay slices (code/math/chat/tool) — a KernelBook/OpenCode row
+    For the general-replay slices (code/math/chat/tool) - a KernelBook/OpenCode row
     could carry a held-out attention kernel. Pass a prebuilt ``heldout_ngrams`` to
     avoid recomputing it per slice. Safe no-op when held-out sources can't be loaded.
     """

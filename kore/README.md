@@ -1,4 +1,4 @@
-# `kore/` — the KORE package
+# `kore/` - the KORE package
 
 The `kore` package is the whole KORE system: task registry, verified GPU environment, physics reward, correctness oracle, data factory, policy-training stages, and evaluation. This page is the **module map**; each subpackage has its own README with per-file detail, schemas, and diagrams.
 

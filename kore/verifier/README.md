@@ -1,4 +1,4 @@
-# `kore/verifier` — PMC counters & toolchain parsers
+# `kore/verifier` - PMC counters & toolchain parsers
 
 Schema + parsing for AMD GPU profiling. This package defines the **rocprofv3 performance-counter sets** that `KoreEnv` collects and parses their output (and hipcc/clang register/occupancy output) into typed objects. Collection itself lives in [`kore/env`](../env/README.md); the physics interpretation (stall/occupancy → residual) lives in [`kore/reward`](../reward/README.md) and [`kore/analysis`](../analysis/README.md).
 
@@ -48,7 +48,7 @@ Handles **both** CSV layouts rocprofv3 emits:
 | LONG (rocprofv3 1.x `*_counter_collection.csv`) | has `Counter_Name` + `Counter_Value` | fold rows per `(Dispatch_Id, Kernel_Name)` |
 | WIDE (older) | counters as columns | one row per dispatch; skip metadata columns |
 
-`wait_mfma_ratio`: `<5` compute-bound, `5–10` balanced, `>10` memory-bound.
+`wait_mfma_ratio`: `<5` compute-bound, `5-10` balanced, `>10` memory-bound.
 
 **Compiler output** (`parsers/compiler_output.py`): `parse_register_info` extracts VGPR/AGPR/SGPR/LDS/spill/occupancy. Heuristics (gfx942/gfx950): VGPR ≤ 256 → occupancy ≥ 2 possible; LDS ≤ 80 KB → dual-occupancy OK.
 

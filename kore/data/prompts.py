@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 
 # Single source of truth for the prompt/response contract lives in the POLICY
-# module (kore.policy.format) — the exact contract the model is trained to emit and
+# module (kore.policy.format) - the exact contract the model is trained to emit and
 # that the env/eval parse back. Data generation MUST request that same contract so
 # the teacher's demonstrations match deployment (no CHANGE-vs-PROPOSED_CHANGE or
 # dual-system-prompt drift). We re-export SYSTEM_PROMPT so existing
@@ -79,7 +79,7 @@ def build_turn_prompt(
         hints_block = f"\n## Tuning hints (gfx950 / CDNA4)\n{tuning_hints.strip()}\n"
 
     src_block = (
-        "\n## Parent Kernel Source (MODIFY THIS — do NOT write from scratch)\n"
+        "\n## Parent Kernel Source (MODIFY THIS - do NOT write from scratch)\n"
         f"```python\n{parent_source}\n```\n"
     )
 

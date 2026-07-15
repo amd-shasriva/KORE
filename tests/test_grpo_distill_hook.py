@@ -1,5 +1,5 @@
 """CPU tests for the GRPO co-evolution distillation hook (_build_distill_sink /
-_distill_group). No torch/GPU needed — grpo's module-level imports are CPU-safe."""
+_distill_group). No torch/GPU needed - grpo's module-level imports are CPU-safe."""
 
 from __future__ import annotations
 

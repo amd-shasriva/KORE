@@ -1,6 +1,6 @@
-# `kore/policy` — the training stages
+# `kore/policy` - the training stages
 
-The five-stage policy curriculum that turns a base LLM into a kernel-optimization agent, plus the prompt/response contract, pure RL math, FSDP wiring, and optional vLLM serving. Every training stage saves a consolidated HF checkpoint so the next stage loads it with `from_pretrained` — no FSDP mesh required for cross-stage handoff.
+The five-stage policy curriculum that turns a base LLM into a kernel-optimization agent, plus the prompt/response contract, pure RL math, FSDP wiring, and optional vLLM serving. Every training stage saves a consolidated HF checkpoint so the next stage loads it with `from_pretrained` - no FSDP mesh required for cross-stage handoff.
 
 ---
 
@@ -26,12 +26,12 @@ flowchart LR
 | `dpo.py` | Stage 2 | DPO on preference pairs; iterative rounds use IPO loss + refreshed reference |
 | `grpo.py` | Stage 3 | Multi-turn agentic GRPO (see below) |
 | `soup.py` | Stage 4 | WiSE-FT interpolation `θ = (1-α)·θ_base + α·θ_kore`, α-swept under a retention gate |
-| `configs.py` | — | All stage config dataclasses + FSDP/DeepSpeed helpers (no torch import) |
-| `format.py` | — | `SYSTEM_PROMPT`, transcript assembly, `parse_response`, turn feedback |
-| `anticollapse.py` | — | Pure anti-collapse math (RC-GRPO, AVSPO, SC-GRPO, GTPO) |
-| `dynamic.py` | — | `DynamicStepController` plateau early-stop |
-| `coevolve_distill.py` | — | `DistillationSink` — write verified co-evolution wins to JSONL |
-| `serve.py` | — | Optional vLLM-ROCm serving wrapper (not used by the native GRPO loop) |
+| `configs.py` | - | All stage config dataclasses + FSDP/DeepSpeed helpers (no torch import) |
+| `format.py` | - | `SYSTEM_PROMPT`, transcript assembly, `parse_response`, turn feedback |
+| `anticollapse.py` | - | Pure anti-collapse math (RC-GRPO, AVSPO, SC-GRPO, GTPO) |
+| `dynamic.py` | - | `DynamicStepController` plateau early-stop |
+| `coevolve_distill.py` | - | `DistillationSink` - write verified co-evolution wins to JSONL |
+| `serve.py` | - | Optional vLLM-ROCm serving wrapper (not used by the native GRPO loop) |
 
 ---
 
@@ -63,14 +63,14 @@ sequenceDiagram
 
 Techniques wired in (all with paper references in [`papers/`](../../../papers/)):
 
-- **Kevin multi-turn credit** — trajectory scored by the *best correct* kernel; per-turn discounted returns, correctness-gated.
-- **StarPO-S** — keep the top-variance groups (echo-trap stabilization).
-- **DAPO dynamic sampling** — oversample and refill until enough non-degenerate groups.
-- **Clip-higher** — asymmetric PPO surrogate; **k3 KL anchor** (`ref_anchor_coef`) to the post-SFT checkpoint (the only KL term).
-- **Anti-collapse ladder** — RC-GRPO reward tokens, AVSPO variance floor, SC-GRPO KL weighting, GTPO code-similarity partial rewards for all-fail groups.
-- **Value prefilter** — generate N, bench only top-k (~4× measurement efficiency; see [`kore/value`](../value/README.md)).
-- **Co-evolution** — `CoevolutionController` replaces round-robin task selection with a learnability/regret/novelty frontier (see [`kore/openended`](../openended/README.md)).
-- **Physics reward** — `reward_mode="residual"` selects the roofline reward; `reward_phase` drives the correctness→latency curriculum.
+- **Kevin multi-turn credit** - trajectory scored by the *best correct* kernel; per-turn discounted returns, correctness-gated.
+- **StarPO-S** - keep the top-variance groups (echo-trap stabilization).
+- **DAPO dynamic sampling** - oversample and refill until enough non-degenerate groups.
+- **Clip-higher** - asymmetric PPO surrogate; **k3 KL anchor** (`ref_anchor_coef`) to the post-SFT checkpoint (the only KL term).
+- **Anti-collapse ladder** - RC-GRPO reward tokens, AVSPO variance floor, SC-GRPO KL weighting, GTPO code-similarity partial rewards for all-fail groups.
+- **Value prefilter** - generate N, bench only top-k (~4× measurement efficiency; see [`kore/value`](../value/README.md)).
+- **Co-evolution** - `CoevolutionController` replaces round-robin task selection with a learnability/regret/novelty frontier (see [`kore/openended`](../openended/README.md)).
+- **Physics reward** - `reward_mode="residual"` selects the roofline reward; `reward_phase` drives the correctness→latency curriculum.
 
 ---
 
@@ -99,6 +99,6 @@ Techniques wired in (all with paper references in [`papers/`](../../../papers/))
 - **`summon_full_params` once per step** wraps the whole rollout; `synced_gpus=True` is mandatory or ragged completion lengths deadlock NCCL.
 - **Gradient checkpointing**: non-reentrant on the GRPO sharded path; reentrant for SFT/DPO/midtrain (flash→SDPA downgrade breaks the non-reentrant tensor-count check).
 - **SDPA, not flash_attention_2**, for GRPO/DPO: ROCm FlashAttention hard-faults on padded generate/logp batches.
-- **Agentic rollouts run serial on the distributed path** — ragged per-trajectory turn counts would desync collectives.
+- **Agentic rollouts run serial on the distributed path** - ragged per-trajectory turn counts would desync collectives.
 
 See [`docs/DISTRIBUTED.md`](../../docs/DISTRIBUTED.md) for sizing and the one-command launch. See also [`kore/data`](../data/README.md) (produces the corpora), [`kore/reward`](../reward/README.md), [`kore/eval`](../eval/README.md).

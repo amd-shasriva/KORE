@@ -1,4 +1,4 @@
-"""Pillar 2 — task data-coverage audit."""
+"""Pillar 2 - task data-coverage audit."""
 
 from __future__ import annotations
 

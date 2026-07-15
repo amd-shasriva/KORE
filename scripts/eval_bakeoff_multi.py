@@ -31,11 +31,11 @@ from pathlib import Path
 
 
 MODEL_PATHS = {
-    "seed": None,                    # seed_policy — the frozen starter kernel (lower bound)
+    "seed": None,                    # seed_policy - the frozen starter kernel (lower bound)
     "base": "Qwen/Qwen3-14B",        # untrained base model
     "midtrain": "runs/full/midtrain",
     "sft": "runs/full/sft",
-    "dpo": "runs/full/dpo",          # DPO v1 (degenerate — kept for comparison)
+    "dpo": "runs/full/dpo",          # DPO v1 (degenerate - kept for comparison)
     "dpo_v2": "runs/full/dpo_v2",    # DPO v2 (RPO-anchored re-train)
     "grpo": "runs/full/grpo",        # if/when present
 }

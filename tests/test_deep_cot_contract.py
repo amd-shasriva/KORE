@@ -6,18 +6,18 @@ slice. Frontier kernel-optimization reasoning is long, branchy and self-correcti
 (roofline math, hypotheses, counter-citations, hypothesize->measure->revise).
 
 These CPU-only tests pin the four guarantees of the fix:
-  1. BACK-COMPAT — a response with NO ``<think>`` block parses exactly as before
+  1. BACK-COMPAT - a response with NO ``<think>`` block parses exactly as before
      (kernel/analysis/proposed_change unchanged, and no deep block leaks into the
      extracted kernel); the ANALYSIS is no longer length-capped.
-  2. DEEP BLOCK ACCEPTED + PRESERVED — an optional ``<think>`` scratchpad is
+  2. DEEP BLOCK ACCEPTED + PRESERVED - an optional ``<think>`` scratchpad is
      parsed into an additive ``think`` field, round-trips through
      ``format_assistant_turn(..., think=...)``, and NEVER contaminates the kernel
      (even when the scratchpad quotes ``FULL_KERNEL:`` / a fenced block / a
      forbidden op as a counter-citation).
-  3. SUMMARIZED FOR CONTEXT — ``summarize_cot`` drops the scratchpad and keeps the
+  3. SUMMARIZED FOR CONTEXT - ``summarize_cot`` drops the scratchpad and keeps the
      ANALYSIS/PROPOSED_CHANGE conclusion; ``build_transcript`` re-renders a PRIOR
      turn WITHOUT its scratchpad, while the trained turn keeps its full CoT.
-  4. CONSISTENCY GATE — ``check_change_consistency`` catches a described-but-not-
+  4. CONSISTENCY GATE - ``check_change_consistency`` catches a described-but-not-
      implemented change and accepts a real one.
 
 Nothing here imports torch/vllm/transformers.
@@ -120,7 +120,7 @@ def test_single_source_of_truth_reexported_by_prompts():
     # data-gen turn prompt embeds the (deep-reasoning) contract too.
     btp = P.build_turn_prompt(parent_source="def k(): pass")
     assert "<think>" in btp and "PROPOSED_CHANGE" in btp and "FULL_KERNEL" in btp
-    # the offline normalizer detects the KORE system prompt by this prefix — it
+    # the offline normalizer detects the KORE system prompt by this prefix - it
     # MUST survive the contract edit or existing shards stop being canonicalized.
     assert SYSTEM_PROMPT.lstrip().startswith(
         "You are KORE, an expert AMD GPU kernel engineer")

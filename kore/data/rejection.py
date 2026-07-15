@@ -8,10 +8,10 @@ tau, default 1.0), then fine-tune on them. This concentrates probability mass on
 the >1x region the sparse RL reward struggles to reach.
 
 Naive rejection sampling has two well-documented failure modes, both guarded here:
-  1. Entropy collapse — a few easy tasks dominate the kept set, so the model
+  1. Entropy collapse - a few easy tasks dominate the kept set, so the model
      overfits them and generalization drops. We STRATIFY: round-robin across
      tasks with a per-task fraction cap, maximizing task entropy of the kept set.
-  2. Near-duplicate memorization — the same winning kernel appears many times.
+  2. Near-duplicate memorization - the same winning kernel appears many times.
      We DEDUP by normalized source (comments/whitespace stripped), keeping the
      fastest instance.
 
@@ -91,7 +91,7 @@ def stratified_rft_select(
 
     Round-robin across tasks (fastest-first within each task) so no single task
     exceeds ``per_task_frac_cap`` of the kept set until every other task is
-    exhausted — this maximizes task entropy and prevents easy-task collapse.
+    exhausted - this maximizes task entropy and prevents easy-task collapse.
     """
     wins = [r for r in records if passes_win_filter(r, tau, min_snr)]
     n_pass = len(wins)

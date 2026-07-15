@@ -66,7 +66,7 @@ def test_vendor_softmax_and_gemm_oracle_cpu():
 
 
 def test_vendor_reference_numerics_cpu():
-    """rmsnorm/silu_mul oracle sanity on CPU (fp32) — vs a direct torch compute."""
+    """rmsnorm/silu_mul oracle sanity on CPU (fp32) - vs a direct torch compute."""
     import torch
     import torch.nn.functional as F
 

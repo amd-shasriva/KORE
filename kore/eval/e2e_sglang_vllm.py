@@ -8,8 +8,8 @@ that gate.
 It is intentionally IMPORT-GUARDED and does NOT require a served model to
 import (so it is safe on a CPU box / in CI). The heavy dependencies (vllm /
 sglang / a running server) are only touched inside the functions. When a backend
-IS configured — an OpenAI-compatible ``base_url`` endpoint (served vLLM/SGLang)
-or a ``model_generate`` callable — :func:`e2e_throughput` / :func:`e2e_accuracy`
+IS configured - an OpenAI-compatible ``base_url`` endpoint (served vLLM/SGLang)
+or a ``model_generate`` callable - :func:`e2e_throughput` / :func:`e2e_accuracy`
 run for real (replay the workload, time tokens/s, score accuracy). They raise
 :class:`E2ENotProvisioned` ONLY when no backend is provided (with a message on
 how to provision one). :func:`e2e_gate` stays pure and testable.
@@ -123,7 +123,7 @@ def _validate_engine(engine: str) -> str:
 
 
 def _count_tokens_default(text: str) -> int:
-    """Whitespace token count — a backend-agnostic tokens/s proxy.
+    """Whitespace token count - a backend-agnostic tokens/s proxy.
 
     Pass ``count_tokens=`` (e.g. a real tokenizer's ``len(tok.encode(...))``) for
     exact accounting; the default keeps this offline/CPU-safe and deterministic.
@@ -137,7 +137,7 @@ def _openai_compatible_generate(
     """Build a ``model_generate`` that hits an OpenAI-compatible chat endpoint.
 
     Works against any vLLM/SGLang server started with the OpenAI API. Uses
-    ``requests`` if present, else stdlib ``urllib`` — both imported lazily so a
+    ``requests`` if present, else stdlib ``urllib`` - both imported lazily so a
     box without ``requests`` still imports this module fine.
     """
     endpoint = base_url.rstrip("/") + "/v1/chat/completions"
@@ -214,7 +214,7 @@ def e2e_throughput(
 ) -> E2EResult:
     """Measure real end-to-end serving throughput (tokens/s) over a fixed workload.
 
-    Runs for real whenever a backend is configured — either an OpenAI-compatible
+    Runs for real whenever a backend is configured - either an OpenAI-compatible
     ``base_url`` (a served vLLM/SGLang-ROCm model, with ``served_kernel`` already
     registered into the engine) or a ``model_generate`` callable. It replays
     ``workload``, times generation, and divides generated tokens by wall time.

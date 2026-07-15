@@ -3,8 +3,8 @@
 KORE's Stage-0 continues pretraining the base model on a domain corpus so the
 policy enters SFT already fluent in the ROCm/HIP/Triton/Composable-Kernel world
 (the strong-distribution-shift regime the plan calls out). This module assembles
-that corpus from REAL local sources on the box — no network, fully offline and
-deterministic — and mixes in a small general-replay slice to guard against
+that corpus from REAL local sources on the box - no network, fully offline and
+deterministic - and mixes in a small general-replay slice to guard against
 catastrophic forgetting during the shift.
 
 Sources (each reported separately in the returned counts):
@@ -27,7 +27,7 @@ Sources (each reported separately in the returned counts):
                                 (offline bundled fallback).
 
 Output: JSONL of ``{"text": <chunk>, "source": <source>}`` rows, chunked to
-``config.max_seq_length`` (a char-budget approximation so it stays CPU/offline —
+``config.max_seq_length`` (a char-budget approximation so it stays CPU/offline -
 no tokenizer download) and deduplicated by normalized-text hash.
 
 Everything is deterministic given ``seed`` (sorted file walks + seeded replay
@@ -153,7 +153,7 @@ def discover_repo_roots() -> list[Path]:
         try:
             rc = c.resolve()
             # is_dir() stats the path, which raises PermissionError (an OSError) for
-            # e.g. /root on a non-root box — must be inside the guard, not after it.
+            # e.g. /root on a non-root box - must be inside the guard, not after it.
             if rc in seen or not rc.is_dir():
                 continue
         except OSError:
@@ -292,7 +292,7 @@ def _load_amd_kernels(n: int, max_chars: int) -> list:
 
     The ``amd_successful_submissions`` subset holds ~60k competition kernels that
     PASSED correctness on real MI300 hardware (fp8-gemm, MoE, MLA-decode, all2all,
-    mxfp4, ...) — the highest-signal AMD-native (gfx942) kernel corpus available.
+    mxfp4, ...) - the highest-signal AMD-native (gfx942) kernel corpus available.
     Unlike KernelBook (NVIDIA/Inductor Triton), these are hand-optimized for AMD
     and carry the ``#!POPCORN`` problem header, so the model sees real gfx942
     idioms. ``code`` is stored as raw bytes; we decode + keep only passing rows.
@@ -381,7 +381,7 @@ def _near_dedup_corpus(rows: list[dict], threshold: float = 0.7,
 # pretraining. The real MI300 AMD competition kernels and the torch->Triton
 # translation pairs are the most direct signal for the target task (writing fast
 # device kernels), so they are seen more epochs than bulk repo code. Factors are
-# deliberately conservative (<=2x) — heavy repetition risks CPT memorization /
+# deliberately conservative (<=2x) - heavy repetition risks CPT memorization /
 # forgetting. Override via KORE_MIDTRAIN_WEIGHTS="src=factor,src=factor".
 _DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
     "amd_kernels": 2.0,           # real gfx942 MI300 kernelbot submissions
@@ -478,7 +478,7 @@ def build_midtrain_corpus(
     # (source_label, list[(path, text)]) built from local files only.
     collected: list[tuple[str, list[tuple[Path, str]]]] = []
 
-    # 1. KORE task Python (seed kernels, references, drivers) — EXCLUDING the
+    # 1. KORE task Python (seed kernels, references, drivers) - EXCLUDING the
     # held-out generalization families (attention) + arch-specific tasks, so the
     # eval set never leaks into pretraining (decontamination, Pillar 5). Task-suite
     # infrastructure files (_genops.py, base.py, ...) live directly under the root
@@ -517,7 +517,7 @@ def build_midtrain_corpus(
     collected.append(("pytorch_triton_pairs", pairs))
 
     # 2b. REAL PyTorch->Triton pairs from KernelBook (HF, use_hf only). ~18k verified
-    # (nn.Module -> Triton) pairs from torch.compile/Inductor — the best supervised
+    # (nn.Module -> Triton) pairs from torch.compile/Inductor - the best supervised
     # translate-and-fuse corpus. Used as CORPUS TEXT only (not executed), so the
     # NVIDIA/libdevice flavor of the Triton is fine for teaching the pattern.
     kb_pairs: list[tuple[Path, str]] = []
@@ -528,7 +528,7 @@ def build_midtrain_corpus(
 
     # 2c. REAL AMD MI300 passing kernels from GPUMODE/kernelbot-data (HF, use_hf
     # only). ~60k gfx942-native competition kernels (fp8-gemm/MoE/MLA/mxfp4/...) that
-    # passed correctness on real MI300 — the highest-signal AMD-native corpus, which
+    # passed correctness on real MI300 - the highest-signal AMD-native corpus, which
     # KernelBook (NVIDIA/Inductor Triton) does not cover.
     amd_kernels: list[tuple[Path, str]] = []
     if use_hf:
@@ -569,7 +569,7 @@ def build_midtrain_corpus(
             content_filter=None,
         )
         # Match keywords against the file's own name + nearest parent dirs (NOT
-        # the top-level repo dir, whose name — e.g. "KernelBench" — would else
+        # the top-level repo dir, whose name - e.g. "KernelBench" - would else
         # sweep in every markdown file). Content-sniff the head as a fallback.
         def _doc_relevant(p: Path, t: str) -> bool:
             tail = "/".join(part.lower() for part in p.parts[-3:])
@@ -584,7 +584,7 @@ def build_midtrain_corpus(
     # SOTA quality gate (The-Stack-v2 / StarCoder2 style): drop minified,
     # autogenerated, vendored/3rd-party, boilerplate/high-repetition, and
     # license-only files BEFORE chunking so continued-pretraining sees clean,
-    # high-signal domain code (and real dense kernels are preserved — the gate is
+    # high-signal domain code (and real dense kernels are preserved - the gate is
     # tuned not to reject long-line/low-comment kernels). Docs use the prose gate.
     # Gated by KORE_MIDTRAIN_QUALITY. Applied to every source incl. the mined AMD /
     # KernelBook sets so even those are screened for junk.

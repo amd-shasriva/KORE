@@ -1,21 +1,21 @@
 """Curation & balancing of the assembled SFT mixture (Pillar 6).
 
 Turns a raw, deduped, contract-unified pile of rows into a BALANCED, quality-
-ranked, curriculum-ordered dataset — the difference between "a lot of verified
+ranked, curriculum-ordered dataset - the difference between "a lot of verified
 data" and "the best training mixture in the world". Operates on final chat rows
 that carry the Pillar-5 ``_provenance`` block (kernel rows) and ``_source`` tag.
 
 Levers (all deterministic, PURE stdlib):
-  * :func:`quality_score` — a scalar from provenance (measured speedup, SNR,
+  * :func:`quality_score` - a scalar from provenance (measured speedup, SNR,
     verified, kind). Retention rows get a neutral score (kept, not ranked out).
-  * :func:`filter_trivial_wins` — drop win demos whose measured speedup is below a
-    floor (the shipped wins were 50% in 1.0-1.1x — barely-better demos dilute the
+  * :func:`filter_trivial_wins` - drop win demos whose measured speedup is below a
+    floor (the shipped wins were 50% in 1.0-1.1x - barely-better demos dilute the
     signal). Repairs are never dropped here (correctness lessons).
-  * :func:`balance_by_family` — cap how many rows any one operator family / dtype
+  * :func:`balance_by_family` - cap how many rows any one operator family / dtype
     contributes so gemm (many tasks) can't drown rmsnorm/quant.
-  * :func:`difficulty_score` + :func:`curriculum_order` — order easy->hard for a
+  * :func:`difficulty_score` + :func:`curriculum_order` - order easy->hard for a
     curriculum (Kevin/AlphaCode-style), by kernel length + inverse speedup margin.
-  * :func:`curate` — the orchestrator used by the build stage.
+  * :func:`curate` - the orchestrator used by the build stage.
 """
 
 from __future__ import annotations
@@ -152,7 +152,7 @@ def curriculum_order(rows: Iterable[dict], reverse: bool = False) -> list[dict]:
 _COMPUTE_BOUND_FAMILIES = {"gemm", "attention", "moe"}
 # Structured memory-bound ops with real fusion/reduction headroom (worth training on
 # more than a bare elementwise op). Everything whose family is a *raw op name* (add,
-# mul, abs, exp, row_sum, ...) — i.e. not one of the recognised structured families —
+# mul, abs, exp, row_sum, ...) - i.e. not one of the recognised structured families -
 # is treated as trivial (near-roofline single-elementwise/reduction; lowest headroom).
 _MEMORY_BOUND_FAMILIES = {"rmsnorm", "layernorm", "quant", "softmax", "rope",
                           "activation", "moe_router"}

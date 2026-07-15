@@ -1,4 +1,4 @@
-"""Pillar 5 — near-dup dedup + eval decontamination."""
+"""Pillar 5 - near-dup dedup + eval decontamination."""
 
 from __future__ import annotations
 

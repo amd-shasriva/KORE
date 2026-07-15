@@ -7,7 +7,7 @@ trip on the [M,inter] intermediate). Input x is [M, 2*inter] (gate || up halves
 concatenated on the last dim); output is [M, inter] fp8 + [M,1] fp32 scales.
 
 fp8 e4m3 encoding is arch-selected via ``FP8_DTYPE`` (OCP ``e4m3fn`` on
-gfx950/CDNA4 MI350X/MI355X — native; FNUZ ``e4m3fnuz`` on gfx942/CDNA3).
+gfx950/CDNA4 MI350X/MI355X - native; FNUZ ``e4m3fnuz`` on gfx942/CDNA3).
 Oracle: fp32 silu_mul, then the exact torch per-token quant. Correctness gate
 (see driver): (a) SNR of dequant ``xq*scale`` vs the TRUE fp32 silu_mul value,
 (b) candidate scales/codes match the oracle to fp8 rounding.

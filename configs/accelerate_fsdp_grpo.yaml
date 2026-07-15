@@ -1,4 +1,4 @@
-# KORE distributed GRPO (online RL) — FSDP SHARD_GRAD_OP (ZeRO-2 equivalent).
+# KORE distributed GRPO (online RL) - FSDP SHARD_GRAD_OP (ZeRO-2 equivalent).
 #
 # Used by scripts/launch_distributed.sh for the `grpo` stage ONLY:
 #   accelerate launch --config_file configs/accelerate_fsdp_grpo.yaml \

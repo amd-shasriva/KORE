@@ -1,4 +1,4 @@
-# `tests/` — the test suite
+# `tests/` - the test suite
 
 CPU-safe `pytest` tests (42 files) covering the science, reward, data, RL math, and campaign wiring. Tests import `kore.*` and avoid GPU work by design (roofline formulas, reward gating, family split, pure RL math, and wiring are all exercised without a device), so the suite runs on any box.
 
@@ -25,4 +25,4 @@ PYTHONPATH=. python -m pytest tests/test_campaign_wiring.py -q     # one file
 | Eval / gates | `test_eval.py`, `test_generalization.py`, `test_retention.py`, `test_champion.py`, `test_korebench.py` |
 | Infra | `test_campaign_wiring.py`, `test_obs.py` |
 
-`test_campaign_wiring.py` and `test_distributed.py` are the fastest confidence check that the orchestration and FSDP config are coherent. Some tests that need real datasets/permissions may skip in a bare environment — that is expected.
+`test_campaign_wiring.py` and `test_distributed.py` are the fastest confidence check that the orchestration and FSDP config are coherent. Some tests that need real datasets/permissions may skip in a bare environment - that is expected.

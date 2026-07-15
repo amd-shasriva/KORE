@@ -71,11 +71,11 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
     """Continued pretraining in the current process.
 
     Handles three regimes with one code path (mirrors ``sft.train_sft``):
-      * **FSDP full-FT** — reached under ``accelerate launch`` (the campaign shells
+      * **FSDP full-FT** - reached under ``accelerate launch`` (the campaign shells
         out here for ``--full-ft``). ``device_map`` is INCOMPATIBLE with FSDP
         (accelerate owns placement), so the model is loaded plain and the Trainer
         wraps it via ``fsdp``/``fsdp_config``.
-      * **LoRA** / **single-GPU full-FT smoke** — keep the legacy
+      * **LoRA** / **single-GPU full-FT smoke** - keep the legacy
         ``device_map="auto"`` path unchanged.
     """
     import torch

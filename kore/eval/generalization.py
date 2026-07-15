@@ -6,7 +6,7 @@ descend the residual on some operator families should transfer to families it
 never saw. This harness makes that claim falsifiable WITHOUT any training:
 
   1. Classify every task into a disjoint operator FAMILY (gemm, norm, activation,
-     reduction, attention, moe, positional, quant) via :func:`classify` — a
+     reduction, attention, moe, positional, quant) via :func:`classify` - a
      registry-independent, ordered pattern match on the task id / operation, so it
      scales to the full authoring-engine task zoo (100s of ops) and future ops.
   2. Hold out ENTIRE families (e.g. train excludes attention + moe) and assert

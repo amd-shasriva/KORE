@@ -4,7 +4,7 @@ C = act(A @ B [+ bias]) in ONE kernel (fp32 accumulate, tl.float16 store). torch
 this as matmul (-> hipBLASLt) + bias + activation = SEPARATE kernels, so fusing
 saves HBM round-trips of the [M,N] output -> real headroom vs the vendor path.
 Grouped tiling + K-mask (ROCm/gfx942-safe, libdevice-free act). Regenerate via
-kore/tasks/generate_ops.py — do not hand-edit.
+kore/tasks/generate_ops.py - do not hand-edit.
 """
 from __future__ import annotations
 

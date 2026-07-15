@@ -1,18 +1,18 @@
 """Profiler-counter-grounded optimization reasoning (Pillar 4).
 
-The gold-win reasoning is a templated string and QA is unverified teacher NL —
+The gold-win reasoning is a templated string and QA is unverified teacher NL -
 which teaches the model to *say* optimization words, not to reason from evidence.
 World-class kernel-optimization CoT follows PROFILE -> DIAGNOSE -> TRANSFORM ->
 MEASURE, grounded in REAL rocprofv3 hardware counters (MFMA util, VMEM traffic,
 LDS/VMEM stall waits). This module turns the counters KORE already collects
 (``kore.verifier.pmc.COUNTER_SETS`` via ``KoreEnv._collect_profile``) into:
 
-  * :func:`diagnose_bottleneck` — a counter-driven bottleneck classification
+  * :func:`diagnose_bottleneck` - a counter-driven bottleneck classification
     (memory-bound / LDS-bound / no-matrix-cores / compute-bound) with the specific
     evidence, so the teacher (and the demo) reason from measured signal.
-  * :func:`counter_grounded_prompt` — a teacher prompt that injects the real
+  * :func:`counter_grounded_prompt` - a teacher prompt that injects the real
     counters + the diagnosis and requires every claim to cite a counter.
-  * :func:`verify_reasoning_grounding` — a check that a produced reasoning actually
+  * :func:`verify_reasoning_grounding` - a check that a produced reasoning actually
     references the measured bottleneck (reject fabricated/ungrounded CoT).
 
 The pure diagnosis/prompt/verify core is CPU-testable; :func:`collect_counters`
@@ -47,11 +47,11 @@ def diagnose_bottleneck(counters: dict) -> tuple[str, str]:
     """Classify the kernel bottleneck from rocprofv3 counters. Returns (label, evidence).
 
     Heuristics (gfx942), in priority order:
-      * no-matrix-cores — MFMA issue count is ~0 while VALU is nonzero (the kernel
+      * no-matrix-cores - MFMA issue count is ~0 while VALU is nonzero (the kernel
         hand-rolls scalar FMAs instead of using tl.dot -> the matrix cores idle);
-      * lds-bound — LDS stall waits dominate total waits (bank conflicts / pressure);
-      * memory-bound — VMEM stall waits dominate (stalled on global loads);
-      * compute-bound — MFMA-heavy with few memory stalls (near the compute roofline).
+      * lds-bound - LDS stall waits dominate total waits (bank conflicts / pressure);
+      * memory-bound - VMEM stall waits dominate (stalled on global loads);
+      * compute-bound - MFMA-heavy with few memory stalls (near the compute roofline).
     Falls back to ("unknown", ...) when counters are missing.
     """
     if not counters:
@@ -66,7 +66,7 @@ def diagnose_bottleneck(counters: dict) -> tuple[str, str]:
 
     if valu > 0 and mfma == 0.0 and vmem > 0:
         return ("no-matrix-cores",
-                f"MFMA issues=0 while VALU={valu:.0f} — matrix cores idle; use tl.dot")
+                f"MFMA issues=0 while VALU={valu:.0f} - matrix cores idle; use tl.dot")
     if any_wait > 0:
         lds_frac = lds_wait / any_wait
         vmem_frac = vmem_wait / any_wait
@@ -258,7 +258,7 @@ def collect_counters(env: Any, source: str, shape: Any = None) -> Optional[dict]
     """Best-effort rocprofv3 counter collection for a kernel via the KoreEnv path.
 
     Returns ``{counter: value}`` or None if profiling is unavailable/failed. Fully
-    fail-safe (never raises) — grounded reasoning degrades to the templated path when
+    fail-safe (never raises) - grounded reasoning degrades to the templated path when
     counters can't be collected (e.g. profiler off, CPU box).
     """
     try:

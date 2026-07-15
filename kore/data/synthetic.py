@@ -9,7 +9,7 @@ HOW CAPTURE WORKS
 -----------------
 ``torch.compile(fn, backend="inductor")`` compiles ``fn`` on first call. With
 ``torch._inductor.config.trace.enabled = True`` Inductor writes a per-compile
-debug directory (``trace.debug_dir``) that contains ``output_code.py`` — the
+debug directory (``trace.debug_dir``) that contains ``output_code.py`` - the
 generated wrapper + Triton kernels. After running the compiled function once we
 glob that directory for ``output_code.py`` and return its contents.
 
@@ -101,9 +101,9 @@ def _validate_generated_triton(
     """Best-effort execute the captured Inductor module vs the torch reference.
 
     Returns:
-      * ``True``  — the captured ``call(...)`` ran and matched ``pytorch_fn``.
-      * ``False`` — it ran but produced a numerically wrong result (reject).
-      * ``None``  — execution could not be attempted (no GPU / no ``call`` entry /
+      * ``True``  - the captured ``call(...)`` ran and matched ``pytorch_fn``.
+      * ``False`` - it ran but produced a numerically wrong result (reject).
+      * ``None``  - execution could not be attempted (no GPU / no ``call`` entry /
         exec failed). The caller documents this and falls back to trusting
         Inductor's correct-by-construction lowering.
     """

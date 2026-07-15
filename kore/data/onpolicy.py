@@ -5,20 +5,20 @@ from *teacher* samples, we relabel/repair on the states the CURRENT POLICY
 actually visits, which is the DAgger no-regret argument (train on your own
 distribution, not the expert's).
 
-A "policy" here is any object with ``generate(messages: list[dict]) -> str`` —
+A "policy" here is any object with ``generate(messages: list[dict]) -> str`` -
 the exact duck type of :class:`kore.data.teacher.TeacherClient`. So a live model
 adapter (a served checkpoint, ``kore.policy.serve.load_generate``, or the GRPO
 ``_HFChatPolicy``) drops straight in wherever the teacher used to be.
 
 Three entry points:
 
-  * :func:`relabel_groups_on_policy` — sample candidate rewrites FROM THE POLICY
+  * :func:`relabel_groups_on_policy` - sample candidate rewrites FROM THE POLICY
     via the same path as ``gen_groups``, verify + rank them, and emit
     ``RankedGroupRecord``s (DPO preferences on states the policy visits).
-  * :func:`dagger_repairs` — roll the POLICY, collect the kernels it emits that
+  * :func:`dagger_repairs` - roll the POLICY, collect the kernels it emits that
     FAIL the verifier, and get an EXPERT (teacher) correction for each; with a
     ``teacher_frac`` beta that decays 30%->0% across rounds (classic DAgger).
-  * :func:`iterative_dpo` — orchestrate N rounds: relabel on-policy -> build DPO
+  * :func:`iterative_dpo` - orchestrate N rounds: relabel on-policy -> build DPO
     pairs -> (caller trains) -> refresh the reference; aggregating the union of
     all rounds' groups for the no-regret property.
 
@@ -68,7 +68,7 @@ def relabel_groups_on_policy(
 
     Identical generation/verification/ranking path as
     :func:`kore.data.gen_groups.generate_groups`, but the generator is the
-    *current policy* rather than the teacher — so the preference pairs are over
+    *current policy* rather than the teacher - so the preference pairs are over
     kernels the policy actually produces (the on-policy distribution). The
     verifier + ``rank_candidates`` / ``build_preferences`` (with the margin gate)
     are reused unchanged. Returns ``RankedGroupRecord``s ready for ``build_dpo``.
@@ -111,17 +111,17 @@ def iterative_dpo(
     """Run ``rounds`` of iterative on-policy DPO.
 
     Each round:
-      1. ``policy = policy_factory(round_idx, prev_ckpt)`` — load the current
+      1. ``policy = policy_factory(round_idx, prev_ckpt)`` - load the current
          policy (``prev_ckpt`` is the checkpoint trained last round, or ``None``
          on the first round). This is the reference-refresh handle.
       2. Relabel groups on-policy for every task (:func:`relabel_groups_on_policy`).
       3. AGGREGATE: union this round's groups with all prior rounds' groups
-         (``aggregate=True``, the DAgger no-regret property — training on the
+         (``aggregate=True``, the DAgger no-regret property - training on the
          union of every visited distribution). Set ``aggregate=False`` to train on
          the latest round only.
       4. Build DPO preference rows from the aggregated groups (``build_dpo``).
       5. If ``train_fn`` is given, call it with the round's data; its return value
-         (a checkpoint id) becomes ``prev_ckpt`` for the next round — i.e. the
+         (a checkpoint id) becomes ``prev_ckpt`` for the next round - i.e. the
          REFERENCE REFRESH: the newly trained policy is both the next round's
          generator and its frozen DPO reference.
 
@@ -213,7 +213,7 @@ def dagger_repairs(
     verified corrected kernel. This trains repair on the states KORE actually
     visits, not on injected/teacher-only breakages. A record is emitted only when
     the teacher's fix passes validation (``make_repair_record`` returns ``None``
-    otherwise — an unfixed failure is simply dropped).
+    otherwise - an unfixed failure is simply dropped).
 
     ``teacher_frac`` is the DAgger beta: that fraction of the ``n`` target is
     sourced from the TEACHER's own natural failures instead (mixing expert
@@ -254,7 +254,7 @@ def dagger_repairs(
                           task=task.task_id, idx=attempts, mode=mode)
                 continue
             if _failure_class(obs) is None:
-                continue  # the policy succeeded here — not a repair state
+                continue  # the policy succeeded here - not a repair state
             rec = make_repair_record(task, teacher, env, cand_src, obs,
                                      diagnostic=diagnostic)
             if rec is not None:

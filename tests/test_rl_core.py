@@ -297,7 +297,7 @@ def test_microbatch_grad_matches_global_token_mean_clip_higher_loss():
     Math legitimately changed (items 1 + 3): the objective is now the DAPO
     clip-higher importance-ratio surrogate ``-min(r*A, clip(r,1-lo,1+hi)*A)`` with
     ``r = exp(logp - old_logp)`` (turn-level geometric-mean ratio), aggregated as a
-    global token-mean ``sum(n_tok*term)/sum(n_tok)`` — NOT the old ratio-free
+    global token-mean ``sum(n_tok*term)/sum(n_tok)`` - NOT the old ratio-free
     sample-mean ``-adv*logp``. Sample tuple is now
     ``(ret, gen_inputs, ref_logp, old_logp, n_tokens, sc_weight)``.
     """
@@ -414,14 +414,14 @@ def test_prefilter_bench_indices_selects_topk(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# backend routing — KORE runs ONE native in-process GRPO loop on AMD (no verl)
+# backend routing - KORE runs ONE native in-process GRPO loop on AMD (no verl)
 # --------------------------------------------------------------------------- #
 def test_inprocess_backend_alias_is_the_fallback():
     assert grpo._train_grpo_inprocess is grpo._train_grpo_fallback
 
 
 def test_train_grpo_routes_to_native_inprocess(monkeypatch):
-    # Any backend value routes to the single native in-process loop — no verl,
+    # Any backend value routes to the single native in-process loop - no verl,
     # no server, no config. Self-contained on AMD.
     for backend in ("inprocess", "fallback", "auto", "anything"):
         seen = {}
@@ -436,7 +436,7 @@ def test_train_grpo_routes_to_native_inprocess(monkeypatch):
 
 
 def test_no_verl_symbols_remain():
-    # verl fully removed — the pipeline runs on pure AMD architecture.
+    # verl fully removed - the pipeline runs on pure AMD architecture.
     for sym in ("_train_grpo_verl", "build_verl_grpo_config", "_verl_available",
                 "kore_verl_reward", "_verl_hydra_overrides"):
         assert not hasattr(grpo, sym), f"{sym} should be removed"
@@ -524,7 +524,7 @@ def test_truncate_prompt_ids_left_truncates():
 
 
 # --------------------------------------------------------------------------- #
-# Fix 5: end-to-end — actually RUN _train_grpo_inprocess for 1+ steps on a TINY
+# Fix 5: end-to-end - actually RUN _train_grpo_inprocess for 1+ steps on a TINY
 # CPU model + a fake KoreEnv, driving the REAL loop (dynamic sampling, StarPO-S,
 # AVSPO, KL anchor, micro-batched clip-higher backward, save). GPU-only pieces
 # (the 14B forward) are replaced by a tiny nn.Module; everything else is real.

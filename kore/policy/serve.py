@@ -5,13 +5,13 @@ GRPO rollout to sample trajectories fast. vLLM is imported lazily so this module
 loads on a CPU box without vLLM installed.
 
 ROCm / gfx942 environment notes (set these before constructing the engine):
-  - ``RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1`` — when vLLM runs under
+  - ``RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1`` - when vLLM runs under
     Ray with tensor parallelism, Ray otherwise rewrites ``HIP_VISIBLE_DEVICES``
     per worker and the ROCm runtime loses the intended device mask. Setting this
     keeps the process-level device visibility that vLLM expects.
-  - ``VLLM_ROCM_USE_AITER=1`` — enable AMD AITER fused kernels (attention/MoE)
+  - ``VLLM_ROCM_USE_AITER=1`` - enable AMD AITER fused kernels (attention/MoE)
     for MI3xx, giving faster decode on gfx942.
-  - ``HIP_VISIBLE_DEVICES`` / ``ROCR_VISIBLE_DEVICES`` — pin the specific GPUs.
+  - ``HIP_VISIBLE_DEVICES`` / ``ROCR_VISIBLE_DEVICES`` - pin the specific GPUs.
 """
 
 from __future__ import annotations

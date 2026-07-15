@@ -23,7 +23,7 @@ the operator-level Speed-of-Light (eta = T_min / T_measured) model used by the P
 falsification harness. THIS module is counter/measurement-oriented; the two are
 intentionally decoupled so neither's edits break the other.
 
-Hardware constants (DENSE matrix-core peaks — no 2x structured sparsity — and
+Hardware constants (DENSE matrix-core peaks - no 2x structured sparsity - and
 datasheet HBM peak), per arch (see ``_ARCH_PEAKS``):
   * gfx950 / CDNA4 (MI350X, DEFAULT): HBM3E 8 TB/s, FP16/BF16 2.3 PFLOP/s,
     OCP-FP8/MXFP8/INT8 4.6, MXFP6/MXFP4 9.2, FP32 144.2 TFLOP/s, FP64 72.1;
@@ -51,12 +51,12 @@ from kore.verifier.pmc import (
 
 # --------------------------------------------------------------------------- #
 # Per-architecture hardware constants. FLOP/s are the DENSE matrix-core peaks (no
-# 2x structured sparsity — the right ceiling for tl.dot/MFMA kernels); byte/s is
+# 2x structured sparsity - the right ceiling for tl.dot/MFMA kernels); byte/s is
 # the datasheet HBM peak. The ACTIVE set is auto-selected from the running GPU
 # (see _detect_arch); override with KORE_ROOFLINE_ARCH=gfx950|gfx942|mi355x.
 # --------------------------------------------------------------------------- #
 _ARCH_PEAKS: dict[str, dict] = {
-    # gfx950 / CDNA4 — AMD Instinct MI350X (air-cooled, 2.2 GHz).  DEFAULT hardware.
+    # gfx950 / CDNA4 - AMD Instinct MI350X (air-cooled, 2.2 GHz).  DEFAULT hardware.
     "gfx950": {
         "name": "MI350X", "arch": "gfx950",
         "hbm_bw_bytes_per_s": 8.0e12,                              # 8 TB/s HBM3E
@@ -68,7 +68,7 @@ _ARCH_PEAKS: dict[str, dict] = {
         "num_cus": 256, "peak_clock_hz": 2.2e9,
         "infinity_cache_bytes": 256 * 1024 * 1024,
     },
-    # gfx950 / CDNA4 — AMD Instinct MI355X (direct-liquid-cooled, 2.4 GHz).
+    # gfx950 / CDNA4 - AMD Instinct MI355X (direct-liquid-cooled, 2.4 GHz).
     "mi355x": {
         "name": "MI355X", "arch": "gfx950",
         "hbm_bw_bytes_per_s": 8.0e12,
@@ -80,7 +80,7 @@ _ARCH_PEAKS: dict[str, dict] = {
         "num_cus": 256, "peak_clock_hz": 2.4e9,
         "infinity_cache_bytes": 256 * 1024 * 1024,
     },
-    # gfx942 / CDNA3 — AMD Instinct MI300X (previous gen).
+    # gfx942 / CDNA3 - AMD Instinct MI300X (previous gen).
     "gfx942": {
         "name": "MI300X", "arch": "gfx942",
         "hbm_bw_bytes_per_s": 5.325e12,
@@ -220,14 +220,14 @@ def roofline(flops: float, bytes: float, dtype: str = "bf16") -> dict:
     """Roofline classification for an op that does ``flops`` FLOPs moving ``bytes``.
 
     Returns a dict with:
-      * ``arithmetic_intensity``  — FLOP/byte (op intensity; dtype-independent).
-      * ``bound``                 — ``"compute"`` if AI >= ridge point else ``"memory"``.
-      * ``peak_attainable_flops`` — ``min(peak_flops, AI * peak_bw)`` FLOP/s, the
+      * ``arithmetic_intensity``  - FLOP/byte (op intensity; dtype-independent).
+      * ``bound``                 - ``"compute"`` if AI >= ridge point else ``"memory"``.
+      * ``peak_attainable_flops`` - ``min(peak_flops, AI * peak_bw)`` FLOP/s, the
                                      highest FLOP/s this op could reach on MI300X.
-      * ``ridge_point``           — peak_flops / peak_bw (FLOP/byte); ops above it
+      * ``ridge_point``           - peak_flops / peak_bw (FLOP/byte); ops above it
                                      are compute-bound.
-      * ``peak_flops`` / ``peak_bandwidth_bytes_per_s`` — the dtype's ceilings used.
-      * ``t_compute_ms`` / ``t_mem_ms`` / ``t_min_ms`` — the compute/memory time
+      * ``peak_flops`` / ``peak_bandwidth_bytes_per_s`` - the dtype's ceilings used.
+      * ``t_compute_ms`` / ``t_mem_ms`` / ``t_min_ms`` - the compute/memory time
                                      lower bounds and their max (the SOL runtime).
     """
     pf = peak_flops(dtype)
@@ -476,7 +476,7 @@ def canonicalize_label(label: str) -> str:
 
 
 def _sum_counter(counters: dict, *names: str) -> float:
-    """Sum the first present of each name (0.0 if absent) — matches grounded_reasoning."""
+    """Sum the first present of each name (0.0 if absent) - matches grounded_reasoning."""
     total = 0.0
     for n in names:
         v = counters.get(n)
@@ -542,7 +542,7 @@ def bottleneck_from_counters(counters: dict, vgpr: Optional[int] = None,
     # 1) matrix cores idle -----------------------------------------------------
     if valu > 0 and mfma == 0.0 and (vmem > 0 or valu > 0):
         return ("no-matrix-cores",
-                f"MFMA ops=0 while SQ_INSTS_VALU={valu:.0f} — matrix cores idle; use tl.dot")
+                f"MFMA ops=0 while SQ_INSTS_VALU={valu:.0f} - matrix cores idle; use tl.dot")
 
     # 2) occupancy-limited (low AND unable to hide latency) --------------------
     if occ is not None and occ.occupancy <= 0.25:
@@ -557,7 +557,7 @@ def bottleneck_from_counters(counters: dict, vgpr: Optional[int] = None,
             return ("occupancy-bound",
                     f"occupancy {occ.occupancy*100:.0f}% "
                     f"({occ.waves_per_simd:.1f}/{MAX_WAVES_PER_SIMD} waves per SIMD, "
-                    f"{lim}-limited{': ' + detail if detail else ''}) — too few waves to "
+                    f"{lim}-limited{': ' + detail if detail else ''}) - too few waves to "
                     f"hide latency; cut register/LDS pressure to raise occupancy")
 
     # 3) LDS-bound -------------------------------------------------------------
@@ -567,23 +567,23 @@ def bottleneck_from_counters(counters: dict, vgpr: Optional[int] = None,
         if lds_frac >= 0.30 and lds_frac >= vmem_frac:
             return ("lds-bound",
                     f"SQ_WAIT_INST_LDS {lds_frac:.0%} of SQ_WAIT_INST_ANY "
-                    f"({lds_wait:.0f}/{any_wait:.0f}) — LDS bank conflicts / pressure")
+                    f"({lds_wait:.0f}/{any_wait:.0f}) - LDS bank conflicts / pressure")
 
     # 4) memory-bound: low L2 reuse (bandwidth) or VMEM stalls -----------------
     if hit is not None and hit < 0.50 and (hbm is None or hbm > 0):
         return ("memory-bound",
                 f"L2 hit-rate {hit*100:.0f}% (TCC_HIT/(TCC_HIT+TCC_MISS)); {_hbm_mb()} "
-                f"traffic — HBM-bandwidth-bound; improve coalescing / reuse")
+                f"traffic - HBM-bandwidth-bound; improve coalescing / reuse")
     if any_wait > 0 and (vmem_wait / any_wait) >= 0.50:
         return ("memory-bound",
                 f"SQ_WAIT_INST_VMEM {vmem_wait / any_wait:.0%} of SQ_WAIT_INST_ANY "
-                f"({vmem_wait:.0f}/{any_wait:.0f}); {_hbm_mb()} — stalled on global loads")
+                f"({vmem_wait:.0f}/{any_wait:.0f}); {_hbm_mb()} - stalled on global loads")
 
     # 5) high L2 reuse but still memory-heavy -> cache/reuse regime ------------
     if hit is not None and hit >= 0.90 and vmem > 0 and mfma < vmem:
         return ("l2-bound",
                 f"L2 hit-rate {hit*100:.0f}% with VMEM-heavy issue "
-                f"(SQ_INSTS_VMEM={vmem:.0f} > MFMA={mfma:.0f}); {_hbm_mb()} — working set "
+                f"(SQ_INSTS_VMEM={vmem:.0f} > MFMA={mfma:.0f}); {_hbm_mb()} - working set "
                 f"fits L2, bound by cache/VMEM throughput not HBM")
 
     # 6) compute-bound ---------------------------------------------------------
@@ -591,12 +591,12 @@ def bottleneck_from_counters(counters: dict, vgpr: Optional[int] = None,
         hitnote = f", L2 hit-rate {hit*100:.0f}%" if hit is not None else ""
         return ("compute-bound",
                 f"MFMA-heavy (MFMA ops={mfma:.0f} >= SQ_INSTS_VMEM={vmem:.0f}{hitnote}) "
-                f"— near the compute roofline")
+                f"- near the compute roofline")
 
     # 7) weak fallbacks --------------------------------------------------------
     if hit is not None:
         return ("memory-bound",
-                f"L2 hit-rate {hit*100:.0f}%; {_hbm_mb()} — memory-dominated")
+                f"L2 hit-rate {hit*100:.0f}%; {_hbm_mb()} - memory-dominated")
     if vmem > 0 or vmem_active > 0:
         return ("memory-bound",
                 f"VMEM-heavy (SQ_INSTS_VMEM={vmem:.0f}, MFMA={mfma:.0f})")

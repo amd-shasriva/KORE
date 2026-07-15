@@ -251,7 +251,7 @@ def _correctness(driver: Path, shape_args: list[str], env: dict,
 # the named residual components: occupancy, memory-stall, MFMA (compute) utilization,
 # and active cycles. NB: gfx950 renamed the raw counters (e.g.
 # SQ_INSTS_VALU_MFMA_MOPS_BF16, not ..._MFMA_BF16), so the old SQ_* names collect
-# nothing — we request the derived metrics instead.
+# nothing - we request the derived metrics instead.
 _PMC_METRICS = ["OccupancyPercent", "MemUnitStalled", "MfmaUtil", "GRBM_GUI_ACTIVE"]
 
 

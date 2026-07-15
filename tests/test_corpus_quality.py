@@ -2,12 +2,12 @@
 
 Pure-CPU, no heavy deps. We check that:
 
-  * low-value files are DROPPED with the expected, actionable reason — minified
+  * low-value files are DROPPED with the expected, actionable reason - minified
     one-liners, ``@generated`` / protobuf stubs, vendored/third-party paths,
     lockfiles, whole-file ``clang-format off``, punctuation/binary blobs,
     trivial stubs, and self-repetitive dumps;
   * license-only / badge-only / too-short markdown docs are DROPPED;
-  * and — the property that matters most for a kernel corpus — REAL dense
+  * and - the property that matters most for a kernel corpus - REAL dense
     domain code is KEPT: a flash-attention Triton kernel, a HIP kernel, a
     Composable-Kernel fp8 GEMM ``.cu`` (SPDX header + a *local*
     ``clang-format off``/``on`` block), and a substantive ROCm perf doc.
@@ -40,7 +40,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 # Real-code fixtures (must be KEPT)
 # --------------------------------------------------------------------------- #
 # A real fused (flash) attention forward Triton kernel: long-ish lines, low
-# comment ratio, online-softmax rescaling — exactly the dense code a naive
+# comment ratio, online-softmax rescaling - exactly the dense code a naive
 # comment-ratio or duplicate-line filter would wrongly discard.
 FLASH_ATTN_TRITON = '''\
 import triton
@@ -96,7 +96,7 @@ def _flash_attn_fwd_kernel(
 
 # A second, DIFFERENT Triton kernel (rmsnorm). It shares many short lines with
 # the attention kernel above (``import``/``@triton.jit``/``tl.*`` idioms/arg
-# fragments) yet has a distinct body — the exact case the char-weighted
+# fragments) yet has a distinct body - the exact case the char-weighted
 # repetition guard must keep.
 RMSNORM_TRITON = '''\
 import triton
@@ -117,7 +117,7 @@ def _rmsnorm_fwd_kernel(X, W, Y, stride, N, eps, BLOCK_N: tl.constexpr):
 '''
 
 # A real HIP kernel: block-tiled reduction using shared (LDS) memory. Dense C++,
-# comment-sparse, long-ish lines — must be KEPT.
+# comment-sparse, long-ish lines - must be KEPT.
 HIP_KERNEL = '''\
 #include <hip/hip_runtime.h>
 

@@ -2,7 +2,7 @@
 
 Pillar 0 (contract unification) applied OFFLINE to data already on disk, so the
 current SFT/DPO shards match exactly what the policy is trained to emit at
-inference — without a full (GPU + teacher) regeneration. The single source of
+inference - without a full (GPU + teacher) regeneration. The single source of
 truth is :mod:`kore.policy.format`; this module only rewrites message *content*:
 
   * any KORE kernel SYSTEM prompt  -> the canonical ``SYSTEM_PROMPT``;
@@ -16,7 +16,7 @@ truth is :mod:`kore.policy.format`; this module only rewrites message *content*:
 
 It is PURE (stdlib + kore.policy.format), deterministic, idempotent, and NEVER
 touches non-kernel retention rows (general chat/code/math) or agentic tool
-trajectories — those carry their own contracts and are left byte-for-byte intact.
+trajectories - those carry their own contracts and are left byte-for-byte intact.
 
 CLI::
 
@@ -46,7 +46,7 @@ _KORE_SYS_PREFIX = "You are KORE, an expert AMD GPU kernel engineer"
 # _source tags whose ASSISTANT turns are kernel responses to canonicalize.
 _KERNEL_SOURCES = {"kernel_repair_opt"}
 # _source tags that are kernel-domain but whose assistant is natural language
-# (QA) — only their SYSTEM prompt is canonicalized, assistant left as-is.
+# (QA) - only their SYSTEM prompt is canonicalized, assistant left as-is.
 _KERNEL_NL_SOURCES = {"kernel_qa"}
 
 
@@ -184,7 +184,7 @@ def normalize_dpo_row(row: dict) -> tuple[dict, bool]:
 
     Preserves the row's ``_provenance`` (and lifts its baseline-anchored margin /
     weight / anchor to the top level for the trainer; see
-    :func:`_preserve_and_backfill_margin`) — the margin is NOT discarded.
+    :func:`_preserve_and_backfill_margin`) - the margin is NOT discarded.
     """
     changed = False
     out = dict(row)  # shallow copy carries _provenance, margin, weight, anchor verbatim

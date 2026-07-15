@@ -1,4 +1,4 @@
-"""KORE retention eval suite — general-capability harnesses (KORE.pdf Sec 5).
+"""KORE retention eval suite - general-capability harnesses (KORE.pdf Sec 5).
 
 KORE's headline claim is *not* "best kernel numbers"; it is "best kernel numbers
 WHILE matching-or-beating the base model on every general benchmark". Kernel
@@ -101,7 +101,7 @@ def load_bench(name: str, data_dir: Optional[Path] = None) -> list[dict]:
 #
 # The bundled JSONL files above are SMOKE-sized. For a *real* retention run we
 # want the full public splits. These are fetched via HuggingFace ``datasets``
-# — but that import (and the network round-trip) is deferred to call time and
+# - but that import (and the network round-trip) is deferred to call time and
 # wrapped so that ANY failure (missing dep, offline box, schema drift) falls
 # back to the bundled smoke set. That keeps this module import-clean and keeps
 # CI / this CPU box fully functional with no network.
@@ -372,7 +372,7 @@ _FULL_LOADERS: dict[str, Callable[[Optional[int]], list[dict]]] = {
 def load_full_bench(name: str, n: Optional[int] = None) -> list[dict]:
     """Load the full (HF) split for ``name`` mapped to the smoke row schema.
 
-    Raises on any failure (missing ``datasets``, offline, schema drift) — callers
+    Raises on any failure (missing ``datasets``, offline, schema drift) - callers
     (:func:`_resolve_bench_items`) treat that as the signal to fall back to smoke.
     """
     loader = _FULL_LOADERS.get(name)
@@ -394,7 +394,7 @@ def _resolve_bench_items(scorer) -> list[dict]:
     if scorer.full or _truthy_env("KORE_EVAL_FULL"):
         try:
             # cap the pulled split: explicit scorer.n, else KORE_EVAL_N (keeps the
-            # retention GATE fast — a few hundred items per bench is plenty of signal).
+            # retention GATE fast - a few hundred items per bench is plenty of signal).
             n = scorer.n
             if n is None:
                 try:
@@ -543,7 +543,7 @@ def _norm_letter(ans) -> str:
 
 
 # ---------------------------------------------------------------------------
-# MMLU — multiple-choice accuracy
+# MMLU - multiple-choice accuracy
 # ---------------------------------------------------------------------------
 
 _LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"]
@@ -602,7 +602,7 @@ class MMLUScorer:
 
 
 # ---------------------------------------------------------------------------
-# HumanEval — pass@1 via sandboxed exec
+# HumanEval - pass@1 via sandboxed exec
 # ---------------------------------------------------------------------------
 
 def format_humaneval_prompt(item: dict) -> str:
@@ -629,7 +629,7 @@ class HumanEvalScorer:
     def build_program(item: dict, completion: str) -> str:
         """Assemble prompt + completion + test into a runnable program.
 
-        Accepts either a bare function body (indented) or a full ``def`` — if the
+        Accepts either a bare function body (indented) or a full ``def`` - if the
         completion already re-declares the entry point we use it standalone.
         """
         comp = _strip_code_fences(completion)
@@ -656,7 +656,7 @@ class HumanEvalScorer:
 
 
 # ---------------------------------------------------------------------------
-# LiveCodeBench-style — timed code correctness
+# LiveCodeBench-style - timed code correctness
 # ---------------------------------------------------------------------------
 
 def format_livecodebench_prompt(item: dict) -> str:
@@ -715,7 +715,7 @@ class LiveCodeBenchScorer:
 
 
 # ---------------------------------------------------------------------------
-# IFEval-style — checkable instruction following
+# IFEval-style - checkable instruction following
 # ---------------------------------------------------------------------------
 
 def _check_instruction(spec: dict, response: str) -> bool:
@@ -813,7 +813,7 @@ class IFEvalScorer:
 
 
 # ---------------------------------------------------------------------------
-# BFCL-style — function/tool-calling accuracy
+# BFCL-style - function/tool-calling accuracy
 # ---------------------------------------------------------------------------
 
 def format_bfcl_prompt(item: dict) -> str:
@@ -881,7 +881,7 @@ class BFCLScorer:
 
 
 # ---------------------------------------------------------------------------
-# MT-Bench-style — LLM-judge (injectable)
+# MT-Bench-style - LLM-judge (injectable)
 # ---------------------------------------------------------------------------
 
 def default_stub_judge(question: str, answer: str, reference: Optional[str] = None) -> float:
@@ -967,7 +967,7 @@ def build_scorer(
     """Instantiate a scorer by bench name. ``judge`` applies only to MT-Bench.
 
     ``full``/``n`` select the FULL HuggingFace split (with offline fallback to
-    smoke) — see :func:`load_full_bench`.
+    smoke) - see :func:`load_full_bench`.
     """
     common = dict(data_dir=data_dir, full=full, n=n)
     if name == "mmlu":
@@ -1035,7 +1035,7 @@ def run_retention_suite(
     ``KORE_EVAL_FULL=1`` env var) to pull each bench's real HuggingFace split
     (see :data:`FULL_HF_SOURCES`); ``n`` caps items per bench. If ``datasets`` is
     missing, the box is offline, or any upstream schema drifts, each bench
-    silently falls back to its bundled smoke set — the chosen source is reported
+    silently falls back to its bundled smoke set - the chosen source is reported
     per bench under ``"sources"``. You can also point a scorer at an arbitrary
     split by constructing it with ``items=<rows>`` and passing ``scorers=``. A
     strong judge is passed via ``judge=`` for MT-Bench.

@@ -1,6 +1,6 @@
 # KORE Training-Data Design Specification (v1)
 
-Target: frontier ROCm GPU-kernel-generation model. Hardware: AMD Instinct MI325X, CDNA3, `gfx942`, wavefront 64, 304 CUs, 64 KB LDS/CU, 512 KiB VGPR file/CU, FP8 = **FNUZ** variant. (MX-FP4/FP8 native scaled-MFMA is **gfx950/CDNA4 only** — see Section 1.4.)
+Target: frontier ROCm GPU-kernel-generation model. Hardware: AMD Instinct MI325X, CDNA3, `gfx942`, wavefront 64, 304 CUs, 64 KB LDS/CU, 512 KiB VGPR file/CU, FP8 = **FNUZ** variant. (MX-FP4/FP8 native scaled-MFMA is **gfx950/CDNA4 only** - see Section 1.4.)
 
 This spec is directly implementable against the KORE codebase (`kore/kore/data/*`, `kore/kore/tasks/*`, `kore/kore/verifier/*`) and the record schemas in `kore/kore/data/schemas.py` (`RepairRecord`, `RankedGroupRecord`, `WinRecord`).
 
@@ -12,7 +12,7 @@ Five principles derived from the evidence (Kevin, ConCuR, GEAK, KORE.pdf) that e
 
 1. **The baseline is the production kernel, not torch.** Every performance label is a speedup vs the *real* serving op (AITER / hipBLASLt / rocBLAS / CK), measured on-box (`--impl reference`), never vs `torch.matmul`/eager. This is the single most important differentiator from KernelBench/Kevin (which use PyTorch Eager) and is already the KORE convention (`kore/kore/tasks/aiter_ref.py`, every `task.yaml` `comparison_baseline`). A model that only beats torch is worthless in production; a model that beats AITER is best-in-world.
 2. **Measured, not asserted.** Only *executed* outcomes enter the corpus. Every correctness/speedup label is produced by the verifier on real gfx942 silicon, re-verified independently, with a variance gate. No teacher-claimed number is ever trusted (Section 4).
-3. **Learn from the abundant, RL-manufacture the scarce.** Repairs and ranked candidates are cheap and plentiful; strong wins are scarce (~15–20 per ~300 audited trajectories per KORE.pdf §2). The curriculum warm-starts on the plentiful (repair SFT → DPO/RFT) then uses RL to produce wins (Kevin's result: 56%→82% correct via multi-turn RL).
+3. **Learn from the abundant, RL-manufacture the scarce.** Repairs and ranked candidates are cheap and plentiful; strong wins are scarce (~15-20 per ~300 audited trajectories per KORE.pdf §2). The curriculum warm-starts on the plentiful (repair SFT → DPO/RFT) then uses RL to produce wins (Kevin's result: 56%→82% correct via multi-turn RL).
 4. **Hard negatives are first-class data, labeled.** Reward hacking is the dominant failure at small scale (Kevin §6.2: 7B copies reference, recycles reference output tensor, wraps in try/except). We *manufacture* these as labeled negatives so the reward model / DPO explicitly learns to reject them (Section 2.6).
 5. **Conciseness of reasoning is a quality signal.** ConCuR's central finding: for a fixed task, the *shortest* CoT that achieves the *highest* speedup is the best training example. We adopt CoT-length × speedup as a curation score for reasoning traces (Section 3.6).
 
@@ -20,7 +20,7 @@ Five principles derived from the evidence (Kevin, ConCuR, GEAK, KORE.pdf) that e
 
 ---
 
-## 1. Coverage matrix — operator families × dtypes × shape regimes × backends
+## 1. Coverage matrix - operator families × dtypes × shape regimes × backends
 
 ### 1.1 Priority tiering (essential vs optional)
 
@@ -28,10 +28,10 @@ We rank operator families by Amdahl weight `f` (fraction of inference GPU time),
 
 | Tier | Rationale | Families |
 |---|---|---|
-| **P0 (essential — must saturate)** | Dominate inference time on every deployed model | Dense/quantized **GEMM** (fp16/bf16/fp8), **Flash-Attention prefill+decode** (causal, GQA), **fused MoE** GEMM+routing, **RMSNorm / fused-add-RMSNorm**, **SiLU/SwiGLU gated MLP**, **fp8 quant/dequant** (per-tensor + per-token/rowwise + block-scale) |
-| **P1 (essential — high value, model-specific)** | Large `f` on flagship models | **MLA decode + prefill** (DeepSeek-V3), **paged-KV attention** (vLLM/SGLang), **RoPE** (incl. partial/NTK), **grouped/batched GEMM**, **softmax / online-softmax**, **LayerNorm**, **sampling** (top-k/top-p/argmax), **KV-cache write/gather/copy** |
-| **P2 (optional — differentiators / frontier)** | Smaller `f` or emerging; give the model a moat | **Sliding-window / block-sparse attention** (VSA), **sparse-MLA decode**, attention **backward** (SLA bwd), **MoE MXFP4** (gfx950), **MXFP8 grouped GEMM** (gfx950), **comms-fusion** (all-reduce/all-gather + GEMM), **int8** GEMM, **speculative-decode** verify |
-| **P3 (breadth — cheap synthetic only)** | Long tail; teaches idiomatic Triton | elementwise (add/mul/cast), reductions, cumsum, `argmax`, dropout, activations (gelu/relu/tanh), loss functions, conv (from KernelBench L1) |
+| **P0 (essential - must saturate)** | Dominate inference time on every deployed model | Dense/quantized **GEMM** (fp16/bf16/fp8), **Flash-Attention prefill+decode** (causal, GQA), **fused MoE** GEMM+routing, **RMSNorm / fused-add-RMSNorm**, **SiLU/SwiGLU gated MLP**, **fp8 quant/dequant** (per-tensor + per-token/rowwise + block-scale) |
+| **P1 (essential - high value, model-specific)** | Large `f` on flagship models | **MLA decode + prefill** (DeepSeek-V3), **paged-KV attention** (vLLM/SGLang), **RoPE** (incl. partial/NTK), **grouped/batched GEMM**, **softmax / online-softmax**, **LayerNorm**, **sampling** (top-k/top-p/argmax), **KV-cache write/gather/copy** |
+| **P2 (optional - differentiators / frontier)** | Smaller `f` or emerging; give the model a moat | **Sliding-window / block-sparse attention** (VSA), **sparse-MLA decode**, attention **backward** (SLA bwd), **MoE MXFP4** (gfx950), **MXFP8 grouped GEMM** (gfx950), **comms-fusion** (all-reduce/all-gather + GEMM), **int8** GEMM, **speculative-decode** verify |
+| **P3 (breadth - cheap synthetic only)** | Long tail; teaches idiomatic Triton | elementwise (add/mul/cast), reductions, cumsum, `argmax`, dropout, activations (gelu/relu/tanh), loss functions, conv (from KernelBench L1) |
 
 **Rule:** P0 must have data in *every* dtype × shape-regime × backend cell that is physically meaningful (Section 1.5 marks the impossible cells). P1 must cover all shape regimes in bf16 + fp8. P2 gets primary+1 validation shape each. P3 is synthetic-only breadth (Section 3.5).
 
@@ -41,10 +41,10 @@ We rank operator families by Amdahl weight `f` (fraction of inference GPU time),
 |---|---|---|---|
 | bf16 | native | **30 dB** | default accum fp32 |
 | fp16 | native | **30 dB** (40 for pure GEMM per `gemm_fp16.yaml`) | overflow risk at large K |
-| fp8 e4m3 | **`float8_e4m3fnuz` (FNUZ)** — NOT OCP `e4m3fn` | **25 dB** | wrong variant silently mismatches AITER/hipBLASLt (`aiter_ref.py`) |
+| fp8 e4m3 | **`float8_e4m3fnuz` (FNUZ)** - NOT OCP `e4m3fn` | **25 dB** | wrong variant silently mismatches AITER/hipBLASLt (`aiter_ref.py`) |
 | fp8 e5m2 | `float8_e5m2fnuz` (FNUZ) | 25 dB | KV-cache / attention accumulation |
 | int8 | native | 30 dB (exact-ish) | per-row/col scales; W8A8 |
-| **mxfp4** (OCP microscaling, e2m1 + e8m0/32) | **gfx950 ONLY** (CDNA4 scaled MFMA) | 25 dB | on gfx942: emulated/dequant path only — label `arch=gfx950` |
+| **mxfp4** (OCP microscaling, e2m1 + e8m0/32) | **gfx950 ONLY** (CDNA4 scaled MFMA) | 25 dB | on gfx942: emulated/dequant path only - label `arch=gfx950` |
 | **mxfp8** (OCP e4m3 + e8m0/32) | **gfx950 ONLY** | 25 dB | K must be multiple of 32 (scale group) |
 | fp32 | native | 40 dB | reference/oracle only; rarely a kernel target |
 
@@ -54,8 +54,8 @@ We rank operator families by Amdahl weight `f` (fraction of inference GPU time),
 
 | Regime | Definition | Why it matters |
 |---|---|---|
-| **decode** | `seq_q = 1`, batch `1..N`, long KV (up to 32K–128K) | latency-bound, memory-bound, tiny-M GEMM; dominates serving |
-| **prefill** | large `seq_q` (512–8192), full attention | compute-bound; MFMA utilization |
+| **decode** | `seq_q = 1`, batch `1..N`, long KV (up to 32K-128K) | latency-bound, memory-bound, tiny-M GEMM; dominates serving |
+| **prefill** | large `seq_q` (512-8192), full attention | compute-bound; MFMA utilization |
 | **chunked-prefill / mixed** | `seq_q` in {128, 256, 512}, ragged batch | vLLM/SGLang default; varlen masking |
 | **small-batch decode** | batch {1, 8, 64} | occupancy cliffs, tail effects |
 | **peak-throughput** | batch {256, 512, 2048} | L2 thrashing (skill `moe_cache_thrashing_past_batch_480`) |
@@ -116,30 +116,30 @@ These are the exact shapes to bake into `task.yaml` `shapes:` blocks (`minimal` 
 | DeepSeek-V3 / R1 (MLA+MoE) | 7168 | 128/128→MLA | qk=576 (512+64), v=512 | 18432 dense / 2048 expert | 256/8 (+1 shared) | 129280 | kv_lora_rank=512, rope=64 |
 | Mixtral-8x7B | 4096 | 32/8 | 128 | 14336 | 8/2 | 32000 | |
 
-**GEMM (dense + fp8) — M×N×K.** Include square (compute-bound) and tall-skinny decode (memory-bound):
+**GEMM (dense + fp8) - M×N×K.** Include square (compute-bound) and tall-skinny decode (memory-bound):
 - Prefill/compute: `4096×4096×4096`, `8192×8192×4096`, `8192×14336×4096` (Llama MLP up), `4096×28672×8192` (70B), `2048×5120×5120` (Qwen3).
 - Decode/tiny-M (seq_q=1..N): `M∈{1,8,16,32,64,128}` × `N,K` from projections: `N=6144,K=4096` (Llama-8B qkv fused), `N=4096,K=4096` (o_proj), `N=28672,K=8192` (70B gate_up), `N=headdim*…`.
 - Vocab/logits GEMM: `M∈{1,64,2048}×N=128256×K=4096` (huge-N tail).
 - **Edge shapes (must include):** `K=4095` (non-multiple-of-32 → fp8 illegal, must fail/guard), `K=8191`, `M=1` (pure GEMV), `N=1`, `M=17` (non-pow2 tail), giant-K `K=28672`.
 
-**Attention (flash) — (batch, q_heads, kv_heads, seq_q, seq_kv, head_dim, causal):**
+**Attention (flash) - (batch, q_heads, kv_heads, seq_q, seq_kv, head_dim, causal):**
 - Prefill: `(4,32,8,4096,4096,128,causal)`, `(2,16,16,2048,2048,128,causal)`, `(8,64,8,8192,8192,128,causal)`, `(1,1,1,256,256,128,noncausal)` [minimal].
 - Decode (seq_q=1, long KV): `(bs,32,8,1,S,128)` for `bs∈{1,8,64,128}`, `S∈{1024,4096,16384,32768,131072}`.
 - Head-dim edges: `head_dim∈{64,128,192(!),256}`; `192` (non-pow2-ish, DeepSeek qk path) and `256` stress LDS.
 - GQA ratios: q/kv `∈{4:1, 8:1, 16:1, 1:1(MHA)}`.
 
-**MLA decode (DeepSeek-V3 constants — do NOT vary; from `mla_deepseekv3_decode.yaml`):** `kv_lora_rank=512, qk_rope_head_dim=64, qk_head_dim=576, v_head_dim=512, page_size=16, nhead=128, nhead_kv=1`; `batch∈{1,4,8}`, `max_seqlen_kv∈{512,4096,32768}`. Prefill adds `max_seqlen_q=4096`.
+**MLA decode (DeepSeek-V3 constants - do NOT vary; from `mla_deepseekv3_decode.yaml`):** `kv_lora_rank=512, qk_rope_head_dim=64, qk_head_dim=576, v_head_dim=512, page_size=16, nhead=128, nhead_kv=1`; `batch∈{1,4,8}`, `max_seqlen_kv∈{512,4096,32768}`. Prefill adds `max_seqlen_q=4096`.
 
-**MoE — (tokens, experts, top_k, hidden, inter):**
+**MoE - (tokens, experts, top_k, hidden, inter):**
 - Decode worst-case: `(1, 256, 8, 7168, 2048)` (DeepSeek), `(1, 8, 2, 4096, 14336)` (Mixtral).
 - Prefill scaling: tokens `∈{128, 512, 2048, 8192}`.
-- Grouped-GEMM MoE (from `mxfp8_grouped_gemm.yaml`): `total_m=65536, hidden=2880, inter=5760, G=32`, plus the **real unbalanced trace** tokens-per-expert `[327,105,1843,2724,...,16053,...,14682,...]` (sum 65536, G=32) — this jagged/0-token/16K-giant-expert case is a mandatory edge (Section 2.2).
+- Grouped-GEMM MoE (from `mxfp8_grouped_gemm.yaml`): `total_m=65536, hidden=2880, inter=5760, G=32`, plus the **real unbalanced trace** tokens-per-expert `[327,105,1843,2724,...,16053,...,14682,...]` (sum 65536, G=32) - this jagged/0-token/16K-giant-expert case is a mandatory edge (Section 2.2).
 
-**Norm / activation — (M, N):**
+**Norm / activation - (M, N):**
 - RMSNorm: `M∈{1,8,64,2048,4096,8192}` × `N∈{4096,5120,7168,8192}`; edge `N=8191` (non-pow2), `N=512` (tiny).
 - SiLU+mul: input `(M, 2*inter)`; `inter∈{14336,11008,17408,25600,2048}`; `M∈{1,64,2048,4096,8192}`.
 
-**RoPE — (batch, heads, seq, head_dim, rotary_dim):** full (`rotary_dim=head_dim=128`), partial (`rotary_dim=64` of 192, DeepSeek), NTK-scaled; `seq∈{1(decode),2048,8192}`.
+**RoPE - (batch, heads, seq, head_dim, rotary_dim):** full (`rotary_dim=head_dim=128`), partial (`rotary_dim=64` of 192, DeepSeek), NTK-scaled; `seq∈{1(decode),2048,8192}`.
 
 **KV-cache ops:** page sizes `∈{1,16,32}`; block tables with holes; `num_blocks∈{...}`; dtype bf16 + fp8 KV.
 
@@ -203,7 +203,7 @@ Each edge case below is a *data requirement*: there must exist (a) at least one 
 | # | Edge case | Detection | Notes |
 |---|---|---|---|
 | R1 | VGPR spill (>256 VGPR/thread) | compiler output parse (`verifier/parsers/compiler_output.py`), rocprofv3 VGPR count | tile too big; skills `reduce_vgpr_reload_lds`, `moe_register_aliasing` |
-| R2 | LDS overflow (>64 KB/CU on gfx942) | compile fail / occupancy=0 | **hard gfx942 limit 64 KB** (gfx950 has 160 KB — do not copy gfx950 tiles) |
+| R2 | LDS overflow (>64 KB/CU on gfx942) | compile fail / occupancy=0 | **hard gfx942 limit 64 KB** (gfx950 has 160 KB - do not copy gfx950 tiles) |
 | R3 | Occupancy cliff | rocprofv3 occupancy; a tile change halving waves/CU | skill `warp_tile_lds_coupling` |
 | R4 | Register spill to scratch (silent slowdown) | perf regression w/ correct result | must be caught by speedup label, not correctness |
 | R5 | num_warps/num_stages mis-tune (pipeline stall) | benchmark | `num_warps∈{4,8}`, tune `num_stages` (SYSTEM_PROMPT) |
@@ -217,14 +217,14 @@ These are the highest-leverage negatives (Kevin §6.2). Each is generated delibe
 | H1 | **Copy the reference** / call the oracle | AST scan: kernel imports/calls `reference`, `matmul_ref`, `torch.matmul`, `F.*` | DPO `rejected`; label `reward_hack:copy_reference` |
 | H2 | **Calls vendor lib** (aiter/rocBLAS/hipBLASLt/rocblas) | AST/string scan for `aiter.`, `hipblaslt`, `rocblas`, `torch.nn.functional` (SYSTEM_PROMPT already forbids) | DPO `rejected`; label `reward_hack:vendor_call` |
 | H3 | **try/except fallback** to torch on kernel failure | AST: `try` wrapping the kernel call with a torch fallback | `rejected`; label `reward_hack:try_except_fallback` |
-| H4 | **Recycle reference output tensor** (Kevin's harness bug) | run candidate FIRST, reference AFTER (KORE `driver.py` already loads candidate then computes ref — enforce ordering); allocate fresh output, poison-fill (NaN) input `out` | `rejected` + harness fix is mandatory |
+| H4 | **Recycle reference output tensor** (Kevin's harness bug) | run candidate FIRST, reference AFTER (KORE `driver.py` already loads candidate then computes ref - enforce ordering); allocate fresh output, poison-fill (NaN) input `out` | `rejected` + harness fix is mandatory |
 | H5 | **Partial compute** passes weak check | fuzz multiple randomized inputs + multiple shapes; compute-only-corner still fails worst-shape SNR | negative + drives multi-shape gate |
 | H6 | **Hardcoded output for the test shape** | randomized shapes at verify time (held-out shape not shown to model) | negative |
 | H7 | **No-op / identity** when reference≈identity | include non-identity refs; SNR fail | negative |
 | H8 | **Timing hack** (empty kernel, async not synced) | `torch.cuda.synchronize()` + CUDA events (KORE `bench` uses events + sync) | reject via correctness gate (speed only counts if correct) |
 | H9 | **Format hack** (claims FULL_KERNEL but reuses parent) | dedup by source hash; `extract_kernel` returns parent | drop / negative |
 
-**Volume target for hard negatives:** ≥ **8% of all Stage-2 DPO pairs** must have a reward-hack `rejected` side, spread across H1–H9, with H1/H2/H3 the majority (they are what a 14B base actually does). This is what prevents the 7B/14B reward-hacking collapse KORE.pdf and Kevin both document.
+**Volume target for hard negatives:** ≥ **8% of all Stage-2 DPO pairs** must have a reward-hack `rejected` side, spread across H1-H9, with H1/H2/H3 the majority (they are what a 14B base actually does). This is what prevents the 7B/14B reward-hacking collapse KORE.pdf and Kevin both document.
 
 ---
 
@@ -236,18 +236,18 @@ Record types (from `schemas.py`): **RepairRecord** (broken→fixed turn), **Rank
 
 | Corpus | Record type | Count (target) | Source split | Per op-cell |
 |---|---|---|---|---|
-| Synthetic torch→Triton (breadth) | SyntheticPair | **20,000–40,000** | KernelBook (18,162) + KORE-generated Inductor captures | broad |
+| Synthetic torch→Triton (breadth) | SyntheticPair | **20,000-40,000** | KernelBook (18,162) + KORE-generated Inductor captures | broad |
 | Repair transitions | RepairRecord | **60,000** | 70% injected-breakage (mutators), 30% natural teacher failures | ~2,500 |
 | Reasoning traces (concise CoT) | ReasoningTrace | **6,000** | teacher (Opus) + self-gen, ConCuR-curated | ~250 |
-| Ranked candidate groups | RankedGroupRecord | **12,000 groups** (k=3–7 → ~48k pairs) | 60% self-gen, 40% teacher | ~500 groups |
-| Verified wins (RFT/SFT-on-wins) | WinRecord | **2,500–4,000** | RL + teacher evolve | ~120 |
+| Ranked candidate groups | RankedGroupRecord | **12,000 groups** (k=3-7 → ~48k pairs) | 60% self-gen, 40% teacher | ~500 groups |
+| Verified wins (RFT/SFT-on-wins) | WinRecord | **2,500-4,000** | RL + teacher evolve | ~120 |
 | Hard negatives (labeled) | RepairRecord/DPO neg | **8,000** | deliberate injection (Section 2.6) | ~330 |
 
-Rationale for the pyramid: it mirrors the natural scarcity (KORE.pdf §2: of ~300 audited trajectories only ~15–20 wins). Repairs and rankings are cheap to manufacture at scale; wins are expensive (each needs a real evolve loop with GPU benchmarks) so we keep them scarce but high-purity. KernelBook gives cheap breadth (correct-by-construction Inductor output).
+Rationale for the pyramid: it mirrors the natural scarcity (KORE.pdf §2: of ~300 audited trajectories only ~15-20 wins). Repairs and rankings are cheap to manufacture at scale; wins are expensive (each needs a real evolve loop with GPU benchmarks) so we keep them scarce but high-purity. KernelBook gives cheap breadth (correct-by-construction Inductor output).
 
 ### 3.2 Per-stage mixing ratios
 
-**Stage 1 — repair-weighted SFT** (14B bring-up). Goal: raise compile+correctness far above base; learn to fix.
+**Stage 1 - repair-weighted SFT** (14B bring-up). Goal: raise compile+correctness far above base; learn to fix.
 
 | Component | Ratio | Notes |
 |---|---|---|
@@ -256,20 +256,20 @@ Rationale for the pyramid: it mirrors the natural scarcity (KORE.pdf §2: of ~30
 | ReasoningTrace (concise CoT) | **12%** | ConCuR: short CoT + high speedup teaches good reasoning |
 | WinRecord (SFT-on-wins) | **8%** | a few strong finals so the model sees "good" |
 
-**Stage 2 — RFT + DPO** (learn to rank). 
+**Stage 2 - RFT + DPO** (learn to rank). 
 
 | Component | Ratio | Notes |
 |---|---|---|
 | DPO pairs from RankedGroupRecord | **70%** | `faster-correct > slower-correct > incorrect > non-compiling` (`gen_groups.rank_candidates`) |
-| — of which hard-negative pairs | **≥8% (of DPO)** | Section 2.6 |
+| - of which hard-negative pairs | **≥8% (of DPO)** | Section 2.6 |
 | RFT (SFT on best-of-group + wins) | **30%** | `build_rft`: rank-0 candidate per group + win trajectories |
 
-**Stage 3 — multi-turn GRPO** (32B, learn to win). Data is *on-policy* (generated by the current policy against the fixed verifier); the static corpus only seeds it.
+**Stage 3 - multi-turn GRPO** (32B, learn to win). Data is *on-policy* (generated by the current policy against the fixed verifier); the static corpus only seeds it.
 
 | Component | Role |
 |---|---|
 | WinRecord (seed) | warm-start / off-policy replay buffer |
-| On-policy trajectories | 16 parallel × 4 refinement turns (train), 8 turns (test) — Kevin recipe; each turn = one training sample; summarize prior CoTs to bound context; discounted intermediate reward across turns |
+| On-policy trajectories | 16 parallel × 4 refinement turns (train), 8 turns (test) - Kevin recipe; each turn = one training sample; summarize prior CoTs to bound context; discounted intermediate reward across turns |
 | Group-relative advantage | `A_i=(r_i-mean r)/(std r+ε)`; reward-conditioned + turn-level credit to avoid zero-advantage collapse on ties (KORE.pdf §3, refs [8][9][10]) |
 
 ### 3.3 Memory-bound vs compute-bound balance
@@ -310,7 +310,7 @@ Guidance: teacher share should *decline* across stages (30% → ~0% at Stage 3).
 
 For each task, sample **5** candidate (CoT, kernel) pairs from the teacher. Keep a trace iff:
 - (a) it is the **shortest CoT among the 5 that also achieves the max measured speedup** (ConCuR part a, ~80% of traces), OR
-- (b) speedup vs AITER baseline **> 1.5×** regardless of length (ConCuR part b — high-value kernels), OR
+- (b) speedup vs AITER baseline **> 1.5×** regardless of length (ConCuR part b - high-value kernels), OR
 - (c) needed to balance single-op vs fusion paradigm ratio (ConCuR part c).
 
 Strip chain-of-thought from prior turns in multi-turn contexts (summarize) to prevent context explosion (Kevin recipe). Store `cot_tokens` and `speedup` on every ReasoningTrace for later re-curation.
@@ -323,11 +323,11 @@ Strip chain-of-thought from prior turns in multi-turn contexts (summarize) to pr
 
 Every correctness/perf label MUST be produced by this pipeline (extends `verifier/test.py`, `verifier/bench.py`, and each `driver.py`):
 
-1. **Multi-shape correctness.** Score the **worst** shape, not the average (KORE.pdf §4: "score the worst shape"). Run `minimal + primary + all validation` shapes; a kernel passes only if the *minimum* SNR over shapes ≥ threshold. KORE `driver.run_correctness` already computes `worst = min(...)` over seeds — extend to iterate shapes too.
-2. **Randomized-input fuzzing.** ≥5 random seeds per shape (KORE uses seeds `[0]` normally, `[0..4]` in `stability`/`determinism` mode — make ≥5 the default for corpus generation). Include the numerical stress seeds from Section 2.1 (×1e2, ×1e-4, zero-rows).
+1. **Multi-shape correctness.** Score the **worst** shape, not the average (KORE.pdf §4: "score the worst shape"). Run `minimal + primary + all validation` shapes; a kernel passes only if the *minimum* SNR over shapes ≥ threshold. KORE `driver.run_correctness` already computes `worst = min(...)` over seeds - extend to iterate shapes too.
+2. **Randomized-input fuzzing.** ≥5 random seeds per shape (KORE uses seeds `[0]` normally, `[0..4]` in `stability`/`determinism` mode - make ≥5 the default for corpus generation). Include the numerical stress seeds from Section 2.1 (×1e2, ×1e-4, zero-rows).
 3. **Held-out verification shapes.** Verify on at least one shape **never shown to the model** (defeats hardcoding, H6). KORE.pdf §4 explicitly includes held-out shapes in the SNR check.
 4. **SNR gate + allclose.** SNR ≥ 30 dB (bf16/fp16), ≥ 25 dB (fp8/MX), with `atol=rtol=1e-2` allclose as secondary (KernelBench convention). fp8 GEMM driver uses `atol=5e-1,rtol=5e-2` with SNR as the real gate.
-5. **Determinism reruns.** Re-run the winning kernel ≥3× (fresh process). If SNR/wall variance exceeds tolerance (nondeterminism, C2), **flag and quarantine** — do not admit to corpus.
+5. **Determinism reruns.** Re-run the winning kernel ≥3× (fresh process). If SNR/wall variance exceeds tolerance (nondeterminism, C2), **flag and quarantine** - do not admit to corpus.
 6. **Independent re-verification.** Re-verify accepted wins in a *separate process / separate harness invocation* (KORE.pdf §4: "re-verify independently"). Candidate is loaded and run **before** the reference (defeats output-recycling hack H4).
 7. **Timing hygiene.** Warmup (≥10 iters) + median of ≥30 timed iters + CUDA-event timing + `torch.cuda.synchronize()` + **variance gate CV < 3%** (KORE.pdf §4). Reject measurements with CV ≥ 3%.
 8. **Reward is lexicographic.** `r = 1[correct] · log(T_base / T_cand)`. Speed counts only if correct; a fast-but-wrong kernel scores 0. No dense/intermediate compile-or-run reward (KORE.pdf §4; prevents over-optimization cheating).
@@ -348,7 +348,7 @@ Before a candidate is even benchmarked, run a static scan (cheap, deterministic)
 Use `leakage_split(by=("operation","shape"))` (exists) so **no op×shape group crosses train/val/test**. Additionally hold out:
 - **≥1 whole operator family** end-to-end (KORE.pdf §5 evaluates on "one held-out operator family"). Recommend holding out **grouped-GEMM MoE** or **MLA prefill** as the never-trained eval family.
 - **Held-out shapes within trained ops** (Section 4.1 #3).
-- **Held-out arch:** train shape/config on gfx942; keep a small gfx950-labeled slice (MX ops) as an OOD generalization probe — never train the model to assume gfx950 LDS (160 KB) tiles on a gfx942 target.
+- **Held-out arch:** train shape/config on gfx942; keep a small gfx950-labeled slice (MX ops) as an OOD generalization probe - never train the model to assume gfx950 LDS (160 KB) tiles on a gfx942 target.
 - **Provenance-based holdout:** hold out entire source repos (e.g. all kernels from one GitHub repo in KernelBook) from train to prevent memorization.
 
 ### 4.5 Labeling & provenance (schema additions)
@@ -378,24 +378,24 @@ A record is admitted to the training corpus iff: verified on ≥ N_shapes (≥3)
 
 ---
 
-## 5. Existing datasets to reuse/adapt — and their gaps for AMD
+## 5. Existing datasets to reuse/adapt - and their gaps for AMD
 
 | Dataset | Local path / URL | What it gives KORE | Gap for gfx942/AMD | Action |
 |---|---|---|---|---|
 | **KernelBench** (L1 100, L2 100, L3 50, L4 20) | `repos/KernelBench/KernelBench/level{1..4}` | 270 PyTorch reference modules; the *task specifications* (op + reference) and the `fast_p` metric | CUDA-oriented; baseline is **torch eager**, not AITER; no Triton/HIP AMD kernels; no fp8/MoE/MLA depth | Reuse the **reference modules as task specs**; re-target baseline to AITER on-box; port to KORE `task.yaml` + `driver.py`. Use L1 (basic ops) + L2 (fusion) for breadth; adopt `fast_p@1.2` as the win metric (KORE.pdf §5). |
-| **GEAK-eval TritonBench-revised** (184) | `repos/GEAK-eval/geak_eval/data/TritonBench/data/TritonBench_G_v1/*` (185 files) | 184 real Triton kernels with harnesses; attention/GLA/retention/linear-attn breadth | Some kernels needed AMD fixes (GEAK: 37/184 failed on AMD — shared-mem errors, invalid HIP args); harnesses assume NVIDIA idioms | Reuse as **held-out eval + SFT breadth**; run through the AMD-fix pass GEAK did; do NOT leak into train (it's an eval bench). |
-| **GEAK-eval ROCm bench** (30–31) | `repos/GEAK-eval/geak_eval/data/ROCm/data/ROCm_v1/*` (31 files) | Real AMD ROCm kernels: `gemm.py`, `layernorm.py`, `moe_gemm.py`, `rmsnorm_fwd/bwd.py`, `test_flashattention_fwd.py`, `test_chained_dot_fp8.py`, `test_matmul_MXFP.py` | Only 31 kernels; the *most* AMD-authentic set available but tiny | **Highest-value seed set.** Use as gold seeds for repair-mutation and as the primary held-out AMD eval. `test_chained_dot_fp8` and `test_matmul_MXFP` directly inform fp8/MX coverage. |
+| **GEAK-eval TritonBench-revised** (184) | `repos/GEAK-eval/geak_eval/data/TritonBench/data/TritonBench_G_v1/*` (185 files) | 184 real Triton kernels with harnesses; attention/GLA/retention/linear-attn breadth | Some kernels needed AMD fixes (GEAK: 37/184 failed on AMD - shared-mem errors, invalid HIP args); harnesses assume NVIDIA idioms | Reuse as **held-out eval + SFT breadth**; run through the AMD-fix pass GEAK did; do NOT leak into train (it's an eval bench). |
+| **GEAK-eval ROCm bench** (30-31) | `repos/GEAK-eval/geak_eval/data/ROCm/data/ROCm_v1/*` (31 files) | Real AMD ROCm kernels: `gemm.py`, `layernorm.py`, `moe_gemm.py`, `rmsnorm_fwd/bwd.py`, `test_flashattention_fwd.py`, `test_chained_dot_fp8.py`, `test_matmul_MXFP.py` | Only 31 kernels; the *most* AMD-authentic set available but tiny | **Highest-value seed set.** Use as gold seeds for repair-mutation and as the primary held-out AMD eval. `test_chained_dot_fp8` and `test_matmul_MXFP` directly inform fp8/MX coverage. |
 | **KernelBook** (18,162 torch↔Triton) | https://huggingface.co/datasets/GPUMODE/KernelBook (+ local `data/synthetic.py` regenerates via Inductor) | Massive breadth of correct-by-construction torch→Triton pairs; idiomatic Triton | Inductor targets NVIDIA; **not** MFMA/gfx942-tuned; no fp8/MoE/MLA; no perf-vs-AITER labels | Use for **Stage-1 breadth only** (25% of SFT). Regenerate on gfx942 with `torch.compile` to capture AMD-flavored Triton where possible. Never use for perf labels. |
 | **ConCuR** (4,892 CoT+CUDA) | https://arxiv.org/abs/2510.07356 | The *curation method* (short-CoT×high-speedup) and evidence that concise CoT → better kernels | CUDA, not Triton/HIP; torch-eager baseline | Reuse the **curation pipeline** (Section 3.6), not the data. Regenerate Triton/HIP CoT traces with the Opus teacher on KORE tasks. |
-| **KernelForge task suite** | `repos/KernelForge-main/tasks/*.yaml` | 9 production-grade AMD task specs with real shapes, constraints, phase gates, and measured results (MLA, MoE-MXFP4, MXFP8 grouped GEMM, flash-attn, sparse attn, SLA bwd, gemm fp16) | gfx950-targeted for MX ops; not a "dataset" but a spec source | **Directly port to KORE `task.yaml`** — these are the P1/P2 coverage cells with real dims + the unbalanced MoE trace. |
-| **KernelForge knowledge_base/skills** (37 skills) | `repos/KernelForge-main/knowledge_base/skills/*.json` | Distilled AMD optimization + pitfall knowledge (VGPR/LDS/MFMA/MoE/MLA/sparse) | — | Mine as **tuning_hints** for prompts and as the source list for edge cases in Section 2 (each skill ⇒ a repair transition). |
+| **KernelForge task suite** | `repos/KernelForge-main/tasks/*.yaml` | 9 production-grade AMD task specs with real shapes, constraints, phase gates, and measured results (MLA, MoE-MXFP4, MXFP8 grouped GEMM, flash-attn, sparse attn, SLA bwd, gemm fp16) | gfx950-targeted for MX ops; not a "dataset" but a spec source | **Directly port to KORE `task.yaml`** - these are the P1/P2 coverage cells with real dims + the unbalanced MoE trace. |
+| **KernelForge knowledge_base/skills** (37 skills) | `repos/KernelForge-main/knowledge_base/skills/*.json` | Distilled AMD optimization + pitfall knowledge (VGPR/LDS/MFMA/MoE/MLA/sparse) | - | Mine as **tuning_hints** for prompts and as the source list for edge cases in Section 2 (each skill ⇒ a repair transition). |
 
 ### 5.1 Net-new data KORE must create (nobody else has it)
 
-1. **AMD-baseline perf labels** — speedup vs AITER/hipBLASLt/rocBLAS/CK measured on gfx942. This is the moat; no public dataset has it.
-2. **fp8-FNUZ correctness data** at scale (per-tensor/per-token/block-scale) — the FNUZ-vs-OCP trap (Section 2.1 N8, `aiter_ref.py`).
+1. **AMD-baseline perf labels** - speedup vs AITER/hipBLASLt/rocBLAS/CK measured on gfx942. This is the moat; no public dataset has it.
+2. **fp8-FNUZ correctness data** at scale (per-tensor/per-token/block-scale) - the FNUZ-vs-OCP trap (Section 2.1 N8, `aiter_ref.py`).
 3. **MLA decode/prefill + paged-KV + MoE-fused** repair/win data with DeepSeek-V3 constants.
-4. **Labeled reward-hack negatives** (Section 2.6) — deliberately manufactured, absent from all public sets.
+4. **Labeled reward-hack negatives** (Section 2.6) - deliberately manufactured, absent from all public sets.
 5. **Multi-turn AMD evolve trajectories** with per-turn verifier feedback (the Stage-3 substrate).
 
 ---
@@ -404,12 +404,12 @@ A record is admitted to the training corpus iff: verified on ≥ N_shapes (≥3)
 
 The corpus is "done" only when every row below has ≥1 verification shape AND ≥1 repair transition:
 
-- [ ] N1–N8 numerical (fp32-accum, large-K overflow, fp8 amax extremes, denormal, NaN/all-masked-row, softmax overflow, variance cancellation, fp8-FNUZ-vs-OCP)
-- [ ] S1–S10 shape (non-pow2, tiny, huge, ragged/varlen, tail-mask, K%32≠0 fp8/MX, misaligned ptr, head-dim 64/192/256, 0-token+giant expert, batch extremes)
-- [ ] L1–L7 layout (transposed, non-contiguous, permuted fp8 MFMA operand, weight [N,K]/trans_b, N-first scale layout, paged-KV indirection, LDS swizzle pitfall)
-- [ ] C1–C4 concurrency (BLOCK_M=64 sparse corruption, atomic nondeterminism, race-only-at-scale, LSE reduction order)
-- [ ] R1–R5 resource (VGPR spill >256, LDS overflow >64 KB, occupancy cliff, scratch spill, num_warps/stages)
-- [ ] H1–H9 reward-hack negatives, labeled, ≥8% of DPO pairs
+- [ ] N1-N8 numerical (fp32-accum, large-K overflow, fp8 amax extremes, denormal, NaN/all-masked-row, softmax overflow, variance cancellation, fp8-FNUZ-vs-OCP)
+- [ ] S1-S10 shape (non-pow2, tiny, huge, ragged/varlen, tail-mask, K%32≠0 fp8/MX, misaligned ptr, head-dim 64/192/256, 0-token+giant expert, batch extremes)
+- [ ] L1-L7 layout (transposed, non-contiguous, permuted fp8 MFMA operand, weight [N,K]/trans_b, N-first scale layout, paged-KV indirection, LDS swizzle pitfall)
+- [ ] C1-C4 concurrency (BLOCK_M=64 sparse corruption, atomic nondeterminism, race-only-at-scale, LSE reduction order)
+- [ ] R1-R5 resource (VGPR spill >256, LDS overflow >64 KB, occupancy cliff, scratch spill, num_warps/stages)
+- [ ] H1-H9 reward-hack negatives, labeled, ≥8% of DPO pairs
 - [ ] Every P0 op has data in every meaningful dtype×regime×backend cell (Section 1.5)
 - [ ] ≥1 whole operator family held out end-to-end for eval
 - [ ] fp8 tasks gate at 25 dB, bf16/fp16 at 30 dB; all baselines are on-box production ops

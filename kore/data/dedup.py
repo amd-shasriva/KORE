@@ -6,16 +6,16 @@ same kernel with a renamed variable, a reflowed comment, a blank-line change, or
 a tweaked constant appears dozens of times (in the shipped data ~148 kernels
 recur >=50x). Training on those wastes capacity and over-weights a few templates.
 
-Two complementary canonicalizers, both PURE (stdlib only — ast/hashlib/re):
+Two complementary canonicalizers, both PURE (stdlib only - ast/hashlib/re):
 
-  * :func:`structural_fingerprint` — parse the kernel as Python, drop docstrings,
+  * :func:`structural_fingerprint` - parse the kernel as Python, drop docstrings,
     and hash the AST STRUCTURE with local identifiers alpha-renamed by first
     occurrence. Two kernels that differ only by variable naming / whitespace /
     comments collapse to the same fingerprint (type-1/type-2 clone detection).
     Falls back to a whitespace/comment-stripped text hash when the source does
     not parse (e.g. inline HIP/C strings).
 
-  * :func:`minhash_signature` + :func:`jaccard` — k-shingle MinHash for FUZZY
+  * :func:`minhash_signature` + :func:`jaccard` - k-shingle MinHash for FUZZY
     near-dup detection (estimated Jaccard) to catch structural near-dups that
     differ by a handful of tokens (a constant, an extra line).
 

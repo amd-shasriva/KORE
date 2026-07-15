@@ -18,14 +18,14 @@ from kore.tasks import vendor_ops as V
 TASKS_DIR = Path(__file__).resolve().parent
 
 _REF_SHIM = '''"""GENERATED vendor reference shim for {op} ({dtype}). See kore/tasks/vendor_ops.py.
-Do not hand-edit — regenerate via kore/tasks/generate_vendor_ops.py."""
+Do not hand-edit - regenerate via kore/tasks/generate_vendor_ops.py."""
 from kore.tasks.vendor_ops import make_vendor_reference
 
 globals().update(make_vendor_reference("{op}", "{dtype}"))
 '''
 
 _DRIVER_SHIM = '''"""GENERATED vendor driver shim for {op} ({dtype}). See kore/tasks/_genops.py.
-Do not hand-edit — regenerate via kore/tasks/generate_vendor_ops.py."""
+Do not hand-edit - regenerate via kore/tasks/generate_vendor_ops.py."""
 import os
 import sys
 

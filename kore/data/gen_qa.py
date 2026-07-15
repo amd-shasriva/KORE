@@ -1,8 +1,8 @@
 """Kernel/GPU/ROCm QA + explanation SFT generation (Stage-1 ``kernel_qa``).
 
 The kernel-QA slice teaches the model to *reason about* AMD GPU kernels in
-natural language — occupancy, memory hierarchy, rocprof counters, numerics, and
-HIP/Triton bug review — not just to emit ``FULL_KERNEL`` blocks. These rows are
+natural language - occupancy, memory hierarchy, rocprof counters, numerics, and
+HIP/Triton bug review - not just to emit ``FULL_KERNEL`` blocks. These rows are
 grounded in the real task seeds/dtypes from ``kore.tasks`` and are produced by a
 :class:`~kore.data.teacher.TeacherClient` (a ``StubTeacher`` in tests).
 

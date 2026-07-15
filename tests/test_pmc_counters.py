@@ -110,7 +110,7 @@ def test_hbm_bytes_approx_without_split_assumes_64b():
 
 
 # --------------------------------------------------------------------------- #
-# Occupancy — matches the ROCm MI300X worked example.
+# Occupancy - matches the ROCm MI300X worked example.
 # --------------------------------------------------------------------------- #
 def test_occupancy_constants_arch_selected():
     # CDNA4 (gfx950, the KORE default) vs CDNA3 (gfx942): the ROCm MI355X cheat sheet

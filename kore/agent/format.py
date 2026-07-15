@@ -1,4 +1,4 @@
-"""Tool-call parsing + chat rendering for the agentic loop — PURE, dep-free.
+"""Tool-call parsing + chat rendering for the agentic loop - PURE, dep-free.
 
 The policy speaks Qwen3-native Hermes tool-calling:
 
@@ -129,14 +129,14 @@ def parse_tool_calls(text: str) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
-# Structured reflection (GEAK/Reflexion) — a parsed block, NOT a tool primitive
+# Structured reflection (GEAK/Reflexion) - a parsed block, NOT a tool primitive
 # --------------------------------------------------------------------------- #
 def parse_reflection(text: str) -> Optional[dict]:
     """Extract a structured ``<reflect>{json}</reflect>`` block from ``text``.
 
     A reflection is the policy's post-failure introspection with three fields:
     ``root_cause`` (why the last attempt failed), ``evidence`` (the concrete
-    signal it read — an error line, SNR, counter) and ``planned_fix`` (the next
+    signal it read - an error line, SNR, counter) and ``planned_fix`` (the next
     concrete change). Returns a dict with all three keys as strings (missing
     ones default to ``""``) or ``None`` when no block is present. Never raises.
 
@@ -308,16 +308,16 @@ Emit a structured reflection block:
 read>, "planned_fix": <the concrete change you will make next>}
 </reflect>
 A good reflection names the ACTUAL error you observed (not a generic guess) and \
-a specific fix. Do not keep patching a dead kernel — if two or three attempts \
+a specific fix. Do not keep patching a dead kernel - if two or three attempts \
 do not improve, abandon that lineage and re-seed a fresh design from the task."""
 
 # Phase-specific guidance (correctness-first, then optimize-for-speed).
 _PHASE_CORRECTNESS = """\
-CURRENT PHASE — PHASE 1 (CORRECTNESS). Your ONLY goal right now is a NUMERICALLY \
+CURRENT PHASE - PHASE 1 (CORRECTNESS). Your ONLY goal right now is a NUMERICALLY \
 CORRECT kernel that passes the SNR gate on every validation shape. Ignore speed \
 for now; use build/test to reach correctness, then keep it."""
 _PHASE_OPTIMIZE = """\
-CURRENT PHASE — PHASE 2 (OPTIMIZE). You already have a correct kernel. Now \
+CURRENT PHASE - PHASE 2 (OPTIMIZE). You already have a correct kernel. Now \
 MAXIMIZE the worst-shape speedup vs the production baseline while STAYING \
 correct. Use bench/pmc to find bottlenecks; keep only correct improvements and \
 revert any regression."""

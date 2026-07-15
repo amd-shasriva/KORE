@@ -3,7 +3,7 @@
 Also defines the **train / held-out generalization split**. A whole operator
 *family* (plus any arch-specific task) is deterministically RESERVED as held-out
 so that training data-generation never sees it and eval measures generalization
-to an unseen family — mirroring KernelBench/GEAK's train-vs-heldout discipline.
+to an unseen family - mirroring KernelBench/GEAK's train-vs-heldout discipline.
 """
 
 from __future__ import annotations
@@ -130,7 +130,7 @@ def get_task(task_id: str) -> Task:
 def heldout_tasks() -> list[Task]:
     """Tasks RESERVED for held-out generalization eval (never seen in training).
 
-    Deterministic and independent of any seed — the reserved set is a function of
+    Deterministic and independent of any seed - the reserved set is a function of
     the operator family + arch alone, so training data-gen can safely exclude it.
     """
     return [t for t in all_tasks() if is_heldout(t)]

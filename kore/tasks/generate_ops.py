@@ -1,10 +1,10 @@
 """Generate KORE task directories at scale from the _genops op registry.
 
 Writes, per (op, dtype), a task dir ``gen_<op>_<dtype>/`` containing:
-  * task.yaml         — metadata + shapes (family-appropriate)
-  * reference.py      — thin shim -> _genops.make_reference (torch oracle + inputs)
-  * seed_triton.py    — a REAL compiling Triton starter kernel (policy edits this)
-  * driver.py         — thin shim -> _genops.driver_main (the verifier contract)
+  * task.yaml         - metadata + shapes (family-appropriate)
+  * reference.py      - thin shim -> _genops.make_reference (torch oracle + inputs)
+  * seed_triton.py    - a REAL compiling Triton starter kernel (policy edits this)
+  * driver.py         - thin shim -> _genops.driver_main (the verifier contract)
 
 Idempotent: re-running overwrites the generated files. Use a ``gen_`` prefix so
 generated tasks never collide with the 15 hand-authored ones. Registry discovery
@@ -23,12 +23,12 @@ from kore.tasks import _genops
 
 TASKS_DIR = Path(__file__).resolve().parent
 
-# dtypes to emit per family — the generated op x dtype coverage frontier (Pillar 2).
+# dtypes to emit per family - the generated op x dtype coverage frontier (Pillar 2).
 # fp32 is emitted for EVERY family (it is the reference dtype: seeds compile + verify
 # by construction, closing the previous binary/reduce/gemm_fusion fp32 holes).
 # fp8/int8 are deliberately NOT emitted for GENERATED ops: they require quantization
 # SCALES (the generic get_inputs casts ~1/sqrt(K) randn values, which int8 truncates
-# to all-zeros and fp8 mangles without a scale) — quantized coverage comes from the
+# to all-zeros and fp8 mangles without a scale) - quantized coverage comes from the
 # hand-wired VENDOR ops (genv_*, kore/tasks/generate_vendor_ops.py) that carry the
 # proper dequant + AITER/hipBLASLt-fp8 baselines.
 FAMILY_DTYPES = {
@@ -71,14 +71,14 @@ SHAPES = {
 }
 
 _REF_SHIM = '''"""GENERATED reference shim for {op} ({dtype}). See kore/tasks/_genops.py.
-Do not hand-edit — regenerate via kore/tasks/generate_ops.py."""
+Do not hand-edit - regenerate via kore/tasks/generate_ops.py."""
 from kore.tasks._genops import make_reference
 
 globals().update(make_reference("{op}", "{family}", "{dtype}"))
 '''
 
 _DRIVER_SHIM = '''"""GENERATED driver shim for {op} ({dtype}). See kore/tasks/_genops.py.
-Do not hand-edit — regenerate via kore/tasks/generate_ops.py."""
+Do not hand-edit - regenerate via kore/tasks/generate_ops.py."""
 import os
 import sys
 

@@ -2,13 +2,13 @@
 
 Coverage (all CPU / no-GPU unless noted):
   * backend selection + config->plugin wiring (FSDP FULL_SHARD default, DeepSpeed
-    ZeRO-3 opt-in) — the sharded full-param path is gated to distributed full-FT;
+    ZeRO-3 opt-in) - the sharded full-param path is gated to distributed full-FT;
   * ``grpo_config_from_dict`` JSON round-trip (nested ``lora``, ``tasks`` pop) and
     the ``python -m kore.policy.grpo <config.json>`` entrypoint;
   * the CROSS-RANK group-relative advantage gather math (simulate N ranks' rewards
     -> a single global GRPO normalization split back per rank);
   * a real 2-process (gloo/CPU) smoke: all-gather rollout rewards across ranks,
-    compute the global advantages, and take one training step — validating the
+    compute the global advantages, and take one training step - validating the
     multiprocess wiring + gather primitive without needing GPUs or a real 14B.
 
 The non-distributed / LoRA / CPU GRPO path is unchanged and covered by
@@ -199,7 +199,7 @@ def test_grpo_main_no_args_returns_usage():
 
 def test_grpo_main_reads_json_and_runs(monkeypatch, tmp_path):
     # _main reads the JSON, defaults distributed=True, threads `tasks` into
-    # train_grpo, and returns 0 — WITHOUT importing torch (train_grpo stubbed).
+    # train_grpo, and returns 0 - WITHOUT importing torch (train_grpo stubbed).
     seen = {}
 
     def fake_train(cfg, tasks=None):
@@ -256,7 +256,7 @@ def test_distributed_group_advantages_uneven_and_three_ranks():
 
 def test_distributed_group_advantages_uses_avspo_variance_floor():
     # A near-degenerate global group: with the AVSPO floor (tau>0) the advantages
-    # do NOT explode / collapse — they route through anticollapse.avspo_advantages.
+    # do NOT explode / collapse - they route through anticollapse.avspo_advantages.
     per_rank = [[1.0, 1.0], [1.0, 1.0]]
     floored = grpo.distributed_group_advantages(per_rank, variance_floor=0.5, avspo_virtual_k=2)
     from kore.policy import anticollapse as ac
@@ -292,7 +292,7 @@ def test_shipped_grpo_14b_full_config_is_sharded_full_ft():
 
 
 # --------------------------------------------------------------------------- #
-# 2-process (gloo/CPU) smoke — real multiprocess gather + one training step
+# 2-process (gloo/CPU) smoke - real multiprocess gather + one training step
 # --------------------------------------------------------------------------- #
 def _smoke_worker(rank: int, world: int, port: int, q):
     """One rank of the 2-proc smoke (module-level so it is fork-safe).

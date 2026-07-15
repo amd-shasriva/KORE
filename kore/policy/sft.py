@@ -9,7 +9,7 @@ chat template has no ``{% generation %}`` marker, so :func:`build_assistant_mask
 injects one around the assistant body (content + tools + ``<|im_end|>``) while
 keeping the rendered text byte-identical to the base template. TRL's
 ``assistant_only_loss`` then masks every prompt/user/system/tool token to ``-100``
-and trains only on assistant responses (+ their stop token) — the standard SFT
+and trains only on assistant responses (+ their stop token) - the standard SFT
 recipe, and the fix for training capacity being spent predicting the user's prompt.
 :func:`_verify_assistant_masking` asserts render-identity + non-empty masks before
 training (and TRL itself raises if any example has no assistant tokens).
@@ -52,7 +52,7 @@ def build_assistant_masked_template(template: str) -> str:
 
     The edit is surgical and RENDER-PRESERVING: the ``<|im_start|>assistant\\n``
     header is pulled OUT of the three assistant body-emission sites (so it stays
-    OUTSIDE the generation span — a masked prompt) and emitted once just before a
+    OUTSIDE the generation span - a masked prompt) and emitted once just before a
     single ``{% generation %}`` that spans the body (content [+ optional <think>],
     tool_calls, and the closing ``<|im_end|>`` stop token), closed by
     ``{% endgeneration %}``. Splitting the header off the body changes no emitted
@@ -64,7 +64,7 @@ def build_assistant_masked_template(template: str) -> str:
     (e.g. a non-Qwen3 template) so we fail loudly rather than train unmasked.
     """
     if "{% generation %}" in template or "{%- generation %}" in template:
-        return template  # already generation-tagged (newer template) — leave as-is
+        return template  # already generation-tagged (newer template) - leave as-is
     t = template
     # 1) strip the header from the assistant BODY emissions (reasoning + 2 plain).
     before = t
@@ -91,7 +91,7 @@ def build_assistant_masked_template(template: str) -> str:
     )
     if t == before or "{% generation %}" not in t or "{% endgeneration %}" not in t:
         raise ValueError(
-            "build_assistant_masked_template: could not inject generation markers — "
+            "build_assistant_masked_template: could not inject generation markers - "
             "the chat template does not match the expected Qwen3 assistant branch. "
             "Set assistant_only_loss=False or supply a generation-tagged template."
         )
@@ -103,9 +103,9 @@ def _verify_assistant_masking(tok, base_template: str, masked_template: str) -> 
 
     Asserts two invariants on representative single-turn, multi-turn, ``<think>``,
     and tool conversations:
-      1. **Render-identity** — the masked template renders byte-identical text to the
+      1. **Render-identity** - the masked template renders byte-identical text to the
          base template (the mask must not perturb what the model sees).
-      2. **Correct masking** — assistant response tokens (and their ``<|im_end|>``)
+      2. **Correct masking** - assistant response tokens (and their ``<|im_end|>``)
          are unmasked while every system/user/tool/header token is masked, and the
          mask is non-empty.
     Raises ``AssertionError`` on any violation so a broken template aborts the run
@@ -156,7 +156,7 @@ def _token_stats(ds, tok, sample: int = 512) -> dict:
     """Best-effort chat-token length stats over up to ``sample`` rows (logging).
 
     Read-only: renders each sampled row through the chat template to count
-    tokens. Never raises — returns ``{}`` if the tokenizer/template can't render.
+    tokens. Never raises - returns ``{}`` if the tokenizer/template can't render.
     """
     try:
         n = len(ds)
@@ -220,7 +220,7 @@ def _filter_overlong(ds, tok, max_length: int):
 
     Returns ``(filtered_dataset, n_dropped)``. Deterministic so every rank computes
     the identical filtered set (consistent FSDP data shards). A row that fails to
-    render is KEPT (conservative — let the trainer handle it). Returns the original
+    render is KEPT (conservative - let the trainer handle it). Returns the original
     dataset object unchanged when nothing is dropped.
     """
     from datasets import Dataset
@@ -310,7 +310,7 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
     model.config.use_cache = False
 
     ds = load_sft_dataset(dataset_path, repair_weight=config.repair_loss_weight)
-    # Drop rows whose rendered length exceeds max_seq_length — ONLY under completion-
+    # Drop rows whose rendered length exceeds max_seq_length - ONLY under completion-
     # only loss. There, an over-length row whose assistant span is truncated away would
     # make TRL raise ("no assistant tokens"), and even a partially-cut assistant tail
     # (missing <|im_end|>) teaches run-on. With full-sequence loss we keep TRL's stock
@@ -382,7 +382,7 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
     class _ObsCallback(TrainerCallback):
         def on_log(self, args, state, control, logs=None, **kwargs):
             logs = logs or {}
-            if "loss" not in logs:  # skip eval/summary logs — train-step only
+            if "loss" not in logs:  # skip eval/summary logs - train-step only
                 return
             log.event("sft_step", step=int(state.global_step), loss=logs.get("loss"),
                       lr=logs.get("learning_rate"),

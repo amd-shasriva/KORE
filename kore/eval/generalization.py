@@ -9,14 +9,22 @@ never saw. This harness makes that claim falsifiable WITHOUT any training:
      reduction, attention, moe, positional, quant) via :func:`classify` - a
      registry-independent, ordered pattern match on the task id / operation, so it
      scales to the full authoring-engine task zoo (100s of ops) and future ops.
-  2. Hold out ENTIRE families (e.g. train excludes attention + moe) and assert
-     there is no task- or family-level leakage between the train and held-out
-     splits.
+  2. Hold out ENTIRE families (a leave-one-family-out probe) and assert there is
+     no task- or family-level leakage between the train and held-out splits.
   3. Evaluate eta and the physics residual-descent reward on the HELD-OUT
      families only, aggregated per family, from an offline measurement JSON
      (as produced by ``kore.analysis.p0_sol``). The same call runs later against
      a trained checkpoint's measured kernels -- it is a pure offline eval and
      NEVER launches training.
+
+This ``classify`` taxonomy is the richer analysis / leave-one-family-out (LOFO)
+grouping and is kept deliberately SEPARATE from the AUTHORITATIVE product split in
+``kore.tasks.registry`` (``operator_family`` + ``HELDOUT_FAMILIES``). The product
+model TRAINS core attention (flash prefill / decode / varlen / fp8) and reserves
+only the structurally-distinct MLA (latent attention) and paged-KV decode families
+(plus any foreign-arch task) as the never-trained generalization set. Do not
+conflate the two taxonomies: here ``attention`` lumps flash/paged together for
+coarse offline study, whereas the registry separates them to protect the split.
 """
 
 from __future__ import annotations

@@ -40,7 +40,7 @@ def test_heldout_split_threads_through():
     rc._apply_split(ctx)
 
     # both selected tasks are TRAIN (not a held-out family); eval falls back to the
-    # registry's held-out generalization set (the reserved attention family).
+    # registry's held-out generalization set (the reserved MLA + paged-KV decode families).
     assert set(ctx["train_task_ids"]) == {"rmsnorm_aiter", "gemm_bf16"}
     held_ids = {t.task_id for t in heldout_tasks()}
     assert held_ids  # the registry reserves at least one family

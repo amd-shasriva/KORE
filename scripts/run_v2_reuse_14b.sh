@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# KORE v2 rerun — REUSE v1 kernels, don't regenerate.
+# KORE v2 rerun - REUSE v1 kernels, don't regenerate.
 #
 # Pipeline: reverify (re-measure the ~27.6k EXISTING kernels against the strong
 # baseline + adversarial battery, NO teacher) -> datagen (ONLY the coverage holes,
@@ -47,7 +47,7 @@ export TORCHINDUCTOR_CACHE_DIR="$REPO_ROOT/.inductor_cache"
 # path measures candidate+reference back-to-back in one process (contention-fair ratio).
 export KORE_REVERIFY_WORKERS_PER_GPU="${KORE_REVERIFY_WORKERS_PER_GPU:-6}"
 # Timing is serialized PER physical GPU (flock) so oversubscribed compiles never
-# corrupt wall-clock measurements — clean CV + honest speedups (set 0 to disable).
+# corrupt wall-clock measurements - clean CV + honest speedups (set 0 to disable).
 export KORE_TIMING_LOCK="${KORE_TIMING_LOCK:-1}"
 
 # PMC-grounded reasoning (Pillar 4): profile winner+parent per group (rocprofv3) so

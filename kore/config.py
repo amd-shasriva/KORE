@@ -1,8 +1,12 @@
 """Central KORE configuration.
 
-Single source of truth for arch/target, thresholds, and paths. Everything that
-touches the GPU or the verifier reads from here so the gfx942 retarget is done
-in exactly one place (the KernelForge sources default to gfx950).
+Single source of truth for the target arch, correctness and benchmark
+thresholds, reward weights, and paths. Everything that touches the GPU or the
+verifier reads from here, so retargeting the hardware (default ``gfx950`` /
+MI350X / CDNA4) or retuning a reward weight happens in exactly one place. The
+lexicographic reward-ladder dominance invariants are asserted in
+``__post_init__`` (see :meth:`KoreConfig._check_reward_invariants`), so an env
+override or a stray edit can never silently invert a reward tier.
 """
 
 from __future__ import annotations
@@ -11,8 +15,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-KORE_ROOT = Path(__file__).resolve().parent.parent          # /root/Kore-rl/kore
-WORKSPACE_ROOT = KORE_ROOT.parent                            # /root/Kore-rl
+KORE_ROOT = Path(__file__).resolve().parent.parent          # repo root (the kore/ package's parent)
+WORKSPACE_ROOT = KORE_ROOT.parent                            # umbrella workspace (repo root's parent)
 REPOS_DIR = WORKSPACE_ROOT / "repos"
 DATA_DIR = KORE_ROOT / "data"
 RUNS_DIR = KORE_ROOT / "runs"

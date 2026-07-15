@@ -230,7 +230,7 @@ def apply_pref_weights(rows: list[dict], *, enabled: bool = True, seed: int = 0)
 
 
 def train(config: DPOConfig) -> dict:
-    """Run DPO LoRA training from ``config.dataset_path`` (preference JSONL)."""
+    """Run DPO training (full-FT or LoRA) from ``config.dataset_path`` (preference JSONL)."""
     import torch
     from datasets import Dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer

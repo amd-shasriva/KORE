@@ -1,4 +1,4 @@
-# SMOKE SUBSET — LiveCodeBench-style timed code-correctness problems. NOT the full bench.
+# SMOKE SUBSET - LiveCodeBench-style timed code-correctness problems. NOT the full bench.
 # TODO: load the full LiveCodeBench release (HF: livecodebench/code_generation_lite) for a real run.
 # Fields: prompt (problem + signature shown to model), entry_point, reference_solution (full function),
 #         test (asserts), time_limit_s (per-item wall budget the solution must run within).

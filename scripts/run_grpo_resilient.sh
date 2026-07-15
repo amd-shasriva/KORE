@@ -47,7 +47,7 @@ for try in $(seq 1 "$MAX_TRIES"); do
     echo "[resilient] GRPO exited 0 (success) on try $try."
     exit 0
   fi
-  echo "[resilient] GRPO failed (rc=$rc) on try $try — likely a transient VRAM spike on a pinned GPU. Retrying in 30s."
+  echo "[resilient] GRPO failed (rc=$rc) on try $try - likely a transient VRAM spike on a pinned GPU. Retrying in 30s."
   pkill -9 -f "python -u -m kore.policy.grpo" 2>/dev/null || true
   sleep 30
 done

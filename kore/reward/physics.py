@@ -5,7 +5,8 @@ removed relative to the roofline lower bound ``T_min`` -- an ABSOLUTE,
 arch-normalized, physics-grounded signal, NOT a relative speedup versus a vendor
 baseline. It is built directly on the validated check-(b) decomposition
 (``kore.analysis.p0_sol``), which fits the residual to counter-derived stall /
-occupancy-deficit time with R^2 ~ 0.99 on gfx950:
+occupancy-deficit time with R^2 ~ 0.98 on gfx950 (calibrated peaks; see
+``docs/P0_RESULTS.md``):
 
     T_meas = T_min + R ,   R = residual (removable, in principle, down to T_min)
     named residual  N = (stall_frac + occupancy_deficit) * T_meas

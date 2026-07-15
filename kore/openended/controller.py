@@ -12,7 +12,10 @@ inside the training loop.
 Grounding: the controller only ever returns task_ids that are ACTUALLY registered
 (the intersection of the parametric task space with the trainer's allowed task
 list), and selection does not mutate op/dtype off the registry, so every proposed
-task is guaranteed runnable on hardware. Frontier selection ranges over the full
+task is guaranteed runnable on hardware. That intersection is also the held-out
+guard: the parametric space contains no held-out family and the allowed list is
+the trainer's train split, so a held-out task can never enter the curriculum.
+Frontier selection ranges over the full
 registered (op × dtype) menu; shape-regime is handled inside each task's own shape
 sweep. (Dynamic minting of brand-new generated ops mid-run is a future extension;
 this integration co-evolves the curriculum over the registered space.)

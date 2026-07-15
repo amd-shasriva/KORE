@@ -76,7 +76,7 @@ Techniques wired in (all with paper references in [`papers/`](../../../papers/))
 
 ## Key config defaults (`configs.py`)
 
-**GRPOConfig** (production values set in [`configs/grpo_14b_full.json`](../../configs/README.md)):
+**GRPOConfig** dataclass defaults (the full 14B campaign's [`configs/grpo_14b_full.json`](../../configs/README.md) pins `model_id` to Qwen3-14B and flips on the full stack: `reward_mode=residual` physics reward, `agentic`, `coevolve`, `value_prefilter`, and the anti-collapse rungs):
 
 | Field | Default | Field | Default |
 | --- | --- | --- | --- |
@@ -95,8 +95,8 @@ Techniques wired in (all with paper references in [`papers/`](../../../papers/))
 
 ## FSDP gotchas (PhD-level)
 
-- **GRPO distributed uses ZeRO-2 (SHARD_GRAD_OP), not FULL_SHARD**: FULL_SHARD reshards params to a 1-D flat buffer between forwards, which breaks `model.generate()`. ZeRO-2 keeps params replicated between forwards.
-- **`summon_full_params` once per step** wraps the whole rollout; `synced_gpus=True` is mandatory or ragged completion lengths deadlock NCCL.
+- **GRPO distributed uses ZeRO-2 (SHARD_GRAD_OP), not FULL_SHARD**: FULL_SHARD reshards params to a 1-D flat buffer between forwards, which breaks `model.generate()`. ZeRO-2 keeps params resident per rank (only grads + optimizer state are sharded).
+- **Rollout runs on a full-weight replica**: generating on the sharded policy deadlocks (per-layer all-gathers interleave with `generate`'s own collectives on ragged lengths), so each step syncs the policy weights into a plain per-rank replica (`summon_full_params` + tensor copy, no forward) and generates locally with zero FSDP collectives, so `synced_gpus` is OFF on the distributed path.
 - **Gradient checkpointing**: non-reentrant on the GRPO sharded path; reentrant for SFT/DPO/midtrain (flash→SDPA downgrade breaks the non-reentrant tensor-count check).
 - **SDPA, not flash_attention_2**, for GRPO/DPO: ROCm FlashAttention hard-faults on padded generate/logp batches.
 - **Agentic rollouts run serial on the distributed path** - ragged per-trajectory turn counts would desync collectives.

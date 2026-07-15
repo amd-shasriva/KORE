@@ -7,7 +7,7 @@ Writes, per (op, dtype), a task dir ``gen_<op>_<dtype>/`` containing:
   * driver.py         - thin shim -> _genops.driver_main (the verifier contract)
 
 Idempotent: re-running overwrites the generated files. Use a ``gen_`` prefix so
-generated tasks never collide with the 15 hand-authored ones. Registry discovery
+generated tasks never collide with the hand-authored ones. Registry discovery
 (kore.tasks.registry) then picks them up automatically.
 
     python -m kore.tasks.generate_ops            # generate all

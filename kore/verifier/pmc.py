@@ -82,10 +82,11 @@ COUNTER_SETS = {
         "SQ_INSTS_SALU",
     ],
     # ------------------------------------------------------------------- #
-    # "grounding": the REAL bottleneck counters for MI300X/gfx942 roofline
-    # reasoning (Pillar 4). Every name below is from the ROCm MI300 counter
-    # reference. Spans SQ + GRBM + TCC, so it is NOT single-pass - collect via
-    # GROUNDING_PASSES (see module note) and merge the per-pass dicts.
+    # "grounding": the REAL bottleneck counters for CDNA3/CDNA4 roofline
+    # reasoning (Pillar 4). Most names are from the ROCm MI300/MI200 counter
+    # reference; the low-precision MFMA op counters (F8/F6F4/XF32) are gfx950/
+    # CDNA4 additions. Spans SQ + GRBM + TCC, so it is NOT single-pass - collect
+    # via GROUNDING_PASSES (see module note) and merge the per-pass dicts.
     # ------------------------------------------------------------------- #
     "grounding": [
         # --- occupancy / launch ---

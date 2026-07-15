@@ -38,6 +38,18 @@ flowchart LR
 
 ---
 
+## Held-out safety
+
+The generalization split can never leak through the curriculum. The parametric
+task space is drawn only from trainable op registries (`kore.tasks._genops`:
+`unary`/`binary`/`reduce`/`fusion`/`gemm_fusion`, plus the vendor-baselined ops),
+so the held-out families (`mla`, `paged_attention` - see [`kore/tasks`](../tasks/README.md))
+are **not representable** as a `TaskDescriptor` and the proposer cannot mint one.
+`CoevolutionController` adds a second guard: it only serves task_ids from the
+trainer's allowed list, which in a KORE campaign is the held-out complement.
+
+---
+
 ## Distributed determinism (important)
 
 Under multi-rank FSDP GRPO, every rank builds the **same** controller (same `seed` + task list) and `next_task_id` is deterministic (driven by `seed + refills` and the proposer RNG, not by wall-clock or step index). The per-rollout feedback (`solve_rate`, `best_speedup`) is all-gathered across ranks before `record()`, so the archive update is **rank-invariant** - all ranks propose identical tasks and stay in lockstep. This is what makes the curriculum safe to enable on the 8-GPU production run.

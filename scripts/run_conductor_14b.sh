@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# KORE full-scale 14B campaign — CONDUCTOR launcher (portable paths + project venv).
+# KORE full-scale 14B campaign - CONDUCTOR launcher (portable paths + project venv).
 #
 # This is the path-agnostic sibling of scripts/run_full_14b.sh (which hardcodes the
 # tas32 dev paths). It resolves the repo root from its own location and uses the
 # project virtualenv, so it runs on conductor / any node / NFS unchanged.
 #
 # RESUMABLE: state lives in <data-root>/campaign_manifest.json. If the node
-# reservation ends mid-run, just re-run this script after you re-reserve — every
+# reservation ends mid-run, just re-run this script after you re-reserve - every
 # already-completed stage whose on-disk artifact is present is skipped, and the
 # run continues from where it stopped (files persist under your account).
 #
 # STAGE PLAN (resume-safe; skips whatever already has an on-disk artifact):
 #   midtrain -> SKIPS when runs/full/midtrain checkpoint is present (it is).
 #   datagen  -> RESUMES additively (shard_done skips finished task-shards and
-#               generates only the missing repair/groups/wins) — needs the teacher
+#               generates only the missing repair/groups/wins) - needs the teacher
 #   agentic  -> SYNTH (--agentic synth): CPU-only reconstruction of native tool-use
 #               trajectories from the verified repair/wins/groups (minutes, no GPU/
 #               teacher) INSTEAD of the tens-of-GPU-hours live harness. See
@@ -33,7 +33,7 @@ PY="${KORE_PY:-$HOME/kore-venv/bin/python}"
 [ -x "$PY" ] || PY="$(command -v python3)"
 echo "[run_conductor] repo=$REPO_ROOT python=$PY"
 
-# Put the venv's bin on PATH so console scripts resolve to the venv — critically
+# Put the venv's bin on PATH so console scripts resolve to the venv - critically
 # `accelerate`, which scripts/launch_distributed.sh invokes by bare name to drive
 # FSDP for midtrain/sft/dpo. Without this the distributed stages die with exit 127.
 export PATH="$(dirname "$PY"):$PATH"
@@ -63,7 +63,7 @@ export TORCHINDUCTOR_CACHE_DIR="$REPO_ROOT/.inductor_cache"
 # Measured on THIS node via `python -m kore.analysis.calibrate_peaks` (matches the
 # P0 study within ~1%): HBM 4.64 TB/s (58% of the 8.0 datasheet) and bf16 1.29
 # PF/s (52% of 2.5). The GRPO physics-residual reward (reward_mode=residual)
-# needs the ATTAINABLE peak, not the datasheet — datasheet peaks make T_min ~2x
+# needs the ATTAINABLE peak, not the datasheet - datasheet peaks make T_min ~2x
 # too small and η ~2x too optimistic. fp8 is left at datasheet (not measurable on
 # this stack). Override by re-running calibrate_peaks on a fully idle node.
 export KORE_PEAK_HBM_BW="${KORE_PEAK_HBM_BW:-4.638812e+12}"
@@ -99,7 +99,7 @@ echo "[run_conductor] stages=$STAGES"
 DATAGEN_WORKERS="${KORE_DATAGEN_WORKERS:-64}"
 echo "[run_conductor] datagen/agentic workers=$DATAGEN_WORKERS (teacher-bound; oversubscribing 8 GPUs)"
 
-# No --tasks -> ALL registered tasks (train = non-held-out; eval = attention family).
+# No --tasks -> ALL registered tasks (train = non-held-out; eval = held-out MLA + paged-KV decode).
 # --adaptive-steps -> GRPO plateau early-stop. Full campaign defaults otherwise.
 # --agentic synth : fill the agentic SFT slice from ALREADY-verified records on CPU
 #   (skips the tens-of-GPU-hours live harness). --gold-wins / --repair-dpo default ON

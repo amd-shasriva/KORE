@@ -89,9 +89,16 @@ PYTHONPATH=<repo> accelerate launch \
 defaults `distributed=true`, and calls `train_sft` / `dpo.train` / `train_grpo`.
 Under FSDP the model is loaded **without** `device_map` (the two are incompatible
 - accelerate/FSDP owns device placement); the HF-`Trainer` stages wrap the model
-with `TrainingArguments(fsdp=..., fsdp_config=...)` built from the config, and the
-native GRPO loop honors `distributed`/`zero_stage` by skipping `device_map` and
-sharding the parameters/optimizer across ranks (ZeRO-3 equivalent).
+with `TrainingArguments(fsdp=..., fsdp_config=...)` built from the config. The
+Trainer stages (midtrain / sft / dpo) run `FULL_SHARD` (ZeRO-3): params, grads,
+and optimizer state are all sharded, since they never call `generate()` in the
+loop. GRPO is the exception: it runs `SHARD_GRAD_OP` (ZeRO-2, via
+`accelerate_fsdp_grpo.yaml` and `build_fsdp_plugin`), which keeps params
+replicated between forwards while still sharding grads and the optimizer. This is
+required because `FULL_SHARD` reshards params after every forward, so the many
+decode steps inside `model.generate()` would re-gather params each step and
+deadlock. GRPO additionally rolls out against a full-weight local replica synced
+once per step, so no FSDP collective runs during generation at all.
 
 For GRPO the resolved JSON also carries the run's **train-split task ids** (so the
 sharded run trains only on the TRAIN split, never the held-out generalization

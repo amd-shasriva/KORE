@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# KORE FULL-SCALE end-to-end 14B run — the complete 70B recipe on 14B, NO scale
-# knobs: ALL registered tasks (attention family held out for eval), FULL datagen
+# KORE FULL-SCALE end-to-end 14B run - the complete 70B recipe on 14B, NO scale
+# knobs: ALL registered tasks (MLA + paged-KV decode families held out for eval), FULL datagen
 # counts, FULL GRPO horizon, full-parameter FSDP across 8x MI325X, every
 # best-in-world lever engaged. Durable/resumable from data/full14b/campaign_manifest.json.
 set -euo pipefail
@@ -20,7 +20,7 @@ export KORE_GENERAL_REPLAY_HF=1        # real SOTA replay (AMD kernels / reasoni
 export KORE_BENCH_COLD=1               # cold-cache (L2-flushed) timing
 export TORCHINDUCTOR_CACHE_DIR=/root/Kore-rl/.inductor_cache
 
-# No --tasks  -> ALL registered tasks (train = non-held-out; eval = attention family).
+# No --tasks  -> ALL registered tasks (train = non-held-out; eval = held-out MLA + paged-KV decode).
 # No datagen caps -> full defaults (n_repair=50, n_parents=20, k=6, wins_gens=8,
 #   n_agentic=16). No --grpo-steps -> full config horizon (+ --adaptive-steps plateau
 #   early-stop). dpo-rounds=2, sft_total=20000, eval-n=300, retention gate @ 0.02:

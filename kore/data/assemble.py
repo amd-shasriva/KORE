@@ -2,7 +2,7 @@
 
 Two products:
   * the Stage-1 multi-capability SFT mixture (kernel repair/opt + kernel QA +
-    agentic tool-use trajectories + ~45% general replay), via mixing.py; and
+    agentic tool-use trajectories + ~50% general replay), via mixing.py; and
   * the Stage-2 DPO set with >=8% labeled reward-hack hard negatives folded in.
 
 Everything degrades gracefully: missing datagen dirs simply contribute nothing,
@@ -92,7 +92,7 @@ def assemble_multicap_sources(
 
     Kernel repair/opt comes from generated repair+wins records; agentic from
     generated trajectories; kernel QA is synthesized from task seeds via the
-    teacher; the ~45% general half comes from general_replay.
+    teacher; the ~50% general half comes from general_replay.
 
     ``kernel_records`` overrides the on-disk repair+wins scan with an explicit
     record list - used by the campaign to build SFT from a leakage-split TRAIN
@@ -157,11 +157,12 @@ def assemble_multicap_sources(
     gch = load_general_replay("chat", max(1, int(round(config.frac_general_chat * total))), seed + 30, use_hf)
 
     # Decontaminate the general-replay + generic-agentic slices against the held-out
-    # eval sources (Pillar 5): a mined code/math row could carry a held-out attention
-    # kernel. ALSO decontaminate against the RETENTION eval benchmarks (MMLU/HumanEval/
-    # LCB/IFEval/BFCL/MT) -- the general slices are ~45% of the SFT mix, so a mined row
-    # carrying an eval question is train-on-test that inflates the retention gate
-    # (audit R2 sft, mirroring the midtrain corpus fix). One shared n-gram set.
+    # eval sources (Pillar 5): a mined code/math row could carry a held-out MLA /
+    # paged-attention kernel. ALSO decontaminate against the RETENTION eval benchmarks
+    # (MMLU/HumanEval/LCB/IFEval/BFCL/MT) -- the general slices are ~50% of the SFT mix,
+    # so a mined row carrying an eval question is train-on-test that inflates the
+    # retention gate (audit R2 sft, mirroring the midtrain corpus fix). One shared
+    # n-gram set.
     if os.environ.get("KORE_DECONTAM", "1") != "0":
         from kore.data.decontam import (build_heldout_ngrams, decontaminate_chat_rows,
                                         eval_benchmark_texts)

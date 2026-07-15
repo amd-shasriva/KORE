@@ -479,10 +479,11 @@ def build_midtrain_corpus(
     collected: list[tuple[str, list[tuple[Path, str]]]] = []
 
     # 1. KORE task Python (seed kernels, references, drivers) - EXCLUDING the
-    # held-out generalization families (attention) + arch-specific tasks, so the
-    # eval set never leaks into pretraining (decontamination, Pillar 5). Task-suite
-    # infrastructure files (_genops.py, base.py, ...) live directly under the root
-    # and are kept; only per-task <task_id>/ dirs of a held-out family are dropped.
+    # held-out generalization families (MLA / paged-KV decode) + arch-specific
+    # tasks, so the eval set never leaks into pretraining (decontamination,
+    # Pillar 5). Task-suite infrastructure files (_genops.py, base.py, ...) live
+    # directly under the root and are kept; only per-task <task_id>/ dirs of a
+    # held-out family are dropped.
     task_py: list[tuple[Path, str]] = []
     if troot is not None and troot.is_dir():
         task_py = _collect_files(
@@ -669,7 +670,7 @@ def build_midtrain_corpus(
     # Text-level decontamination backstop (Pillar 5): drop any chunk whose n-grams
     # overlap the HELD-OUT reference sources OR the RETENTION eval benchmarks. The
     # kore_tasks/pairs dir-filter above already excludes held-out KORE tasks; this also
-    # catches a held-out kernel (e.g. a flash-attention impl) copied into a mined
+    # catches a held-out kernel (e.g. an MLA / paged-KV-decode impl) copied into a mined
     # source (KernelBook / amd_kernels / repo Triton), AND -- new in R2 -- any general-
     # replay shard that carries an eval-benchmark question (MMLU/HumanEval/...), which
     # would otherwise train-on-test and inflate the retention gate. Safe no-op if the

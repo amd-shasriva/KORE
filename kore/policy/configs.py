@@ -1,12 +1,20 @@
 """Training config dataclasses for the KORE policy stages.
 
 Hyperparameters follow the KORE plan (Sec 4.6) + the Kevin recipe:
-  - Base models are reasoning+math+code, RL-trainable. 14B for bring-up/SFT,
-    32B primary for GRPO, scaling to a 70B distill via LoRA.
-  - Stage curriculum: repair-weighted SFT -> RFT + DPO -> multi-turn GRPO.
-  - GRPO (Kevin): per-turn reward S = 0.3*1{correct} + (t_base/t_cand)*1{correct},
-    discounted-sum credit gamma=0.4, per-turn-as-sample, m=16 traj x n=4 turns,
-    KL=0, Clip-Higher (0.2 / 0.28), serial > parallel refinement.
+  - Base models are reasoning+math+code, RL-trainable. The dataclass defaults
+    encode the model ladder (14B bring-up/SFT, 32B GRPO); the shipped campaign
+    pins every stage to Qwen3-14B, full-parameter FSDP, via the
+    ``configs/*_14b_full.json`` launch files (no LoRA in the full run).
+  - Stage curriculum: midtrain (ROCm/HIP/Triton continued pretraining, whose
+    checkpoint is the SFT base) -> repair-weighted multi-capability SFT ->
+    iterative DPO -> multi-turn GRPO -> WiSE-FT soup.
+  - GRPO (Kevin lineage): per-turn reward S = 0.3*1{correct} +
+    (t_base/t_cand)*1{correct}, discounted-sum credit gamma=0.4,
+    per-turn-as-sample, m=16 traj x n=4 turns, serial > parallel refinement.
+    KORE realizes Kevin's "KL = 0" via the small k3 retention anchor
+    (``ref_anchor_coef``) and clips at GSPO *sequence* scale (0.03 / 0.04), not
+    Kevin's (here inert) 0.2 / 0.28 token bounds (see ``GRPOConfig`` for the
+    per-field rationale).
 
 These are plain dataclasses (no heavy imports) so they can be constructed and
 inspected on CPU / in tests. The training entrypoints in ``sft.py`` / ``dpo.py``
@@ -256,22 +264,26 @@ class GRPOConfig(DistributedMixin):
     # ``scripts/launch_distributed.sh grpo``). A single-process run (CPU tests,
     # single-GPU LoRA) ignores them entirely and keeps the legacy in-process path.
     #
-    # ``sharding_backend`` selects how the POLICY (and frozen REFERENCE) are
-    # sharded across ranks so no full replica ever lives on a single GPU:
-    #   "fsdp"      -> torch FullyShardedDataParallel FULL_SHARD (ZeRO-3-equivalent);
-    #   "deepspeed" -> DeepSpeed ZeRO-3 engine;
+    # ``sharding_backend`` selects how the POLICY is sharded across ranks so the
+    # dominant full-FT memory (gradients + optimizer state) is split, not replicated:
+    #   "fsdp"      -> torch FullyShardedDataParallel in SHARD_GRAD_OP/ZeRO-2 mode
+    #                  (grads+optim sharded; params stay resident per rank so the
+    #                  online rollout/logp forwards see full 2-D weights);
+    #   "deepspeed" -> DeepSpeed ZeRO-3 engine (also shards params);
     #   "auto"      -> FSDP (the O(1-sample) micro-batched backward + ROCm-native
-    #                  robustness make FSDP the default; see grpo.py docstring for
-    #                  the ZeRO-3-vs-FSDP rationale). DeepSpeed ZeRO-3 is fully
+    #                  robustness make FSDP the default; see grpo.py for the
+    #                  FSDP-vs-DeepSpeed rationale). DeepSpeed ZeRO-3 is fully
     #                  wired and selectable via "deepspeed".
     sharding_backend: str = "auto"          # "auto" | "fsdp" | "deepspeed"
-    fsdp_version: int = 1                    # torch FSDP version (1 = full_shard; 2 = FSDP2)
+    fsdp_version: int = 1                    # torch FSDP API version (1 = FSDP1; 2 = FSDP2)
     zero_stage: int = 3                      # DeepSpeed ZeRO stage (3 = shard params+grads+optim)
     cpu_offload: bool = False                # offload params+optimizer to CPU (needed at 32B/70B)
     ds_config: Optional[str] = None          # explicit DeepSpeed JSON config path (overrides builder)
-    # Generate in lockstep across ranks: REQUIRED under ZeRO-3/FSDP so ranks that
-    # finish a rollout early keep issuing (dummy) forwards until every rank is done
-    # - otherwise the collective per-forward all-gather deadlocks on ragged lengths.
+    # Lockstep generation across ranks (dummy forwards until every rank finishes)
+    # for the legacy path that generated ON the sharded policy. The current
+    # distributed loop instead rolls out on a full-weight per-rank replica with
+    # ZERO FSDP collectives, so it generates with lockstep OFF regardless (see
+    # ``_grpo_synced_gpus`` in grpo.py); this knob is retained for that fallback.
     synced_gpus: bool = True
 
     # --- Anti-collapse ladder (see anticollapse.py) ---
@@ -628,7 +640,7 @@ def grpo_sharding_backend(config) -> str:
     Returns ``"none"`` when this is NOT a distributed full-FT run (keep the legacy
     in-process path). Otherwise honors ``config.sharding_backend``:
       * ``"deepspeed"`` -> DeepSpeed ZeRO-3;
-      * ``"fsdp"``/``"fsdp2"`` -> torch FullyShardedDataParallel FULL_SHARD;
+      * ``"fsdp"``/``"fsdp2"`` -> torch FullyShardedDataParallel (SHARD_GRAD_OP/ZeRO-2);
       * ``"auto"`` -> ``"fsdp"`` (the default). FSDP is chosen because KORE's
         O(1-sample) micro-batched backward (many per-sample ``backward()`` then one
         ``optimizer.step()``) maps cleanly onto FSDP's grad reduce-scatter +

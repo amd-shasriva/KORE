@@ -1,6 +1,6 @@
 """General-capability replay loaders for the anti-catastrophic-forgetting mix.
 
-KORE specializes a reasoning+code base model on AMD kernels. To keep the ~45%
+KORE specializes a reasoning+code base model on AMD kernels. To keep the ~50%
 general-retention backbone (chat / code / math / instruction-following) plus the
 new agentic tool-use skill, Stage-1 SFT mixes real general data back in
 (Tulu-3-style replay). This module is the loader for that half.

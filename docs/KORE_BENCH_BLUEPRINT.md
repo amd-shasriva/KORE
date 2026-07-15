@@ -509,12 +509,15 @@ re-verification on the cached candidate module, reward lexicographic `r = 1[corr
 
 ### 4.6 Leakage-safe held-out split
 
-`registry.py` already reserves a whole family (`attention`) + all non-`gfx942` (gfx950 MX)
-tasks as held-out. For the release we additionally:
-- Hold out **≥1 whole family end-to-end** (recommend **grouped-GEMM MoE** *or* **MLA
-  prefill**) as the never-trained generalization eval.
+`registry.py` already reserves two structurally-distinct attention variants as whole
+families (`mla` latent attention + `paged_attention` KV-decode), plus any task on a foreign
+arch (outside the `gfx950`/`gfx942` lineage), as held-out. Core attention still trains, so
+the product model stays strong at attention while the eval measures true cross-family
+transfer. For the release we additionally:
+- Hold out **≥1 more whole family end-to-end** (recommend **grouped-GEMM MoE**) as an extra
+  never-trained generalization eval.
 - Held-out **shapes within trained ops**.
-- Held-out **arch** (gfx950 MX slice) as an OOD probe.
+- Held-out **arch** (a foreign non-`gfx950`/`gfx942` slice) as an OOD probe.
 - **Provenance holdout**: reserve entire source repos (e.g. all GEAK-eval ROCm_v1 kernels)
   as eval-only to prevent memorization.
 - Publish a frozen `test` split hash so leaderboard submissions can't train on it.

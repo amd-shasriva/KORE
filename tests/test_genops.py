@@ -91,5 +91,5 @@ def test_generated_tasks_registered_and_wide():
     # generation is checked in; the suite should be wide (>= 100 operators)
     assert len(tasks) >= 100
     assert any(t.startswith("gen_") for t in tasks)
-    # generated ops are all training ops (held-out stays the attention family)
+    # generated ops are all training ops (held-out stays MLA + paged-KV decode)
     assert len(train_tasks()) >= 90

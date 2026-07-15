@@ -19,8 +19,11 @@ distribution* co-evolves with the policy:
 
 Everything here is pure and CPU-only (torch is only imported lazily, inside
 functions, when the underlying op registries need it), so the whole task
-frontier is unit-testable without a GPU. Nothing here is wired into the training
-campaign - integration is a separate step.
+frontier is unit-testable without a GPU. The GRPO-facing adapter
+(:class:`kore.openended.controller.CoevolutionController`) wires this frontier
+into multi-turn GRPO when ``coevolve`` is enabled (see
+``configs/grpo_14b_full.json``); the standalone :mod:`kore.openended.coevolve`
+loop stays runner-agnostic for offline study.
 """
 
 from __future__ import annotations

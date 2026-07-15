@@ -10,6 +10,11 @@ existing parametric op registries:
     kernels), family ``vendor_<op>`` to match ``registry.operator_family`` /
     the generated ``op_family`` yaml field.
 
+Both source registries are trainable-only: the held-out generalization families
+(``mla`` / ``paged_attention``, see :mod:`kore.tasks.registry`) are absent from
+this space by construction, so a descriptor can never name a held-out task and the
+proposer built on top of it cannot leak one into training.
+
 A descriptor = ``(source, family, op, dtype, shape_regime)``; its *difficulty
 features* are derived (not stored) via :func:`descriptor_features`. Those
 features double as the MAP-Elites behavior descriptor:

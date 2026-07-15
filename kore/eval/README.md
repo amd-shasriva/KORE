@@ -1,6 +1,6 @@
 # `kore/eval` - evaluation, gates & generalization
 
-KORE's claim is conjunctive: **best kernel numbers _while_ matching-or-beating the base model on every general benchmark, _and_ generalizing to a held-out operator family.** This package measures all three, plus a maximum-scrutiny anti-hack re-eval of champion kernels.
+KORE's claim is conjunctive: **best kernel numbers _while_ matching-or-beating the base model on every general benchmark, _and_ generalizing to held-out operator families.** This package measures all three, plus a maximum-scrutiny anti-hack re-eval of champion kernels.
 
 ---
 
@@ -59,6 +59,8 @@ flowchart TD
 ## Generalization (held-out families)
 
 `generalization.py` classifies tasks into 8 families (`attention, moe, gemm, norm, positional, quant, reduction, activation`, first-match-wins rules), builds a leakage-checked split by **entire families**, and evaluates the physics residual reward on held-out families from a P0 measures JSON - **offline, no training**. It gates aggregation on the reward's own correctness verdict (`rr.correct`), not just the raw measure flag.
+
+> **Two family taxonomies, by design.** The 8-family `classify` here is the richer analysis / leave-one-family-out grouping. The AUTHORITATIVE product split is `kore.tasks.registry` (`operator_family` + `HELDOUT_FAMILIES`): the model **trains** core attention (flash prefill/decode/varlen/fp8) and reserves the structurally-distinct **MLA** (latent attention) and **paged-KV decode** families (plus any foreign-arch task) as the never-trained set. `korebench.py`'s per-family view uses the registry taxonomy; don't conflate the two.
 
 ---
 

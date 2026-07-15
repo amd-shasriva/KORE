@@ -1,10 +1,10 @@
 task_id: fused_rmsnorm_quant_fp8
 operation: fused_rmsnorm_quant_fp8
-dtype: fp8_e4m3fnuz
+dtype: fp8_e4m3fn
 backend: triton
 gpu_target: gfx950
 seed_kernel_name: seed_triton.py
-snr_threshold: 22.0   # fp8 e4m3fnuz gate on dequant vs the TRUE fp32 normed value
+snr_threshold: 22.0   # fp8 e4m3fn (OCP, gfx950) gate on dequant vs TRUE fp32 normed
 shapes:
   minimal: {M: 64, N: 512}
   primary: {M: 4096, N: 4096}       # Llama-3-8B hidden: RMSNorm -> fp8 GEMM prologue

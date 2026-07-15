@@ -1,7 +1,7 @@
 """GENERATED vendor-baselined a8w8 GEMM seed (fp8) vs aiter.gemm_a8w8.
 Y = (XQ*x_scale) @ (WQ*w_scale)^T, bf16 out. 8-bit (fp8/int8) operands up-converted
 in-register to fp32, fp32 accumulate, scales on the accumulator. Dtype-agnostic:
-the load->fp32 path handles both fp8 e4m3fnuz and int8. Regenerate via generate_vendor_ops.py."""
+the load->fp32 path handles both fp8 e4m3fn (OCP, gfx950/CDNA4) and int8. Regenerate via generate_vendor_ops.py."""
 from __future__ import annotations
 import torch, triton, triton.language as tl
 

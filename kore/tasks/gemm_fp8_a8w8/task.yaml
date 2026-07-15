@@ -1,10 +1,10 @@
 task_id: gemm_fp8_a8w8
 operation: gemm_fp8
-dtype: fp8_e4m3fnuz
+dtype: fp8_e4m3fn
 backend: triton
 gpu_target: gfx950
 seed_kernel_name: seed_triton.py
-snr_threshold: 25.0   # fp8 e4m3fnuz gate (low precision)
+snr_threshold: 25.0   # fp8 e4m3fn (OCP, gfx950/CDNA4) gate (low precision)
 shapes:
   minimal: {M: 8, N: 512, K: 512}
   primary: {M: 4096, N: 4096, K: 4096}   # prefill

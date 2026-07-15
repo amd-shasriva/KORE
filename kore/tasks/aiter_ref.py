@@ -194,7 +194,8 @@ def aiter_gelu_tanh_and_mul(x: torch.Tensor) -> torch.Tensor:
 
 # --- fp8 GEMM -------------------------------------------------------------
 def per_tensor_quant_fp8(x: torch.Tensor):
-    """Per-tensor symmetric quantization to fp8 e4m3fnuz.
+    """Per-tensor symmetric quantization to the arch-selected fp8 e4m3 (``FP8_DTYPE``:
+    OCP e4m3fn on gfx950/CDNA4, FNUZ e4m3fnuz on gfx942/CDNA3).
 
     Returns ``(xq, scale)`` where ``scale`` is a scalar fp32 tensor and
     ``x ≈ xq.float() * scale``.
@@ -326,7 +327,8 @@ def aiter_rope_neox(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
 
 # --- Dynamic per-token fp8 quantization ----------------------------------
 def aiter_dynamic_per_token_quant(x: torch.Tensor):
-    """AITER dynamic per-token (rowwise) fp8 quant to e4m3fnuz.
+    """AITER dynamic per-token (rowwise) fp8 quant to the arch-selected e4m3
+    (``FP8_DTYPE``: OCP e4m3fn on gfx950/CDNA4, FNUZ e4m3fnuz on gfx942/CDNA3).
 
     ``aiter.dynamic_per_token_scaled_quant(out, input, scales)`` writes the fp8
     codes into ``out`` [M,N] and the per-row fp32 scales into ``scales`` [M,1]

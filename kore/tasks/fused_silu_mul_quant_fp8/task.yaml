@@ -1,10 +1,10 @@
 task_id: fused_silu_mul_quant_fp8
 operation: fused_silu_mul_quant_fp8
-dtype: fp8_e4m3fnuz
+dtype: fp8_e4m3fn
 backend: triton
 gpu_target: gfx950
 seed_kernel_name: seed_triton.py
-snr_threshold: 22.0   # fp8 e4m3fnuz gate on dequant vs the TRUE fp32 silu_mul value
+snr_threshold: 22.0   # fp8 e4m3fn (OCP, gfx950) gate on dequant vs TRUE fp32 silu_mul
 shapes:
   minimal: {M: 64, N: 1024}         # inter = 512
   primary: {M: 4096, N: 8192}       # inter = 4096: FFN/MoE down-proj prologue

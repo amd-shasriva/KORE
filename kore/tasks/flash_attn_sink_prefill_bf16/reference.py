@@ -23,7 +23,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _attn_common import causal_mask, expand_kv, sdpa_fp32  # noqa: E402
+from kore.tasks._attn_common import causal_mask, expand_kv, sdpa_fp32  # noqa: E402
 
 ENTRY = "flash_attn"
 ATOL = 2e-2
@@ -74,12 +74,14 @@ def candidate_output(fn, shape, inputs):
 
 
 def baseline_output(shape, inputs):
-    """REAL vendor bar: AITER ``flash_attn_func`` with the per-head ``sink_ptr``.
+    """Perf-only vendor bar: dense AITER causal flash-attention (no sink term).
 
-    NOTE (verify on gfx950): the exact sink_ptr dtype/shape/semantics expected by the
-    installed AITER must be confirmed to match this oracle (per-head additive sink logit
-    in the softmax denominator). See VERIFICATION_CHECKLIST.md."""
-    import aiter
+    The installed AITER ``sink_ptr`` does NOT match the gpt-oss oracle (per-head additive
+    denominator sink; verified ~14.8 dB mismatch on gfx950), so per VERIFICATION_CHECKLIST.md
+    we KEEP the verified fp32 sink oracle and time against dense causal ``flash_attn_func``.
+    The sink adds only a per-head denominator term (near-identical compute), so dense causal
+    is a fair, oracle-agnostic speed floor the specialized sink kernel must beat."""
+    from kore.tasks.aiter_ref_attn import aiter_flash_attn
 
     q, k, v, sink = inputs
-    return aiter.flash_attn_func(q, k, v, causal=True, sink_ptr=sink)
+    return aiter_flash_attn(q, k, v, causal=True)

@@ -1,0 +1,46 @@
+[
+  {
+    "family": "attention",
+    "task": "flash_attn_sink_prefill_bf16",
+    "snr": 53.22,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 14.84,
+    "status": "PASS",
+    "baseline_mismatch": true
+  },
+  {
+    "family": "attention",
+    "task": "flash_attn_varlen_noncausal_bf16",
+    "snr": 52.74,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 52.75,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "quant",
+    "task": "gemm_fp8_requant_epilogue",
+    "snr": 69.72,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 40.16,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "moe",
+    "task": "moe_gelu_bf16",
+    "snr": 80.84,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 48.67,
+    "status": "PASS",
+    "baseline_mismatch": false
+  }
+]

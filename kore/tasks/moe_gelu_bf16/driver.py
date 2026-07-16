@@ -20,7 +20,7 @@ sys.path.insert(0, _HERE)                     # task dir -> reference.py
 sys.path.insert(0, os.path.dirname(_HERE))    # parent   -> _moe_common.py
 
 import reference as ref  # noqa: E402
-from _moe_common import driver_main  # noqa: E402
+from kore.tasks._moe_common import driver_main  # noqa: E402
 
 if __name__ == "__main__":
     raise SystemExit(driver_main(ref, _HERE))

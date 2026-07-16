@@ -23,7 +23,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _moe_common import gated_mlp_fp32, make_routing, vendor_fused_moe  # noqa: E402
+from kore.tasks._moe_common import gated_mlp_fp32, make_routing  # noqa: E402
 
 ENTRY = "fused_moe"
 ATOL = 3e-2
@@ -68,6 +68,30 @@ def candidate_output(fn, shape, inputs):
 
 
 def baseline_output(shape, inputs):
-    """REAL vendor bar: AITER CK fused MoE with ActivationType.Gelu."""
+    """Perf-only vendor bar: dense bf16 GeGLU MoE via per-expert hipBLASLt matmuls.
+
+    The installed AITER ``fused_moe`` with ActivationType.Gelu fails to JIT-build on this
+    node, so per VERIFICATION_CHECKLIST.md we KEEP the verified fp32 GeGLU oracle and time
+    against a dense per-expert top-k GeGLU computed with torch bf16 matmuls (hipBLASLt) -- a
+    real vendor-library bar the fused Triton kernel must beat. Grouped by expert so weight
+    materialization stays O(E), not O(M)."""
+    import torch
+    import torch.nn.functional as F
+
     hidden, w1, w2, tw, ti = inputs
-    return vendor_fused_moe(hidden, w1, w2, tw, ti, activation="gelu")
+    M, D = hidden.shape
+    topk = ti.shape[1]
+    rows = hidden.repeat_interleave(topk, dim=0)              # [M*topk, D] bf16
+    flat_ids = ti.reshape(-1).long()
+    flat_w = tw.reshape(-1).float()
+    y = torch.zeros((M * topk, D), dtype=torch.bfloat16, device=hidden.device)
+    for e in torch.unique(flat_ids).tolist():
+        idx = (flat_ids == e).nonzero(as_tuple=True)[0]
+        if idx.numel() == 0:
+            continue
+        gate_up = torch.matmul(rows[idx], w1[e].t())          # [n, 2I] bf16 (hipBLASLt)
+        i2 = gate_up.shape[1] // 2
+        h = F.gelu(gate_up[:, :i2].float(), approximate="tanh").to(torch.bfloat16) * gate_up[:, i2:]
+        y[idx] = torch.matmul(h, w2[e].t())                   # [n, D] bf16 (hipBLASLt)
+    y = (y.float().reshape(M, topk, D) * flat_w.reshape(M, topk, 1)).sum(dim=1)
+    return y.to(torch.bfloat16)

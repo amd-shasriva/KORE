@@ -41,32 +41,31 @@ _ARCH_LABELS: tuple[tuple[str, str], ...] = (
     ("cdna3", "cdna4"),
 )
 
-# fp8 encoding dtype names: gfx942 FNUZ -> gfx950 OCP. Guarded (see module docstring).
-_FP8_DTYPES: tuple[tuple[str, str], ...] = (
-    ("e4m3fnuz", "e4m3fn"),
-    ("e5m2fnuz", "e5m2"),
-)
-
-# Marker of a repair fix-lesson that names both fp8 encodings; skip fp8 rewrites there.
-_FIX_LESSON_MARKER = "instead of"
+# The legacy FNUZ fp8 encoding marker. If a string mentions FNUZ (e4m3fnuz / e5m2fnuz),
+# leave the WHOLE string verbatim: FNUZ is the gfx942 encoding, so its arch label is
+# bound to that fact. Scrubbing gfx942 -> gfx950 there would manufacture a false
+# "gfx950 uses FNUZ" statement (gfx950 uses OCP e4m3fn) and could corrupt a real fp8
+# kernel's dtype. This preserves deliberate gfx942-vs-gfx950 fp8 facts (the aiter_ref
+# infra docs, fp8 task docstrings) and fp8 code. Stale single-arch text without FNUZ is
+# still rewritten to the target.
+_LEGACY_FP8_MARKER = "fnuz"
 
 
 def normalize_text(s: str) -> str:
     """Rewrite stale arch tokens in one string toward the gfx950 target.
 
-    Pure and idempotent. Arch/board/uarch labels are always rewritten; the fp8
-    encoding names are rewritten only when the string is not a two-encoding repair
-    fix-lesson (guarded by ``"instead of"``).
+    Pure and idempotent. A string that mentions the legacy FNUZ fp8 encoding is left
+    verbatim (its arch labels and dtype are arch-specific and correct as written);
+    otherwise the arch / board / uarch labels (gfx942 -> gfx950, CDNA3 -> CDNA4,
+    MI300X / MI325X -> MI350X) are rewritten to the gfx950 target.
     """
     if not s:
+        return s
+    if _LEGACY_FP8_MARKER in s.lower():
         return s
     for old, new in _ARCH_LABELS:
         if old in s:
             s = s.replace(old, new)
-    if _FIX_LESSON_MARKER not in s:
-        for old, new in _FP8_DTYPES:
-            if old in s:
-                s = s.replace(old, new)
     return s
 
 

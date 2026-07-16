@@ -1,0 +1,25 @@
+task_id: moe_permute_bf16
+operation: moe_permute
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# MoE dispatch/permute (scatter tokens to experts): given hidden [M,D] and an
+# expert-sorted index sort_idx [M] (stable argsort of the token->expert
+# assignment, precomputed like aiter moe_sorting / moe_align_block_size does),
+# gather permuted[i] = hidden[sort_idx[i]] so each expert's tokens land in one
+# contiguous block ready for a grouped GEMM. Memory-bound indexed copy. Oracle:
+# fp32 gather (exact). Vendor bar: framework indexed gather (fused ROCm gather).
+# Near-exact -> very high SNR; gate at 25 dB rejects a wrong-index / dropped-row
+# kernel. STAGED DRAFT. classify: operation "moe_permute" -> family "moe".
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 64, E: 8, D: 128}
+  primary: {M: 8192, E: 256, D: 7168}     # DeepSeek-V3 dispatch, hidden 7168
+  validation:
+    - {M: 4096, E: 32, D: 4096}            # 32-expert, hidden 4096
+    - {M: 2048, E: 64, D: 2048}            # 64-expert
+    - {M: 1024, E: 256, D: 5120}           # 256-expert, Llama-4 hidden
+targets:
+  snr_db: 25.0
+  comparison_baseline: framework_gather   # torch indexed gather (fused ROCm)

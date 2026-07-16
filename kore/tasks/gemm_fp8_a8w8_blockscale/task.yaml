@@ -1,0 +1,24 @@
+task_id: gemm_fp8_a8w8_blockscale
+operation: gemm_fp8_a8w8_blockscale
+dtype: fp8_e4m3fn
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# DeepSeek-V3 BLOCK-SCALED fp8 (OCP e4m3fn, gfx950/CDNA4): activation quantized 1x128
+# (x_scale[M,K//128]), weight quantized 128x128 (w_scale[N//128,K//128]). Per-128-K-group
+# dequant is applied on the fp32 accumulator. Correctness oracle = blockwise fp32
+# dequant-matmul (each block scale applied EXACTLY once). Baseline (--impl reference) =
+# AITER gemm_a8w8_blockscale. get_inputs GUARDS K%128==0 and N%128==0 (the block-scale
+# alignment constraint; K=4095 is illegal and raises). STAGED DRAFT - verify on gfx950.
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 128, N: 256, K: 256}
+  primary: {M: 4096, N: 4096, K: 4096}          # prefill
+  validation:
+    - {M: 1, N: 4096, K: 4096}                  # decode bs=1 (edge S2)
+    - {M: 4097, N: 512, K: 512}                 # non-128-aligned M tail (edge S5)
+    - {M: 2048, N: 14336, K: 4096}              # Llama MLP up-proj
+    - {M: 8, N: 7168, K: 2048}                  # DeepSeek hidden, small-batch decode
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_gemm_a8w8_blockscale   # the REAL serving bar (CK 1x128/128x128)

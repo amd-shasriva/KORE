@@ -1,0 +1,92 @@
+[
+  {
+    "family": "moe",
+    "task": "moe_batched_gemm_bf16",
+    "snr": 90.02,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 89.74,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "moe",
+    "task": "moe_biased_grouped_topk_bf16",
+    "snr": 143.24,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 999.0,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "moe",
+    "task": "moe_gelu_bf16",
+    "snr": 80.84,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": false,
+    "baseline_error": "RuntimeError: [aiter] build [module_moe_ck2stages_b16_b16_preshuffle_on_b16_gelu_no_mulWeightStage2] under /home/shasriva/aiter/aiter/jit/build/module_moe_ck2stages_b16_b16_preshuffle_on_b16_gelu_no_m",
+    "baseline_oracle_snr": null,
+    "baseline_oracle_error": "RuntimeError: [aiter] build [module_moe_ck2stages_b16_b16_preshuffle_on_b16_gelu_no_mulWeightStage2] under /home/shasriva/aiter/aiter/jit/build/module_moe_ck2stages_b16_b16_preshuffle_on_b16_gelu_no_m",
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "moe",
+    "task": "moe_grouped_gemm_bf16",
+    "snr": 85.08,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 85.26,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "moe",
+    "task": "moe_grouped_gemm_fp8",
+    "snr": 83.11,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 72.66,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "moe",
+    "task": "moe_permute_bf16",
+    "snr": 999.0,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 999.0,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "moe",
+    "task": "moe_sum_combine_bf16",
+    "snr": 95.15,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 999.0,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "moe",
+    "task": "moe_topk_softmax_norenorm_bf16",
+    "snr": 143.09,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 143.09,
+    "status": "PASS",
+    "baseline_mismatch": false
+  }
+]

@@ -1,0 +1,25 @@
+task_id: moe_biased_grouped_topk_bf16
+operation: moe_biased_grouped_topk
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# DeepSeek-V3 MoE router: SIGMOID gate + per-expert correction bias, grouped
+# top-k (experts partitioned into n_groups; keep the topk_group groups with the
+# highest top-2-score sum; then top-k experts among the kept groups), weights =
+# the ORIGINAL sigmoid scores at the chosen experts, renormalized. Scored on a
+# dense [M,E] scatter (order-independent selection + weights). fp32 path lands
+# very high SNR; gate at 25 dB rejects a wrong-group / wrong-topk / wrong-bias
+# kernel. STAGED DRAFT - verify on gfx950 (see FLAG: aiter.biased_grouped_topk
+# signature). classify: operation contains "topk" -> family "moe_router".
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 16, E: 16, topk: 2, n_groups: 4, topk_group: 2}
+  primary: {M: 4096, E: 256, topk: 8, n_groups: 8, topk_group: 4}   # DeepSeek-V3
+  validation:
+    - {M: 8192, E: 256, topk: 8, n_groups: 8, topk_group: 4}        # more tokens
+    - {M: 2048, E: 64, topk: 6, n_groups: 8, topk_group: 3}         # smaller MoE
+    - {M: 1, E: 256, topk: 8, n_groups: 8, topk_group: 4}           # single-token decode
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_biased_grouped_topk   # AITER biased_grouped_topk (FLAG)

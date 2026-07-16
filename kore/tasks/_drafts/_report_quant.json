@@ -1,0 +1,90 @@
+[
+  {
+    "family": "quant",
+    "task": "gemm_fp8_a8w8_blockscale",
+    "snr": 83.06,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 72.99,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "quant",
+    "task": "gemm_fp8_a8w8_pertensor",
+    "snr": 83.06,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 72.77,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "quant",
+    "task": "gemm_fp8_a8w8_pertoken",
+    "snr": 82.86,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 72.67,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "quant",
+    "task": "gemm_fp8_requant_epilogue",
+    "snr": 69.72,
+    "allclose": false,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 40.16,
+    "status": "FAIL",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "quant",
+    "task": "gemm_int8_a8w8",
+    "snr": 82.95,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 83.39,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "quant",
+    "task": "gemm_mxfp4_a4w4",
+    "snr": 999.0,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 999.0,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "quant",
+    "task": "gemm_w4a16_g128",
+    "snr": 80.1,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 51.79,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "quant",
+    "task": "gemm_w4a8_fp8",
+    "snr": 87.6,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 49.45,
+    "status": "PASS",
+    "baseline_mismatch": false
+  }
+]

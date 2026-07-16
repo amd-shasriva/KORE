@@ -1,0 +1,24 @@
+task_id: gemm_int8_a8w8
+operation: gemm_int8_a8w8
+dtype: int8
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# int8 W8A8 GEMM: per-token activation scale [M,1] + per-output-channel weight scale
+# [1,N], symmetric (round-to-nearest, +/-127). Correctness oracle = fp32 matmul of the
+# dequantized int8 operands (each scale applied EXACTLY once). Baseline (--impl reference)
+# = AITER gemm_a8w8 (int8 path). int8 is near-exact so SNR lands high; gate held at 25 dB
+# for family consistency (still rejects a wrong-scale / bf16-accum kernel). STAGED DRAFT.
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 8, N: 512, K: 512}
+  primary: {M: 4096, N: 4096, K: 4096}          # prefill
+  validation:
+    - {M: 1, N: 4096, K: 4096}                  # decode bs=1 (edge S2)
+    - {M: 17, N: 4096, K: 4096}                 # non-pow2 tail M (edge S5)
+    - {M: 4097, N: 6144, K: 4096}               # tail M + fused-qkv N
+    - {M: 8192, N: 8192, K: 4096}               # peak-throughput batch
+    - {M: 64, N: 4096, K: 4095}                 # non-pow2 K tail (edge S1)
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_gemm_a8w8          # the REAL serving bar (CK int8 W8A8)

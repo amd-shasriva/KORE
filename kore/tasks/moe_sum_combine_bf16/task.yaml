@@ -1,0 +1,24 @@
+task_id: moe_sum_combine_bf16
+operation: moe_sum_combine
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# MoE weighted combine (the unpermute + reduce back to per-token output): given
+# the per-slot expert outputs y [M, topk, D] and router weights topk_weight
+# [M, topk], compute out[m] = sum_k topk_weight[m,k] * y[m,k,:] (blueprint M13
+# moe_sum). Oracle: fp32 weighted reduce. Vendor bar: framework weighted reduce
+# (fused ROCm). fp32-accumulation bf16 candidate lands high SNR; gate at 25 dB
+# rejects a wrong-weight / wrong-axis reduce. STAGED DRAFT.
+# classify: operation "moe_sum_combine" contains "moe" -> family "moe".
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 64, topk: 2, D: 128}
+  primary: {M: 8192, topk: 8, D: 7168}     # DeepSeek-V3 combine, hidden 7168
+  validation:
+    - {M: 4096, topk: 8, D: 4096}           # 32-expert top-8, hidden 4096
+    - {M: 2048, topk: 2, D: 8192}           # Mixtral top-2, hidden 8192
+    - {M: 1, topk: 8, D: 5120}              # single-token decode
+targets:
+  snr_db: 25.0
+  comparison_baseline: framework_moe_sum   # torch weighted reduce (fused ROCm)

@@ -1,0 +1,25 @@
+task_id: moe_grouped_gemm_bf16
+operation: moe_grouped_gemm
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# bf16 GROUPED (segmented) expert GEMM: out[m] = hidden[m] @ w[e]^T for the
+# expert e = expert_ids[m] (top-1 routing). Unbalanced jagged token->expert
+# counts with a guaranteed 0-token last expert (the MoE gate_up projection
+# stage, G11/M6). Oracle: fp32 per-group matmul. Vendor bar: per-expert
+# torch.matmul -> hipBLASLt (the production dense grouped-GEMM bar; the candidate
+# must beat launching one GEMM per non-empty expert). fp32-accumulation bf16
+# candidate lands ~40+ dB; gate at 25 dB. STAGED DRAFT - verify on gfx950.
+# classify: operation "moe_grouped_gemm" contains "moe" -> family "moe".
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 64, E: 8, N: 128, K: 128}
+  primary: {M: 4096, E: 32, N: 2048, K: 4096}     # 32-expert gate/up, hidden 4096
+  validation:
+    - {M: 8192, E: 64, N: 1024, K: 2048}           # 64-expert, more tokens
+    - {M: 1024, E: 256, N: 512, K: 2048}           # DeepSeek 256-expert
+    - {M: 512, E: 32, N: 1536, K: 4096}            # small-batch 0-token edge (Qwen inter)
+targets:
+  snr_db: 25.0
+  comparison_baseline: hipblaslt_grouped_gemm_bf16   # per-expert torch.matmul (hipBLASLt)

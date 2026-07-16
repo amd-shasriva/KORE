@@ -1,0 +1,24 @@
+task_id: gemm_w4a8_fp8
+operation: gemm_w4a8_fp8
+dtype: int4_w4a8
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# W4A8 mixed-precision GEMM: int4 per-output-channel SYMMETRIC weight + fp8 (OCP e4m3fn)
+# per-token activation. The QServe/QoQ-style serving path (4-bit weight, 8-bit activation)
+# that halves weight HBM traffic vs W8A8 while keeping an 8-bit activation. Correctness
+# oracle = fp32 matmul of the dequantized fp8 activation and int4 weight (each scale
+# applied EXACTLY once, on its own axis). Baseline (--impl reference) = dequant both to
+# bf16 + hipBLASLt matmul. get_inputs GUARDS K even (int4 nibble packing). STAGED DRAFT.
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 64, N: 128, K: 256}
+  primary: {M: 16, N: 4096, K: 4096}            # decode weight-bound (w4 shines, tiny M)
+  validation:
+    - {M: 1, N: 4096, K: 14336}                 # single-token decode, Llama FFN down
+    - {M: 4096, N: 4096, K: 4096}               # prefill (large M)
+    - {M: 17, N: 5120, K: 3584}                 # Qwen3-ish, non-pow2 tail M
+    - {M: 64, N: 4096, K: 4096}                 # small-batch decode
+targets:
+  snr_db: 25.0
+  comparison_baseline: bf16_dequant_matmul      # hipBLASLt bar (w4a8 wins on weight HBM)

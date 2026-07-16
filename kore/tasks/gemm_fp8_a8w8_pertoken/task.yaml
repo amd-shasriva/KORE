@@ -1,0 +1,26 @@
+task_id: gemm_fp8_a8w8_pertoken
+operation: gemm_fp8_a8w8_pertoken
+dtype: fp8_e4m3fn
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# fp8 (OCP e4m3fn, gfx950/CDNA4) a8w8 with DYNAMIC per-token activation scale [M,1] +
+# per-output-channel weight scale [1,N] -- the serving-critical dynamic-quant GEMM.
+# Correctness oracle = fp32 matmul of the dequantized fp8 operands (each scale applied
+# EXACTLY once); the fp8 rounding is shared by candidate + reference so the gate measures
+# matmul fidelity, not quantization error. Baseline (--impl reference) = AITER gemm_a8w8.
+# STAGED DRAFT - verify on gfx950 before promotion (see ../VERIFICATION_CHECKLIST.md).
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 8, N: 512, K: 512}
+  primary: {M: 4096, N: 4096, K: 4096}          # prefill (Llama-3-8B o_proj scale)
+  validation:
+    - {M: 1, N: 4096, K: 4096}                  # decode bs=1 (edge S2, GEMV)
+    - {M: 17, N: 6144, K: 4096}                 # non-pow2 tail M + fused-qkv N
+    - {M: 4097, N: 4096, K: 4096}               # tail M=4097 (edge S5, boundary mask)
+    - {M: 8192, N: 28672, K: 8192}              # Llama-70B gate_up (giant N)
+    - {M: 64, N: 4096, K: 4095}                 # non-pow2 K tail (edge S1, K masking)
+    - {M: 16, N: 4096, K: 4096, TA: 1}          # transposed A (A^T, non-contiguous; L1)
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_gemm_a8w8          # the REAL serving bar (CK fp8 per-token)

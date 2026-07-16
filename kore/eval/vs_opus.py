@@ -154,7 +154,8 @@ def opus_policy(teacher=None, *, kind: str = DEFAULT_TEACHER_KIND,
 
 
 def make_opus_teacher(kind: str = DEFAULT_TEACHER_KIND, *, model: Optional[str] = None,
-                      resilient: bool = True, log=None, **teacher_kwargs):
+                      resilient: bool = True, temperature: Optional[float] = None,
+                      log=None, **teacher_kwargs):
     """Build the frontier teacher, returning ``None`` (not raising) if unavailable.
 
     This is the graceful-degradation entry point for :func:`head_to_head` and the
@@ -162,6 +163,11 @@ def make_opus_teacher(kind: str = DEFAULT_TEACHER_KIND, *, model: Optional[str] 
     gateway unreachable) is caught and turned into a loud warning + ``None`` so the
     caller can SKIP the Opus side rather than crash - exactly how the retention
     gate tolerates an unprovisioned serving backend.
+
+    ``temperature`` (when given) is threaded into the teacher's construction so the
+    Opus side decodes at the SAME temperature as the KORE side - a fair head-to-head.
+    Otherwise the teacher keeps its own default (0.7), which would silently mismatch
+    a greedy KORE side.
     """
     try:
         from kore.data.teacher import load_env_local, make_teacher
@@ -169,6 +175,8 @@ def make_opus_teacher(kind: str = DEFAULT_TEACHER_KIND, *, model: Optional[str] 
         kw = dict(teacher_kwargs)
         if model:
             kw["model"] = model
+        if temperature is not None:
+            kw["temperature"] = float(temperature)
         return make_teacher(kind, resilient=resilient, **kw)
     except Exception as e:  # noqa: BLE001 - provisioning failure is non-fatal here
         _loud_warn(log, "frontier teacher NOT provisioned; Opus side will be SKIPPED "
@@ -319,7 +327,11 @@ def head_to_head(
     Both sides are built with :func:`kore.eval.policies.model_policy` (so they are
     prompted + parsed identically) and scored with :func:`evaluate_policy` under the
     SAME ``env_factory`` (live :class:`KoreEnv` verify + cold-cache bench), the SAME
-    ``budget``, and the SAME timing-integrity gate, once per seed. We report:
+    ``budget``, the SAME timing-integrity gate, and the SAME decoding ``temperature``
+    (the teacher's is pinned to match the KORE side), once per seed. With
+    ``temperature > 0`` each seed reseeds the torch global RNG so the multi-seed CI
+    reflects real generation variance on torch-RNG backends; at ``temperature == 0``
+    (greedy) generation is deterministic and the CI is timing-jitter only. We report:
 
       * ``kore`` / ``opus``: fast_p mean +/- 95% CI over seeds (via
         :func:`kore.eval.bakeoff.aggregate_fastp_over_seeds`) plus each seed's raw
@@ -340,12 +352,28 @@ def head_to_head(
     seeds = list(seeds)
     n = len(tasks)
 
+    def _seed_everything(sd: int) -> None:
+        # Make per-seed sampling reproducible AND varied across seeds on backends that
+        # draw from the torch global RNG (e.g. the HF backend). For greedy decoding
+        # (temperature == 0) generation is deterministic, so this is a no-op on the
+        # samples and the multi-seed CI then reflects timing jitter only (reported
+        # honestly below). Only called on the LIVE path (never under dry_run).
+        try:
+            import torch
+            torch.manual_seed(sd)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(sd)
+        except Exception:  # noqa: BLE001 - seeding is best-effort, never fatal
+            pass
+
     # KORE side (always evaluated; its numbers survive an Opus skip).
     kore_pol = kore_policy(kore_generate_fn, system_prompt=system_prompt,
                            max_tokens=max_tokens, temperature=temperature)
     kore_seed_results: list[dict] = []
     for sd in seeds:
         kdr = seed_kore_dry_run(sd) if seed_kore_dry_run is not None else kore_dry_run
+        if kdr is None:
+            _seed_everything(sd)
         res = evaluate_policy(kore_pol, tasks, env_factory=env_factory, budget=budget,
                               mode=mode, dry_run=kdr, ps=ps, cfg=cfg)
         res["seed"] = sd
@@ -376,6 +404,15 @@ def head_to_head(
                         "reporting KORE-only fast_p (head-to-head not computed)")
         return out
 
+    # Enforce a MATCHED decoding temperature on the teacher so the comparison is fair:
+    # the KORE side decodes at ``temperature`` (via kore_policy), so the Opus teacher
+    # must too. TeacherClient carries its decode params at construction and
+    # _teacher_generate drops per-call overrides, so we pin it here (belt-and-suspenders
+    # with make_opus_teacher(temperature=...)); otherwise a greedy KORE side (0.0) would
+    # be silently compared against a teacher sampling at 0.7.
+    if hasattr(teacher, "temperature"):
+        teacher.temperature = float(temperature)
+
     # Opus side (graceful): a provisioning error or a sustained-outage hard-stop
     # from the ResilientTeacher must SKIP the comparison, never crash the eval.
     opus_pol = opus_policy(teacher=teacher, system_prompt=system_prompt,
@@ -384,6 +421,8 @@ def head_to_head(
     try:
         for sd in seeds:
             odr = seed_opus_dry_run(sd) if seed_opus_dry_run is not None else opus_dry_run
+            if odr is None:
+                _seed_everything(sd)
             res = evaluate_policy(opus_pol, tasks, env_factory=env_factory, budget=budget,
                                   mode=mode, dry_run=odr, ps=ps, cfg=cfg)
             res["seed"] = sd
@@ -526,6 +565,10 @@ def main(argv=None) -> int:  # pragma: no cover - CLI wiring (GPU/gateway path)
     p.add_argument("--mode", default="serial", choices=("serial", "parallel"))
     p.add_argument("--margin", type=float, default=1.0,
                    help="multiplicative speedup margin to win a task (>=1.0)")
+    p.add_argument("--temperature", type=float, default=0.0,
+                   help="matched decode temperature for BOTH sides (0.0 = greedy); "
+                        "use >0 for a sampling head-to-head where the multi-seed CI "
+                        "reflects real generation variance, not just timing jitter")
     p.add_argument("--out", default=None,
                    help="optional path stem to persist JSON + markdown (default: stdout only)")
     args = p.parse_args(argv)
@@ -541,7 +584,8 @@ def main(argv=None) -> int:  # pragma: no cover - CLI wiring (GPU/gateway path)
         print("[vs_opus] no tasks resolved; nothing to evaluate", file=sys.stderr)
         return 2
 
-    teacher = make_opus_teacher(args.teacher, model=args.teacher_model)
+    teacher = make_opus_teacher(args.teacher, model=args.teacher_model,
+                                temperature=args.temperature)
 
     # KORE served model (lazy torch/vLLM import lives in load_generate).
     from kore.env.kore_env import KoreEnv
@@ -551,6 +595,7 @@ def main(argv=None) -> int:  # pragma: no cover - CLI wiring (GPU/gateway path)
     res = head_to_head(
         tasks, kore_gen, teacher, budget=args.budget, seeds=seeds,
         env_factory=lambda t: KoreEnv(t), mode=args.mode, margin=args.margin,
+        temperature=args.temperature,
     )
     print(format_vs_opus_report(res))
 

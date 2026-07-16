@@ -1,0 +1,25 @@
+task_id: gemm_w4a16_g128
+operation: gemm_w4a16_g128
+dtype: int4_w4a16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# Group-wise ASYMMETRIC (zero-point) int4 weight, bf16 activation -- the AWQ/GPTQ serving
+# layout (group=128 along K): per group g, w ~= (code - zero[n,g]) * scale[n,g]. The live
+# gemm_w4a16 is per-CHANNEL SYMMETRIC; this adds the group-wise asymmetric (zero-point)
+# complement, which is the dominant production 4-bit format. Correctness oracle = fp32
+# matmul of the dequantized int4 weight with the zero-point applied EXACTLY once. Baseline
+# (--impl reference) = materialize weight to bf16 + hipBLASLt matmul (the int4 kernel wins
+# on ~4x less weight HBM traffic). get_inputs GUARDS K%128==0. STAGED DRAFT.
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 64, N: 128, K: 256}
+  primary: {M: 16, N: 4096, K: 4096}            # decode weight-bound (int4 shines, tiny M)
+  validation:
+    - {M: 1, N: 4096, K: 14336}                 # single-token decode, Llama FFN down
+    - {M: 4096, N: 4096, K: 4096}               # prefill (large M)
+    - {M: 17, N: 5120, K: 3584}                 # Qwen3-ish, non-pow2 tail M, K=28*128
+    - {M: 32, N: 4096, K: 4096, TA: 1}          # transposed A (A^T, non-contiguous; L1)
+targets:
+  snr_db: 25.0
+  comparison_baseline: bf16_dequant_matmul      # hipBLASLt bar (int4 wins on HBM traffic)

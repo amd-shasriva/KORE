@@ -73,6 +73,8 @@ class AgentEpisode:
     # --- GEAK-style cognition additions --- #
     turn_rewards: list[float] = field(default_factory=list)   # per-turn verified reward
     turn_correct: list[bool] = field(default_factory=list)    # per-turn correctness
+    turn_speedups: list = field(default_factory=list)         # per-turn MEASURED speedup (or None)
+    turn_codes: list[str] = field(default_factory=list)       # per-turn candidate kernel source
     reflections: list[dict] = field(default_factory=list)     # structured reflect turns
     phase_trace: list[dict] = field(default_factory=list)     # [{turn, phase}]
     reseeds: list[dict] = field(default_factory=list)         # trap-avoidance restarts
@@ -91,6 +93,8 @@ class AgentEpisode:
             "success": self.success,
             "turn_rewards": self.turn_rewards,
             "turn_correct": self.turn_correct,
+            "turn_speedups": self.turn_speedups,
+            "turn_codes": self.turn_codes,
             "reflections": self.reflections,
             "phase_trace": self.phase_trace,
             "reseeds": self.reseeds,
@@ -268,6 +272,8 @@ class AgentHarness:
         tool_trace: list[dict] = []
         turn_rewards: list[float] = []
         turn_correct: list[bool] = []
+        turn_speedups: list = []
+        turn_codes: list[str] = []
         reflections: list[dict] = []
         phase_trace: list[dict] = []
         reseeds: list[dict] = []
@@ -315,7 +321,7 @@ class AgentHarness:
                               best_reward=(_br if _br != float("-inf") else None))
 
             # --- per-turn verified reward trace (RL contract): one entry/turn --- #
-            self._record_turn(ex, turn_rewards, turn_correct)
+            self._record_turn(ex, turn_rewards, turn_correct, turn_speedups, turn_codes)
 
             # --- correctness -> optimization phase split --- #
             if phase == PHASE_CORRECTNESS and ex.best_src is not None:
@@ -367,6 +373,8 @@ class AgentHarness:
             success=success,
             turn_rewards=turn_rewards,
             turn_correct=turn_correct,
+            turn_speedups=turn_speedups,
+            turn_codes=turn_codes,
             reflections=reflections,
             phase_trace=phase_trace,
             reseeds=reseeds,
@@ -374,27 +382,42 @@ class AgentHarness:
 
     @staticmethod
     def _record_turn(ex: ToolExecutor, turn_rewards: list[float],
-                     turn_correct: list[bool]) -> None:
-        """Append the verified reward/correctness of the current candidate.
+                     turn_correct: list[bool], turn_speedups: list,
+                     turn_codes: list[str]) -> None:
+        """Append the verified reward/correctness/speedup/source of this turn.
 
         Uses the candidate evaluated this turn when present; otherwise carries
         the best-so-far reward (0.0 before any candidate). This is the per-turn
-        signal the GRPO agentic path folds in as Kevin credit.
+        signal the GRPO agentic path folds in as Kevin credit AND (new) surfaces
+        as per-turn ``speedups`` + ``codes`` so agentic wins reach co-evolution
+        distillation and the open-ended controller exactly like the serial path.
+        The four arrays are populated in lockstep (one entry per turn), so they
+        stay index-aligned with ``_HFChatPolicy.turn_inputs``.
         """
         if ex.candidate_reward is not None:
             r = float(ex.candidate_reward)
             c = bool(ex.candidate_correct)
+            su = ex.candidate_speedup
+            code = ex.candidate_src or ""
         elif ex.best_reward != float("-inf"):
             r = float(ex.best_reward)
             c = True
+            su = ex.best_speedup
+            code = ex.best_src or ""
         else:
             r = 0.0
             c = False
+            su = None
+            code = ""
         # EXACT reward (no display rounding): turn_rewards is the per-turn GRPO
         # Kevin-credit signal, so it must match best_reward bit-for-bit. Rounding
         # here silently discards reward contrast the advantage estimator needs.
         turn_rewards.append(float(r))
         turn_correct.append(c)
+        # Measured speedup only when the turn actually benched a correct candidate
+        # (else None), so a correctness-only turn never invents a timing number.
+        turn_speedups.append(float(su) if su is not None else None)
+        turn_codes.append(code)
 
 
 def _safe_seed(task) -> str:

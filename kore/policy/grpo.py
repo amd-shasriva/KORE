@@ -2290,10 +2290,14 @@ def _rollout_agentic(model, tok, env, task, config, ref_model=None):
 
     Returns the SAME per-turn dict shape as :func:`_rollout` (``rewards``,
     ``correct``, ``infra``, ``gen_inputs``, ``ref_logps``, ``old_logps``,
-    ``n_tokens``, ``codes``). ``ref_logps`` are populated when ``ref_model`` is
-    provided - the per-turn KL anchor is now ACTIVE in agentic mode (item 5). If
-    the harness/episode exposes no per-turn trace, this degrades to a single
-    terminal (best_reward, success) sample (Kevin trajectory value).
+    ``n_tokens``, ``codes``, ``speedups``). ``ref_logps`` are populated when
+    ``ref_model`` is provided - the per-turn KL anchor is now ACTIVE in agentic
+    mode (item 5). ``codes`` and ``speedups`` are now populated per turn from the
+    harness's per-turn trace (AgentEpisode.turn_codes / turn_speedups), so agentic
+    rollouts feed co-evolution distillation + the open-ended controller the SAME
+    achieved-speedup + kernel-source signal as the serial path (both were dropped
+    before). If the harness/episode exposes no per-turn trace, this degrades to a
+    single terminal (best_reward, success) sample with ``codes=""``/``speedups=None``.
     """
     import torch
 
@@ -2317,6 +2321,9 @@ def _rollout_agentic(model, tok, env, task, config, ref_model=None):
 
     # Align the per-turn credit trace with the recorded assistant generations.
     n = min(len(turn_inputs), len(turn_rewards), len(turn_correct))
+    # Per-turn MEASURED speedup + candidate source, recovered from the harness's
+    # per-turn trace (aligned + correctness-gated; degrades to ("", None)).
+    codes_t, speedups_t = _agentic_per_turn_signal(episode, turn_correct, n)
     out = {"rewards": [], "correct": [], "infra": [], "gen_inputs": [],
            "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": [], "speedups": []}
     for t in range(n):
@@ -2338,9 +2345,49 @@ def _rollout_agentic(model, tok, env, task, config, ref_model=None):
         out["ref_logps"].append(ref_lp)
         out["old_logps"].append(old_lp)
         out["n_tokens"].append(max(int(gen_ids.shape[0]), 1))
-        out["codes"].append("")  # per-turn kernel source not exposed by the harness
-        out["speedups"].append(None)  # harness exposes no per-turn speedup
+        # Per-turn kernel source + measured speedup so co-evolution distillation
+        # gets a real best_kernel_src and the controller/open-ended archive see the
+        # achieved speedup (both were dropped before; serial parity).
+        out["codes"].append(codes_t[t])
+        out["speedups"].append(speedups_t[t])
     return out
+
+
+def _agentic_per_turn_signal(episode, turn_correct, n: int):
+    """Per-turn ``(codes, speedups)`` for the first ``n`` agentic assistant turns.
+
+    Recovers the harness's per-turn kernel source (``episode.turn_codes``) and
+    MEASURED speedup (``episode.turn_speedups``) so the agentic rollout feeds
+    co-evolution distillation + the open-ended controller the SAME signal as the
+    serial path. Pure / CPU-only (no torch), so it is unit-testable in isolation.
+
+    Safety: the trace is used ONLY when it is present AND index-aligned with the
+    (reward, correct) trace (``turn_rewards``/``turn_correct`` same length as
+    ``turn_speedups``/``turn_codes``), so the degraded terminal-only fallback in
+    :func:`_episode_turn_rewards` (length 1) can never misattribute a speedup or
+    source to the wrong turn - it degrades to ``("", None)`` per turn. Speedups are
+    correctness-gated exactly like the serial ``_rollout`` (a non-correct turn
+    never carries a measured speedup).
+    """
+    ep_speedups = list(getattr(episode, "turn_speedups", []) or [])
+    ep_codes = list(getattr(episode, "turn_codes", []) or [])
+    tr_raw = getattr(episode, "turn_rewards", None)
+    tc_raw = getattr(episode, "turn_correct", None)
+    aligned = (isinstance(tr_raw, list) and isinstance(tc_raw, list)
+               and len(tr_raw) == len(tc_raw) == len(ep_speedups) == len(ep_codes)
+               and len(ep_speedups) >= n >= 0)
+    codes: list[str] = []
+    speedups: list = []
+    for t in range(max(0, n)):
+        if aligned:
+            codes.append(ep_codes[t])
+            su = ep_speedups[t]
+            gated = (su is not None and t < len(turn_correct) and bool(turn_correct[t]))
+            speedups.append(float(su) if gated else None)
+        else:
+            codes.append("")
+            speedups.append(None)
+    return codes, speedups
 
 
 def _episode_turn_rewards(episode):

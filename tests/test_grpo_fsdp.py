@@ -336,6 +336,126 @@ def test_accumulator_lockstep_pads_ragged_ranks():
     assert _run(0, 5) == 5
 
 
+def test_agentic_per_turn_signal_recovers_aligned_speedup_and_code():
+    """The agentic rollout now surfaces per-turn MEASURED speedup + kernel source
+    (previously dropped as None/""), so co-evolution distillation gets a real
+    best_kernel_src and the controller sees achieved speedups. Speedups are
+    correctness-gated exactly like the serial _rollout."""
+    from kore.agent.harness import AgentEpisode
+
+    ep = AgentEpisode(
+        task_id="t",
+        turn_rewards=[0.0, 0.5, 1.0],
+        turn_correct=[False, True, True],
+        turn_speedups=[None, 1.5, 2.0],
+        turn_codes=["srcA", "srcB", "srcC"],
+    )
+    codes, sus = grpo._agentic_per_turn_signal(ep, ep.turn_correct, 3)
+    assert codes == ["srcA", "srcB", "srcC"]
+    assert sus == [None, 1.5, 2.0]
+
+
+def test_agentic_per_turn_signal_gates_speedup_on_correctness():
+    # A measured speedup on a NON-correct turn is dropped (a kernel that is not
+    # correct can never contribute a rewarded/distilled speedup).
+    from kore.agent.harness import AgentEpisode
+
+    ep = AgentEpisode(
+        task_id="t",
+        turn_rewards=[1.0, 0.0],
+        turn_correct=[True, False],
+        turn_speedups=[2.0, 3.0],     # 3.0 sits on an incorrect turn -> must drop
+        turn_codes=["good", "bad"],
+    )
+    codes, sus = grpo._agentic_per_turn_signal(ep, ep.turn_correct, 2)
+    assert codes == ["good", "bad"]
+    assert sus == [2.0, None]
+
+
+def test_agentic_per_turn_signal_degrades_when_trace_misaligned():
+    # Terminal-only fallback (turn_rewards length 1) vs a longer harness trace ->
+    # NOT index-aligned, so we must degrade to ("", None) rather than misattribute
+    # a speedup/source to the wrong turn.
+    from kore.agent.harness import AgentEpisode
+
+    ep = AgentEpisode(
+        task_id="t",
+        turn_rewards=[1.0],                 # collapsed (best_reward, success)
+        turn_correct=[True],
+        turn_speedups=[None, 2.0, None],    # full harness trace (len 3) -> misaligned
+        turn_codes=["a", "b", "c"],
+    )
+    codes, sus = grpo._agentic_per_turn_signal(ep, [True], 1)
+    assert codes == [""] and sus == [None]
+
+
+def test_agentic_per_turn_signal_handles_missing_fields():
+    # An episode object without the per-turn fields (legacy) degrades cleanly.
+    class _LegacyEp:
+        pass
+
+    codes, sus = grpo._agentic_per_turn_signal(_LegacyEp(), [True, True], 2)
+    assert codes == ["", ""] and sus == [None, None]
+    assert grpo._agentic_per_turn_signal(_LegacyEp(), [], 0) == ([], [])
+
+
+def test_agentic_per_turn_signal_matches_live_harness_trace():
+    """End-to-end contract: a real harness episode's recorded trace maps through
+    _agentic_per_turn_signal to the per-turn (code, speedup) the GRPO agentic
+    rollout emits - the fast bench turn carries its 2x speedup + source. Uses
+    local fakes (no cross-test import) so it is robust to the test layout."""
+    import json as _json
+
+    from kore.agent.harness import AgentHarness
+    from kore.data.teacher import StubTeacher
+    from kore.reward.reward import Observation
+
+    class _Task:
+        task_id, operation, dtype, gpu_target = "fake_gemm_bf16", "gemm", "bf16", "gfx942"
+
+    class _Env:
+        def step(self, source, full_validation=True, multi_shape=True):
+            if "__WRONG__" in source:
+                return Observation(compiled=True, dtype="bf16", validation_passed=False,
+                                   snr_by_shape={"primary": 5.0}, snr_db=5.0,
+                                   error_text="worst SNR 5.0 < 25.0")
+            if "__FAST__" in source:
+                return Observation(compiled=True, dtype="bf16", validation_passed=True,
+                                   snr_by_shape={"primary": 41.0}, snr_db=41.0,
+                                   wall_by_shape={"primary": 1.0},
+                                   baseline_by_shape={"primary": 2.0},
+                                   wall_ms=1.0, baseline_ms=2.0)
+            return Observation(compiled=True, dtype="bf16", validation_passed=True,
+                               snr_by_shape={"primary": 40.0}, snr_db=40.0,
+                               wall_by_shape={"primary": 2.0},
+                               baseline_by_shape={"primary": 2.0},
+                               wall_ms=2.0, baseline_ms=2.0)
+
+    def _call(name, args):
+        return f'<tool_call>\n{_json.dumps({"name": name, "arguments": args})}\n</tool_call>'
+
+    script = [
+        _call("build", {"kernel_src": "cand __WRONG__"}),
+        _call("test", {"kernel_src": "cand __WRONG__"}),
+        _call("test", {"kernel_src": "cand fixed"}),
+        _call("bench", {"kernel_src": "cand __FAST__"}) + "\n" + _call("keep", {}),
+        "All done - no further changes.",
+    ]
+    state = {"i": 0}
+
+    def _fn(_messages):
+        i = state["i"]; state["i"] = i + 1
+        return script[i] if i < len(script) else "done."
+
+    ep = AgentHarness(_Task(), StubTeacher(fn=_fn), _Env(),
+                      max_turns=8, use_kb=False).run()
+    n = ep.turns_used
+    codes, sus = grpo._agentic_per_turn_signal(ep, ep.turn_correct, n)
+    assert len(codes) == len(sus) == n
+    assert sus[3] == 2.0 and codes[3] == "cand __FAST__"
+    assert sus[0] is None and sus[1] is None and sus[2] is None
+
+
 def test_shipped_14b_config_enables_agentic_rollouts():
     # The 14B GRPO template requests agentic tool-use RL; the distributed path now
     # HONORS it (it previously silently fell back to serial refinement).

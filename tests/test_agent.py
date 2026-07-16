@@ -183,6 +183,55 @@ def test_executor_build_test_bench_dispatch():
     assert r["correct"] is True and r["speedup"] == 2.0 and r["reward"] > 0.3
 
 
+def test_bench_surfaces_measured_speedup_delta():
+    """Per-turn measured-latency feedback: the ``bench`` tool reports the running
+    best speedup, the signed delta vs that best, and whether the frontier moved -
+    the signal the policy reads to know if THIS turn's change actually helped."""
+    ex = ToolExecutor(FakeEnv(), FakeTask(), seed_src="seed")
+
+    # First bench: a correct 1x kernel establishes the frontier (no prior best).
+    r0 = ex.dispatch({"name": "bench", "arguments": {"kernel_src": "slow"}}, turn=0)
+    assert r0["speedup"] == 1.0
+    assert r0["best_speedup_so_far"] == 1.0
+    assert r0["delta_vs_best"] is None        # no prior frontier to diff against
+    assert r0["improved_frontier"] is True    # first correct measurement sets it
+    assert ex.candidate_speedup == 1.0 and ex.best_speedup == 1.0
+
+    # Faster (2x) kernel -> positive delta, frontier advances.
+    r1 = ex.dispatch({"name": "bench", "arguments": {"kernel_src": "__FAST__"}}, turn=1)
+    assert r1["speedup"] == 2.0
+    assert r1["best_speedup_so_far"] == 2.0
+    assert r1["delta_vs_best"] == 1.0         # 2.0 - 1.0
+    assert r1["improved_frontier"] is True
+    assert ex.best_speedup == 2.0
+
+    # Slower (1x) kernel -> negative delta, frontier UNCHANGED (never regresses).
+    r2 = ex.dispatch({"name": "bench", "arguments": {"kernel_src": "slow2"}}, turn=2)
+    assert r2["speedup"] == 1.0
+    assert r2["best_speedup_so_far"] == 2.0
+    assert r2["delta_vs_best"] == -1.0        # 1.0 - 2.0
+    assert r2["improved_frontier"] is False
+    assert ex.best_speedup == 2.0
+
+    # An INCORRECT candidate carries no measured speedup (cannot fake a delta).
+    r3 = ex.dispatch({"name": "bench", "arguments": {"kernel_src": "__WRONG__"}}, turn=3)
+    assert r3["correct"] is False and r3["speedup"] is None
+    assert r3["delta_vs_best"] is None and r3["improved_frontier"] is False
+    assert ex.candidate_speedup is None and ex.best_speedup == 2.0  # frontier intact
+
+
+def test_build_and_test_never_fabricate_a_measured_speedup():
+    """Only a BENCHED, correct candidate has a trustworthy speedup; compile-only
+    (build) and correctness-only (test) turns must leave it None so a turn that
+    never timed the kernel can't inject a phantom latency signal into the trace."""
+    ex = ToolExecutor(FakeEnv(), FakeTask())
+    ex.dispatch({"name": "build", "arguments": {"kernel_src": "good"}}, turn=0)
+    assert ex.candidate_speedup is None
+    ex.dispatch({"name": "test", "arguments": {"kernel_src": "good"}}, turn=0)  # correct, unbenched
+    assert ex.candidate_correct is True and ex.candidate_speedup is None
+    assert ex.best_speedup is None  # the frontier only advances on a real bench
+
+
 def test_executor_pmc_surfaces_efficiency_or_stub():
     ex = ToolExecutor(FakeEnv(), FakeTask())
     r = ex.dispatch({"name": "pmc", "arguments": {"kernel_src": "good"}})
@@ -457,6 +506,34 @@ def test_agent_episode_exposes_per_turn_reward_trace():
     assert max(ep.turn_rewards) == ep.best_reward
     # Trajectory-level summary still present.
     assert ep.turns_to_best == 3 and ep.success is True
+
+
+def test_agent_episode_exposes_per_turn_speedup_and_code_trace():
+    """The harness records per-turn MEASURED speedup + candidate source in lockstep
+    with the reward/correct trace, so the GRPO agentic path can feed co-evolution
+    distillation + the open-ended controller the same signal as the serial path."""
+    env = FakeEnv()
+    ep = AgentHarness(FakeTask(), scripted_teacher(_win_script()), env,
+                      max_turns=8, use_kb=False).run()
+
+    # Parallel arrays, one entry per turn, index-aligned with turn_rewards.
+    assert len(ep.turn_speedups) == ep.turns_used
+    assert len(ep.turn_codes) == ep.turns_used
+    assert len(ep.turn_speedups) == len(ep.turn_rewards) == len(ep.turn_correct)
+
+    # _win_script benches __FAST__ (2x) only on turn 3; turns 0-2 are build/test
+    # (never timed) -> only turn 3 carries a measured speedup + its source.
+    assert ep.turn_speedups[0] is None and ep.turn_speedups[1] is None
+    assert ep.turn_speedups[2] is None            # correct on turn 2, but NOT benched
+    assert ep.turn_speedups[3] == 2.0
+    assert ep.turn_codes[3] == "cand __FAST__"
+    # correctness-only turns still record their candidate source (for correct_kernels)
+    assert ep.turn_codes[2] == "cand fixed"
+
+    # the new fields survive serialization (record round-trip / datagen reuse)
+    d = ep.to_dict()
+    assert d["turn_speedups"] == ep.turn_speedups
+    assert d["turn_codes"] == ep.turn_codes
 
 
 # --------------------------------------------------------------------------- #

@@ -181,11 +181,20 @@ class ToolExecutor:
         self.candidate_src: Optional[str] = None
         self.candidate_reward: Optional[float] = None
         self.candidate_correct: bool = False
+        # Per-turn MEASURED speedup of the candidate evaluated this turn (vendor-
+        # relative, from the verified Observation). None unless the candidate was
+        # BENCHED and correct, so a build/test turn never fabricates a timing
+        # signal. Consumed by the harness's per-turn trace -> GRPO ``speedups``.
+        self.candidate_speedup: Optional[float] = None
 
         self.best_src: Optional[str] = None
         self.best_reward: float = float("-inf")
         self.best_turn: Optional[int] = None
         self.best_obs: dict = {}
+        # Best MEASURED speedup seen so far (max over benched-correct candidates),
+        # tracked independently of best_reward so the ``bench`` tool can report an
+        # honest frontier delta ("did THIS change beat my fastest correct kernel?").
+        self.best_speedup: Optional[float] = None
 
         self.keep_decisions: list[dict] = []
         self._turn: int = 0
@@ -209,6 +218,7 @@ class ToolExecutor:
         self.candidate_src = None
         self.candidate_reward = None
         self.candidate_correct = False
+        self.candidate_speedup = None
         return {"ok": True, "reseeded": True,
                 "seeded_from": "task_seed" if self.seed_src else "empty",
                 "preserved_best_reward": _round(
@@ -239,11 +249,21 @@ class ToolExecutor:
         self.candidate_src = src
         self.candidate_reward = rr.reward
         self.candidate_correct = rr.correct
+        # Only a benched, correct candidate has a trustworthy measured speedup; a
+        # compile/correctness-only eval leaves it None (no timing was taken).
+        self.candidate_speedup = (float(rr.speedup)
+                                  if (rr.correct and do_bench and rr.speedup is not None)
+                                  else None)
         if rr.correct and rr.reward > self.best_reward:
             self.best_reward = rr.reward
             self.best_src = src
             self.best_turn = self._turn
             self.best_obs = self._obs_dict(obs)
+        # Frontier of measured speedup advances on any faster benched-correct
+        # candidate (decoupled from best_reward, which is the Kevin scoring key).
+        if self.candidate_speedup is not None and (
+            self.best_speedup is None or self.candidate_speedup > self.best_speedup):
+            self.best_speedup = self.candidate_speedup
         return obs, rr
 
     # -- dispatch --------------------------------------------------------- #
@@ -295,13 +315,28 @@ class ToolExecutor:
     def _tool_bench(self, args: dict) -> dict:
         src = args["kernel_src"]
         multi = args.get("shape") is None
+        # Snapshot the measured-speedup frontier BEFORE this candidate is folded in
+        # so the delta reflects "did THIS turn's change beat my fastest correct
+        # kernel so far?" - the per-turn latency feedback the policy optimizes.
+        prev_best_su = self.best_speedup
         obs, rr = self._evaluate(src, do_bench=True, multi_shape=multi)
+        cur_su = self.candidate_speedup
+        delta = (round(cur_su - prev_best_su, 3)
+                 if (cur_su is not None and prev_best_su is not None) else None)
+        improved = bool(cur_su is not None and (prev_best_su is None or cur_su > prev_best_su))
         return {
             "ok": bool(rr.correct),
             "tool": "bench",
             "compiled": bool(obs.compiled),
             "correct": bool(rr.correct),
             "speedup": _round(rr.speedup, 3),
+            # Per-turn measured-latency feedback: the model reads its own kernel's
+            # speedup, the running best, the signed delta vs that best, and whether
+            # it pushed the frontier. Pure context (the trained reward is still the
+            # verified compute_kernel_reward), so it cannot be gamed.
+            "best_speedup_so_far": _round(self.best_speedup, 3),
+            "delta_vs_best": delta,
+            "improved_frontier": improved,
             "wall_ms": _round(getattr(obs, "wall_ms", None)),
             "baseline_ms": _round(getattr(obs, "baseline_ms", None)),
             "tier": rr.tier,

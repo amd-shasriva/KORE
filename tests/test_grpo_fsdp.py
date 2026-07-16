@@ -278,6 +278,74 @@ def test_all_gather_object_single_process_fallback():
 
 
 # --------------------------------------------------------------------------- #
+# RAGGED AGENTIC rollouts on the sharded path (the agentic-at-scale enablement)
+# --------------------------------------------------------------------------- #
+def test_build_kevin_samples_handles_ragged_agentic_trajectories():
+    """Agentic rollouts have VARIABLE turn counts. Kevin credit must flatten ragged
+    trajectories into per-turn samples so the agentic path can share the serial
+    per-turn pipeline on the distributed sharded loop (the enablement's core)."""
+    traj_rewards = [[0.0, 1.0], [0.0, 0.0, 0.0, 2.0, 0.0]]        # 2-turn + 5-turn
+    traj_correct = [[False, True], [False, False, False, True, False]]
+    returns, index = grpo.build_kevin_samples(traj_rewards, traj_correct, gamma=0.5)
+    # one per-turn sample per turn across BOTH ragged trajectories (2 + 5)
+    assert len(returns) == len(index) == 7
+    # index maps back to the correct (trajectory, turn) for the ragged shapes
+    assert index == [(0, 0), (0, 1), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4)]
+    # correctness-gated gamma returns: the pre-correct turns still carry look-ahead
+    # credit (>0) toward the correct turn, and every trajectory keeps its own length.
+    assert returns[0] > 0.0 and returns[1] > 0.0
+
+
+def test_accumulator_lockstep_pads_ragged_ranks():
+    """THE invariant that makes ragged agentic rollouts shard-safe: every rank runs
+    EXACTLY ``max_micro_steps`` backward calls regardless of its local sample count
+    (surplus = zeroed dummy forwards), so the FSDP/ZeRO collectives stay symmetric
+    across ranks even when agentic trajectories yield different per-rank counts."""
+    torch = pytest.importorskip("torch")
+
+    class _FakeAcc:
+        def __init__(self):
+            self.n_backward = 0
+
+        def backward(self, loss):
+            self.n_backward += 1
+
+    class _FakeTok:
+        def __call__(self, s, return_tensors=None):
+            class _R:
+                input_ids = torch.tensor([[1]])
+            return _R()
+
+    def _logp_fn(gen_inputs):  # ignores input; fixed scalar logp
+        return torch.tensor(0.5, requires_grad=True)
+
+    def _run(n_local, max_micro):
+        acc = _FakeAcc()
+        # sample = [ret, gen_inputs, ref_logp, old_logp, n_tokens, sc_weight]
+        terms = [(0.3, [0.3, [("p", "g")], None, None, 4, None]) for _ in range(n_local)]
+        grpo._accumulate_grpo_grads_distributed(
+            terms, _logp_fn, accelerator=acc, global_total_tokens=100, grad_scale=2.0,
+            max_micro_steps=max_micro, ref_anchor_coef=0.0, clip_ratio_low=0.2,
+            clip_ratio_high=0.28, tok=_FakeTok(), device="cpu")
+        return acc.n_backward
+
+    # A "slow" rank (2 samples), a "full" rank (5), and a fully-idle rank (0) all run
+    # the SAME max_micro=5 collective forwards -> no rank desyncs under ragged agentic.
+    assert _run(2, 5) == 5
+    assert _run(5, 5) == 5
+    assert _run(0, 5) == 5
+
+
+def test_shipped_14b_config_enables_agentic_rollouts():
+    # The 14B GRPO template requests agentic tool-use RL; the distributed path now
+    # HONORS it (it previously silently fell back to serial refinement).
+    raw = json.loads((REPO_ROOT / "configs" / "grpo_14b_full.json").read_text())
+    cfg = grpo.grpo_config_from_dict(raw)
+    assert cfg.agentic is True
+    assert cfg.max_tool_turns >= 1
+
+
+# --------------------------------------------------------------------------- #
 # shipped 14B full-FT sharded template
 # --------------------------------------------------------------------------- #
 def test_shipped_grpo_14b_full_config_is_sharded_full_ft():

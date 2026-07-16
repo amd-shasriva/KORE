@@ -1644,11 +1644,14 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
     the cross-rank StarPO-S/dynamic-sampling decision), ``returns`` + ``samples``
     (per-turn Kevin samples for THIS rank), ``correct_kernels``, and ``infra``.
 
-    Only serial refinement is driven here: its per-trajectory forward COUNT is
-    fixed (``num_turns``), so every rank issues the same number of collective
-    forwards - the invariant ZeRO-3/FSDP requires. (Agentic tool rollouts have
-    ragged per-trajectory turn counts and are not sharded here; see the module
-    docstring / DISTRIBUTED notes.)
+    Both serial refinement (``_rollout``) and AGENTIC tool-use (``_rollout_agentic``)
+    are driven here, selected by ``config.agentic`` (mirrors the single-process
+    ``_one_group``). Ragged agentic turn counts are SAFE on the sharded path: the
+    rollout generates on the plain full-weight REPLICA (zero FSDP collectives), and
+    the only cross-rank collectives - the per-roll ``_all_gather_object`` and the
+    ``max_micro``-padded training backward - already tolerate different per-rank
+    sample counts (the padding was built for ragged infra-drops), so no rank ever
+    desyncs. The pre-replica constraint that forced serial here is obsolete.
     """
     from kore.env.kore_env import KoreEnv
     from kore.policy import anticollapse as ac
@@ -1668,9 +1671,10 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
         _bench_gpu = _ids[_lr] if _lr < len(_ids) else str(_lr)
     else:
         _bench_gpu = str(_lr)
-    # The distributed slice always runs the SERIAL _rollout (agentic is ragged), so
-    # it owns the dense bonus -> disable KoreEnv's internal profiling when active.
-    env = _make_rollout_env(task, config, gpu=_bench_gpu, serial=True)
+    # Serial refinement (_rollout) owns the dense profiling bonus, so disable
+    # KoreEnv's internal profiling for it; the agentic path keeps the env unchanged
+    # (serial=not agentic, mirroring the single-process _one_group).
+    env = _make_rollout_env(task, config, gpu=_bench_gpu, serial=not config.agentic)
     G = config.num_trajectories
     my = _rank_slice(G, rank, world)
     rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=seed) if config.rc_grpo else [None] * G
@@ -1688,7 +1692,13 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
     # FSDP-wrapped `model` is still used for the SHARDED training forward/backward.
     gen_model = getattr(model, "module", model)
     for g in my:
-        d = _rollout(gen_model, tok, env, task, config, rtoks[g], ref_model)
+        # Both rollouts generate on the collective-free replica (gen_model), so ragged
+        # agentic turns don't desync FSDP; the caller's gather + padded backward absorb
+        # the variable per-rank sample counts. Mirrors the single-process _one_group.
+        if config.agentic:
+            d = _rollout_agentic(gen_model, tok, env, task, config, ref_model)
+        else:
+            d = _rollout(gen_model, tok, env, task, config, rtoks[g], ref_model)
         traj_rewards.append(d["rewards"]); traj_correct.append(d["correct"])
         traj_infra.append(d["infra"]); turn_inputs.append(d["gen_inputs"])
         turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
@@ -1730,8 +1740,9 @@ def _train_grpo_distributed(config, tasks):
     rank; ZeRO-3 shards them too). Per step:
       1. the live policy weights are synced into a plain full-weight per-rank
          replica, and each rank rolls out its strided slice of every Kevin group's
-         ``G`` trajectories LOCALLY on that replica (serial refinement, zero FSDP
-         collectives, so ``synced_gpus`` stays off);
+         ``G`` trajectories LOCALLY on that replica (serial refinement OR agentic
+         tool-use per ``config.agentic``; zero FSDP collectives on the replica, so
+         ``synced_gpus`` stays off and ragged agentic turns cannot deadlock);
       2. per-trajectory rewards + per-turn returns + correct-kernels are
          ALL-GATHERED so StarPO-S / dynamic-sampling and the group-relative
          advantage baseline are computed over the FULL group (all ranks);
@@ -1793,9 +1804,10 @@ def _train_grpo_distributed(config, tasks):
              cpu_offload=bool(getattr(config, "cpu_offload", False)),
              ref_anchor_coef=config.ref_anchor_coef, bf16=bool(getattr(config, "bf16", True)))
     if config.agentic:
-        log.warn("grpo distributed: agentic rollouts have ragged per-trajectory turn "
-                 "counts (non-symmetric collective forwards under sharding); running the "
-                 "SERIAL refinement rollout on the sharded path instead", agentic=True)
+        log.info("grpo distributed: AGENTIC tool-use rollouts ACTIVE on the sharded path "
+                 "(generation on the full-weight replica; ragged per-trajectory turns are "
+                 "absorbed by the cross-rank gather + the max_micro-padded backward, so no "
+                 "rank desyncs)", agentic=True, max_tool_turns=config.max_tool_turns)
 
     _activate_value_ranker(config)
     tok = AutoTokenizer.from_pretrained(config.model_id)

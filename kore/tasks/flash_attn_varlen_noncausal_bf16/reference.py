@@ -21,7 +21,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _attn_common import expand_kv, sdpa_fp32  # noqa: E402
+from kore.tasks._attn_common import expand_kv, sdpa_fp32  # noqa: E402
 
 ENTRY = "flash_attn_varlen"
 ATOL = 2e-2
@@ -106,9 +106,23 @@ def candidate_output(fn, shape, inputs):
 
 
 def baseline_output(shape, inputs):
-    """REAL vendor bar: AITER ``flash_attn_varlen_func`` (CK/ASM ragged FMHA, non-causal)."""
-    import aiter
+    """Perf-only vendor bar: dense AITER flash-attention run PER-SEQUENCE.
+
+    The installed AITER ``flash_attn_varlen_func`` (module_fmha_v3_varlen_fwd) fails to
+    JIT-build on this node, so per VERIFICATION_CHECKLIST.md we KEEP the verified oracle and
+    time against the dense ``flash_attn_func`` looped over each ragged sequence -- a REAL
+    vendor kernel computing the SAME non-causal attention (the varlen kernel's win is
+    avoiding this per-sequence relaunch / padding)."""
+    from kore.tasks.aiter_ref_attn import aiter_flash_attn
 
     q, k, v, cu = inputs
-    max_seqlen = int((cu[1:] - cu[:-1]).max().item())
-    return aiter.flash_attn_varlen_func(q, k, v, cu, cu, max_seqlen, max_seqlen, causal=False)
+    cu_list = cu.tolist()
+    out = q.new_empty(q.shape)
+    for s in range(len(cu_list) - 1):
+        a, b = cu_list[s], cu_list[s + 1]
+        if b - a <= 0:
+            continue
+        o = aiter_flash_attn(q[a:b].unsqueeze(0), k[a:b].unsqueeze(0),
+                             v[a:b].unsqueeze(0), causal=False)   # [1, L, H, D]
+        out[a:b] = o.squeeze(0)
+    return out

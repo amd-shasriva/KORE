@@ -22,11 +22,16 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _quant_common import fp8_dtype_max, gemm_fp8_requant_fp32, quant_rowwise_fp8  # noqa: E402
+from kore.tasks._quant_common import fp8_dtype_max, gemm_fp8_requant_fp32, quant_rowwise_fp8  # noqa: E402
 
 ENTRY = "gemm"
+# fp8 OUTPUT precision: the requant target is e4m3fn (3 mantissa bits -> ~1/8 relative
+# step), so the candidate and the oracle can legitimately round a boundary value to
+# adjacent fp8 codes. RTOL must therefore be >= one fp8 ULP (~0.125) or allclose fails on
+# those tie elements despite a ~70 dB SNR (aggregate). The 25 dB SNR gate stays the primary
+# correctness guard; ATOL covers small-magnitude outputs.
 ATOL = 5e-1
-RTOL = 5e-2
+RTOL = 1.5e-1
 
 
 def parse_shape(shape_str: str) -> dict:
@@ -83,7 +88,7 @@ def baseline_output(shape, inputs):
     dequantized (bf16) to match the oracle."""
     import torch
 
-    from _quant_common import fp8_dtype_max
+    from kore.tasks._quant_common import fp8_dtype_max
     from kore.tasks.aiter_ref import aiter_gemm_a8w8
 
     xq, wq, x_scale, w_scale, bias, out_scale = inputs

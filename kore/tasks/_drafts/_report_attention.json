@@ -1,0 +1,125 @@
+[
+  {
+    "family": "attention",
+    "task": "flash_attn_chunked_prefill_bf16",
+    "snr": 52.22,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 52.23,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "attention",
+    "task": "flash_attn_decode_fp8",
+    "snr": 87.65,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 48.35,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "attention",
+    "task": "flash_attn_headdim_prefill_bf16",
+    "snr": 53.5,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 53.5,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "attention",
+    "task": "flash_attn_mha_prefill_bf16",
+    "snr": 53.48,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 53.54,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "attention",
+    "task": "flash_attn_mqa_decode_bf16",
+    "snr": 82.51,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 52.22,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "attention",
+    "task": "flash_attn_mqa_prefill_bf16",
+    "snr": 53.48,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 53.59,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "attention",
+    "task": "flash_attn_noncausal_fp8",
+    "snr": 52.25,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 48.15,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "attention",
+    "task": "flash_attn_noncausal_prefill_bf16",
+    "snr": 52.26,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 52.32,
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "attention",
+    "task": "flash_attn_sink_prefill_bf16",
+    "snr": 53.22,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 14.84,
+    "status": "PASS",
+    "baseline_mismatch": true
+  },
+  {
+    "family": "attention",
+    "task": "flash_attn_sliding_decode_bf16",
+    "snr": 82.03,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": 0.6,
+    "status": "PASS",
+    "baseline_mismatch": true
+  },
+  {
+    "family": "attention",
+    "task": "flash_attn_varlen_noncausal_bf16",
+    "snr": 52.74,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": false,
+    "baseline_error": "RuntimeError: [aiter] build [module_fmha_v3_varlen_fwd] under /home/shasriva/aiter/aiter/jit/build/module_fmha_v3_varlen_fwd/build failed !!!!!!",
+    "baseline_oracle_snr": null,
+    "baseline_oracle_error": "RuntimeError: [aiter] build [module_fmha_v3_varlen_fwd] under /home/shasriva/aiter/aiter/jit/build/module_fmha_v3_varlen_fwd/build failed !!!!!!",
+    "status": "PASS",
+    "baseline_mismatch": false
+  }
+]

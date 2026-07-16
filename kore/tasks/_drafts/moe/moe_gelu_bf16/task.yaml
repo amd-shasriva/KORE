@@ -1,0 +1,23 @@
+task_id: moe_gelu_bf16
+operation: moe_gelu
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# bf16 top-k fused MoE with a GeGLU (tanh-GELU gate * up) expert MLP vs fp32
+# oracle. Complements the live SiLU fused_moe (Llama-4 Scout / gpt-oss use gated
+# GELU). fp32-accumulation candidate lands ~40+ dB; gate at 25 dB (KORE MoE bar,
+# matches the live fused_moe_silu_bf16). Router is the unbalanced jagged trace
+# with a guaranteed 0-token last expert. STAGED DRAFT - verify on gfx950.
+# classify: operation "moe_gelu" contains "moe" (not "topk") -> family "moe".
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 32, E: 8, topk: 2, D: 256, I: 256}
+  primary: {M: 256, E: 16, topk: 1, D: 5120, I: 8192}   # Llama-4 Scout GeGLU, top-1
+  validation:
+    - {M: 256, E: 8, topk: 2, D: 8192, I: 1024}          # 70B-hidden GeGLU, top-2
+    - {M: 128, E: 64, topk: 8, D: 2048, I: 1024}         # 64-expert, top-8
+    - {M: 64, E: 32, topk: 8, D: 4096, I: 768}           # small-batch 0-token edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_fused_moe   # AITER CK fused MoE, ActivationType.Gelu

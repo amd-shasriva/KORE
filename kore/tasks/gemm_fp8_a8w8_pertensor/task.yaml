@@ -1,0 +1,24 @@
+task_id: gemm_fp8_a8w8_pertensor
+operation: gemm_fp8_a8w8_pertensor
+dtype: fp8_e4m3fn
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# fp8 (OCP e4m3fn, gfx950/CDNA4) a8w8 with STATIC PER-TENSOR scales: one scalar scale for
+# the whole activation (broadcast to x_scale[M,1]) and one for the whole weight
+# (broadcast to w_scale[1,N]). The calibrated-static-scale serving GEMM. Correctness
+# oracle = fp32 matmul of the dequantized fp8 operands (scale applied once). Baseline
+# (--impl reference) = AITER gemm_a8w8. STAGED DRAFT - verify on gfx950 before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 8, N: 512, K: 512}
+  primary: {M: 4096, N: 4096, K: 4096}          # prefill
+  validation:
+    - {M: 1, N: 4096, K: 4096}                  # decode bs=1 (edge S2)
+    - {M: 8, N: 4096, K: 4096}                  # small-batch decode
+    - {M: 4097, N: 4096, K: 4096}               # tail M=4097 (edge S5)
+    - {M: 2048, N: 14336, K: 4096}              # Llama MLP up-proj
+    - {M: 64, N: 4096, K: 4095}                 # non-pow2 K tail (edge S1)
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_gemm_a8w8          # the REAL serving bar (CK fp8)

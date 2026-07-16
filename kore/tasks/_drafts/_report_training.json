@@ -1,0 +1,50 @@
+[
+  {
+    "family": "training",
+    "task": "flash_attn_backward_bf16",
+    "snr": 52.18,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": null,
+    "baseline_oracle_error": "AttributeError: module 'reference' has no attribute 'baseline_output'",
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "training",
+    "task": "gemm_backward_bf16",
+    "snr": 55.59,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": null,
+    "baseline_oracle_error": "AttributeError: module 'reference' has no attribute 'baseline_output'",
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "training",
+    "task": "layernorm_backward_bf16",
+    "snr": 55.39,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": null,
+    "baseline_oracle_error": "AttributeError: module 'reference' has no attribute 'baseline_output'",
+    "status": "PASS",
+    "baseline_mismatch": false
+  },
+  {
+    "family": "training",
+    "task": "softmax_backward_bf16",
+    "snr": 52.74,
+    "allclose": true,
+    "cand_error": null,
+    "baseline_runs": true,
+    "baseline_oracle_snr": null,
+    "baseline_oracle_error": "AttributeError: module 'reference' has no attribute 'baseline_output'",
+    "status": "PASS",
+    "baseline_mismatch": false
+  }
+]

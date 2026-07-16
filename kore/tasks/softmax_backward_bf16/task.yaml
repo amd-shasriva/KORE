@@ -1,0 +1,22 @@
+task_id: softmax_backward_bf16
+operation: softmax_backward
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# Row-softmax backward: (y, dy) -> dx = y*(dy - <dy,y>_row). y = saved softmax
+# output. Correctness = SNR of dx vs the torch AUTOGRAD oracle. bf16 gradient
+# fidelity lands well above 25 dB with fp32 reduction; gate at 25 dB (KORE
+# low-precision bar) still rejects a missing row-mean-subtraction (the classic
+# softmax-backward bug). STAGED DRAFT - verify on gfx950 before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 64, N: 1024}
+  primary: {M: 8192, N: 8192}          # attention-prob / logit rows, training step
+  validation:
+    - {M: 4096, N: 32768}              # large-vocab softmax backward
+    - {M: 16384, N: 2048}              # wide batch, short rows
+    - {M: 8192, N: 8191}              # non-pow2 N tail (edge, masking)
+targets:
+  snr_db: 25.0
+  comparison_baseline: torch_autograd_backward   # framework fused softmax backward (perf-only)

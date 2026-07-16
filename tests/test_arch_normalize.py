@@ -24,22 +24,19 @@ def test_compound_system_prompt_phrase():
     assert "MI325X" not in out and "CDNA3" not in out and "gfx942" not in out
 
 
-def test_fp8_dtype_rewritten_when_not_a_fix_lesson():
-    # A plain kernel docstring naming the gfx942 fp8 encoding gets the gfx950 (OCP)
-    # encoding, so training text is arch-consistent.
-    assert normalize_text("XQ: [M, K] fp8 e4m3fnuz") == "XQ: [M, K] fp8 e4m3fn"
-    assert normalize_text("scale in e5m2fnuz") == "scale in e5m2"
+def test_fnuz_fp8_text_left_verbatim():
+    # FNUZ is the legacy gfx942 fp8 encoding; any text mentioning it is arch-specific
+    # and left verbatim, because rewriting the dtype or the co-located arch label would
+    # manufacture a false "gfx950 uses FNUZ" fact or corrupt a real fp8 kernel's dtype.
+    assert normalize_text("XQ: [M, K] fp8 e4m3fnuz") == "XQ: [M, K] fp8 e4m3fnuz"
+    assert normalize_text("e5m2fnuz accum on gfx942") == "e5m2fnuz accum on gfx942"
 
 
-def test_fp8_dtype_preserved_inside_repair_fix_lesson():
-    # The repair fix-lesson names BOTH encodings in one sentence ("instead of"); a
-    # blind swap would collapse it to nonsense, so fp8 rewrites are skipped there.
-    lesson = "the fp8 encoding was `e4m3fnuz` (FNUZ) instead of `e4m3fn` (OCP)"
-    out = normalize_text(lesson)
-    assert "e4m3fnuz" in out  # preserved, lesson stays coherent
-    # arch labels are still safe to rewrite even in a fix-lesson.
-    assert normalize_text("use e4m3fnuz on gfx942 instead of e4m3fn") == (
-        "use e4m3fnuz on gfx950 instead of e4m3fn")
+def test_fnuz_fix_lesson_and_arch_preserved_together():
+    # A repair fix-lesson names FNUZ; the whole line (both encodings AND the co-located
+    # arch label) stays verbatim, so the lesson is coherent and no false fact is made.
+    lesson = "the fp8 was `e4m3fnuz` (FNUZ) instead of `e4m3fn` (OCP) on gfx942 / CDNA3"
+    assert normalize_text(lesson) == lesson
 
 
 def test_target_and_unrelated_text_untouched():
@@ -53,6 +50,17 @@ def test_idempotent():
     src = "AMD Instinct MI325X (CDNA3, gfx942) fp8 e4m3fnuz"
     once = normalize_text(src)
     assert normalize_text(once) == once
+
+
+def test_multi_arch_comparison_left_verbatim():
+    # A deliberate legacy-vs-target comparison (e.g. the aiter_ref infra docstrings)
+    # must be left verbatim, not collapsed into a self-contradiction. This is the
+    # audit's "gfx950 uses FNUZ e4m3fn range 240" corruption case.
+    src = ("gfx942 / CDNA3 (MI300X): FNUZ e4m3fnuz, range +/-240; "
+           "gfx950 / CDNA4 (MI350X): OCP e4m3fn, range +/-448.")
+    assert normalize_text(src) == src            # both arches named -> unchanged
+    # single-arch stale text is still rewritten to the target
+    assert normalize_text("optimize for gfx942 (CDNA3)") == "optimize for gfx950 (CDNA4)"
 
 
 def test_normalize_obj_recurses_and_preserves_non_strings():

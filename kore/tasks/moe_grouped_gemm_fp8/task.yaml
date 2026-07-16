@@ -1,0 +1,26 @@
+task_id: moe_grouped_gemm_fp8
+operation: moe_grouped_gemm_fp8
+dtype: fp8_e4m3fn
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# fp8 GROUPED (segmented) expert GEMM: per expert e = expert_ids[m], compute
+# out[m] = (xq[m]*x_scale[m]) @ (wq[e]*w_scale[e])^T with per-token activation
+# scales and per-channel weight scales (a8w8), bf16 out. The fp8 quantized MoE
+# gate_up projection (blueprint M3/M6, fp8). Unbalanced jagged token->expert
+# counts with a guaranteed 0-token last expert. Oracle: fp32 of the DEQUANTIZED
+# per-group matmul (the fp8 rounding is shared by candidate + reference, so the
+# gate measures kernel fidelity, not quant error). Vendor: per-expert
+# aiter.gemm_a8w8 (CK). gate at 25 dB (fp8 bar). fp8 = OCP e4m3fn on gfx950.
+# STAGED DRAFT. classify: operation "moe_grouped_gemm_fp8" -> family "moe".
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 64, E: 8, N: 256, K: 256}
+  primary: {M: 4096, E: 32, N: 2048, K: 4096}     # 32-expert fp8 gate/up, hidden 4096
+  validation:
+    - {M: 8192, E: 64, N: 1024, K: 2048}           # 64-expert, more tokens
+    - {M: 1024, E: 256, N: 512, K: 2048}           # DeepSeek 256-expert fp8
+    - {M: 512, E: 32, N: 1536, K: 4096}            # small-batch 0-token edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_gemm_a8w8   # per-expert AITER fp8 a8w8 GEMM (CK)

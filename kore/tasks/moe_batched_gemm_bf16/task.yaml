@@ -1,0 +1,23 @@
+task_id: moe_batched_gemm_bf16
+operation: moe_batched_gemm
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# bf16 BATCHED expert GEMM: C[e] = A[e] @ B[e]^T for E experts, each with the
+# SAME token count m (the balanced-dispatch expert-parallel case). A [E,m,K],
+# B [E,N,K] -> [E,m,N]. Oracle: fp32 batched matmul. Vendor: AITER
+# batched_gemm_bf16 (torch.bmm -> hipBLASLt fallback). fp32-accumulation bf16
+# candidate lands ~40+ dB; gate at 25 dB (KORE low-precision bar). STAGED DRAFT.
+# classify: operation "moe_batched_gemm" contains "moe" -> family "moe".
+snr_threshold: 25.0
+shapes:
+  minimal: {E: 2, m: 32, N: 64, K: 128}
+  primary: {E: 8, m: 512, N: 512, K: 512}
+  validation:
+    - {E: 32, m: 256, N: 1024, K: 1024}     # 32 experts, wider
+    - {E: 64, m: 128, N: 512, K: 512}        # 64 experts
+    - {E: 16, m: 512, N: 513, K: 512}        # non-pow2 N tail
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_batched_gemm_bf16   # AITER batched bf16 GEMM (CK)

@@ -1,0 +1,24 @@
+task_id: flash_attn_backward_bf16
+operation: flash_attn_backward
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# Causal MHA (H==KV) flash-attention backward: (q,k,v,o,do,lse) -> (dq,dk,dv), all
+# [B,S,H,D] except lse [B,H,S] fp32. FlashAttention-2 backward (delta preprocess +
+# dK/dV per KV-block + dQ per Q-block), never materializing the S x S matrix.
+# Correctness = worst SNR of dq/dk/dv vs the torch AUTOGRAD oracle (causal SDPA).
+# Gate at 25 dB (KORE low-precision attention bar). HIGHEST-RISK draft (gradients +
+# the most complex seed): STAGED, GPU-UNVERIFIED - see VERIFICATION_CHECKLIST.md
+# (flagged HIGH) before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {B: 1, H: 4, S: 256, D: 64}
+  primary: {B: 2, H: 16, S: 2048, D: 128}      # 4k-token causal training attention
+  validation:
+    - {B: 1, H: 32, S: 4096, D: 128}           # long-context causal training
+    - {B: 4, H: 16, S: 2048, D: 128}           # 8k-token batch
+    - {B: 1, H: 16, S: 1000, D: 128}          # non-multiple-of-BLOCK seqlen edge
+targets:
+  snr_db: 25.0
+  comparison_baseline: sdpa_autograd_backward   # fused F.scaled_dot_product_attention backward (perf bar)

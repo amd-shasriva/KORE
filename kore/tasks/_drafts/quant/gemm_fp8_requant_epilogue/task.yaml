@@ -1,0 +1,27 @@
+task_id: gemm_fp8_requant_epilogue
+operation: gemm_fp8_requant_epilogue
+dtype: fp8_e4m3fn
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# fp8 a8w8 GEMM (per-token A, per-channel W) with a FUSED bias + static-scale fp8 REQUANT
+# epilogue: Y_fp8 = requant(A_deq @ W_deq^T + bias, out_scale). The output is itself fp8
+# (feeding the next fp8 op), fusing the dequant/requant round trip into the GEMM epilogue.
+# Correctness oracle = fp32 dequant-matmul + bias, requantized to fp8 with out_scale, then
+# dequantized (the fp8 output rounding is shared by candidate + reference; the gate
+# measures matmul + epilogue fidelity). Baseline (--impl reference) = AITER gemm_a8w8
+# (real fp8 GEMM) + an unfused torch requant -- the multi-kernel bar the fusion beats.
+# STAGED DRAFT - verify on gfx950 before promotion.
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 8, N: 512, K: 512}
+  primary: {M: 4096, N: 4096, K: 4096}          # prefill
+  validation:
+    - {M: 1, N: 4096, K: 4096}                  # decode bs=1 (edge S2)
+    - {M: 17, N: 4096, K: 4096}                 # non-pow2 tail M (edge S5)
+    - {M: 4097, N: 4096, K: 4096}               # tail M=4097
+    - {M: 2048, N: 14336, K: 4096}              # Llama MLP up-proj
+    - {M: 64, N: 4096, K: 4095}                 # non-pow2 K tail (edge S1)
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_gemm_a8w8          # real fp8 GEMM + unfused requant (fusion bar)

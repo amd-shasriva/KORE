@@ -1,0 +1,25 @@
+task_id: gemm_mxfp4_a4w4
+operation: gemm_mxfp4_a4w4
+dtype: mxfp4
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# OCP Microscaling FP4 (MXFP4) GEMM with BOTH operands in mxfp4 (E2M1 codes + E8M0 shared
+# exponent per 32 K-elements) -- the gfx950/CDNA4-NATIVE scaled-MFMA path (A4W4). The live
+# gemm_mxfp4 is weight-only (bf16 activation); this is the both-operands-fp4 complement.
+# Correctness oracle = fp32 matmul of the dequantized mxfp4 A and W (mxfp4 rounding shared
+# by candidate + reference). Baseline (--impl reference) = dequant both to bf16 +
+# hipBLASLt matmul (real vendor GEMM lib; the fp4 kernel wins on ~4x less HBM traffic and
+# the native MX matrix path). get_inputs GUARDS K%32==0 (MX scale-group). STAGED DRAFT.
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 64, N: 128, K: 256}
+  primary: {M: 4096, N: 4096, K: 4096}          # prefill (native MX MFMA)
+  validation:
+    - {M: 1, N: 4096, K: 4096}                  # decode bs=1 (edge S2)
+    - {M: 17, N: 4096, K: 4096}                 # non-pow2 tail M (edge S5)
+    - {M: 8192, N: 5120, K: 3584}               # Qwen3-ish, K multiple of 32
+    - {M: 128, N: 4096, K: 28672}               # giant K (edge S3, 28672 = 896*32)
+targets:
+  snr_db: 25.0
+  comparison_baseline: bf16_dequant_matmul      # hipBLASLt bar; native = aiter.gemm_a4w4 (FLAG)

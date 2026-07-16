@@ -1,0 +1,25 @@
+task_id: moe_topk_softmax_norenorm_bf16
+operation: moe_topk_softmax_norenorm
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# MoE router variant: fp32 softmax over experts -> top-k select, WITHOUT the
+# top-k renormalization (weights are the raw softmax probs of the selected
+# experts; used by routers that keep the un-renormalized gate, e.g. some
+# switch/soft-MoE and Llama-4 top-1 configs). Complements the live
+# topk_softmax_bf16 (which renormalizes). Scored on a dense [M,E] scatter
+# (selection + weights, order-independent). fp32 softmax path lands very high
+# SNR; gate at 25 dB still cleanly rejects a wrong-topk / spurious-renorm kernel.
+# classify: operation contains "topk" -> family "moe_router".
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 16, E: 8, topk: 2}
+  primary: {M: 4096, E: 256, topk: 8}     # DeepSeek-V3 256-expert router
+  validation:
+    - {M: 8192, E: 32, topk: 8}            # 32-expert, more tokens
+    - {M: 2048, E: 8, topk: 2}             # Mixtral router
+    - {M: 1, E: 64, topk: 1}               # single-token decode, top-1
+targets:
+  snr_db: 25.0
+  comparison_baseline: aiter_topk_softmax   # AITER topk_softmax (renormalize=False)

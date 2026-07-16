@@ -1,0 +1,23 @@
+task_id: gemm_backward_bf16
+operation: gemm_backward
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+# GEMM backward for Y = X @ W^T (X[M,K], W[N,K]): (x, w, dy) -> (dx[M,K], dw[N,K]).
+# dx = dY @ W (dgrad, contracts N); dw = dY^T @ X (wgrad, contracts M tokens).
+# Correctness = worst SNR of the two gradients vs the torch AUTOGRAD oracle. Gate at
+# 25 dB (KORE bf16 GEMM bar); fp32 accumulation over the contraction keeps both well
+# above it. Baseline is two hipBLASLt GEMMs. STAGED DRAFT - verify on gfx950.
+snr_threshold: 25.0
+shapes:
+  minimal: {M: 256, N: 256, K: 256}
+  primary: {M: 8192, N: 4096, K: 4096}     # attention/MLP linear backward, Llama-3-ish
+  validation:
+    - {M: 32768, N: 4096, K: 4096}         # 32k-token batch (upper training range), big wgrad reduction
+    - {M: 4096, N: 14336, K: 4096}         # MLP up-proj wgrad (wide N)
+    - {M: 8192, N: 4096, K: 8192}          # wide hidden K
+    - {M: 4096, N: 4095, K: 4096}         # non-pow2 N tail (edge, masking)
+targets:
+  snr_db: 25.0
+  comparison_baseline: hipblaslt_gemm_backward   # dX=dY@W, dW=dY^T@X via hipBLASLt (perf bar)

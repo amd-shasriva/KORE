@@ -103,8 +103,69 @@ TOOL_SCHEMAS: list[dict] = [
     ),
 ]
 
+# --- Paradigm-v2: verified epsilon-typed transformation calculus as an action space.
+# These expose kore.transform (a library of 13 real Triton source rewrites, each
+# typed exact/approx with an epsilon cost + side conditions) so the policy can
+# propose PROVABLY-in-contract optimization moves instead of free-form edits. Pure
+# CPU (source rewrites only); the model still build/test/benches the result through
+# the existing verified env, so an approximate move that drifts is caught by the SNR
+# gate. Kept OUT of the default advertised set (backward compatible: datagen/agentic
+# stages are unchanged); GRPO opts in via ``agentic_transform_tools`` -> the harness
+# is built with :func:`agent_tool_schemas(transforms=True)`.
+_TRANSFORM_SRC = {
+    "type": "string",
+    "description": "Kernel to operate on; OMIT to use your current working kernel.",
+}
+TRANSFORM_TOOL_SCHEMAS: list[dict] = [
+    _fn(
+        "list_transforms",
+        "List the VERIFIED kernel transformations currently legal for a kernel "
+        "under its remaining numerical error budget. Each move is typed exact "
+        "(bit-preserving) or approx (with an epsilon cost) and carries side "
+        "conditions, so you only ever see SAFE, in-contract optimization moves "
+        "(e.g. set_num_warps, retile_block, split_k, fp32_accumulator). Pure/no GPU.",
+        {"kernel_src": _TRANSFORM_SRC},
+        [],
+    ),
+    _fn(
+        "apply_transform",
+        "Apply ONE verified transformation (name + params from list_transforms) to "
+        "a kernel, with epsilon-budget accounting + side-condition checks. Returns "
+        "the rewritten kernel source (then build/test/bench it). An inadmissible or "
+        "budget-exceeding move is REJECTED rather than producing an out-of-contract "
+        "kernel. Pure/no GPU.",
+        {
+            "kernel_src": _TRANSFORM_SRC,
+            "name": {"type": "string",
+                     "description": "Transform name from list_transforms, e.g. set_num_warps."},
+            "params": {"type": "object",
+                       "description": "Transform params, e.g. {\"value\": 8}; omit for the default grid."},
+        },
+        ["name"],
+    ),
+]
+
+# Default advertised set = the base 6 (UNCHANGED, so every existing caller +
+# the agentic datagen stage behave identically). The verified-transform tools are
+# opt-in via :func:`agent_tool_schemas`.
 TOOL_NAMES: list[str] = [s["function"]["name"] for s in TOOL_SCHEMAS]
-_SCHEMA_BY_NAME: dict[str, dict] = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
+# ``_SCHEMA_BY_NAME`` covers ALL tools (base + transform) so validate/dispatch stay
+# fail-safe even if a model emits a transform call when it was not advertised.
+_ALL_TOOL_SCHEMAS: list[dict] = TOOL_SCHEMAS + TRANSFORM_TOOL_SCHEMAS
+_SCHEMA_BY_NAME: dict[str, dict] = {s["function"]["name"]: s for s in _ALL_TOOL_SCHEMAS}
+
+
+def agent_tool_schemas(transforms: bool = False) -> list[dict]:
+    """The advertised tool set for the agent system prompt.
+
+    ``transforms=False`` (default): the base 6 build/test/bench/pmc/keep/revert
+    tools -- byte-identical to the legacy set. ``transforms=True``: additionally
+    advertise the verified epsilon-typed transformation calculus
+    (:data:`TRANSFORM_TOOL_SCHEMAS`), turning kore.transform into a first-class,
+    provably-in-contract action space. GRPO enables it via
+    ``config.agentic_transform_tools``.
+    """
+    return list(_ALL_TOOL_SCHEMAS) if transforms else list(TOOL_SCHEMAS)
 
 
 # --------------------------------------------------------------------------- #
@@ -203,10 +264,32 @@ class ToolExecutor:
 
         self.keep_decisions: list[dict] = []
         self._turn: int = 0
+        # Lazy verified-transform epsilon budget for this (operation, dtype), shared
+        # across the episode so approximate transforms accumulate their epsilon cost
+        # (the calculus refuses a move once the budget is spent). Built on first use
+        # so the base tool path never imports kore.transform. Reset on reseed.
+        self._transform_budget = None
 
     # -- helpers ---------------------------------------------------------- #
     def set_turn(self, turn: int) -> None:
         self._turn = turn
+
+    def _get_transform_budget(self):
+        """Lazily build the episode's :class:`kore.transform.ErrorBudget`.
+
+        Sized from the task's ``(operation, dtype)`` so exact moves are free and
+        approximate moves draw down a bounded, dtype-appropriate epsilon. Never
+        raises (physics/transform is a bonus): returns None on any import gap.
+        """
+        if self._transform_budget is None:
+            try:
+                from kore.transform import ErrorBudget
+                op = (getattr(self.task, "operation", None)
+                      or getattr(self.task, "task_id", "") or "")
+                self._transform_budget = ErrorBudget.for_op(op, self.dtype)
+            except Exception:  # noqa: BLE001 - transform is optional; degrade gracefully
+                self._transform_budget = None
+        return self._transform_budget
 
     def reseed_lineage(self) -> dict:
         """Abandon the current candidate lineage and roll back to the seed.
@@ -225,6 +308,7 @@ class ToolExecutor:
         self.candidate_correct = False
         self.candidate_speedup = None
         self.candidate_phi = None
+        self._transform_budget = None  # fresh lineage -> fresh epsilon budget
         return {"ok": True, "reseeded": True,
                 "seeded_from": "task_seed" if self.seed_src else "empty",
                 "preserved_best_reward": _round(
@@ -425,6 +509,63 @@ class ToolExecutor:
         return {"ok": True, "tool": "revert", "reverted": True,
                 "committed_reward": _round(self.committed_reward),
                 "was_regression": bool(was_regression)}
+
+    # -- verified transformation calculus (paradigm-v2 action space) ------- #
+    def _working_src(self, args: dict) -> Optional[str]:
+        """The kernel a transform tool operates on: explicit arg, else the current
+        candidate/committed/seed lineage (so the model can say 'transform my kernel')."""
+        return (args.get("kernel_src") or self.candidate_src
+                or self.committed_src or self.seed_src)
+
+    def _tool_list_transforms(self, args: dict) -> dict:
+        src = self._working_src(args)
+        if not src:
+            return {"ok": False, "tool": "list_transforms",
+                    "error": "no kernel source available (build/keep one first)"}
+        budget = self._get_transform_budget()
+        if budget is None:
+            return {"ok": False, "tool": "list_transforms",
+                    "error": "transform calculus unavailable"}
+        try:
+            from kore.transform import admissible_actions
+            actions = admissible_actions(src, budget)
+        except Exception as e:  # noqa: BLE001 - never crash the loop
+            return {"ok": False, "tool": "list_transforms", "error": f"transform error: {e}"}
+        return {
+            "ok": True, "tool": "list_transforms",
+            "actions": [a.to_dict() for a in actions],
+            "n_admissible": len(actions),
+            "budget": budget.state(),
+        }
+
+    def _tool_apply_transform(self, args: dict) -> dict:
+        src = self._working_src(args)
+        name = args.get("name")
+        params = args.get("params") or {}
+        if not src:
+            return {"ok": False, "tool": "apply_transform",
+                    "error": "no kernel source available (build/keep one first)"}
+        budget = self._get_transform_budget()
+        if budget is None:
+            return {"ok": False, "tool": "apply_transform",
+                    "error": "transform calculus unavailable"}
+        try:
+            from kore.transform import apply_sequence
+            new_src, applied, rejected, budget_state = apply_sequence(
+                src, [(name, params)], budget)
+        except Exception as e:  # noqa: BLE001 - never crash the loop
+            return {"ok": False, "tool": "apply_transform", "error": f"transform error: {e}"}
+        ok = bool(applied) and not rejected
+        return {
+            "ok": ok, "tool": "apply_transform",
+            # Return the rewritten source so the model can build/test/bench it. On a
+            # rejected/inadmissible move the source is UNCHANGED (never out-of-contract).
+            "kernel_src": new_src if ok else src,
+            "applied": applied,
+            "rejected": rejected,
+            "budget": budget_state,
+            "error": (rejected[0].get("reason") if rejected else None),
+        }
 
 
 # --------------------------------------------------------------------------- #

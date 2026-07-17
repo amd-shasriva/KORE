@@ -350,7 +350,7 @@ def test_agentic_per_turn_signal_recovers_aligned_speedup_and_code():
         turn_speedups=[None, 1.5, 2.0],
         turn_codes=["srcA", "srcB", "srcC"],
     )
-    codes, sus = grpo._agentic_per_turn_signal(ep, ep.turn_correct, 3)
+    codes, sus, phis = grpo._agentic_per_turn_signal(ep, ep.turn_correct, 3)
     assert codes == ["srcA", "srcB", "srcC"]
     assert sus == [None, 1.5, 2.0]
 
@@ -367,7 +367,7 @@ def test_agentic_per_turn_signal_gates_speedup_on_correctness():
         turn_speedups=[2.0, 3.0],     # 3.0 sits on an incorrect turn -> must drop
         turn_codes=["good", "bad"],
     )
-    codes, sus = grpo._agentic_per_turn_signal(ep, ep.turn_correct, 2)
+    codes, sus, phis = grpo._agentic_per_turn_signal(ep, ep.turn_correct, 2)
     assert codes == ["good", "bad"]
     assert sus == [2.0, None]
 
@@ -385,7 +385,7 @@ def test_agentic_per_turn_signal_degrades_when_trace_misaligned():
         turn_speedups=[None, 2.0, None],    # full harness trace (len 3) -> misaligned
         turn_codes=["a", "b", "c"],
     )
-    codes, sus = grpo._agentic_per_turn_signal(ep, [True], 1)
+    codes, sus, phis = grpo._agentic_per_turn_signal(ep, [True], 1)
     assert codes == [""] and sus == [None]
 
 
@@ -394,9 +394,9 @@ def test_agentic_per_turn_signal_handles_missing_fields():
     class _LegacyEp:
         pass
 
-    codes, sus = grpo._agentic_per_turn_signal(_LegacyEp(), [True, True], 2)
-    assert codes == ["", ""] and sus == [None, None]
-    assert grpo._agentic_per_turn_signal(_LegacyEp(), [], 0) == ([], [])
+    codes, sus, phis = grpo._agentic_per_turn_signal(_LegacyEp(), [True, True], 2)
+    assert codes == ["", ""] and sus == [None, None] and phis == [None, None]
+    assert grpo._agentic_per_turn_signal(_LegacyEp(), [], 0) == ([], [], [])
 
 
 def test_agentic_per_turn_signal_matches_live_harness_trace():
@@ -450,7 +450,7 @@ def test_agentic_per_turn_signal_matches_live_harness_trace():
     ep = AgentHarness(_Task(), StubTeacher(fn=_fn), _Env(),
                       max_turns=8, use_kb=False).run()
     n = ep.turns_used
-    codes, sus = grpo._agentic_per_turn_signal(ep, ep.turn_correct, n)
+    codes, sus, phis = grpo._agentic_per_turn_signal(ep, ep.turn_correct, n)
     assert len(codes) == len(sus) == n
     assert sus[3] == 2.0 and codes[3] == "cand __FAST__"
     assert sus[0] is None and sus[1] is None and sus[2] is None

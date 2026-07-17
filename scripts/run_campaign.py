@@ -1556,6 +1556,25 @@ def _stage_grpo(ctx):
         or ctx.get("value_model_path")
     variance_floor = _ANTICOLLAPSE_VARIANCE_FLOOR if anticollapse else 0.0
 
+    # Paradigm-v2 (P1a): if the measurement-efficiency prefilter is on but no value
+    # model was supplied, TRAIN one from THIS run's own verified ranked groups
+    # (schedule-conditioned, real measurements) so the prefilter AND the AlphaKernel
+    # search prior run on a grounded model instead of the source-only heuristic. CPU,
+    # fully fail-safe -- any shortfall leaves value_model_path unset (heuristic).
+    if value_prefilter and not value_model_path:
+        try:
+            from kore.value.replay_train import train_value_from_groups
+            vpath = str(_repo_root() / "runs" / "value" / "value_model.pkl")
+            m = train_value_from_groups(str(ctx["data_root"] / "groups"), vpath)
+            value_model_path = vpath
+            ctx["value_model_path"] = vpath
+            _log("grpo", f"trained value model from {m['n_groups']} groups "
+                         f"({m['n_candidates']} candidates); held-out group rank-corr="
+                         f"{m['heldout_group_rank_corr']} -> {vpath}")
+            LOG.event("value_model_trained", **m)
+        except Exception as e:  # noqa: BLE001 - value model is a bonus, never a hard dep
+            _log("grpo", f"value-model training skipped ({e}); prefilter -> heuristic fallback")
+
     # GRPO ships the JSON `-m` entry, so full-FT shells out to the FSDP launcher
     # exactly like sft/dpo (detected via `grpo_config_from_dict`, so this flips on
     # automatically the moment the sibling entry lands). If a full-FT run is asked

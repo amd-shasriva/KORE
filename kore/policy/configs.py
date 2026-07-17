@@ -363,6 +363,35 @@ class GRPOConfig(DistributedMixin):
     reward_mode: str = "speedup"
     physics_weight: float = 1.0
 
+    # --- Paradigm-v2 credit assignment (P0d + P0b) ---
+    # credit_incorrect_turns: feed an INCORRECT turn's shaped progress reward (bounded
+    # sub-threshold SNR + format signal, always < correctness_weight) into the Kevin
+    # per-turn return instead of hard-zeroing it -- densifies the gradient in the
+    # deceptive not-yet-correct band while keeping correctness lexicographically
+    # dominant. physics_shaping_weight: weight on the potential-based shaping
+    # F_t = gamma*Phi(s_{t+1}) - Phi(s_t) with Phi = roofline attainment rho
+    # (kore.reward.whitebox.phi_potential). By the Ng-Harada-Russell theorem this is
+    # policy-invariant at ANY weight, so it cannot introduce a reward-hacking
+    # incentive -- it only densifies per-turn credit toward the roofline.
+    credit_incorrect_turns: bool = False
+    physics_shaping_weight: float = 0.0
+
+    # --- Paradigm-v2 test-time search (P1b AlphaKernel) ---
+    # use_search: at inference, run value-guided best-first search over kernel
+    # transformations (kore.search.alphakernel) with the verifier as a perfect
+    # simulator + roofline admissible bound, instead of flat best-of-n. search_budget
+    # is the hard verifier-call cap per rollout. (The trained-ValueModel prior +
+    # bench prefilter reuse the existing ``value_model_path`` field above.)
+    use_search: bool = False
+    search_budget: int = 64
+
+    # --- Paradigm-v2 open-ended minting (P3) ---
+    # coevolve_mint: let the CoevolutionController mint NET-NEW correct-by-construction
+    # tasks (kore.openended.minter) beyond the registered menu, expanding the RL
+    # curriculum open-endedly (measured-roofline QD + learning-progress).
+    coevolve_mint: bool = False
+    coevolve_mint_batch: int = 8
+
     # --- Agentic tool-use RL (ToolRL reward shaping) ---
     agentic: bool = False                   # rollouts drive build/test/bench/pmc tools
     tool_reward_weight: float = 0.2         # weight on ToolRL-style shaping term

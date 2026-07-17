@@ -30,6 +30,7 @@
   "coevolve_distill_path": "data/full14b/coevolve_wins.jsonl",
   "coevolve_distill_min_speedup": 1.0,
   "total_steps": 2000,
+  "save_steps": 100,
   "reward_phase": "all",
   "reward_mode": "speedup",
   "physics_weight": 1.0,

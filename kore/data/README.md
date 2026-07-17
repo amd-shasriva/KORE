@@ -79,6 +79,13 @@ flowchart LR
 ```
 
 - `build_datasets.py` / `assemble.py`: multi-capability SFT mix (repair + wins + QA + agentic + general replay) and DPO pairs with ≥8% reward-hack hard negatives.
+- **Objective aligned with GRPO (paradigm-v2).** The SFT/DPO assembly optimizes the SAME
+  vendor-relative **speedup** objective the GRPO reward now uses (`reward_mode=speedup`): DPO pairs come
+  from the `faster-correct > slower-correct > incorrect > non-compiling` ranking (`gen_groups.rank_candidates`)
+  and SFT/gold wins pass a speedup gate (`filter_trivial_wins`, the RFT speedup gate on `gold_wins`), so
+  warm-start and RL pull in one direction. GRPO's physics named-residual `ρ` is layered on only as
+  policy-invariant shaping, not as a competing assembly objective. This is an assembly/scoring alignment
+  - the record generation above is unchanged.
 - `leakage_split` groups by `(family, arch)` so whole groups stay on one side of train/val/test; the registry held-out filter is the final authority.
 - `onpolicy.py`: `iterative_dpo` relabels preferences on-policy from the current checkpoint (DAgger no-regret), refreshing the reference each round; `dagger_repairs` mines the policy's own failures with a teacher-mixing fraction that decays 30%→0%.
 - `general_replay.py`: anti-forgetting replay (code/math/chat/instruction/tool_use), real HF datasets when `KORE_GENERAL_REPLAY_HF=1`.

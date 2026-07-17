@@ -2,6 +2,8 @@
 
 Offline diagnostics that establish (and stress-test) the physical premise behind KORE's reward. Nothing here trains a policy; these modules **measure** and **falsify**. This is the code behind the [`Kore-prelim-analysis`](../../../Kore-prelim-analysis/) study and [`docs/P0_RESULTS.md`](../../docs/P0_RESULTS.md).
 
+> **Paradigm-v2: no longer offline-only.** The roofline `T_min` and the named-residual decomposition (`stall + occupancy-deficit`) are now consumed **ONLINE by the training reward** via [`kore.reward.whitebox`](../reward/README.md#paradigm-v2-white-box-potential--pbs-shaping) - not just offline in `p0_sol`. `whitebox` reuses `rooflines.roofline` for `T_min` and the same named-term structure to score a kernel's roofline attainment `Φ = ρ` as a potential-based shaping signal in GRPO. *Active in the live run:* the `T_min`-based `η = T_min/T_measured` attainment is the live potential (`physics_shaping_weight = 0.15`). The full named-residual `ρ = T_min/(T_min+N)` - the R²≈0.98 signal validated by check (b) below - is BUILT for online use (`whitebox.physics_signal_from_counters`) and engages when rocprofv3 counters are collected per candidate; otherwise the online potential degrades to `η`. `p0_sol` remains where the decomposition is *validated* offline; paradigm-v2 makes the same math a live reward input.
+
 ---
 
 ## Files
@@ -83,6 +85,6 @@ python -m kore.analysis.p0_sol --dry-run --tasks gemm_bf16,rmsnorm_aiter
 python -m kore.analysis.residual_transfer --report data/p0_study_final.json --out data/residual_transfer.json
 ```
 
-The bridge to the live reward: `physics_from_measure(KernelMeasure) → PhysicsSignal → compute_residual_reward` - the same math the training reward uses (see [`kore/reward`](../reward/README.md)).
+The bridge to the live reward: `physics_from_measure(KernelMeasure) → PhysicsSignal → compute_residual_reward` - the same math the training reward uses (see [`kore/reward`](../reward/README.md)). Online, `kore.reward.whitebox` reuses `rooflines.roofline` (`T_min`) + the named-term structure to feed GRPO's potential-based shaping directly, so this roofline model is a live reward input, not only an offline diagnostic.
 
 See also: [`tasks`](../tasks/README.md), [`verifier`](../verifier/README.md) (PMC), [`eval/generalization`](../eval/README.md).

@@ -55,7 +55,7 @@ sequenceDiagram
       Env->>Rew: Observation
       Rew-->>Pol: reward (apply_reward_phase)
     end
-    Note over Pol: build_kevin_samples (per-turn credit, best-correct scoring)
+    Note over Pol: build_kevin_samples (per-turn Kevin credit + ρ potential shaping, best-correct scoring)
   end
   Note over Pol: GTPO code-sim · SC-GRPO KL weight · StarPO-S variance filter
   Pol->>Pol: clip-higher PG + k3 KL anchor to SFT ckpt
@@ -68,15 +68,17 @@ Techniques wired in (all with paper references in [`papers/`](../../../papers/))
 - **DAPO dynamic sampling** - oversample and refill until enough non-degenerate groups.
 - **Clip-higher** - asymmetric PPO surrogate; **k3 KL anchor** (`ref_anchor_coef`) to the post-SFT checkpoint (the only KL term).
 - **Anti-collapse ladder** - RC-GRPO reward tokens, AVSPO variance floor, SC-GRPO KL weighting, GTPO code-similarity partial rewards for all-fail groups.
-- **Value prefilter** - generate N, bench only top-k (~4× measurement efficiency; see [`kore/value`](../value/README.md)).
+- **Value prefilter** - generate N, bench only top-k (~4× measurement efficiency); the ranker is a **schedule-conditioned value model trained from the run's own verified ranked groups** (`kore/value/replay_train.py`, auto-trained pre-GRPO), see [`kore/value`](../value/README.md).
 - **Co-evolution** - `CoevolutionController` replaces round-robin task selection with a learnability/regret/novelty frontier (see [`kore/openended`](../openended/README.md)).
-- **Physics reward** - `reward_mode="residual"` selects the roofline reward; `reward_phase` drives the correctness→latency curriculum.
+- **Physics-shaped credit (paradigm-v2)** - the flagship terminal reward is the high-contrast vendor-relative **speedup** (`reward_mode="speedup"`); the validated roofline attainment `ρ` is injected as a **policy-invariant potential** (`kore/reward/whitebox.py:phi_potential`) via Ng-Harada-Russell shaping `F = γ·Φ' − Φ` (`physics_shaping_weight`; flagship 0.15), and **incorrect turns keep their bounded shaped progress** instead of a hard zero (`credit_incorrect_turns`). `reward_phase` drives the correctness→latency curriculum. (`reward_mode="residual"` instead scores the correct tier by `ρ` directly.)
+- **Identical single-process / distributed credit (paradigm-v2)** - the potential is wired `ToolExecutor.candidate_phi → AgentEpisode.turn_phis → build_kevin_samples` through both `_one_group` (single-GPU fallback) and `_rollout_slice_distributed` (FSDP), so the two GRPO paths assign identical per-turn credit.
+- **Verified-transform action space + test-time search + open-ended minting (paradigm-v2, now LIVE)** - the paradigm-v2 discovery stack is wired into the loop and **on in the flagship**. `agentic_transform_tools=true` exposes the verified ε-typed transform calculus (`kore/transform`) to the agentic policy as first-class `list_transforms`/`apply_transform` tools (`kore/agent/tools.py`; `_rollout_agentic` builds the harness via `agent_tool_schemas(transforms=True)`), so the model proposes provably-in-contract rewrites, not free-form edits. `use_search=true` runs AlphaKernel value-guided best-first search (`kore/search`) over that same calculus through the production `TransformProposePolicy` (`kore/search/propose.py`), wired as a **throttled, fail-safe, off-policy search-then-distill** hook (`_maybe_search_then_distill`, in *both* the serial and distributed loops): it fires once every `search_every=50` steps on the step's single best group, *after* the on-policy gradient is built, spends only `search_budget=16` verifier benches, and feeds **only** the distillation sink - so it never corrupts on-policy credit and any error is a no-op. `coevolve_mint=true` lets `CoevolutionController` mint net-new correct-by-construction tasks (`kore/openended/minter.py`) and materialize them into runnable on-disk task dirs (`kore/openended/materialize.py`, self-checked) - see [`kore/openended`](../openended/README.md).
 
 ---
 
 ## Key config defaults (`configs.py`)
 
-**GRPOConfig** dataclass defaults (the full 14B campaign's [`configs/grpo_14b_full.json`](../../configs/README.md) pins `model_id` to Qwen3-14B and flips on the full stack: `reward_mode=residual` physics reward, `agentic`, `coevolve`, `value_prefilter`, and the anti-collapse rungs):
+**GRPOConfig** dataclass defaults (the full 14B campaign's [`configs/grpo_14b_full.json`](../../configs/README.md) pins `model_id` to Qwen3-14B and flips on the full stack: `reward_mode=speedup` terminal reward with the paradigm-v2 roofline shaping (`credit_incorrect_turns=true`, `physics_shaping_weight=0.15`), `agentic`, `coevolve`, `value_prefilter`, and the anti-collapse rungs - plus the now-live paradigm-v2 discovery levers `agentic_transform_tools=true`, `use_search=true` (`search_budget=16`, `search_every=50`), and `coevolve_mint=true` (`coevolve_mint_batch=6`)):
 
 | Field | Default | Field | Default |
 | --- | --- | --- | --- |
@@ -88,6 +90,12 @@ Techniques wired in (all with paper references in [`papers/`](../../../papers/))
 | `starpo_s` | true | `dynamic_sampling` | true |
 | `coevolve` | false | `value_prefilter` | false |
 | `agentic` | false | `synced_gpus` | true |
+| `credit_incorrect_turns` | false | `physics_shaping_weight` | 0.0 |
+| `use_search` | false | `search_budget` | 64 |
+| `coevolve_mint` | false | `coevolve_mint_batch` | 8 |
+| `search_every` | 25 | `agentic_transform_tools` | false |
+
+The paradigm-v2 rows above are dataclass **defaults** (legacy Kevin credit, search + mint off); the flagship JSON turns the whole paradigm-v2 stack **on**, overriding `credit_incorrect_turns=true`, `physics_shaping_weight=0.15`, `agentic_transform_tools=true`, `use_search=true` (`search_budget=16`, `search_every=50`), and `coevolve_mint=true` (`coevolve_mint_batch=6`).
 
 **SFT**: full-FT, `max_seq_length=16384`, `num_train_epochs=3`, `repair_loss_weight=2.0`. **DPO**: `beta=0.1`, iterative uses `loss_type="ipo"`. **Midtrain**: `general_replay_frac=0.30`, `max_seq_length=8192`. **Soup**: `alphas=(0.7,0.8,0.9)`, retention `epsilon=0.005`.
 

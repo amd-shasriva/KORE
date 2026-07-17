@@ -272,6 +272,16 @@ Rationale for the pyramid: it mirrors the natural scarcity (KORE.pdf §2: of ~30
 | On-policy trajectories | 16 parallel × 4 refinement turns (train), 8 turns (test) - Kevin recipe; each turn = one training sample; summarize prior CoTs to bound context; discounted intermediate reward across turns |
 | Group-relative advantage | `A_i=(r_i-mean r)/(std r+ε)`; reward-conditioned + turn-level credit to avoid zero-advantage collapse on ties (KORE.pdf §3, refs [8][9][10]) |
 
+**Objective alignment with SFT/DPO (paradigm-v2).** GRPO's within-turn reward is the SAME
+vendor-relative **speedup** signal that Stages 1-2 assemble on (`reward_mode=speedup`; the SFT
+speedup gate and the DPO `faster-correct > slower-correct` ranking below), so all three stages
+optimize one objective - the prior SFT/DPO-vs-GRPO mismatch is resolved. The physics named-residual
+`ρ` is added ONLY as a *policy-invariant* potential-based-shaping term (`physics_shaping_weight`,
+Ng-Harada-Russell), which densifies per-turn credit toward the roofline **without** changing the
+optimal policy, so it never re-introduces an objective mismatch. This is a *training-objective*
+alignment: **the datagen record generation is unchanged** (no new record types, mutators, or
+verification changes) - only how the already-verified records are scored/assembled.
+
 ### 3.3 Memory-bound vs compute-bound balance
 
 Serving is dominated by memory-bound decode, but compute-bound prefill has the biggest per-kernel speedup ceilings. Split code-volume roughly:
@@ -330,7 +340,7 @@ Every correctness/perf label MUST be produced by this pipeline (extends `verifie
 5. **Determinism reruns.** Re-run the winning kernel ≥3× (fresh process). If SNR/wall variance exceeds tolerance (nondeterminism, C2), **flag and quarantine** - do not admit to corpus.
 6. **Independent re-verification.** Re-verify accepted wins in a *separate process / separate harness invocation* (KORE.pdf §4: "re-verify independently"). Candidate is loaded and run **before** the reference (defeats output-recycling hack H4).
 7. **Timing hygiene.** Warmup (≥10 iters) + median of ≥30 timed iters + CUDA-event timing + `torch.cuda.synchronize()` + **variance gate CV < 3%** (KORE.pdf §4). Reject measurements with CV ≥ 3%.
-8. **Reward is lexicographic.** `r = 1[correct] · log(T_base / T_cand)`. Speed counts only if correct; a fast-but-wrong kernel scores 0. No dense/intermediate compile-or-run reward (KORE.pdf §4; prevents over-optimization cheating).
+8. **Reward is lexicographic.** `r = 1[correct] · log(T_base / T_cand)`. Speed counts only if correct; a fast-but-wrong kernel scores 0. No dense/intermediate compile-or-run reward that could change the objective (KORE.pdf §4; prevents over-optimization cheating). The paradigm-v2 online physics term is the sole dense signal, and it is added as *policy-invariant* Ng-Harada-Russell potential-based shaping (`Φ=ρ`), which telescopes to a start-state constant and therefore cannot shift the optimum or reward-hack - it densifies per-turn GRPO credit without weakening this lexicographic guarantee.
 9. **Baseline = production op, measured on-box.** `--impl reference` calls AITER/hipBLASLt/rocBLAS/CK for `T_base`; never a torch fallback.
 
 ### 4.2 Anti-cheat AST/static gate (pre-execution)

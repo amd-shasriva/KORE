@@ -384,6 +384,12 @@ class GRPOConfig(DistributedMixin):
     # bench prefilter reuse the existing ``value_model_path`` field above.)
     use_search: bool = False
     search_budget: int = 64
+    # Throttle: run the search-then-distill hook once every ``search_every`` steps on
+    # the step's best kernel, so the extra verifier budget stays bounded
+    # (search_every x search_budget benches over the run). The search result is an
+    # OFF-POLICY distillation target (fed to coevolve_distill_path), never attributed
+    # to the on-policy gradient -- so it is sound at any setting.
+    search_every: int = 25
 
     # --- Paradigm-v2 open-ended minting (P3) ---
     # coevolve_mint: let the CoevolutionController mint NET-NEW correct-by-construction
@@ -396,6 +402,13 @@ class GRPOConfig(DistributedMixin):
     agentic: bool = False                   # rollouts drive build/test/bench/pmc tools
     tool_reward_weight: float = 0.2         # weight on ToolRL-style shaping term
     max_tool_turns: int = 8
+    # Paradigm-v2: advertise the verified epsilon-typed transformation calculus
+    # (kore.transform: 13 real Triton rewrites, each exact/approx with an epsilon
+    # cost + side conditions) to the agent as ``list_transforms``/``apply_transform``
+    # tools -- a PROVABLY-in-contract optimization action space on top of free-form
+    # editing. Pure CPU (source rewrites); the env still verifies the result, so it
+    # cannot bypass the SNR gate. Off by default (legacy tools); the flagship enables it.
+    agentic_transform_tools: bool = False
 
     seed: int = 0
     logging_steps: int = 1                  # WIRED: emit the per-step metrics event every N steps

@@ -16,7 +16,9 @@ from kore.reward.reward import Observation
 from kore.agent.tools import (
     TOOL_SCHEMAS,
     TOOL_NAMES,
+    TRANSFORM_TOOL_SCHEMAS,
     ToolExecutor,
+    agent_tool_schemas,
     validate_tool_call,
     tool_use_reward,
 )
@@ -273,6 +275,76 @@ def test_executor_keep_revert_and_best_tracking():
     assert ex.candidate_src is None
     # best kernel is unaffected by the bad candidate
     assert ex.best_src == "__FAST__"
+
+
+# --------------------------------------------------------------------------- #
+# 3b. Verified-transform action space (paradigm-v2)
+# --------------------------------------------------------------------------- #
+# A minimal Triton GEMM with tunable launch kwargs (num_warps/num_stages) + a
+# tuple BLOCK defn, so exact knob transforms (e.g. set_num_warps) are admissible.
+_XFORM_GEMM = '''\
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _k(a_ptr, b_ptr, c_ptr, M, N, K,
+       BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr):
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc += 1.0
+
+
+def gemm(a, b, c):
+    BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M = 64, 128, 64, 8
+    _k[(1,)](a, b, c, 1, 1, 1, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+             GROUP_M=GROUP_M, num_warps=4, num_stages=2)
+'''
+
+
+def test_agent_tool_schemas_gating_and_validation():
+    base = agent_tool_schemas(transforms=False)
+    full = agent_tool_schemas(transforms=True)
+    base_names = {s["function"]["name"] for s in base}
+    full_names = {s["function"]["name"] for s in full}
+    assert base_names == {"build", "test", "bench", "pmc", "keep", "revert"}
+    assert full_names == base_names | {"list_transforms", "apply_transform"}
+    assert len(TRANSFORM_TOOL_SCHEMAS) == 2
+    # validate/dispatch recognize the transform tools even though they are opt-in.
+    ok = validate_tool_call({"name": "apply_transform",
+                             "arguments": {"name": "set_num_warps", "params": {"value": 8}}})
+    assert ok["valid_name"] and ok["valid_params"]
+    bad = validate_tool_call({"name": "apply_transform", "arguments": {}})
+    assert bad["valid_name"] and not bad["valid_params"]  # 'name' is required
+
+
+def test_transform_tool_list_and_apply():
+    ex = ToolExecutor(FakeEnv(), FakeTask(), seed_src=_XFORM_GEMM)
+    listed = ex.dispatch({"name": "list_transforms", "arguments": {}}, turn=0)
+    assert listed["ok"] is True
+    assert listed["n_admissible"] >= 1
+    names = {a["name"] for a in listed["actions"]}
+    assert "set_num_warps" in names  # an exact knob move on num_warps=4
+    # apply an EXACT move -> rewritten source, budget unspent (exact costs 0 eps).
+    applied = ex.dispatch({"name": "apply_transform",
+                           "arguments": {"name": "set_num_warps", "params": {"value": 8}}}, turn=0)
+    assert applied["ok"] is True
+    assert "num_warps=8" in applied["kernel_src"]
+    assert applied["kernel_src"] != _XFORM_GEMM
+    assert not applied["rejected"]
+
+
+def test_transform_tool_is_failsafe():
+    ex = ToolExecutor(FakeEnv(), FakeTask(), seed_src=_XFORM_GEMM)
+    # unknown transform -> rejected, source UNCHANGED, never raises.
+    bad = ex.dispatch({"name": "apply_transform",
+                       "arguments": {"name": "no_such_transform", "params": {}}}, turn=0)
+    assert bad["ok"] is False
+    assert bad["kernel_src"] == _XFORM_GEMM
+    assert bad["rejected"]
+    # no working source (empty seed) -> graceful error, no crash.
+    ex2 = ToolExecutor(FakeEnv(), FakeTask(), seed_src=None)
+    empty = ex2.dispatch({"name": "list_transforms", "arguments": {}}, turn=0)
+    assert empty["ok"] is False and "no kernel source" in empty["error"]
 
 
 # --------------------------------------------------------------------------- #

@@ -314,6 +314,15 @@ _IMPORT_CHECKS = [
     ("kore.eval.fastp", "fastp", True, []),
     ("kore.eval.policies", "seed_policy", True, []),
     ("kore.eval.policies", "model_policy", True, ["checkpoint"]),
+    # Frontier eval tracks wired into _stage_eval (paradigm-v2): paired significance
+    # (bootstrap CI + Wilcoxon) + the KernelBench-AMD fast_p adapter + the robust
+    # anti-hack battery. Import-checked so a dry-run catches any drift.
+    ("kore.eval.paired_stats", "paired_speedup_comparison", True, []),
+    ("kore.eval.paired_stats", "format_paired_report", True, []),
+    ("kore.eval.kernelbench_amd", "bundled_specs", True, []),
+    ("kore.eval.kernelbench_amd", "run_kernelbench_amd", True, ["env_factory", "budget"]),
+    ("kore.eval.kernelbench_amd", "format_kernelbench_report", True, []),
+    ("kore.eval.robust_eval", "robust_correctness", True, []),
     # Fix 4 (dry-run fidelity): the REAL-RUN-ONLY symbols the audit found were
     # imported lazily inside each stage body (so a dry-run never touched them and
     # drift could slip past the preflight). Import-check them here too - datagen /
@@ -1729,7 +1738,8 @@ def _stage_eval(ctx):
 
     if ctx["dry"]:
         _log("eval", "would run matched-budget fast_p bake-off (seed vs the TRAINED model) "
-                     "+ full retention suite on the held-out split")
+                     "+ paired significance (bootstrap CI + Wilcoxon) + the KernelBench-AMD "
+                     "fast_p track on the held-out split")
         return
     from kore.env.kore_env import KoreEnv
     from kore.eval.policies import model_policy, seed_policy
@@ -1740,12 +1750,88 @@ def _stage_eval(ctx):
     _log("eval", f"scoring seed vs KORE checkpoint={kore_ckpt} on tasks="
                  f"{[t.task_id for t in tasks]}")
 
-    policies = {"seed": seed_policy, "kore": model_policy(kore_ckpt)}
+    kore_pol = model_policy(kore_ckpt)
+    policies = {"seed": seed_policy, "kore": kore_pol}
     res = matched_budget_bakeoff(policies, tasks, budget=ctx["args"].eval_budget,
                                  env_factory=lambda t: KoreEnv(t), dry_run=None)
     _log("eval", "\n" + format_bakeoff_table(res))
     paths = save_report(res, ctx["data_root"] / "eval" / "bakeoff")
     _log("eval", f"report -> {paths['json']}")
+
+    # --- Frontier eval track 1: paired significance (KORE vs seed) --------------
+    # A speedup table is not a result without a significance statement. Compute a
+    # paired bootstrap CI + Wilcoxon signed-rank + sign test on the per-task speedup
+    # ratio over tasks BOTH policies solved -- the publishable "is KORE really faster,
+    # and by how much (with CI)?" answer. Fail-safe: never breaks the core bake-off.
+    try:
+        _eval_paired_significance(ctx, res)
+    except Exception as e:  # noqa: BLE001 - reporting extra, never fatal
+        _log("eval", f"paired-significance track skipped: {e}")
+
+    # --- Frontier eval track 2: KernelBench-AMD fast_p --------------------------
+    # Score the trained model on the recognized KernelBench problems (AMD/gfx950
+    # adapter) to report a community-comparable fast_p_1/1.5/2. Bundled offline specs
+    # by default; a real KernelBench checkout via --kernelbench-root. Fail-safe.
+    try:
+        _eval_kernelbench_amd(ctx, kore_pol, KoreEnv)
+    except Exception as e:  # noqa: BLE001 - extra benchmark track, never fatal
+        _log("eval", f"kernelbench-amd track skipped: {e}")
+
+
+def _eval_paired_significance(ctx, res):
+    """Paired bootstrap CI + Wilcoxon + sign test on KORE-vs-seed per-task speedups."""
+    from kore.eval.paired_stats import format_paired_report, paired_speedup_comparison
+
+    pol = res.get("policies", {})
+    kore_pt = {t["task_id"]: t for t in pol.get("kore", {}).get("per_task", [])}
+    seed_pt = {t["task_id"]: t for t in pol.get("seed", {}).get("per_task", [])}
+    kore_su, seed_su = [], []
+    for tid, kt in kore_pt.items():
+        st = seed_pt.get(tid)
+        if st is None:
+            continue
+        ks, ss = kt.get("best_speedup"), st.get("best_speedup")
+        # both must be correct+timed for a valid paired comparison
+        if kt.get("correct") and st.get("correct") and ks and ss and ks > 0 and ss > 0:
+            kore_su.append(float(ks))
+            seed_su.append(float(ss))
+    if len(kore_su) < 2:
+        _log("eval", f"paired-significance: only {len(kore_su)} matched-correct task(s); "
+                     "need >=2 -- skipped")
+        return
+    cmp = paired_speedup_comparison(kore_su, seed_su,
+                                    seed=getattr(ctx["args"], "split_seed", 0))
+    _log("eval", "\n" + format_paired_report(cmp, name_a="KORE", name_b="seed"))
+    out = ctx["data_root"] / "eval" / "paired_seed_vs_kore.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(cmp.to_dict(), indent=2))
+    _log("eval", f"paired report -> {out} (n={len(kore_su)}, significant={cmp.significant})")
+
+
+def _eval_kernelbench_amd(ctx, kore_pol, KoreEnv):
+    """KernelBench-AMD fast_p track for the trained model (bundled specs or real KB)."""
+    from kore.eval.kernelbench_amd import (bundled_specs, format_kernelbench_report,
+                                           load_real_kernelbench, run_kernelbench_amd)
+
+    kb_root = getattr(ctx["args"], "kernelbench_root", None)
+    if kb_root:
+        specs = load_real_kernelbench(kb_root)
+        _log("eval", f"kernelbench-amd: loaded {len(specs)} real KernelBench specs from {kb_root}")
+    else:
+        specs = bundled_specs()
+        _log("eval", f"kernelbench-amd: {len(specs)} bundled offline specs "
+                     "(pass --kernelbench-root for the full suite)")
+    if not specs:
+        _log("eval", "kernelbench-amd: no specs available -- skipped")
+        return
+    kb = run_kernelbench_amd(kore_pol, specs, gpu_target="gfx950",
+                             budget=ctx["args"].eval_budget,
+                             env_factory=lambda t: KoreEnv(t))
+    _log("eval", "\n" + format_kernelbench_report(kb["report"]))
+    out = ctx["data_root"] / "eval" / "kernelbench_amd.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(kb["report"], indent=2, default=str))
+    _log("eval", f"kernelbench-amd report -> {out}")
 
 
 def _retention_gate(ctx, *, stage, candidate, base):
@@ -1914,6 +2000,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--evolve-generations", type=int, default=4, dest="evolve_generations")
     p.add_argument("--soup-out", default="runs/soup", dest="soup_out")
     p.add_argument("--eval-budget", type=int, default=5, dest="eval_budget")
+    # Frontier eval: point at a real KernelBench checkout to score the recognized
+    # suite (else the bundled offline specs are used for a smoke fast_p track).
+    p.add_argument("--kernelbench-root", default=None, dest="kernelbench_root",
+                   help="path to a KernelBench checkout for the full fast_p suite "
+                        "(default: bundled offline specs)")
     # P5 flagship novelty: dense hardware-counter (rocprofv3) reward weight. 0 =
     # off (default). A small value (e.g. 0.15) enables the roofline-attainment
     # dense bonus; propagated to training subprocs via KORE_PROFILE_REWARD_WEIGHT.

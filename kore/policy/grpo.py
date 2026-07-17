@@ -946,6 +946,49 @@ def _distill_group(sink, task_id, best_speedup, best_kernel_src, config):
         log.warn("coevolve distillation failed", task=task_id, error=repr(e))
 
 
+def _maybe_search_then_distill(groups, config, distill_sink, step):
+    """AlphaKernel test-time search from the step's BEST kernel, feeding the distill
+    sink (paradigm-v2 P1b). Sound + cheap by construction:
+
+      * runs AFTER the policy-gradient sample is built from the model's OWN tokens,
+        so the search result is NEVER attributed to the on-policy update (it is an
+        off-policy DISTILLATION target for later expert-iteration/RFT) -- no credit-
+        assignment corruption;
+      * throttled to ONE search per ``search_every`` steps on the single best group,
+        so the extra verifier budget is bounded (``search_every`` x ``search_budget``
+        benches over the run), not multiplied across every rollout;
+      * value-guided best-first search over the VERIFIED transform action space
+        (kore.search.propose.search_from_kernel) with the env as a perfect simulator.
+
+    Fully fail-safe: any error (or use_search off / no distill sink) is a no-op.
+    """
+    if not getattr(config, "use_search", False) or distill_sink is None:
+        return
+    every = max(1, int(getattr(config, "search_every", 25)))
+    if step % every != 0:
+        return
+    cand = [g for g in groups if g.get("best_kernel_src") and g.get("best_speedup")]
+    if not cand:
+        return
+    g = max(cand, key=lambda gg: gg.get("best_speedup") or 0.0)
+    try:
+        from kore.search.propose import search_from_kernel
+        env = _make_rollout_env(g["task"], config)
+        res = search_from_kernel(
+            g["best_kernel_src"], g["task"], env,
+            budget=int(getattr(config, "search_budget", 64)),
+            reward_mode=getattr(config, "reward_mode", "speedup"), seed=step)
+        src, su = res.get("best_source"), res.get("best_speedup_lcb")
+        base = float(g.get("best_speedup") or 0.0)
+        if src and su and float(su) > base:
+            _distill_group(distill_sink, g["task"].task_id, float(su), src, config)
+            log.info("search-then-distill: search beat the rollout", step=step,
+                     task=g["task"].task_id, search_speedup=round(float(su), 4),
+                     rollout_speedup=round(base, 4))
+    except Exception as e:  # noqa: BLE001 - search is a bonus; never break the step
+        log.info("search-then-distill skipped", step=step, error=str(e))
+
+
 def _train_grpo_fallback(config, tasks):
     """Compact in-process GRPO loop implementing the locked KORE recipe.
 
@@ -1061,7 +1104,9 @@ def _train_grpo_fallback(config, tasks):
             tasks, seed=getattr(config, "seed", 0),
             batch=getattr(config, "coevolve_batch", None),
             k_attempts=config.num_trajectories,
-            include_vendor=getattr(config, "coevolve_include_vendor", True))
+            include_vendor=getattr(config, "coevolve_include_vendor", True),
+            mint=getattr(config, "coevolve_mint", False),
+            mint_batch=getattr(config, "coevolve_mint_batch", 8))
         log.info("coevolve: frontier curriculum active", **controller.report())
 
     def _one_group(task, seed):
@@ -1144,10 +1189,12 @@ def _train_grpo_fallback(config, tasks):
             nonlocal task_cursor
             if controller is not None:
                 tid = controller.next_task_id(step, attempt)
+                task_obj = controller.resolve_task(tid)  # minted OR registered
             else:
                 tid = tasks[task_cursor % len(tasks)]
                 task_cursor += 1
-            g = _one_group(get_task(tid), step * 100003 + attempt)
+                task_obj = get_task(tid)
+            g = _one_group(task_obj, step * 100003 + attempt)
             # Record EVERY rolled group (survivors AND collapsed all-fail groups) so
             # the frontier archive learns which tasks are unsolvable/trivial, not just
             # the high-variance survivors that reach the training update.
@@ -1176,6 +1223,12 @@ def _train_grpo_fallback(config, tasks):
         # _roll, so this just logs the co-evolved frontier state once per step). ---- #
         if controller is not None:
             log.info("coevolve step", step=step, **controller.report())
+
+        # ---- 1a'. AlphaKernel test-time search-then-distill (paradigm-v2 P1b) ---- #
+        # Throttled, fail-safe, post-gradient: search the verified transform action
+        # space from the step's best kernel and bank any faster verified kernel as an
+        # off-policy distillation target (never touches the on-policy update).
+        _maybe_search_then_distill(groups, config, distill_sink, step)
 
         # ---- 1b. GTPO all-fail code-similarity shaping (item 4c) ---- #
         # For an all-fail group (no correct kernel -> Kevin returns all 0), replace
@@ -1955,7 +2008,9 @@ def _train_grpo_distributed(config, tasks):
             tasks, seed=getattr(config, "seed", 0),
             batch=getattr(config, "coevolve_batch", None),
             k_attempts=config.num_trajectories,
-            include_vendor=getattr(config, "coevolve_include_vendor", True))
+            include_vendor=getattr(config, "coevolve_include_vendor", True),
+            mint=getattr(config, "coevolve_mint", False),
+            mint_batch=getattr(config, "coevolve_mint_batch", 8))
         if rank == 0:
             log.info("coevolve: frontier curriculum active (distributed)", **controller.report())
 
@@ -1963,10 +2018,15 @@ def _train_grpo_distributed(config, tasks):
         nonlocal task_cursor
         if controller is not None:
             tid = controller.next_task_id(step, attempt)  # deterministic -> identical on all ranks
+            # Minting is seed-deterministic + the reference reconstruction is content-
+            # deterministic, so every rank materializes the SAME minted task to its own
+            # temp dir -> rank-invariant task_id + identical oracle (registered tasks
+            # resolve to the shared registry unchanged).
+            task = controller.resolve_task(tid)
         else:
             tid = tasks[task_cursor % len(tasks)]
             task_cursor += 1
-        task = get_task(tid)
+            task = get_task(tid)
         # Roll out on the full-weight REPLICA (collective-free local generation),
         # NOT the FSDP-sharded policy (which deadlocks in generate()).
         local = _rollout_slice_distributed(gen_replica, tok, task, config, ref_model,
@@ -1979,7 +2039,8 @@ def _train_grpo_distributed(config, tasks):
         # gather the co-evolution outcome shards -> identical full-group signal on
         # every rank (so the archive update is rank-invariant).
         solve_rate = best_speedup = None
-        if controller is not None or distill_sink is not None:
+        best_src = None
+        if controller is not None or distill_sink is not None or getattr(config, "use_search", False):
             all_meta = _all_gather_object(
                 [(local.get("n_solved", 0), local.get("n_traj", 0),
                   local.get("best_speedup"), local.get("best_kernel_src"))],
@@ -2007,7 +2068,8 @@ def _train_grpo_distributed(config, tasks):
                 "correct_kernels": merge_across_ranks(all_correct),
                 "any_correct": bool(merge_across_ranks(all_correct)),
                 "infra": local["infra"],
-                "solve_rate": solve_rate, "best_speedup": best_speedup}
+                "solve_rate": solve_rate, "best_speedup": best_speedup,
+                "best_kernel_src": best_src}
 
     _inner = getattr(model, "module", model)
     _gc_on = bool(getattr(config, "gradient_checkpointing", True))
@@ -2071,6 +2133,14 @@ def _train_grpo_distributed(config, tasks):
         # rank-invariantly, so this just logs the frontier state once per step).
         if controller is not None and rank == 0:
             log.info("coevolve(dist) step", step=step, **controller.report())
+
+        # AlphaKernel test-time search-then-distill (paradigm-v2 P1b), rank-0 only
+        # (owns the distill sink). Throttled (search_every) + bounded (search_budget)
+        # so rank 0's straggler time is a small fraction of a step, well under the
+        # collective timeout; other ranks simply wait at the next all-gather. Sound:
+        # off-policy distillation target, never attributed to the on-policy update.
+        if rank == 0:
+            _maybe_search_then_distill(groups, config, distill_sink, step)
 
         # GTPO all-fail code-sim shaping against the gathered correct kernels.
         if config.gtpo_codesim:
@@ -2371,10 +2441,14 @@ def _rollout_agentic(model, tok, env, task, config, ref_model=None):
     import torch
 
     from kore.agent.harness import AgentHarness
-    from kore.agent.tools import tool_use_reward
+    from kore.agent.tools import agent_tool_schemas, tool_use_reward
 
     policy = _HFChatPolicy(model, tok, config)
-    harness = AgentHarness(task, policy, env, max_turns=config.max_tool_turns)
+    # Paradigm-v2: advertise the verified epsilon-typed transformation calculus as a
+    # first-class action space when enabled (fail-safe pure-CPU source rewrites; the
+    # result is still verified through the env). Off -> byte-identical legacy tools.
+    tools = agent_tool_schemas(transforms=getattr(config, "agentic_transform_tools", False))
+    harness = AgentHarness(task, policy, env, max_turns=config.max_tool_turns, tools=tools)
     episode = harness.run()
 
     turn_rewards, turn_correct = _episode_turn_rewards(episode)

@@ -2,9 +2,10 @@
 
 The verified terminal signal (correctness x speedup) is high-contrast but SPARSE:
 across the "correct-but-slow" valley it is nearly flat, so the per-turn advantage
-estimator gets little gradient. We densify it with a *potential* ``Phi(s)`` (the
-roofline attainment ``rho`` from :func:`kore.reward.whitebox.phi_potential`) added
-as Ng-Harada-Russell potential-based shaping:
+estimator gets little gradient. We densify it with a *potential* ``Phi(s)`` -- the
+roofline attainment from :func:`kore.reward.whitebox.phi_potential` (the named
+residual ``rho`` when PMC counters are present, else the timing-based ``eta =
+T_min/T_meas``) -- added as Ng-Harada-Russell potential-based shaping:
 
     F(s, s') = gamma * Phi(s') - Phi(s)
 
@@ -14,8 +15,13 @@ to ``-Phi(s_0)`` (a constant of the START state), so:
 
   * the trajectory-level optimal policy is provably unchanged (no reward-hacking
     incentive can be introduced by the dense term -- a formal anti-gaming result),
-  * yet the PER-TURN returns are re-distributed to credit local progress toward the
-    roofline, which is exactly the dense signal the flat valley needs.
+  * PBS is expected-gradient-NEUTRAL: it does not ADD directional gradient toward
+    the roofline, it RE-DISTRIBUTES the existing terminal credit across turns
+    (variance reduction / denser intermediate signal), which is what the flat valley
+    needs. Invariance holds only when the potentials passed here are the ENTERING-
+    state ``Phi(s_t)`` (see the caller ``kevin_turn_returns``, which reconstructs
+    them from the per-turn EXIT potentials); feeding exit potentials would make the
+    per-turn subtraction action-dependent and break the theorem.
 
 This module is PURE / CPU-only. It operates on the per-turn arrays the GRPO loop
 already builds (``turn_rewards`` and a parallel list of per-turn potentials), and
@@ -34,10 +40,13 @@ def shaping_terms(phis: Sequence[Optional[float]], gamma: float,
                   terminal_phi: float = 0.0) -> List[float]:
     """Per-turn PBS terms ``F_t = gamma*Phi(s_{t+1}) - Phi(s_t)``.
 
-    ``phis[t]`` is the potential of the state AT turn ``t`` (i.e. after turn ``t``'s
-    kernel is evaluated). The transition potential uses ``phis[t+1]`` as the "next"
-    state, and ``terminal_phi`` (default 0) as ``Phi`` past the last turn -- so the
-    discounted sum telescopes to ``-Phi(s_0)``.
+    ``phis[t]`` MUST be the potential of the state ENTERING turn ``t`` (``Phi(s_t)``,
+    the kernel the agent starts turn ``t`` with) -- NOT the exit state it produces.
+    The transition uses ``phis[t+1]`` as the "next" state and ``terminal_phi``
+    (default 0) as ``Phi`` past the last turn, so the discounted sum telescopes to
+    ``-Phi(s_0)``. Passing exit potentials instead would shift the whole chain by one
+    and make the per-turn subtraction action-dependent (breaking policy invariance);
+    the GRPO caller therefore reconstructs the entering-state sequence before calling.
 
     A ``None`` potential on either side of a transition makes that transition's term
     ``0.0`` (a shaping boundary): we never fabricate progress across a turn whose

@@ -47,6 +47,9 @@ LOGPATH_FILE = "/tmp/kore_foldin_logpath.txt"
 # artifacts (completed stages skip) instead of re-running from scratch.
 STAGES = os.environ.get("KORE_SUP_STAGES", "build,sft,dpo,grpo,soup,eval")
 FORCE = os.environ.get("KORE_SUP_FORCE", "0") == "1"
+# SFT mix cap -- lower than the 20k default so the verified-kernel slice (~4k rows)
+# actually reaches its 0.28 target fraction instead of being water-filled by general.
+SFT_TOTAL = os.environ.get("KORE_SUP_SFT_TOTAL", "13000")
 CMD = [
     VENV, "scripts/run_campaign.py", "--model", "Qwen/Qwen3-14B", "--full-ft", "--use-hf",
     "--teacher", "claude", "--adaptive-steps",
@@ -54,7 +57,7 @@ CMD = [
 if FORCE:
     CMD.append("--force")
 CMD += [
-    "--stages", STAGES,
+    "--stages", STAGES, "--sft-total", SFT_TOTAL,
     "--gpu-ids", "0,1,2,3,4,5,6,7", "--datagen-workers", WORKERS, "--ground-reasoning",
     "--profile-reward", "0.15", "--data-root", "data/full14b",
     "--midtrain-out", "runs/full/midtrain", "--sft-out", "runs/full/sft",

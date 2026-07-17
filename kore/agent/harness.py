@@ -74,6 +74,7 @@ class AgentEpisode:
     turn_rewards: list[float] = field(default_factory=list)   # per-turn verified reward
     turn_correct: list[bool] = field(default_factory=list)    # per-turn correctness
     turn_speedups: list = field(default_factory=list)         # per-turn MEASURED speedup (or None)
+    turn_phis: list = field(default_factory=list)             # per-turn roofline potential Phi=rho (or None)
     turn_codes: list[str] = field(default_factory=list)       # per-turn candidate kernel source
     reflections: list[dict] = field(default_factory=list)     # structured reflect turns
     phase_trace: list[dict] = field(default_factory=list)     # [{turn, phase}]
@@ -94,6 +95,7 @@ class AgentEpisode:
             "turn_rewards": self.turn_rewards,
             "turn_correct": self.turn_correct,
             "turn_speedups": self.turn_speedups,
+            "turn_phis": self.turn_phis,
             "turn_codes": self.turn_codes,
             "reflections": self.reflections,
             "phase_trace": self.phase_trace,
@@ -273,6 +275,7 @@ class AgentHarness:
         turn_rewards: list[float] = []
         turn_correct: list[bool] = []
         turn_speedups: list = []
+        turn_phis: list = []
         turn_codes: list[str] = []
         reflections: list[dict] = []
         phase_trace: list[dict] = []
@@ -321,7 +324,8 @@ class AgentHarness:
                               best_reward=(_br if _br != float("-inf") else None))
 
             # --- per-turn verified reward trace (RL contract): one entry/turn --- #
-            self._record_turn(ex, turn_rewards, turn_correct, turn_speedups, turn_codes)
+            self._record_turn(ex, turn_rewards, turn_correct, turn_speedups,
+                              turn_codes, turn_phis)
 
             # --- correctness -> optimization phase split --- #
             if phase == PHASE_CORRECTNESS and ex.best_src is not None:
@@ -374,6 +378,7 @@ class AgentHarness:
             turn_rewards=turn_rewards,
             turn_correct=turn_correct,
             turn_speedups=turn_speedups,
+            turn_phis=turn_phis,
             turn_codes=turn_codes,
             reflections=reflections,
             phase_trace=phase_trace,
@@ -383,7 +388,7 @@ class AgentHarness:
     @staticmethod
     def _record_turn(ex: ToolExecutor, turn_rewards: list[float],
                      turn_correct: list[bool], turn_speedups: list,
-                     turn_codes: list[str]) -> None:
+                     turn_codes: list[str], turn_phis: list) -> None:
         """Append the verified reward/correctness/speedup/source of this turn.
 
         Uses the candidate evaluated this turn when present; otherwise carries
@@ -398,16 +403,19 @@ class AgentHarness:
             r = float(ex.candidate_reward)
             c = bool(ex.candidate_correct)
             su = ex.candidate_speedup
+            phi = ex.candidate_phi
             code = ex.candidate_src or ""
         elif ex.best_reward != float("-inf"):
             r = float(ex.best_reward)
             c = True
             su = ex.best_speedup
+            phi = None  # best-so-far carries no fresh potential this turn
             code = ex.best_src or ""
         else:
             r = 0.0
             c = False
             su = None
+            phi = None
             code = ""
         # EXACT reward (no display rounding): turn_rewards is the per-turn GRPO
         # Kevin-credit signal, so it must match best_reward bit-for-bit. Rounding
@@ -417,6 +425,7 @@ class AgentHarness:
         # Measured speedup only when the turn actually benched a correct candidate
         # (else None), so a correctness-only turn never invents a timing number.
         turn_speedups.append(float(su) if su is not None else None)
+        turn_phis.append(float(phi) if phi is not None else None)
         turn_codes.append(code)
 
 

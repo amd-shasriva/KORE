@@ -97,20 +97,49 @@ def kevin_trajectory_score(turn_rewards: list[float], correct_flags: list[bool])
 
 
 def kevin_turn_returns(turn_rewards: list[float], correct_flags: list[bool],
-                       gamma: float = 0.4) -> list[float]:
+                       gamma: float = 0.4, *, credit_incorrect: bool = False,
+                       phis: Optional[list] = None, phi_weight: float = 0.0) -> list[float]:
     """Per-turn discounted returns with performance gated on correctness.
 
-    Each turn's immediate reward is zeroed unless that turn is correct, then the
-    discounted-sum look-ahead (gamma) propagates later success back to the turns
-    that set it up. Used as the per-turn-as-sample signal for GRPO.
+    Legacy Kevin (default): each turn's immediate reward is zeroed unless that turn
+    is correct, then the discounted-sum look-ahead (gamma) propagates later success
+    back to the turns that set it up.
+
+    P0d densification (``credit_incorrect=True``): an INCORRECT turn keeps its
+    *shaped* reward (the sub-threshold SNR-progress + format signal from
+    ``reward.py``) instead of a hard zero. That signal is bounded strictly below
+    ``correctness_weight`` (asserted in ``config.py``), so correctness still
+    dominates lexicographically -- but the gradient is no longer flat-zero across
+    the deceptive "not-yet-correct" band, which is exactly where the audit found the
+    RL signal was dead.
+
+    P0b potential-based shaping (``phis`` + ``phi_weight`` > 0): add
+    ``F_t = gamma*Phi(s_{t+1}) - Phi(s_t)`` (``phis[t]`` = roofline attainment from
+    :func:`kore.reward.whitebox.phi_potential`). By the Ng-Harada-Russell theorem
+    this densifies per-turn credit toward the roofline WITHOUT changing the optimal
+    policy (the discounted shaping telescopes to a start-state constant that cancels
+    in the GRPO group baseline), so it is safe at any weight and cannot be
+    reward-hacked. ``None`` potentials are zero-contribution boundaries.
     """
-    gated = [r if c else 0.0 for r, c in zip(turn_rewards, correct_flags)]
-    return discounted_returns(gated, gamma)
+    base = [(r if (c or credit_incorrect) else 0.0)
+            for r, c in zip(turn_rewards, correct_flags)]
+    # PBS is applied to the per-STEP rewards BEFORE the discounted look-ahead, so
+    # the trajectory return telescopes to a start-state constant (Ng et al.) and the
+    # optimal policy is provably preserved while per-turn credit is densified.
+    if phis is not None and phi_weight:
+        from kore.reward.shaping import shaping_terms
+        terms = shaping_terms(list(phis), gamma)
+        base = [b + phi_weight * (terms[t] if t < len(terms) else 0.0)
+                for t, b in enumerate(base)]
+    return discounted_returns(base, gamma)
 
 
 def build_kevin_samples(traj_rewards: list[list[float]], traj_correct: list[list[bool]],
                         gamma: float = 0.4,
                         traj_infra: Optional[list[list[bool]]] = None,
+                        *, credit_incorrect: bool = False,
+                        traj_phis: Optional[list[list]] = None,
+                        phi_weight: float = 0.0,
                         ) -> tuple[list[float], list[tuple[int, int]]]:
     """Flatten m trajectories x n turns into per-turn Kevin-credit samples.
 
@@ -135,7 +164,10 @@ def build_kevin_samples(traj_rewards: list[list[float]], traj_correct: list[list
     index: list[tuple[int, int]] = []
     for ti, (rewards, corrects) in enumerate(zip(traj_rewards, traj_correct)):
         infra = traj_infra[ti] if traj_infra is not None else None
-        for tu, r in enumerate(kevin_turn_returns(rewards, corrects, gamma)):
+        phis = traj_phis[ti] if traj_phis is not None else None
+        for tu, r in enumerate(kevin_turn_returns(
+                rewards, corrects, gamma, credit_incorrect=credit_incorrect,
+                phis=phis, phi_weight=phi_weight)):
             if infra is not None and tu < len(infra) and infra[tu]:
                 continue  # infra sample: not a kernel signal - drop from the batch
             returns.append(r)
@@ -1038,6 +1070,7 @@ def _train_grpo_fallback(config, tasks):
         traj_rewards, traj_correct, traj_infra = [], [], []
         turn_inputs, turn_ref, turn_old, turn_ntok, turn_codes = [], [], [], [], []
         traj_speedups: list[list] = []
+        traj_phis: list[list] = []
         for g in range(G):
             if config.agentic:
                 d = _rollout_agentic(model, tok, env, task, config, ref_model)
@@ -1048,12 +1081,20 @@ def _train_grpo_fallback(config, tasks):
             turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
             turn_ntok.append(d["n_tokens"]); turn_codes.append(d["codes"])
             traj_speedups.append(d.get("speedups", []))
+            traj_phis.append(d.get("phis", []))
             traj_scores.append(
                 kevin_trajectory_score(d["rewards"], d["correct"])
                 if config.kevin_best_kernel_scoring else (max(d["rewards"]) if d["rewards"] else 0.0))
             log.debug("rollout", task=task.task_id, traj=g, turns=len(d["rewards"]),
                       best_reward=traj_scores[-1], correct_turns=sum(1 for c in d["correct"] if c))
-        returns, index = build_kevin_samples(traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra)
+        # P0d + P0b: credit shaped incorrect-turn progress (not hard-zero) and densify
+        # per-turn credit with the policy-invariant roofline potential (PBS). Both are
+        # config-gated (defaults preserve legacy Kevin); the campaign turns them on.
+        returns, index = build_kevin_samples(
+            traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra,
+            credit_incorrect=bool(getattr(config, "credit_incorrect_turns", False)),
+            traj_phis=traj_phis,
+            phi_weight=float(getattr(config, "physics_shaping_weight", 0.0)))
         samples, codes = [], []
         for (ti, tu), ret in zip(index, returns):
             samples.append([ret, turn_inputs[ti][tu], turn_ref[ti][tu],
@@ -1683,6 +1724,7 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
     turn_inputs, turn_ref, turn_old, turn_ntok, turn_codes = [], [], [], [], []
     traj_scores = []
     traj_speedups: list[list] = []
+    traj_phis: list[list] = []
     # Full-param summon for generation is done ONCE per step by the caller (wrapping
     # the whole dynamic-sampling rollout). Run the rollout forwards on the UNWRAPPED
     # inner module: under summon its params are the full un-sharded weights, and
@@ -1704,10 +1746,17 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
         turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
         turn_ntok.append(d["n_tokens"]); turn_codes.append(d["codes"])
         traj_speedups.append(d.get("speedups", []))
+        traj_phis.append(d.get("phis", []))
         traj_scores.append(
             kevin_trajectory_score(d["rewards"], d["correct"])
             if config.kevin_best_kernel_scoring else (max(d["rewards"]) if d["rewards"] else 0.0))
-    returns, index = build_kevin_samples(traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra)
+    # P0d + P0b: same densified/policy-invariant credit as the single-process path,
+    # so the two GRPO recipes stay identical (audit R2 grpo H3 divergence fix).
+    returns, index = build_kevin_samples(
+        traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra,
+        credit_incorrect=bool(getattr(config, "credit_incorrect_turns", False)),
+        traj_phis=traj_phis,
+        phi_weight=float(getattr(config, "physics_shaping_weight", 0.0)))
     samples, codes = [], []
     for (ti, tu), ret in zip(index, returns):
         samples.append([ret, turn_inputs[ti][tu], turn_ref[ti][tu],
@@ -2182,7 +2231,8 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
 
     turns: list[dict] = []
     out = {"rewards": [], "correct": [], "infra": [], "gen_inputs": [],
-           "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": [], "speedups": []}
+           "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": [],
+           "speedups": [], "phis": []}
     for _turn in range(config.num_turns):
         ctx_turns = mask_cot_turns(turns) if config.cot_masking else turns
         msgs = build_transcript(prompt, ctx_turns)
@@ -2272,6 +2322,10 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         out["n_tokens"].append(n_tok)
         out["codes"].append(code)
         out["speedups"].append(rr.speedup if rr.correct else None)
+        # Roofline potential Phi(s)=rho for policy-invariant PBS credit (cheap eta
+        # from the measured wall + roofline T_min; named-residual when counters are
+        # present). Fail-safe: None on any physics gap = a shaping boundary.
+        out["phis"].append(_turn_phi(task, obs) if rr.correct else None)
         turns.append({"response": text, "feedback": build_turn_feedback(obs) + dense_fb})
     return out
 
@@ -2321,11 +2375,12 @@ def _rollout_agentic(model, tok, env, task, config, ref_model=None):
 
     # Align the per-turn credit trace with the recorded assistant generations.
     n = min(len(turn_inputs), len(turn_rewards), len(turn_correct))
-    # Per-turn MEASURED speedup + candidate source, recovered from the harness's
-    # per-turn trace (aligned + correctness-gated; degrades to ("", None)).
-    codes_t, speedups_t = _agentic_per_turn_signal(episode, turn_correct, n)
+    # Per-turn MEASURED speedup + candidate source + roofline potential, recovered
+    # from the harness's per-turn trace (aligned + correctness-gated; degrades safely).
+    codes_t, speedups_t, phis_t = _agentic_per_turn_signal(episode, turn_correct, n)
     out = {"rewards": [], "correct": [], "infra": [], "gen_inputs": [],
-           "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": [], "speedups": []}
+           "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": [],
+           "speedups": [], "phis": []}
     for t in range(n):
         gen_inputs = [turn_inputs[t]]
         prompt_ids, gen_ids = turn_inputs[t]
@@ -2350,44 +2405,68 @@ def _rollout_agentic(model, tok, env, task, config, ref_model=None):
         # achieved speedup (both were dropped before; serial parity).
         out["codes"].append(codes_t[t])
         out["speedups"].append(speedups_t[t])
+        out["phis"].append(phis_t[t])
     return out
 
 
+def _turn_phi(task, obs, counters=None):
+    """Fail-safe roofline potential ``Phi(s) = rho`` (named-residual attainment when
+    ``counters`` are present, else the eta fallback) for potential-based shaping.
+
+    Returns None on any physics/roofline gap -- a PBS shaping boundary that
+    contributes no (fabricated) credit. Never raises, so it can be called inline in
+    the rollout without a correctness/robustness risk.
+    """
+    try:
+        from kore.reward.whitebox import phi_potential
+        return phi_potential(task, obs, counters)
+    except Exception:  # noqa: BLE001 - physics is a bonus, never a hard dependency
+        return None
+
+
 def _agentic_per_turn_signal(episode, turn_correct, n: int):
-    """Per-turn ``(codes, speedups)`` for the first ``n`` agentic assistant turns.
+    """Per-turn ``(codes, speedups, phis)`` for the first ``n`` agentic turns.
 
-    Recovers the harness's per-turn kernel source (``episode.turn_codes``) and
-    MEASURED speedup (``episode.turn_speedups``) so the agentic rollout feeds
-    co-evolution distillation + the open-ended controller the SAME signal as the
-    serial path. Pure / CPU-only (no torch), so it is unit-testable in isolation.
+    Recovers the harness's per-turn kernel source (``episode.turn_codes``), MEASURED
+    speedup (``episode.turn_speedups``), and roofline potential (``episode.turn_phis``,
+    ``Phi=rho`` for PBS credit) so the agentic rollout feeds co-evolution distillation,
+    the open-ended controller, AND the policy-invariant shaping the SAME signals as
+    the serial path. Pure / CPU-only (no torch), unit-testable in isolation.
 
-    Safety: the trace is used ONLY when it is present AND index-aligned with the
-    (reward, correct) trace (``turn_rewards``/``turn_correct`` same length as
-    ``turn_speedups``/``turn_codes``), so the degraded terminal-only fallback in
-    :func:`_episode_turn_rewards` (length 1) can never misattribute a speedup or
-    source to the wrong turn - it degrades to ``("", None)`` per turn. Speedups are
-    correctness-gated exactly like the serial ``_rollout`` (a non-correct turn
-    never carries a measured speedup).
+    Safety: the trace is used ONLY when present AND index-aligned with the
+    (reward, correct) trace, so the degraded terminal-only fallback in
+    :func:`_episode_turn_rewards` (length 1) can never misattribute a value to the
+    wrong turn - it degrades to ``("", None, None)`` per turn. speedup/phi are
+    correctness-gated exactly like the serial ``_rollout``. ``turn_phis`` is optional
+    (older episodes lack it) -> phi degrades to None independently.
     """
     ep_speedups = list(getattr(episode, "turn_speedups", []) or [])
     ep_codes = list(getattr(episode, "turn_codes", []) or [])
+    ep_phis = list(getattr(episode, "turn_phis", []) or [])
     tr_raw = getattr(episode, "turn_rewards", None)
     tc_raw = getattr(episode, "turn_correct", None)
     aligned = (isinstance(tr_raw, list) and isinstance(tc_raw, list)
                and len(tr_raw) == len(tc_raw) == len(ep_speedups) == len(ep_codes)
                and len(ep_speedups) >= n >= 0)
+    phis_aligned = aligned and len(ep_phis) == len(tr_raw)
     codes: list[str] = []
     speedups: list = []
+    phis: list = []
     for t in range(max(0, n)):
+        correct_t = (t < len(turn_correct) and bool(turn_correct[t]))
         if aligned:
             codes.append(ep_codes[t])
             su = ep_speedups[t]
-            gated = (su is not None and t < len(turn_correct) and bool(turn_correct[t]))
-            speedups.append(float(su) if gated else None)
+            speedups.append(float(su) if (su is not None and correct_t) else None)
         else:
             codes.append("")
             speedups.append(None)
-    return codes, speedups
+        if phis_aligned:
+            ph = ep_phis[t]
+            phis.append(float(ph) if (ph is not None and correct_t) else None)
+        else:
+            phis.append(None)
+    return codes, speedups, phis
 
 
 def _episode_turn_rewards(episode):

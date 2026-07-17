@@ -195,6 +195,11 @@ class ToolExecutor:
         # tracked independently of best_reward so the ``bench`` tool can report an
         # honest frontier delta ("did THIS change beat my fastest correct kernel?").
         self.best_speedup: Optional[float] = None
+        # Per-turn ROOFLINE POTENTIAL Phi(s) = rho (named-residual attainment) of the
+        # candidate evaluated this turn; None unless benched + correct. Consumed by
+        # the harness trace -> GRPO potential-based shaping (policy-invariant dense
+        # credit toward the roofline). Fail-safe: any physics gap -> None.
+        self.candidate_phi: Optional[float] = None
 
         self.keep_decisions: list[dict] = []
         self._turn: int = 0
@@ -219,6 +224,7 @@ class ToolExecutor:
         self.candidate_reward = None
         self.candidate_correct = False
         self.candidate_speedup = None
+        self.candidate_phi = None
         return {"ok": True, "reseeded": True,
                 "seeded_from": "task_seed" if self.seed_src else "empty",
                 "preserved_best_reward": _round(
@@ -264,6 +270,15 @@ class ToolExecutor:
         if self.candidate_speedup is not None and (
             self.best_speedup is None or self.candidate_speedup > self.best_speedup):
             self.best_speedup = self.candidate_speedup
+        # Roofline potential Phi(s) for potential-based shaping (fail-safe: the
+        # physics/roofline module may be unavailable -> None, a shaping boundary).
+        self.candidate_phi = None
+        if rr.correct and do_bench:
+            try:
+                from kore.reward.whitebox import phi_potential
+                self.candidate_phi = phi_potential(self.task, obs)
+            except Exception:  # noqa: BLE001 - physics is a bonus, never a hard dep
+                self.candidate_phi = None
         return obs, rr
 
     # -- dispatch --------------------------------------------------------- #

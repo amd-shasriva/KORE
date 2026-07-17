@@ -51,4 +51,34 @@ Key behaviors:
 
 Tool-use shaping (`tool_use_reward`) rewards correct schemas, keep/revert discipline, and reflection, folded into the best correct turn - but always dominated by the verified kernel outcome.
 
-See also: [`kore/data`](../data/README.md), [`kore/policy`](../policy/README.md), [`kore/env`](../env/README.md).
+---
+
+## Paradigm-v2: per-turn physics trace + latency feedback
+
+The harness now records four **index-aligned** per-turn arrays on `AgentEpisode` (one entry per turn, in lockstep with `turn_rewards`/`turn_correct`), so the agentic rollout feeds GRPO the same per-turn signals as the serial path:
+
+| `AgentEpisode` field | Meaning |
+| --- | --- |
+| `turn_speedups` | per-turn MEASURED vendor speedup (only when the turn benched a correct kernel, else `None`) |
+| `turn_phis` | per-turn roofline **potential** `Φ = ρ` for potential-based shaping (`None` unless benched + correct) |
+| `turn_codes` | per-turn candidate kernel source |
+
+These are populated in `_record_turn` from matching `ToolExecutor` state set in `_evaluate`:
+
+- **`ToolExecutor.candidate_speedup`** - the benched-correct candidate's measured worst-shape speedup. A `build`/`test` turn leaves it `None`, so a non-timed turn never fabricates a speedup.
+- **`ToolExecutor.candidate_phi`** - the roofline potential `phi_potential(task, obs)` for that turn (fail-safe `None` on any physics gap - a shaping boundary). It feeds GRPO's policy-invariant PBS credit toward the roofline (`kore.reward.shaping`, weight `physics_shaping_weight`). *Live wiring:* `phi_potential` is called **without a counter dict**, so the online potential is the PMC-free `η = T_min/T_measured`; the named-residual `ρ` path in `kore.reward.whitebox` engages only when rocprofv3 counters are supplied.
+- **`ToolExecutor.best_speedup`** - the measured-speedup **frontier** (max over benched-correct candidates), tracked *independently* of `best_reward` (still the Kevin scoring key), so the `bench` tool can report an honest frontier delta.
+
+On the GRPO side, `grpo._agentic_per_turn_signal` recovers these arrays correctness-gated and index-aligned (degrading to `("", None, None)` per turn): `turn_phis → traj_phis → build_kevin_samples(phi_weight=…)` densifies per-turn credit via PBS, while `turn_codes`/`turn_speedups` feed co-evolution distillation + the open-ended controller - reaching parity with the serial `_rollout`.
+
+**Bench-tool frontier delta.** The `bench` tool result now carries per-turn latency feedback so the model can see whether *this* change actually helped:
+
+| `bench` result field | Meaning |
+| --- | --- |
+| `best_speedup_so_far` | running best measured speedup this episode |
+| `delta_vs_best` | signed `cur − prev_best` (the frontier is snapshotted *before* this candidate is folded in) |
+| `improved_frontier` | whether this turn pushed the frontier |
+
+This is **pure context** - the trained reward is still the verified `compute_kernel_reward`, so surfacing the delta to the policy cannot be gamed.
+
+See also: [`kore/data`](../data/README.md), [`kore/policy`](../policy/README.md), [`kore/env`](../env/README.md), [`kore/reward`](../reward/README.md) (the `whitebox`/`shaping` potential this trace feeds).

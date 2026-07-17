@@ -107,6 +107,29 @@ family) and the **Kevin + anti-collapse levers** (`rc_grpo` / `variance_floor` /
 `sc_grpo` / `gtpo_codesim` / `value_prefilter`, all on by default -
 `configs/grpo_14b_full.json`).
 
+### Identical per-turn credit: single-process == distributed
+
+The single-process and distributed GRPO paths now compute **identical per-turn
+credit**. Both `_one_group` (serial) and `_rollout_slice_distributed` (sharded)
+feed their per-trajectory `(rewards, correct, infra, phis)` traces through the
+*same* `build_kevin_samples(...)` call with the *same* paradigm-v2 levers read
+from the config:
+
+- **P0d** `credit_incorrect_turns` - an incorrect turn keeps its bounded shaped
+  SNR-progress reward (below `correctness_weight`) instead of a hard zero, so the
+  gradient is not flat across the not-yet-correct band; and
+- **P0b** `physics_shaping_weight` - the roofline-attainment potential
+  `Φ(s)=ρ` (`kore.reward.whitebox.phi_potential`) is added as Ng-Harada-Russell
+  PBS `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` (`kore.reward.shaping`), policy-invariant at
+  any weight.
+
+Both travel in the resolved GRPO JSON (`credit_incorrect_turns=true`,
+`physics_shaping_weight=0.15` in `configs/grpo_14b_full.json`), so switching
+between the single-GPU LoRA bring-up and the sharded full-FT run does **not**
+change the credit assignment - only the sharding does. (The sharded path applies
+this credit per-rank on that rank's trajectory slice; the group-relative
+advantage baseline is then computed over the all-gathered full group.)
+
 ### Example training config (`configs/sft_14b_full.json`)
 
 ```json

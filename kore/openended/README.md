@@ -2,6 +2,11 @@
 
 Instead of cycling tasks round-robin, KORE can **co-evolve the curriculum with the policy**: propose the tasks at the policy's competence frontier - maximally *learnable*, high *headroom-regret*, and *novel* relative to what's been mastered. This is UED/PLR + MAP-Elites over a parametric task space, integrated into GRPO through `CoevolutionController`. Pure CPU control logic (no torch at import).
 
+The package now has **two complementary halves**:
+
+- **SELECT (live):** `controller.py` curriculum-**selects** tasks from the *fixed* registered menu (the intersection of the parametric space with the trainer's allowed list). This is what the flagship 14B GRPO run uses (`coevolve: true`).
+- **MINT (live):** `grammar.py` + `minter.py` **mint net-new, correct-by-construction tasks** beyond the registered menu and `materialize.py` turns each into a runnable on-disk task dir, so the curriculum grows open-endedly instead of only re-weighting a fixed menu. Now **wired into `CoevolutionController` and on in the flagship** (`coevolve_mint: true`, `coevolve_mint_batch: 6`), and still fully fail-safe - a bad mint is skipped, never trained on (see [Open-ended task minting](#open-ended-task-minting-grammarpy--minterpy) below).
+
 ---
 
 ## Files
@@ -12,7 +17,10 @@ Instead of cycling tasks round-robin, KORE can **co-evolve the curriculum with t
 | `proposer.py` | Frontier scoring: learnability + regret + novelty |
 | `archive.py` | MAP-Elites task archive (niche = behavioral descriptor) |
 | `coevolve.py` | Full open-ended generation loop |
-| `controller.py` | `CoevolutionController` - the GRPO-facing adapter |
+| `controller.py` | `CoevolutionController` - the GRPO-facing adapter (curriculum-**selects** registered tasks) |
+| `grammar.py` | **(new)** Typed composition grammar over verified torch primitives - the minter's correct-by-construction oracle builder |
+| `minter.py` | `TaskMinter` - **mints** net-new verifiable tasks beyond the registered menu (wired via `coevolve_mint`; **on in the flagship**) |
+| `materialize.py` | **(new)** `materialize_minted_task` - writes a `MintedTask` to a runnable on-disk task dir (reusing the `_genops` driver/reference ABI) with a materialize-time **self-check** that rejects any faithless reconstruction |
 
 ---
 
@@ -56,9 +64,46 @@ Under multi-rank FSDP GRPO, every rank builds the **same** controller (same `see
 
 ```python
 class CoevolutionController:
-    def next_task_id(step=0, attempt=0) -> str   # deterministic across ranks
+    def next_task_id(step=0, attempt=0) -> str   # deterministic across ranks; minted OR registered
+    def resolve_task(task_id) -> Task             # materialized minted task if minted, else registered
     def record(task_id, solve_rate, best_speedup) -> bool
     def report() -> dict                          # frontier metrics
 ```
 
 Enabled via `coevolve: true` in [`configs/grpo_14b_full.json`](../../configs/README.md). See also: [`kore/policy/grpo.py`](../policy/README.md), [`kore/tasks`](../tasks/README.md).
+
+---
+
+## Open-ended task minting (`grammar.py` + `minter.py`)
+
+The controller above curriculum-**SELECTS** from the *fixed* registered task menu - it re-weights the 282 registered (op × dtype) tasks. `grammar.py` + `minter.py` **grow it open-endedly**: they **MINT net-new, correct-by-construction tasks**, and `materialize.py` turns each into a runnable on-disk task dir, so the RL curriculum is no longer capped at the registered set. Once a planned "future extension," minting is now **wired into `CoevolutionController` (`next_task_id`/`resolve_task`) and live in the flagship run**.
+
+> **Status: WIRED + LIVE IN THE FLAGSHIP.** `grammar.py` + `minter.py` are implemented and unit-tested (`kore/openended/tests/test_minter.py`: all four moves, the construction gate, behavioral dedup, held-out rejection, fused-vs-sequential reference equality, niche placement, and a runnable-namespace round-trip), and the new `materialize.py` turns each `MintedTask` into a runnable on-disk task dir - guarded by a materialize-time **self-check** that rejects any faithless reconstruction. Minting is wired into `CoevolutionController` (`next_task_id`/`resolve_task`) behind the `coevolve_mint` GRPO flag (`GRPOConfig.coevolve_mint`) and is **on in the flagship 14B run** (`coevolve_mint: true`, `coevolve_mint_batch: 6` in `configs/grpo_14b_full.json`), expanding the curriculum beyond the registered menu. It stays fully **fail-safe**: any bad mint or self-check mismatch is skipped and the loop falls back to registered tasks, so enabling it can never crash or corrupt the run. CPU-only (torch imported lazily, only to build/gate/self-check references - never a GPU).
+
+### `grammar.py` - a typed grammar over verified torch primitives
+
+The "correct-by-construction" half: a small typed IR whose leaves are **verified torch primitives** (`relu`, `matmul`, `rmsnorm`, `softmax`, reductions, ...) and whose composition is **type-checked**, so any well-typed `Pipeline` denotes a pure torch function that *is* the task's reference oracle - there is no separate spec to drift from.
+
+- **Type system:** values are `MATRIX` (`[M,N]`) or `ROWVEC` (`[M]`, terminal). Each `Primitive` declares the type it consumes/produces and the aux tensors it samples (matmul weight, bias, residual, norm scale). `Pipeline.typecheck()` is the soundness gate: exactly one leading source, every stage consumes the prior stage's type, nothing follows a terminal reduction.
+- **Correct-by-construction oracle:** `build_reference()` folds inputs in fp32 and casts to the task dtype - identical to `kore.tasks._genops.make_reference` (`ref_fn`), so a minted reference grades like a hand-written generated op. `build_sampler()` draws seeded inputs with the same `1/sqrt(K)` GEMM scaling `_genops` uses, keeping references well-conditioned.
+- **Measured cost model:** `flops_and_bytes()` estimates fused FLOPs, HBM bytes, and **arithmetic intensity** (the roofline x-axis) on CPU - deeper fusions raise intensity (more FLOPs, same bytes).
+- **Behavioral hash:** `behavioral_hash()` is a SHA1 of the reference's fp32 outputs on a canonical probe - a shape/precision-independent fingerprint of the *operation*, used for behavioral dedup.
+
+### `minter.py` - the verifiable `TaskMinter`
+
+A `MintedTask` is an **in-memory RL-curriculum task** whose six-field ABI (`name, reference_fn, input_sampler, dtype, tol, family`) matches KORE's task ABI; `to_reference_namespace()` emits the exact namespace `_genops.make_reference` returns, so a minted task drops into the generic driver/verifier and runs on GPU at train time. At train time the new `materialize.py` writes each `MintedTask` to a runnable on-disk task dir on demand - reusing the trusted `_genops` driver/reference ABI, with a self-check that rejects any faithless reconstruction - and `CoevolutionController.resolve_task` serves it alongside registered tasks (these are ephemeral RL-curriculum task dirs, distinct from the offline datagen corpus).
+
+- **Four minting moves:** `fusion` (chain primitives into a new fused op), `extrapolate` (re-cast a structure at a new dtype/shape scale), `novel` (compose activations/reductions into a brand-new op), and `mutate_crossover` (lift **registered** descriptors into the grammar and perturb/recombine).
+- **Robust-kbench-style construction gate:** every candidate must (1) type-check, (2) not be a held-out family, (3) execute on CPU, (4) be finite, (5) be deterministic (same seed → identical output), (6) be non-constant, (7) vary along **every** axis, and (8) be sensitive to **every** input - rejecting constant/memset, collapsed, and dead-input degenerates before a task can enter the curriculum. Followed by **behavioral-hash dedup** (`hash × dtype × shape_scale`, so a genuine parametric-extrapolation variant is *not* a duplicate).
+- **Measured-roofline QD:** survivors get a MAP-Elites niche from **measured CPU proxies** (`arithmetic_intensity` compute/memory-bound at a FLOPs/byte ridge of 20, fusion depth, dtype precision, shape scale) - the same `task_space.descriptor_features` keys, so minted ops niche-place alongside registered ones in the archive.
+- **Learning progress:** learnability is `4·p·(1-p)` from a supplied rollout success-rate `p`, novelty is Hamming distance to occupied niches, and the **proposer reward is the injected learning-progress delta** (`progress_fn`, falling back to the learnability prior).
+
+### Held-out safety (by construction)
+
+Minting inherits and strengthens the SELECT-path guard: the grammar has **no** attention / MLA / paged-KV primitive at all, so a held-out task is literally *unrepresentable*. The gate additionally rejects any candidate whose name/family hits the held-out tokens or the canonical registry classifier (`kore.tasks.registry`), so the guard can never drift from the train/held-out split.
+
+```python
+from kore.openended import minter
+tasks = minter.mint_batch(archive, policy_p_fn, n=8, seed=0,   # deterministic, LLM-free
+                          progress_fn=learning_progress_delta)  # wired via coevolve_mint (ON in the flagship)
+```

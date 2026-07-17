@@ -83,6 +83,8 @@ JSONL records are filtered to the current `Observation` field set on load, so sc
 
 When `profile_reward_weight > 0`, `_collect_profile` runs rocprofv3 with `--bench-mode` on the primary shape and produces a `profile_efficiency ∈ [0,1]` (see [`kore/verifier`](../verifier/README.md) for counter sets and [`kore/reward`](../reward/README.md) for how it shapes reward). rocprof requires `--bench-mode`; without it candidate/reference profiles are degenerate.
 
+`collect_counters(source, shape=primary)` is the PUBLIC rocprofv3 PMC entry point: it stages an isolated workdir, profiles the candidate, and returns aggregated `{counter: value}` (the gfx950 derived metrics `MemUnitStalled` / `OccupancyPercent`, plus captured `vgpr_count` / `lds_bytes` / `num_warps`) or `None` if the profiler is unavailable - fully fail-safe. Those *named* counters can feed the **online named-residual roofline potential** used by the paradigm-v2 training reward: `kore.reward.whitebox.phi_potential` turns them into `Φ = ρ = T_min/(T_min+N)` (the check-(b) `N = stall + occupancy-deficit` decomposition), which GRPO adds as a policy-invariant potential-based-shaping term (`physics_shaping_weight`, see [`kore/reward`](../reward/README.md)). When no PMC is collected the potential degrades to the counter-free `η = T_min/T_meas` attainment.
+
 ---
 
 ## Config knobs (from `kore/config.py`)

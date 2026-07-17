@@ -103,11 +103,35 @@ KORE_PEAK_HBM_BW=4.599e12 KORE_PEAK_BF16=1.273e15 PYTHONPATH=<aiter2> \
 python -m kore.analysis.plots --report data/p0_study_final.json --out figures/
 ```
 
-## Downstream (built, not trained)
-- **Residual-descent reward** (`kore.reward.physics`): scores a correct kernel by the fraction of the
-  *named* residual it removes vs `T_min` (`ρ_phys = T_min/(T_min+N)`), delegating all
-  hack/compile/correctness gating to the existing lexicographic reward; graceful η fallback when PMC
-  is absent. Unit-tested.
+## Downstream (paradigm-v2) - the named residual is now wired ONLINE (mechanism, not yet trained-through)
+The P0 physics signal is no longer offline-only. **Paradigm-v2 brings the named-residual attainment
+`ρ` ONLINE as a potential-based-shaping (PBS) potential inside multi-turn GRPO**, while the *within-turn*
+reward reverts to the high-contrast vendor-relative **speedup** reward.
+
+- **Online residual potential** (`kore.reward.whitebox` + `kore.reward.shaping`): the scalar potential
+  `Φ(s) = ρ` (roofline attainment) is folded into the per-turn Kevin credit as Ng-Harada-Russell
+  shaping `F_t = γ·Φ(s_{t+1}) − Φ(s_t)`. `whitebox.phi_potential` upgrades `Φ` from the flat
+  `η = T_min/T_meas` fallback to the **named residual** `ρ = T_min/(T_min+N)` - the *same*
+  `N = (stall_frac + occupancy_deficit)·T_meas` decomposition that carries the check-(b) R²≈0.98 -
+  **whenever rocprofv3 PMC counters are present** (`KoreEnv.collect_counters`); with no PMC it degrades
+  to `η`. By the Ng et al. (1999) theorem PBS is policy-invariant at ANY weight (the discounted shaping
+  telescopes to a start-state constant that cancels in the GRPO group baseline), so the dense term
+  densifies per-turn credit toward the roofline **without changing the optimal policy and without
+  introducing a reward-hacking incentive**. It is wired identically into BOTH the single-process and the
+  distributed GRPO credit paths, and is live in the campaign at `physics_shaping_weight=0.15` (with
+  `reward_mode=speedup`, `credit_incorrect_turns=true` - `configs/grpo_14b_full.json`). Unit-tested
+  (telescoping/invariance).
+- **Within-turn reward reverted to speedup** (`reward_mode=speedup`): the tier-3 correct-kernel signal
+  is again the high-contrast `1[correct]·log(T_base/T_cand)` vendor-relative reward; the physics `ρ`
+  now enters ONLY as the policy-invariant *shaping* potential, not as the base objective. The offline
+  residual-descent reward (`kore.reward.physics`, `reward_mode=residual`) remains available and
+  unit-tested, but is not the campaign's within-turn objective.
 - **Zero-shot generalization harness** (`kore.eval.generalization`): leakage-checked hold-out of whole
   operator families; offline eval of η + residual-descent on held-out families. Unit-tested.
-- No RL/GRPO training has been run - this is a press-go state.
+
+**Honest scope (verdict unchanged).** The R²≈0.98 is the **in-sample** named-residual decomposition on
+the 132-kernel P0 study (check (b)); `η` remains the **low-contrast** correlate (check (a) ρ=0.53,
+check (c) WEAK) and the study verdict stays **PARTIAL**. Wiring the potential online is a *mechanism*
+claim, NOT an end-to-end validation - whether the online named-residual PBS actually improves the
+policy is exactly what the GRPO run (currently gated behind the running datagen campaign) will test. No
+end-to-end GRPO training-efficacy has been demonstrated yet.

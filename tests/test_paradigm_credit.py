@@ -4,9 +4,11 @@ Validates (pure, no torch/GPU):
   * backward compatibility (legacy hard-zero gating unchanged by default);
   * P0d densification: an incorrect turn's shaped progress reward now flows into
     the gradient instead of being hard-zeroed, while correctness stays dominant;
-  * P0b potential-based shaping: the trajectory return shifts by exactly the
-    start-state constant -Phi(s_0) (Ng et al. policy invariance), so per-turn credit
-    is densified without changing which trajectory is best;
+  * P0b potential-based shaping: the potential is taken at the ENTERING state
+    Phi(s_t) (prev turn's exit; seed = 0.0 constant), so the per-turn sample return
+    R_t is action-INDEPENDENT (Ng et al. policy invariance) and the trajectory
+    return R_0 shifts only by the start-state constant -Phi(s_0)=0 -- densifying
+    per-turn credit without changing which trajectory is best;
   * build_kevin_samples threads the new per-turn potentials + credit flag.
 """
 
@@ -37,29 +39,48 @@ def test_p0d_credit_incorrect_densifies_progress():
     assert max(dense) > max(all_wrong)
 
 
-def test_p0b_pbs_shifts_trajectory_return_by_start_constant():
+def test_p0b_pbs_leaves_trajectory_return_invariant():
+    # PBS shifts the TRAJECTORY return R_0 by -w*Phi(s_0). s_0 is the ENTERING
+    # (seed) state -- a fixed per-group constant (0.0) -- so R_0 is UNCHANGED by PBS
+    # for ANY interior/exit potentials and ANY weight. This is the Ng et al.
+    # guarantee that shaping cannot alter the trajectory-level optimum (and Phi(s_0)
+    # cancels in the GRPO group baseline). The OLD exit-state convention wrongly made
+    # this shift depend on the interior potential -> not invariant; this locks it.
     tr = [0.0, 1.0]
     tc = [True, True]
     gamma = 0.5
-    phis = [0.3, 0.7]
     no_pbs = kevin_turn_returns(tr, tc, gamma)
-    pbs = kevin_turn_returns(tr, tc, gamma, phis=phis, phi_weight=1.0)
-    # trajectory return = R_0 (full discounted look-ahead). PBS shifts it by -Phi(s_0).
-    assert abs((pbs[0] - no_pbs[0]) - (-phis[0])) < 1e-9
-    # weight scales the (invariant) shift linearly
-    pbs_half = kevin_turn_returns(tr, tc, gamma, phis=phis, phi_weight=0.5)
-    assert abs((pbs_half[0] - no_pbs[0]) - (-0.5 * phis[0])) < 1e-9
+    for phis in ([0.3, 0.7], [0.9, 0.1], [0.0, 1.0]):
+        for w in (1.0, 0.5):
+            pbs = kevin_turn_returns(tr, tc, gamma, phis=phis, phi_weight=w)
+            assert abs(pbs[0] - no_pbs[0]) < 1e-9, (phis, w)
+
+
+def test_pbs_is_policy_invariant_to_own_turn_action():
+    # THE policy-invariance property (the semantic the arithmetic-only tests missed):
+    # sample (i,t)'s return R_t is the advantage that multiplies turn t's OWN
+    # generation, so PBS must make R_t INDEPENDENT of turn t's produced kernel
+    # (its exit potential phi[t]). We vary ONLY phi[1] and require R[1] unchanged.
+    tr = [0.3, 0.3, 0.3]
+    tc = [True, True, True]
+    gamma = 0.5
+    a = kevin_turn_returns(tr, tc, gamma, phis=[0.2, 0.5, 0.8], phi_weight=1.0)
+    b = kevin_turn_returns(tr, tc, gamma, phis=[0.2, 0.9, 0.8], phi_weight=1.0)  # differ only at t=1
+    assert abs(a[1] - b[1]) < 1e-9, "R_1 must be invariant to turn 1's own action (phi[1])"
+    assert abs(a[0] - b[0]) < 1e-9, "earlier turns' returns also cancel the later action"
+    # turn 2's return legitimately depends on phi[1] (its ENTERING-state baseline,
+    # which is action-independent for turn 2) -- so it is allowed to differ.
 
 
 def test_pbs_none_potentials_are_zero_boundaries():
     tr = [0.0, 1.0]
     tc = [False, True]
-    # phis=[None, 0.7]: the t0 shaping TERM is zeroed (cur=None), but the t1 term
-    # F_1 = gamma*Phi_T(=0) - 0.7 = -0.7 still propagates back to R_0 via the
-    # discount -- that is correct, not a phantom credit. base=[0,1]+shaping[0,-0.7]
-    # -> [0,0.3] -> R=[0.15, 0.3].
+    # phis=[None, 0.7] are EXIT potentials. Turn 0 is incorrect (exit None), so
+    # turn 1's ENTERING state (= turn 0's exit) is None -> its PBS term is a boundary
+    # (0); turn 0's own term is a boundary too. No shaping is fabricated, so the
+    # returns collapse to the pure correctness-gated base: base=[0,1] -> R=[0.5, 1.0].
     rets = kevin_turn_returns(tr, tc, gamma=0.5, phis=[None, 0.7], phi_weight=1.0)
-    assert abs(rets[0] - 0.15) < 1e-9 and abs(rets[1] - 0.3) < 1e-9
+    assert abs(rets[0] - 0.5) < 1e-9 and abs(rets[1] - 1.0) < 1e-9
     # a FULLY-None potential list contributes zero shaping anywhere (pure boundary)
     none_rets = kevin_turn_returns(tr, tc, gamma=0.5, phis=[None, None], phi_weight=1.0)
     base = kevin_turn_returns(tr, tc, gamma=0.5)

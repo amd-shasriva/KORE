@@ -270,8 +270,11 @@ class ToolExecutor:
         if self.candidate_speedup is not None and (
             self.best_speedup is None or self.candidate_speedup > self.best_speedup):
             self.best_speedup = self.candidate_speedup
-        # Roofline potential Phi(s) for potential-based shaping (fail-safe: the
-        # physics/roofline module may be unavailable -> None, a shaping boundary).
+        # Roofline potential of the kernel PRODUCED this turn = the EXIT state
+        # Phi(s_{t+1}). The entering-state Phi(s_t) needed for policy-invariant PBS
+        # is reconstructed downstream in kevin_turn_returns (prev turn's exit); do
+        # NOT shift here or the potential will be double-shifted. Fail-safe: the
+        # physics/roofline module may be unavailable -> None, a shaping boundary.
         self.candidate_phi = None
         if rr.correct and do_bench:
             try:

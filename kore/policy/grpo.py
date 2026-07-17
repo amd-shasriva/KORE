@@ -114,21 +114,34 @@ def kevin_turn_returns(turn_rewards: list[float], correct_flags: list[bool],
     RL signal was dead.
 
     P0b potential-based shaping (``phis`` + ``phi_weight`` > 0): add
-    ``F_t = gamma*Phi(s_{t+1}) - Phi(s_t)`` (``phis[t]`` = roofline attainment from
-    :func:`kore.reward.whitebox.phi_potential`). By the Ng-Harada-Russell theorem
-    this densifies per-turn credit toward the roofline WITHOUT changing the optimal
-    policy (the discounted shaping telescopes to a start-state constant that cancels
-    in the GRPO group baseline), so it is safe at any weight and cannot be
-    reward-hacked. ``None`` potentials are zero-contribution boundaries.
+    ``F_t = gamma*Phi(s_{t+1}) - Phi(s_t)`` with the roofline-attainment potential
+    ``Phi`` (:func:`kore.reward.whitebox.phi_potential`; the live signal is the
+    timing-based ``eta = T_min/T_meas`` unless PMC counters are threaded in, which
+    upgrades it to the named residual ``rho``). ``phis[t]`` is the EXIT potential
+    ``Phi(s_{t+1})``; the entering-state ``Phi(s_t)`` is reconstructed as the prior
+    turn's exit (seed = 0.0). By the Ng-Harada-Russell theorem PBS is expected-
+    gradient-NEUTRAL and leaves the optimal policy invariant at ANY weight (the
+    per-turn subtraction ``-w*Phi(s_t)`` is action-independent, and ``Phi(s_0)``
+    cancels in the GRPO group baseline) -- so it RESHAPES/spreads per-turn credit
+    (variance reduction, denser intermediate signal) without introducing any
+    reward-hacking incentive. ``None`` potentials are zero-contribution boundaries.
     """
     base = [(r if (c or credit_incorrect) else 0.0)
             for r, c in zip(turn_rewards, correct_flags)]
-    # PBS is applied to the per-STEP rewards BEFORE the discounted look-ahead, so
-    # the trajectory return telescopes to a start-state constant (Ng et al.) and the
-    # optimal policy is provably preserved while per-turn credit is densified.
+    # Potential-based shaping (Ng-Harada-Russell), applied to the per-STEP rewards
+    # BEFORE the discounted look-ahead. ``phis[t]`` is the potential of the kernel
+    # PRODUCED at turn t (the EXIT state s_{t+1}). PBS needs F_t = gamma*Phi(s_{t+1})
+    # - Phi(s_t) where Phi(s_t) is the ENTERING state -- which for turn t is the
+    # PREVIOUS turn's exit (turn 0 enters from the seed, a group constant -> 0.0 so
+    # it cancels in the GRPO group baseline). Feeding the entering-state sequence
+    # makes the telescoped per-turn subtraction -w*Phi(s_t) ACTION-INDEPENDENT, so
+    # the optimal policy is provably preserved (the exit-state convention would make
+    # it action-dependent -> not invariant). None potentials are shaping boundaries.
     if phis is not None and phi_weight:
         from kore.reward.shaping import shaping_terms
-        terms = shaping_terms(list(phis), gamma)
+        exit_phis = list(phis)
+        enter_phis = [0.0] + exit_phis[:-1]   # Phi(s_t): prev turn's exit; seed=0.0
+        terms = shaping_terms(enter_phis, gamma)
         base = [b + phi_weight * (terms[t] if t < len(terms) else 0.0)
                 for t, b in enumerate(base)]
     return discounted_returns(base, gamma)
@@ -2322,9 +2335,11 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         out["n_tokens"].append(n_tok)
         out["codes"].append(code)
         out["speedups"].append(rr.speedup if rr.correct else None)
-        # Roofline potential Phi(s)=rho for policy-invariant PBS credit (cheap eta
-        # from the measured wall + roofline T_min; named-residual when counters are
-        # present). Fail-safe: None on any physics gap = a shaping boundary.
+        # Roofline potential of the kernel PRODUCED this turn = the EXIT state
+        # Phi(s_{t+1}) (cheap eta from measured wall + roofline T_min; named-residual
+        # rho when counters are threaded in). kevin_turn_returns reconstructs the
+        # entering-state Phi(s_t) for policy-invariant PBS -- do NOT shift here.
+        # Fail-safe: None on any physics gap = a shaping boundary.
         out["phis"].append(_turn_phi(task, obs) if rr.correct else None)
         turns.append({"response": text, "feedback": build_turn_feedback(obs) + dense_fb})
     return out

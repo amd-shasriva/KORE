@@ -31,10 +31,20 @@ MAX_RETRIES = int(os.environ.get("KORE_SUP_MAX_RETRIES", "12"))
 COOLDOWN_S = int(os.environ.get("KORE_SUP_COOLDOWN_S", "90"))
 LOGPATH_FILE = "/tmp/kore_foldin_logpath.txt"
 
+# Stages + --force are env-configurable so the supervisor serves BOTH the datagen
+# phase and the post-datagen training chain. Default = the training chain
+# (build->eval) with NO --force, so a relaunch RESUMES via the manifest + on-disk
+# artifacts (completed stages skip) instead of re-running from scratch.
+STAGES = os.environ.get("KORE_SUP_STAGES", "build,sft,dpo,grpo,soup,eval")
+FORCE = os.environ.get("KORE_SUP_FORCE", "0") == "1"
 CMD = [
     VENV, "scripts/run_campaign.py", "--model", "Qwen/Qwen3-14B", "--full-ft", "--use-hf",
-    "--teacher", "claude", "--adaptive-steps", "--force",
-    "--stages", "datagen,build,midtrain,sft,dpo,grpo,soup,eval",
+    "--teacher", "claude", "--adaptive-steps",
+]
+if FORCE:
+    CMD.append("--force")
+CMD += [
+    "--stages", STAGES,
     "--gpu-ids", "0,1,2,3,4,5,6,7", "--datagen-workers", WORKERS, "--ground-reasoning",
     "--profile-reward", "0.15", "--data-root", "data/full14b",
     "--midtrain-out", "runs/full/midtrain", "--sft-out", "runs/full/sft",

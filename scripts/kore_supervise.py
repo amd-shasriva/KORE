@@ -25,6 +25,16 @@ import time
 REPO = "/home/shasriva/Kore-RL/KORE"
 LOGDIR = os.path.join(REPO, "runs/full/logs")
 VENV = "/home/shasriva/kore-venv/bin/python"
+
+# Rigorous verification gates -- MUST match the datagen + the wrapper launch scripts
+# (run_full_14b.sh etc.), otherwise GRPO trains on speedups vs an UNFUSED-eager
+# baseline (inflated) and a weaker correctness oracle, inconsistent with the verified
+# data. Set here so the campaign AND every training subprocess (GRPO rollouts) inherit
+# them: honest compiler-fused baseline, enumerated adversarial+metamorphic correctness
+# battery, shape augmentation, cold-cache timing. setdefault so an explicit env wins.
+for _gk, _gv in {"KORE_VERIFIED_CORRECTNESS": "1", "KORE_COMPILE_BASELINE": "1",
+                 "KORE_SHAPE_AUGMENT": "1", "KORE_BENCH_COLD": "1"}.items():
+    os.environ.setdefault(_gk, _gv)
 WORKERS = os.environ.get("KORE_DATAGEN_WORKERS", "64")
 POLL_S = int(os.environ.get("KORE_SUP_POLL_S", "120"))
 MAX_RETRIES = int(os.environ.get("KORE_SUP_MAX_RETRIES", "12"))

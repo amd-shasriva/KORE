@@ -45,11 +45,19 @@ def load_midtrain_dataset(path: Path):
     from datasets import Dataset
 
     rows: list[dict] = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    n_bad = 0
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line:
             continue
-        rec = json.loads(line)
+        # A 484MB multi-source corpus can carry the odd malformed/truncated line
+        # (e.g. an embedded control char, or a read racing a concurrent rebuild).
+        # Skip it instead of crashing the whole multi-hour CPT on one bad record.
+        try:
+            rec = json.loads(line)
+        except Exception:  # noqa: BLE001 - resilient corpus load
+            n_bad += 1
+            continue
         if isinstance(rec, dict) and isinstance(rec.get("text"), str):
             text = rec["text"]
         elif isinstance(rec, dict) and isinstance(rec.get("messages"), list):
@@ -64,6 +72,9 @@ def load_midtrain_dataset(path: Path):
         text = text.strip()
         if text:
             rows.append({"text": text})
+    if n_bad:
+        print(f"[midtrain] load_midtrain_dataset: skipped {n_bad} malformed line(s); "
+              f"kept {len(rows)} records", flush=True)
     return Dataset.from_list(rows)
 
 

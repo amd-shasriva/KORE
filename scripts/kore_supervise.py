@@ -25,6 +25,13 @@ import time
 REPO = "/home/shasriva/Kore-RL/KORE"
 LOGDIR = os.path.join(REPO, "runs/full/logs")
 VENV = "/home/shasriva/kore-venv/bin/python"
+_VENV_BIN = "/home/shasriva/kore-venv/bin"
+
+# CRITICAL: put the venv bin on PATH so the distributed launcher (launch_distributed.sh
+# -> bare `accelerate`) resolves. Running VENV python directly does NOT activate the
+# venv, so without this the FSDP launch dies with exit 127 (command not found) and the
+# whole chain crash-loops at the first distributed stage.
+os.environ["PATH"] = _VENV_BIN + os.pathsep + os.environ.get("PATH", "")
 
 # Rigorous verification gates -- MUST match the datagen + the wrapper launch scripts
 # (run_full_14b.sh etc.), otherwise GRPO trains on speedups vs an UNFUSED-eager

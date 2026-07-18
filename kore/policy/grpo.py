@@ -119,12 +119,15 @@ def kevin_turn_returns(turn_rewards: list[float], correct_flags: list[bool],
     timing-based ``eta = T_min/T_meas`` unless PMC counters are threaded in, which
     upgrades it to the named residual ``rho``). ``phis[t]`` is the EXIT potential
     ``Phi(s_{t+1})``; the entering-state ``Phi(s_t)`` is reconstructed as the prior
-    turn's exit (seed = 0.0). By the Ng-Harada-Russell theorem PBS is expected-
-    gradient-NEUTRAL and leaves the optimal policy invariant at ANY weight (the
-    per-turn subtraction ``-w*Phi(s_t)`` is action-independent, and ``Phi(s_0)``
-    cancels in the GRPO group baseline) -- so it RESHAPES/spreads per-turn credit
-    (variance reduction, denser intermediate signal) without introducing any
-    reward-hacking incentive. ``None`` potentials are zero-contribution boundaries.
+    turn's exit (seed = 0.0). By Ng-Harada-Russell, PBS is expected-gradient-neutral
+    for the vanilla estimator; here it is APPROXIMATELY so -- the ``-w*Phi(s_t)``
+    offset feeds GRPO's std-normalized group-relative advantage and a
+    correct->incorrect boundary (``Phi=None``) breaks the telescoping, leaving a
+    small bounded (<= gamma*w*Phi ~ 0.06) action-dependent leak. So it
+    RESHAPES/spreads per-turn credit (variance reduction, denser signal) as an
+    approximate state-dependent baseline; the anti-hack spine is the correctness
+    gate, not this term. ``None`` potentials are zero-contribution boundaries.
+    (See kore.reward.shaping for the full caveat.)
     """
     base = [(r if (c or credit_incorrect) else 0.0)
             for r, c in zip(turn_rewards, correct_flags)]
@@ -578,6 +581,20 @@ def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inproc
     # Bridge the curriculum PHASE too, so the agentic tool path masks the speed term
     # in the correctness phase exactly like the serial path (audit R2 grpo C1/C2).
     _os.environ["KORE_REWARD_PHASE"] = str(getattr(config, "reward_phase", "all"))
+    # Paradigm-v3: bridge the frontier levers to the agentic tool path (ToolExecutor
+    # has no config handle -- it reads these from the env) and to any accelerate-
+    # launched subprocess (which inherits this environment). The GRPO template config
+    # is thus the single source of truth, so these activate WITHOUT depending on a
+    # supervisor/orchestrator restart. Anti-reward-hack Speed-of-Light gate:
+    if getattr(config, "roofline_gate", False):
+        _os.environ["KORE_ROOFLINE_GATE"] = "1"
+        _os.environ["KORE_ROOFLINE_TOL"] = str(getattr(config, "roofline_tol", 0.25))
+    # LIVE named-residual rho (per-turn rocprofv3 counters in the PBS potential):
+    if getattr(config, "physics_live_counters", False):
+        _os.environ["KORE_PHYSICS_LIVE_COUNTERS"] = "1"
+    # Self-referential open-ended minter grammar evolution (correct-by-construction):
+    if getattr(config, "coevolve_evolve_grammar", False):
+        _os.environ["KORE_MINTER_EVOLVE_GRAMMAR"] = "1"
     return _train_grpo_inprocess(config, tasks)
 
 
@@ -946,6 +963,32 @@ def _distill_group(sink, task_id, best_speedup, best_kernel_src, config):
         log.warn("coevolve distillation failed", task=task_id, error=repr(e))
 
 
+def _search_value_fn(config):
+    """Build a ``value_fn(sources, task) -> list[float]`` from the trained value model
+    for the AlphaKernel PUCT prior, or None (heuristic) when disabled/unavailable.
+
+    Fully fail-safe: any gap (flag off, no model, API mismatch) returns None so the
+    search falls back to its correctness-base prior -- never raises, never blocks.
+    """
+    if not getattr(config, "search_value_prior", False):
+        return None
+    try:
+        from kore.value.rerank import load_default_model, score_candidates
+        vm = load_default_model(getattr(config, "value_model_path", None))
+        if vm is None:
+            return None
+
+        def _vf(sources, task):
+            srcs = list(sources)
+            try:
+                return score_candidates(srcs, task=task, model=vm)
+            except Exception:  # noqa: BLE001 - uniform prior on any scorer gap
+                return [0.0] * len(srcs)
+        return _vf
+    except Exception:  # noqa: BLE001 - value prior is a bonus; heuristic fallback
+        return None
+
+
 def _maybe_search_then_distill(groups, config, distill_sink, step):
     """AlphaKernel test-time search from the step's BEST kernel, feeding the distill
     sink (paradigm-v2 P1b). Sound + cheap by construction:
@@ -974,10 +1017,26 @@ def _maybe_search_then_distill(groups, config, distill_sink, step):
     try:
         from kore.search.propose import search_from_kernel
         env = _make_rollout_env(g["task"], config)
+        # Paradigm-v3 DEEP search: roofline admissible branch-and-bound + trained value
+        # prior + deeper/wider tree, all opt-in and fail-safe (off => shallow flat search).
+        skw = {}
+        if getattr(config, "search_bnb", False):
+            try:
+                from kore.search import make_roofline_ub_fn
+                skw["roofline_ub_fn"] = make_roofline_ub_fn(
+                    ceiling_dtype=getattr(g["task"], "dtype", None),
+                    safety_margin=float(getattr(config, "roofline_tol", 0.25)))
+            except Exception:  # noqa: BLE001 - B&B is a bonus; no-prune fallback
+                pass
+        _vfn = _search_value_fn(config)
+        if _vfn is not None:
+            skw["value_fn"] = _vfn
         res = search_from_kernel(
             g["best_kernel_src"], g["task"], env,
             budget=int(getattr(config, "search_budget", 64)),
-            reward_mode=getattr(config, "reward_mode", "speedup"), seed=step)
+            k_expand=int(getattr(config, "search_k_expand", 4)),
+            max_depth=getattr(config, "search_max_depth", None),
+            reward_mode=getattr(config, "reward_mode", "speedup"), seed=step, **skw)
         src, su = res.get("best_source"), res.get("best_speedup_lcb")
         base = float(g.get("best_speedup") or 0.0)
         if src and su and float(su) > base:
@@ -2362,7 +2421,9 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
                     obs, code, task,
                     mode=getattr(config, "reward_mode", "speedup"),
                     dtype=task.dtype, snr_threshold=snr_threshold,
-                    physics_weight=getattr(config, "physics_weight", 1.0)),
+                    physics_weight=getattr(config, "physics_weight", 1.0),
+                    roofline_gate=getattr(config, "roofline_gate", False),
+                    roofline_tol=getattr(config, "roofline_tol", 0.25)),
                 config)
             if best is None or (bool(rr.correct), rr.reward) > (bool(best[4].correct), best[4].reward):
                 best = (seq, text, code, obs, rr)

@@ -11,7 +11,7 @@ The same message contract (`format.py`) is reused **without a GPU** by [`kore/da
 | File | Purpose |
 | --- | --- |
 | `harness.py` | `AgentHarness` turn loop + `WinsKB` few-shot retrieval |
-| `tools.py` | Tool schemas + `ToolExecutor` + `tool_use_reward` |
+| `tools.py` | Tool schemas (base 6 + opt-in verified-transform tools) + `ToolExecutor` + `tool_use_reward` |
 | `format.py` | Hermes `<tool_call>` parsing / rendering, reflection parsing, `episode_to_chat` |
 | `schema.py` | `AgenticTrajectoryRecord` |
 
@@ -53,6 +53,21 @@ Tool-use shaping (`tool_use_reward`) rewards correct schemas, keep/revert discip
 
 ---
 
+## Verified-transform tools (paradigm-v2 action space)
+
+Beyond the base six, the harness can advertise a **verified ε-typed transformation calculus** as first-class tools, so the policy proposes **provably-in-contract** optimization moves instead of free-form edits. This is **opt-in and on in the flagship** (`agentic_transform_tools: true` → `_rollout_agentic` builds the harness via `agent_tool_schemas(transforms=True)`); it is **off by default**, so agentic datagen / SFT reconstruction stay byte-identical to the legacy set.
+
+| Tool | Effect |
+| --- | --- |
+| `list_transforms` | The transforms currently **legal** for the working kernel under its remaining ε-budget (each typed `exact`/`approx` with an ε cost + side conditions) |
+| `apply_transform` | Apply ONE named transform (+ params) with ε-accounting; returns the rewritten source. An inadmissible / budget-exceeding move is **rejected** and the source is left unchanged (never out-of-contract) |
+
+- **Bounded, shared budget.** `ToolExecutor` lazily builds a per-episode `ErrorBudget` sized from the task's `(operation, dtype)` ([`kore/transform`](../transform/README.md)); approx moves draw it down across turns (exact moves are free), and it is **reset on reseed**, so the agent sees a *shrinking* set of safe moves as it spends numerical tolerance.
+- **The env is still the authority.** These tools are **pure CPU source rewrites** - the model must still `build`/`test`/`bench` the result through the verified env, so an approx move that actually drifts is caught by the **SNR gate**. The `exact`/`approx` typing is a *design-time label, not a proof* (e.g. `fp32_accumulator` is labeled exact but changes output bits) - the guarantee is downstream verification, not the type. See [`kore/transform`](../transform/README.md).
+- **Anti-reward-hack spine.** Because the action space is bounded to in-contract rewrites, a policy composing only these moves structurally *cannot* emit a memset/cache/timing exploit - the same calculus AlphaKernel searches over ([`kore/search`](../search/README.md)).
+
+---
+
 ## Paradigm-v2: per-turn physics trace + latency feedback
 
 The harness now records four **index-aligned** per-turn arrays on `AgentEpisode` (one entry per turn, in lockstep with `turn_rewards`/`turn_correct`), so the agentic rollout feeds GRPO the same per-turn signals as the serial path:
@@ -60,7 +75,7 @@ The harness now records four **index-aligned** per-turn arrays on `AgentEpisode`
 | `AgentEpisode` field | Meaning |
 | --- | --- |
 | `turn_speedups` | per-turn MEASURED vendor speedup (only when the turn benched a correct kernel, else `None`) |
-| `turn_phis` | per-turn roofline **potential** `Φ = ρ` for potential-based shaping (`None` unless benched + correct) |
+| `turn_phis` | per-turn roofline **potential** `Φ` for PBS — online the PMC-free `η` (`ρ` only when counters are threaded); `None` unless benched + correct |
 | `turn_codes` | per-turn candidate kernel source |
 
 These are populated in `_record_turn` from matching `ToolExecutor` state set in `_evaluate`:
@@ -81,4 +96,4 @@ On the GRPO side, `grpo._agentic_per_turn_signal` recovers these arrays correctn
 
 This is **pure context** - the trained reward is still the verified `compute_kernel_reward`, so surfacing the delta to the policy cannot be gamed.
 
-See also: [`kore/data`](../data/README.md), [`kore/policy`](../policy/README.md), [`kore/env`](../env/README.md), [`kore/reward`](../reward/README.md) (the `whitebox`/`shaping` potential this trace feeds).
+See also: [`kore/data`](../data/README.md), [`kore/policy`](../policy/README.md), [`kore/env`](../env/README.md), [`kore/reward`](../reward/README.md) (the `whitebox`/`shaping` potential this trace feeds), [`kore/transform`](../transform/README.md) (the verified action space behind the transform tools), [`kore/search`](../search/README.md) (AlphaKernel over that same calculus).

@@ -1777,6 +1777,30 @@ def _stage_eval(ctx):
     except Exception as e:  # noqa: BLE001 - extra benchmark track, never fatal
         _log("eval", f"kernelbench-amd track skipped: {e}")
 
+    # --- Frontier eval track 3: HEAD-TO-HEAD vs Opus 4.8 (paired significance) --
+    # The publishable "did the 14B beat the frontier model?" answer: run KORE AND
+    # Opus on the SAME held-out tasks under the SAME verified oracle + cold-cache
+    # timing + matched budget, then paired bootstrap CI + Wilcoxon + sign test on the
+    # KORE-minus-Opus per-task speedups. Fail-safe: with no API key it skips cleanly
+    # and the KORE-only fast_p above is untouched.
+    try:
+        from kore.eval.head_to_head import (format_head_to_head_report,
+                                            head_to_head_vs_opus)
+        h2h = head_to_head_vs_opus(
+            kore_pol, tasks, env_factory=lambda t: KoreEnv(t),
+            budget=ctx["args"].eval_budget, opus_kind="claude", temperature=0.0,
+            seed=getattr(ctx["args"], "split_seed", 0),
+            out=ctx["data_root"] / "eval" / "head_to_head_vs_opus")
+        _log("eval", "\n" + format_head_to_head_report(h2h))
+        if h2h.get("opus_skipped"):
+            _log("eval", f"head-to-head vs Opus SKIPPED: {h2h.get('skip_reason')}")
+        else:
+            _log("eval", f"head-to-head vs Opus -> "
+                         f"{ctx['data_root'] / 'eval' / 'head_to_head_vs_opus.json'} "
+                         f"(verdict: {h2h.get('verdict')})")
+    except Exception as e:  # noqa: BLE001 - extra track, never fatal
+        _log("eval", f"head-to-head vs Opus track skipped: {e}")
+
 
 def _eval_paired_significance(ctx, res):
     """Paired bootstrap CI + Wilcoxon + sign test on KORE-vs-seed per-task speedups."""

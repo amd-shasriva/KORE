@@ -9,19 +9,30 @@ T_min/T_meas``) -- added as Ng-Harada-Russell potential-based shaping:
 
     F(s, s') = gamma * Phi(s') - Phi(s)
 
-The Ng et al. (1999) theorem: PBS leaves the optimal policy invariant for ANY
-potential and ANY weight. Concretely, the discounted sum of the shaping telescopes
-to ``-Phi(s_0)`` (a constant of the START state), so:
+The Ng et al. (1999) theorem: for the VANILLA expected-gradient estimator, PBS
+leaves the optimal policy invariant for ANY potential and ANY weight -- the
+discounted shaping telescopes to ``-Phi(s_0)`` (a constant of the START state). In
+that idealized setting:
 
-  * the trajectory-level optimal policy is provably unchanged (no reward-hacking
-    incentive can be introduced by the dense term -- a formal anti-gaming result),
+  * the trajectory-level optimal policy is unchanged (the dense term adds no
+    reward-hacking incentive), and
   * PBS is expected-gradient-NEUTRAL: it does not ADD directional gradient toward
     the roofline, it RE-DISTRIBUTES the existing terminal credit across turns
     (variance reduction / denser intermediate signal), which is what the flat valley
-    needs. Invariance holds only when the potentials passed here are the ENTERING-
-    state ``Phi(s_t)`` (see the caller ``kevin_turn_returns``, which reconstructs
-    them from the per-turn EXIT potentials); feeding exit potentials would make the
-    per-turn subtraction action-dependent and break the theorem.
+    needs. This requires the potentials passed here to be the ENTERING-state
+    ``Phi(s_t)`` (see the caller ``kevin_turn_returns``, which reconstructs them
+    from the per-turn EXIT potentials); feeding exit potentials would make the
+    per-turn subtraction action-dependent.
+
+HONEST CAVEAT (the KORE application, not the theorem itself): the exact invariance
+is a property of the vanilla estimator. KORE feeds the ``-w*Phi(s_t)`` offset into
+GRPO's std-normalized, GROUP-RELATIVE, per-turn-as-sample advantage (dividing by a
+sigma that itself depends on the shifted returns), and at a correct->incorrect
+boundary ``Phi(s')=None`` zeroes ``F`` and breaks the telescoping. A small BOUNDED
+action-dependent leak (<= gamma*w*Phi ~ 0.06 at w=0.15) therefore survives. Treat
+PBS here as an APPROXIMATE, expected-gradient-neutral STATE-DEPENDENT BASELINE that
+reshapes credit -- not an exact at-any-weight guarantee. The real anti-hack spine
+is the lexicographic correctness gate + bounded action space, not this term.
 
 This module is PURE / CPU-only. It operates on the per-turn arrays the GRPO loop
 already builds (``turn_rewards`` and a parallel list of per-turn potentials), and

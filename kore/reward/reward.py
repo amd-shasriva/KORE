@@ -188,6 +188,72 @@ def _strip_comments_and_docstrings(src: str) -> str:
     return src
 
 
+# --------------------------------------------------------------------------- #
+# Roofline SPEED-OF-LIGHT ceiling (anti-reward-hack gate; OFF by default).
+#
+# A kernel's runtime is physically lower-bounded by the operator's roofline T_min
+# (see :mod:`kore.analysis.rooflines`): T_min = max(W_flops/P_peak, Q_bytes/B_peak).
+# A *measured* time BELOW T_min implies throughput ABOVE the speed of light, which
+# no correct implementation can achieve -- it can only come from attacking the
+# MEASUREMENT: timing a warm cache without a cold-cache flush, a "do-less"/streamed
+# path, or a forged timer. This is exactly the latency exploit that inflated the
+# reported speedups in Sakana's CUDA agent and CUDA-L1. The ceiling gate rejects
+# such candidates to the anti-hack floor so a physically-impossible speedup can
+# never be rewarded, complementing the source-level scan (which cannot see timing).
+#
+# The tolerance absorbs measurement noise + roofline peak-estimate error (the peaks
+# are curated approximate vendor specs). Only a time faster than T_min*(1 - tol) is
+# rejected, so a kernel merely sitting ON the roofline (eta -> 1) is always safe.
+# The gate is sound only under COLD-CACHE timing (KORE flushes L2 between timed
+# iters, see kore.reward.timing_integrity) -- otherwise a cache-resident small shape
+# could legitimately beat the HBM-traffic floor -- hence it is opt-in, default OFF.
+# --------------------------------------------------------------------------- #
+DEFAULT_ROOFLINE_TOL = 0.25
+
+
+def roofline_ceiling_violation(measured_ms: Optional[float], t_min_ms: Optional[float],
+                               tol: float = DEFAULT_ROOFLINE_TOL) -> bool:
+    """True iff ``measured_ms`` is a physically-impossible sub-roofline (super-SOL) time.
+
+    Returns True when a valid, positive ``measured_ms`` is faster than the roofline
+    speed-of-light floor ``t_min_ms`` by more than the fractional tolerance ``tol``
+    (i.e. ``measured_ms < t_min_ms * (1 - tol)``). Such a time cannot be produced by a
+    faster *correct* kernel (you cannot beat the speed of light); it is a measurement
+    exploit and the caller drops it to the hack tier.
+
+    FAIL-OPEN by design: returns False on any missing / non-positive / NaN input, and
+    for ``tol >= 1`` (the threshold collapses to <= 0 and never fires). Enabling the
+    gate therefore can never reject a candidate we are unable to physically adjudicate,
+    and is byte-identical to not calling it whenever the roofline is unknown.
+    """
+    if measured_ms is None or t_min_ms is None:
+        return False
+    try:
+        m = float(measured_ms)
+        t = float(t_min_ms)
+    except (TypeError, ValueError):
+        return False
+    # NaN-safe: every comparison with NaN is False, so a NaN measured/T_min never fires.
+    if not (m > 0.0) or not (t > 0.0):
+        return False
+    if tol < 0.0:
+        tol = 0.0
+    return m < t * (1.0 - tol)
+
+
+def _ceiling_measured_ms(obs: "Observation") -> Optional[float]:
+    """Smallest positive measured wall time for the roofline-ceiling gate.
+
+    A timing exploit drives the measured time toward zero, so the MIN over shapes is
+    the value most likely to breach the speed-of-light floor; falls back to the scalar
+    ``wall_ms``. Returns None when no positive timing exists (gate then fail-opens).
+    """
+    vals = [v for v in (obs.wall_by_shape or {}).values() if v and v > 0]
+    if vals:
+        return min(vals)
+    return obs.wall_ms if (obs.wall_ms and obs.wall_ms > 0) else None
+
+
 def _shape_ratios(obs: Observation) -> list[float]:
     """Per-shape speedup ratios base_ms/cand_ms (a gain; higher is better)."""
     out: list[float] = []
@@ -372,7 +438,10 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
                    mode: str = "eval", cfg=CONFIG,
                    snr_threshold: Optional[float] = None,
                    phase: Optional[str] = None,
-                   response: Optional[str] = None) -> RewardResult:
+                   response: Optional[str] = None,
+                   roofline_gate: bool = False,
+                   t_min_ms: Optional[float] = None,
+                   roofline_tol: float = DEFAULT_ROOFLINE_TOL) -> RewardResult:
     """Lexicographic, anti-hackable reward. Returns a :class:`RewardResult`.
 
     Tier order (a strictly better outcome in an earlier tier ALWAYS dominates):
@@ -394,6 +463,13 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
         ``cfg.reward_phase`` when ``phase`` is None.
 
     ``snr_threshold`` overrides the dtype default (honors per-task task.yaml).
+
+    ``roofline_gate`` (default OFF) enables the anti-reward-hack roofline SPEED-OF-LIGHT
+    ceiling: when a ``t_min_ms`` roofline floor is supplied and the measured time is
+    physically impossible below it (see :func:`roofline_ceiling_violation`, tolerance
+    ``roofline_tol``), the candidate is rejected to the hack tier (a measurement
+    exploit is never rewarded). With ``roofline_gate=False`` this reward is
+    byte-identical to the pre-gate behavior for every existing caller.
     """
     flags: list[str] = []
     phase = (phase or getattr(cfg, "reward_phase", "full") or "full").lower()
@@ -411,8 +487,23 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     # Punished STRICTLY harder than a compile failure (reward_hack < reward_compile_fail)
     # and never eligible for any shaping/format credit: cheating is the unique floor.
     hack = obs.hack_reason or (scan_for_hacks(source) if source else None)
+    # Roofline SPEED-OF-LIGHT ceiling (opt-in): a physically-impossible sub-roofline
+    # measured time is a measurement exploit -> the same hack floor. The source scan
+    # takes precedence (keeps its specific reason); this only fires when no source
+    # hack was found. Fully inert unless ``roofline_gate`` is set with a ``t_min_ms``,
+    # so the default path stays byte-identical.
+    ceiling_hack = False
+    if not hack and roofline_gate and t_min_ms is not None:
+        m_ceiling = _ceiling_measured_ms(obs)
+        if roofline_ceiling_violation(m_ceiling, t_min_ms, roofline_tol):
+            ceiling_hack = True
+            hack = (f"measured {m_ceiling:.4g} ms is below the roofline speed-of-light "
+                    f"T_min {t_min_ms:.4g} ms (tol {roofline_tol:.2f}) -- physically "
+                    "impossible throughput; timing/measurement exploit")
     if hack:
         flags.append("hack")
+        if ceiling_hack:
+            flags.append("roofline_ceiling")
         rr = RewardResult(cfg.reward_hack, False, None, "hack", flags, str(hack))
         _log_decision(rr)
         return rr

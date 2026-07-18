@@ -180,7 +180,13 @@ class ValueModel(Protocol):
 # --------------------------------------------------------------------------- #
 @dataclass
 class AlphaKernelConfig:
-    """Search hyper-parameters (all with production-reasonable defaults)."""
+    """Search hyper-parameters (all with production-reasonable defaults).
+
+    The defaults reproduce the historical (shallow) search behavior exactly, so a
+    caller that constructs ``AlphaKernelConfig()`` gets the pre-existing search. The
+    orchestrator (grpo) opts into deeper / value-guided / branch-and-bound search by
+    passing larger ``k_expand`` / ``max_depth`` / a ``value_fn`` / a ``roofline_ub_fn``.
+    """
 
     c_puct: float = 1.5           # PUCT exploration weight on the value prior
     c_novelty: float = 0.25       # diversity/novelty bonus weight
@@ -194,6 +200,33 @@ class AlphaKernelConfig:
     reward_mode: str = "speedup"  # compute_kernel_reward mode ("speedup"/"residual")
     multi_shape: bool = True      # env.step multi-shape (worst-shape discipline)
     step_cost: int = 1            # budget units per env.step
+
+    # -- deeper-search controls (item 3): SAFE defaults preserve prior behavior -- #
+    max_depth: Optional[int] = None   # max node depth to EXPAND; None => unbounded
+    #                                   (the historical behavior). A node at
+    #                                   ``depth >= max_depth`` is kept as a leaf
+    #                                   (still measured / eligible as incumbent) but
+    #                                   never expanded, bounding tree height without
+    #                                   changing shallow results when None.
+
+    # -- incumbent eligibility (item 2) -------------------------------------- #
+    incumbent_min_measures: int = 1   # a node must have >= this many speedup
+    #                                   samples to be eligible as the anytime
+    #                                   incumbent. Default 1 == the historical
+    #                                   ``n > 0`` gate; grpo may raise it (e.g. 2) to
+    #                                   avoid committing the B&B floor to a kernel
+    #                                   whose LCB has no variance evidence yet.
+
+    # -- value-model leaf prior (item 4) ------------------------------------- #
+    value_leaf_weight: float = 0.0    # weight of the value-model score used as a
+    #                                   PRIOR leaf value for a correct-but-not-yet-
+    #                                   measured node. 0.0 (default) => the leaf
+    #                                   value is exactly the historical
+    #                                   correctness-base; > 0 blends in a bounded
+    #                                   surrogate estimate so an unmeasured correct
+    #                                   node is ranked by the value model until the
+    #                                   perf oracle refines it. Never reaches the
+    #                                   measured-speedup band (bounded < 1.0).
 
 
 # --------------------------------------------------------------------------- #
@@ -250,28 +283,53 @@ class Node:
 # --------------------------------------------------------------------------- #
 # Value-model scoring (adapter over the pluggable ValueModel / rerank fallback)
 # --------------------------------------------------------------------------- #
-def _value_scores(value_model, sources: list[str], task) -> list[float]:
-    """Score candidate sources with the value model (higher = better prior).
+def _value_scores(value_model, sources: list[str], task, value_fn=None) -> list[float]:
+    """Score candidate sources for the PUCT prior (higher = more promising).
 
-    Resolution order: an explicit ``.score(sources, task)`` (the fakeable
-    AlphaKernel contract) -> a fitted rerank ``ValueModel`` via
-    :func:`kore.value.rerank.score_candidates` -> a plain callable -> the rerank
-    source-heuristic (model=None). Every branch is defensive so a value-model
-    failure degrades to uniform priors rather than breaking the search."""
+    Resolution order (first that succeeds and returns one score per source wins):
+      1. an explicit ``value_fn(sources, task) -> [float]`` -- the clean orchestrator
+         hook (item 4). Pass e.g. a closure over
+         :func:`kore.value.rerank.score_candidates` bound to a trained
+         :class:`kore.value.model.ValueModel` to drive priors from the learned value.
+      2. a :class:`ValueModel` exposing the fakeable ``.score(sources, task)`` contract;
+      3. :func:`kore.value.rerank.score_candidates` -- a fitted rerank ``ValueModel``
+         (anything with ``.predict``, incl. ``kore.value.model.ValueModel``) or, with
+         no model, the deterministic source heuristic;
+      4. a plain per-source callable ``value_model(source)``.
+
+    Every branch is defensive: a value-model failure degrades to the next fallback
+    (ultimately uniform 0.0 priors) rather than breaking the search. Default
+    (``value_fn=None``, ``value_model=None``) reproduces the historical heuristic
+    priors exactly."""
     if not sources:
         return []
-    if value_model is not None and hasattr(value_model, "score"):
+    # 1. explicit value_fn(sources, task) -> [float]  (highest precedence)
+    if value_fn is not None:
         try:
-            return [float(x) for x in value_model.score(list(sources), task)]
+            out = [float(x) for x in value_fn(list(sources), task)]
+            if len(out) == len(sources):
+                return out
         except Exception:  # noqa: BLE001 - never let the surrogate break search
             pass
+    # 2. fakeable ValueModel.score(sources, task)
+    if value_model is not None and hasattr(value_model, "score"):
+        try:
+            out = [float(x) for x in value_model.score(list(sources), task)]
+            if len(out) == len(sources):
+                return out
+        except Exception:  # noqa: BLE001 - never let the surrogate break search
+            pass
+    # 3. rerank.score_candidates (trained ValueModel via .predict, else heuristic)
     try:
         from kore.value.rerank import score_candidates
         model = value_model if (value_model is not None
                                 and hasattr(value_model, "predict")) else None
-        return [float(x) for x in score_candidates(list(sources), task=task, model=model)]
+        out = [float(x) for x in score_candidates(list(sources), task=task, model=model)]
+        if len(out) == len(sources):
+            return out
     except Exception:  # noqa: BLE001 - numpy/value deps unavailable
         pass
+    # 4. plain per-source callable
     if callable(value_model):
         try:
             return [float(value_model(s)) for s in sources]
@@ -287,6 +345,20 @@ def _softmax(xs: list[float]) -> list[float]:
     exps = [math.exp(x - m) for x in xs]
     s = sum(exps) or 1.0
     return [e / s for e in exps]
+
+
+def _sigmoid(x: float) -> float:
+    """Numerically-stable logistic squash to (0, 1). Used to bound a raw value-model
+    score into a small leaf-value prior that can never reach the measured-speedup
+    band (see AlphaKernelConfig.value_leaf_weight)."""
+    try:
+        if x >= 0:
+            z = math.exp(-x)
+            return 1.0 / (1.0 + z)
+        z = math.exp(x)
+        return z / (1.0 + z)
+    except OverflowError:
+        return 0.0 if x < 0 else 1.0
 
 
 def _struct_key(source: str):
@@ -307,15 +379,27 @@ def _struct_key(source: str):
 # --------------------------------------------------------------------------- #
 # Roofline ceiling helper (admissible perf bound via kore.analysis.rooflines)
 # --------------------------------------------------------------------------- #
-def roofline_speedup_ceiling(task, baseline_ms: float, shape=None,
-                             arch: Optional[str] = None) -> Optional[float]:
+def roofline_speedup_ceiling(task, baseline_ms: float, *, shape=None,
+                             arch: Optional[str] = None,
+                             dtype: Optional[str] = None) -> Optional[float]:
     """Admissible speedup ceiling = ``baseline_ms / T_min`` for the task's shape.
 
     ``T_min`` is the roofline lower bound on runtime (:func:`kore.analysis.
-    rooflines.roofline`), so no correct kernel can exceed ``baseline_ms / T_min``.
-    Returns None when the operator is not roofline-modelable or the roofline deps
-    are unavailable (the caller then leaves ``roofline_ub = +inf`` -> no pruning).
-    A production ``roofline_ub_fn`` can wrap this once a baseline is measured."""
+    rooflines.roofline`) -- the physics limit set by the operator's mandatory FLOPs
+    and HBM byte traffic -- so NO correct kernel for this task can run faster than
+    ``T_min``, hence none can exceed a speedup of ``baseline_ms / T_min``. That makes
+    the returned value an ADMISSIBLE (never-too-small) upper bound on speedup.
+
+    Returns None when the operator is not roofline-modelable, the shape has no dims,
+    or the roofline deps are unavailable (the caller then leaves ``roofline_ub =
+    +inf`` -> no pruning). ``dtype`` overrides the precision the peak is taken at (see
+    the admissibility note on :class:`RooflineCeiling` re: precision-lowering moves).
+
+    This is a *pure* scalar helper (no per-search state). The production
+    branch-and-bound adapter is :class:`RooflineCeiling` / :func:`make_roofline_ub_fn`,
+    which wrap this with the correct ``(source, task)`` call signature and inject the
+    env-measured baseline during the search.
+    """
     try:
         from kore.analysis.rooflines import (
             detect_arch, resolve_peaks, roofline, shape_to_str,
@@ -331,10 +415,109 @@ def roofline_speedup_ceiling(task, baseline_ms: float, shape=None,
     if not dims:
         return None
     rf = roofline(getattr(task, "task_id", "?"), getattr(task, "operation", ""),
-                  getattr(task, "dtype", "fp32"), shape_to_str(dims), dims, peaks, a)
+                  dtype or getattr(task, "dtype", "fp32"),
+                  shape_to_str(dims), dims, peaks, a)
     if rf is None or not (rf.t_min_ms > 0):
         return None
     return baseline_ms / rf.t_min_ms
+
+
+class RooflineCeiling:
+    """Admissible roofline speedup-ceiling for AlphaKernel branch-and-bound.
+
+    A **callable with the canonical ``roofline_ub_fn(source, task) -> Optional[float]``
+    signature** so it drops straight into ``search(..., roofline_ub_fn=...)`` /
+    ``search_from_kernel(..., roofline_ub_fn=...)``. It exists to FIX the historical
+    signature mismatch: :func:`roofline_speedup_ceiling` is ``(task, baseline_ms,
+    ...)``, which could NOT be passed as the ``(source, task)`` call site expected --
+    so the bound was un-wireable and branch-and-bound stayed dormant.
+
+    Admissibility (the B&B soundness invariant)
+    -------------------------------------------
+    The ceiling returned is the PHYSICAL maximum speedup ``baseline_ms / T_min``,
+    where ``T_min`` is the roofline lower bound on runtime for the task. Because
+    ``T_min`` bounds *every* kernel that solves the task at the modeled precision, it
+    bounds a search node **and every kernel reachable from it by further transforms**.
+    Pruning a node whose ceiling ``<=`` the incumbent's guaranteed (LCB) speedup can
+    therefore never discard a branch that contained the true optimum -- the defining
+    property of an admissible bound.
+
+    The ceiling is a per-task physical constant (it does not depend on how a kernel is
+    written), so ``__call__`` ignores ``source`` except to honor the signature.
+
+    Precision caveat (kept sound by construction)
+    ---------------------------------------------
+    ``T_min`` is computed at ``ceiling_dtype`` (default: the task's declared dtype).
+    A precision-LOWERING transform (KORE's ``downcast_dtype``, e.g. bf16->fp8) raises
+    the physical peak and could let a descendant exceed a ceiling taken at the higher
+    precision -- which would make pruning UNSOUND. Two guards keep the bound
+    admissible:
+      * ``ceiling_dtype`` -- set it to the FASTEST precision the task's epsilon budget
+        can ever reach (e.g. "fp8") when precision-lowering moves are enabled, so no
+        reachable descendant can beat the ceiling; and
+      * ``safety_margin`` -- inflate the ceiling by ``(1 + safety_margin)`` to absorb
+        roofline modeling error (approximate vendor peaks, ignored cache reuse). A
+        larger margin prunes less and is strictly safer. Default 0.25 (25% headroom).
+
+    Baseline discovery
+    ------------------
+    The speedup ceiling needs the baseline (reference) runtime, which is measured by
+    the env DURING the search, not known up front. Pass ``baseline_ms`` if you have
+    it; otherwise :class:`_Search` calls :meth:`observe_baseline` with the first
+    env-reported baseline and the bound activates from then on. Until a baseline is
+    known ``__call__`` returns None (no pruning), so it is safe to install before any
+    measurement.
+    """
+
+    def __init__(self, baseline_ms: Optional[float] = None, *,
+                 arch: Optional[str] = None, shape=None,
+                 ceiling_dtype: Optional[str] = None,
+                 safety_margin: float = 0.25):
+        self.baseline_ms: Optional[float] = (
+            float(baseline_ms) if baseline_ms and baseline_ms > 0 else None)
+        self.arch = arch
+        self.shape = shape
+        self.ceiling_dtype = ceiling_dtype
+        self.safety_margin = max(0.0, float(safety_margin))
+        self._cache: dict = {}
+
+    def observe_baseline(self, baseline_ms: Optional[float]) -> None:
+        """Adopt the first positive env-measured baseline (monotone: set once).
+
+        Fixing the baseline to the first observation keeps the ceiling STABLE across
+        the search, so a node's admissibility verdict cannot flip due to baseline
+        jitter across shapes/measurements."""
+        if baseline_ms and baseline_ms > 0 and self.baseline_ms is None:
+            self.baseline_ms = float(baseline_ms)
+            self._cache.clear()
+
+    def __call__(self, source: str, task) -> Optional[float]:
+        if not self.baseline_ms:
+            return None                       # no baseline yet -> no pruning (safe)
+        key = (id(task), self.ceiling_dtype)
+        if key in self._cache:
+            return self._cache[key]
+        ceil = roofline_speedup_ceiling(
+            task, self.baseline_ms, shape=self.shape, arch=self.arch,
+            dtype=self.ceiling_dtype)
+        if ceil is not None:
+            ceil = ceil * (1.0 + self.safety_margin)
+        self._cache[key] = ceil
+        return ceil
+
+
+def make_roofline_ub_fn(baseline_ms: Optional[float] = None, *,
+                        arch: Optional[str] = None, shape=None,
+                        ceiling_dtype: Optional[str] = None,
+                        safety_margin: float = 0.25) -> RooflineCeiling:
+    """Build the production admissible ``roofline_ub_fn`` for branch-and-bound.
+
+    Thin convenience wrapper around :class:`RooflineCeiling` (see its docstring for
+    the admissibility invariant and the precision caveat). Pass the result as
+    ``search(..., roofline_ub_fn=make_roofline_ub_fn(...))`` to turn B&B ON; omit it
+    (default None) to keep B&B OFF and reproduce the historical search exactly."""
+    return RooflineCeiling(baseline_ms, arch=arch, shape=shape,
+                           ceiling_dtype=ceiling_dtype, safety_margin=safety_margin)
 
 
 # --------------------------------------------------------------------------- #
@@ -344,11 +527,12 @@ class _Search:
     """Internal search state machine. One instance per :func:`search` call."""
 
     def __init__(self, task, env, policy, value_model, budget, cfg,
-                 roofline_ub_fn):
+                 roofline_ub_fn, value_fn=None):
         self.task = task
         self.env = env
         self.policy = policy
         self.value_model = value_model
+        self.value_fn = value_fn
         self.cfg = cfg
         self.budget: Budget = budget if isinstance(budget, Budget) else Budget(int(budget))
         self.roofline_ub_fn = roofline_ub_fn
@@ -363,8 +547,17 @@ class _Search:
         self.n_transpositions: int = 0
         self.struct_counts: dict = {}
 
+        # Anytime incumbent = the CURRENT true argmax over correct, sufficiently-
+        # sampled nodes (recomputed every update; see _update_incumbent). It is the
+        # kernel we report as "best found".
         self.incumbent: Optional[Node] = None
         self.incumbent_lcb: float = float("-inf")
+        # B&B pruning floor: a MONOTONE non-decreasing lower bound on the best
+        # achievable speedup (the running max of every incumbent LCB ever attained).
+        # Pruning is decided against THIS, never against the (possibly-moving) live
+        # incumbent LCB, so a prune decision can never be retroactively unsound if a
+        # later re-measurement lowers a node's LCB. See _update_incumbent/_admissible.
+        self._prune_floor: float = float("-inf")
         self.incumbent_trace: list[Optional[float]] = []
         self._baseline_ms: Optional[float] = None
 
@@ -383,6 +576,15 @@ class _Search:
         b = getattr(obs, "baseline_ms", None)
         if b:
             self._baseline_ms = b
+            # Feed the env-measured baseline to a roofline adapter that discovers it
+            # lazily (e.g. RooflineCeiling), so B&B activates once the reference
+            # runtime is known. User (source, task) lambdas lack this hook -> skipped.
+            obs_fn = getattr(self.roofline_ub_fn, "observe_baseline", None)
+            if callable(obs_fn):
+                try:
+                    obs_fn(b)
+                except Exception:  # noqa: BLE001 - a bound helper must not break search
+                    pass
         rr = compute_kernel_reward(obs, source, self.task, mode=self.cfg.reward_mode,
                                    dtype=self.dtype, snr_threshold=self.snr_threshold)
         return rr, obs
@@ -437,7 +639,7 @@ class _Search:
         successive_halving(
             arms, self.budget, eta=self.cfg.sh_eta,
             min_measures=self.cfg.sh_min_measures, max_measures=self.cfg.sh_max_measures,
-            rank_key="lcb", incumbent_lcb=self.incumbent_lcb,
+            rank_key="lcb", incumbent_lcb=self._prune_floor,   # monotone B&B floor
         )
 
     # -- node value + backup (MAX) ---------------------------------------- #
@@ -445,6 +647,16 @@ class _Search:
         if node.correct and node.stats.n > 0:
             return _Q_CORRECT_BASE + node.stats.lcb   # pessimistic measured value
         if node.correct:
+            # Correct but not yet measured. Default (value_leaf_weight == 0) is the
+            # bare correctness base -- the historical behavior. When a value model is
+            # supplied AND value_leaf_weight > 0, blend a BOUNDED surrogate leaf value
+            # in [base, base + w] so an unmeasured-correct leaf is provisionally
+            # ranked by the value model until the perf oracle refines it, while still
+            # sitting strictly below any measured node (whose value is base + lcb,
+            # lcb ~ speedup) so measurement always dominates speculation.
+            w = self.cfg.value_leaf_weight
+            if w > 0.0:
+                return _Q_CORRECT_BASE + w * _sigmoid(node.value_prior)
             return _Q_CORRECT_BASE                     # correct, measurement pending
         if node.status == "compile_fail":
             return _Q_COMPILE_FAIL
@@ -479,25 +691,64 @@ class _Search:
                 if id(p) not in seen:
                     stack.append(p)
 
-    # -- incumbent (anytime best; monotone via running max) --------------- #
+    # -- incumbent (anytime best) + monotone B&B floor -------------------- #
     def _update_incumbent(self) -> None:
-        best = None
+        """Recompute the anytime incumbent as the TRUE argmax over correct,
+        sufficiently-sampled nodes, then advance the monotone B&B pruning floor.
+
+        Fixes the stale/decoupled-incumbent defect. Previously ``incumbent_lcb`` was
+        a running max advanced independently of the ``incumbent`` pointer, which was
+        promoted only on a strict improvement and NEVER demoted. Because a node's LCB
+        is non-monotone in its sample count (adding samples can *lower* an arm's LCB
+        if its mean drifts down), the two could drift apart: ``incumbent`` could point
+        at a node that is no longer the argmax while pruning compared against a
+        high-water ``incumbent_lcb`` that no live node still achieves -- making the
+        branch-and-bound test UNSOUND (it could prune a subtree that actually
+        contained the optimum).
+
+        The fix keeps a single source of truth for each of two distinct concerns:
+
+          * ``incumbent`` / ``incumbent_lcb`` -- the CURRENT argmax, recomputed from
+            scratch every call, so the reported "best found" is always the genuine
+            argmax and can never be stale; and
+          * ``_prune_floor`` -- the monotone running max of the incumbent LCB. Every
+            value it takes is the LCB of a REAL correct, measured node, so it is a
+            valid lower bound on the achievable optimum; keeping it monotone means a
+            prune decided at one step stays sound even if a later re-measurement
+            lowers some node's LCB (the floor never retreats below a value we already
+            proved achievable).
+
+        Eligibility requires ``correct`` and at least ``cfg.incumbent_min_measures``
+        samples (default 1 == the historical ``n > 0``), so the floor is never
+        committed to a node with no variance evidence when the caller asks for more.
+        """
+        best: Optional[Node] = None
         for n in self.tt.values():
-            if n.correct and n.stats.n > 0:
+            if n.correct and n.stats.n >= self.cfg.incumbent_min_measures:
                 if best is None or n.stats.lcb > best.stats.lcb:
                     best = n
-        if best is not None and best.stats.lcb > self.incumbent_lcb:
-            self.incumbent_lcb = best.stats.lcb
-            self.incumbent = best
+        # True argmax (may move between nodes across calls; that is correct).
+        self.incumbent = best
+        self.incumbent_lcb = best.stats.lcb if best is not None else float("-inf")
+        # Advance the monotone pruning floor (never regresses).
+        if best is not None and self.incumbent_lcb > self._prune_floor:
+            self._prune_floor = self.incumbent_lcb
         self.incumbent_trace.append(
-            self.incumbent_lcb if self.incumbent is not None else None)
+            self.incumbent_lcb if best is not None else None)
 
     def _admissible(self, node: Node) -> bool:
-        """Admissible branch-and-bound: a node whose roofline ceiling cannot beat
-        the current incumbent LCB is dominated and must never be selected."""
-        if self.incumbent_lcb == float("-inf"):
-            return True
-        return node.roofline_ub > self.incumbent_lcb
+        """Admissible branch-and-bound test.
+
+        A node is dominated (and must never be selected) when its OPTIMISTIC roofline
+        ceiling cannot beat the monotone incumbent floor. This is sound because
+        ``roofline_ub`` is an upper bound on the achievable speedup of the node AND
+        every kernel reachable from it, while ``_prune_floor`` is a lower bound on a
+        speedup we have ALREADY achieved; so ``roofline_ub <= _prune_floor`` proves no
+        kernel in this subtree can strictly improve on what we already hold, and
+        discarding it cannot lose the optimum."""
+        if self._prune_floor == float("-inf"):
+            return True                      # no incumbent yet -> nothing dominates
+        return node.roofline_ub > self._prune_floor
 
     # -- selection (best-first PUCT over the frontier) -------------------- #
     def _novelty(self, node: Node) -> float:
@@ -514,9 +765,15 @@ class _Search:
 
     def _select(self) -> Optional[Node]:
         """Pick the best frontier node to expand; prune dominated ones en route."""
+        md = self.cfg.max_depth
         frontier: list[Node] = []
         for n in self.tt.values():
             if n.pruned or n.expanded or not n.evaluated:
+                continue
+            if md is not None and n.depth >= md:
+                # Depth cap (item 3): a node at/below the frontier depth stays a
+                # valid measured leaf (still eligible as the incumbent) but is never
+                # expanded, bounding tree height. Default max_depth=None => no cap.
                 continue
             if not self._admissible(n):
                 n.pruned = True
@@ -579,7 +836,8 @@ class _Search:
             self._backup(node)
             return
 
-        scores = _value_scores(self.value_model, [e.source for e in edits], self.task)
+        scores = _value_scores(self.value_model, [e.source for e in edits],
+                               self.task, value_fn=self.value_fn)
         priors = _softmax(scores)
         new_children: list[Node] = []
         for edit, score, prior in zip(edits, scores, priors):
@@ -651,6 +909,7 @@ class _Search:
 def search(root_source: str, task, env, policy, value_model=None, budget=64, *,
            config: Optional[AlphaKernelConfig] = None,
            roofline_ub_fn: Optional[Callable[[str, object], Optional[float]]] = None,
+           value_fn: Optional[Callable[[list, object], list]] = None,
            seed: int = 0) -> dict:
     """Run AlphaKernel value-guided search from ``root_source``.
 
@@ -664,21 +923,31 @@ def search(root_source: str, task, env, policy, value_model=None, budget=64, *,
                   (a :class:`~kore.env.kore_env.KoreEnv` in production).
     policy      : a :class:`ProposePolicy` (``propose(ProposeContext) -> [Edit]``).
     value_model : optional :class:`ValueModel` for PUCT priors; falls back to
-                  :func:`kore.value.rerank.score_candidates`.
+                  :func:`kore.value.rerank.score_candidates`. May be a trained
+                  :class:`kore.value.model.ValueModel` (used via ``.predict``).
     budget      : int (verifier-call cap) or a :class:`~kore.search.bandit.Budget`.
+    config      : an :class:`AlphaKernelConfig` to override the (shallow) defaults --
+                  e.g. raise ``k_expand`` / set ``max_depth`` for a deeper search, or
+                  ``value_leaf_weight`` to use the value model as a leaf prior.
     roofline_ub_fn : optional ``(source, task) -> Optional[float]`` giving a per-node
                   admissible speedup ceiling for branch-and-bound pruning; when
-                  omitted no roofline pruning is applied.
+                  omitted (default None) NO roofline pruning is applied (prior
+                  behavior). Use :func:`make_roofline_ub_fn` for the production bound.
+    value_fn    : optional ``(sources, task) -> [float]`` scorer for PUCT priors,
+                  taking precedence over ``value_model``. Clean hook for the
+                  orchestrator to bind a trained value model (default None => the
+                  historical heuristic / rerank fallback).
 
     Returns a dict with:
       ``best_source``        - the incumbent (best CORRECT node by ``speedup_lcb``),
       ``best_speedup_lcb``   - its pessimistic measured speedup (None if none found),
       ``best_node``          - the incumbent :class:`Node` (or None),
       ``root``               - the root :class:`Node` (DAG entry point),
-      ``tree_stats``         - counters incl. the monotone ``incumbent_trace``.
+      ``tree_stats``         - counters incl. the ``incumbent_trace``.
     """
     cfg = config or AlphaKernelConfig()
-    engine = _Search(task, env, policy, value_model, budget, cfg, roofline_ub_fn)
+    engine = _Search(task, env, policy, value_model, budget, cfg, roofline_ub_fn,
+                     value_fn=value_fn)
     root = engine.run(root_source)
     inc = engine.incumbent
     return {

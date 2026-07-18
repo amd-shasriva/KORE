@@ -256,9 +256,11 @@ class ToolExecutor:
         # tracked independently of best_reward so the ``bench`` tool can report an
         # honest frontier delta ("did THIS change beat my fastest correct kernel?").
         self.best_speedup: Optional[float] = None
-        # Per-turn ROOFLINE POTENTIAL Phi(s) = rho (named-residual attainment) of the
-        # candidate evaluated this turn; None unless benched + correct. Consumed by
-        # the harness trace -> GRPO potential-based shaping (policy-invariant dense
+        # Per-turn ROOFLINE POTENTIAL Phi(s) of the candidate evaluated this turn;
+        # online the PMC-free eta = T_min/T_meas (phi_potential is called WITHOUT a
+        # counter dict here, so the named-residual rho is not used live). None unless
+        # benched + correct. Consumed by the harness trace -> GRPO potential-based
+        # shaping (an approximately policy-invariant, expected-gradient-neutral dense
         # credit toward the roofline). Fail-safe: any physics gap -> None.
         self.candidate_phi: Optional[float] = None
 
@@ -334,8 +336,14 @@ class ToolExecutor:
         # serial path's apply_reward_phase (audit R2 grpo C1/C2).
         _mode = os.environ.get("KORE_REWARD_MODE", "speedup")
         _phase = os.environ.get("KORE_REWARD_PHASE", "all")
+        # Paradigm-v3 anti-reward-hack: reject a measured time physically FASTER than the
+        # Speed-of-Light roofline T_min (a cache/stream/do-less measurement exploit) ->
+        # hack tier. Env-gated because the ToolExecutor has no config handle (the
+        # supervisor sets KORE_ROOFLINE_GATE for the flagship). Off => byte-identical.
+        _rg = os.environ.get("KORE_ROOFLINE_GATE", "0") == "1"
+        _rtol = float(os.environ.get("KORE_ROOFLINE_TOL", "0.25") or 0.25)
         rr = compute_kernel_reward(obs, src, self.task, mode=_mode, dtype=self.dtype,
-                                   reward_phase=_phase)
+                                   reward_phase=_phase, roofline_gate=_rg, roofline_tol=_rtol)
         self.candidate_src = src
         self.candidate_reward = rr.reward
         self.candidate_correct = rr.correct
@@ -363,7 +371,19 @@ class ToolExecutor:
         if rr.correct and do_bench:
             try:
                 from kore.reward.whitebox import phi_potential
-                self.candidate_phi = phi_potential(self.task, obs)
+                # Paradigm-v3 LIVE rho: when KORE_PHYSICS_LIVE_COUNTERS=1, profile the
+                # benched-correct kernel and thread the rocprofv3 counters into the
+                # potential so Phi is the named-residual rho (R^2~0.98), not the PMC-free
+                # eta. Deliberate opt-in (extra per-turn profiling cost); off => eta.
+                _counters = None
+                if os.environ.get("KORE_PHYSICS_LIVE_COUNTERS", "0") == "1":
+                    _collect = getattr(self.env, "collect_counters", None)
+                    if callable(_collect):
+                        try:
+                            _counters = _collect(src)
+                        except Exception:  # noqa: BLE001 - profiling is a bonus
+                            _counters = None
+                self.candidate_phi = phi_potential(self.task, obs, _counters)
             except Exception:  # noqa: BLE001 - physics is a bonus, never a hard dep
                 self.candidate_phi = None
         return obs, rr

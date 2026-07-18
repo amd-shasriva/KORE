@@ -41,10 +41,12 @@ from typing import Optional
 
 from kore.config import CONFIG
 from kore.reward.reward import (  # noqa: F401 - Observation re-exported for callers
+    DEFAULT_ROOFLINE_TOL,
     Observation,
     RewardResult,
     _format_component,
     compute_reward,
+    roofline_ceiling_violation,
 )
 
 # Default weight on the physics credit (rho in (0,1]) for a correct kernel, so a
@@ -229,6 +231,52 @@ def physics_signal_from_obs(task, obs, arch: Optional[str] = None) -> Optional[P
     return PhysicsSignal(t_min_ms=worst[1], measured_ms=worst[2])
 
 
+def roofline_ceiling_violation_from_obs(task, obs, tol: float = DEFAULT_ROOFLINE_TOL,
+                                        arch: Optional[str] = None) -> tuple[bool, str]:
+    """Detect a physically-impossible SUPER-ROOFLINE measured time on ANY benched shape.
+
+    For each shape with a positive measured wall, computes that shape's roofline
+    speed-of-light ``T_min`` and flags a ceiling violation
+    (``measured < T_min*(1 - tol)``) via
+    :func:`kore.reward.reward.roofline_ceiling_violation`. Returns ``(True, reason)`` on
+    the FIRST violating shape -- you cannot beat the speed of light on any shape, so one
+    impossible shape is enough to condemn the candidate -- else ``(False, "")``.
+
+    This mirrors the per-shape roofline iteration of :func:`physics_signal_from_obs` but
+    checks the CEILING (maximum attainment) rather than the worst-shape floor. FAIL-OPEN:
+    any op that is not roofline-modelable, has no positive timing, or an analysis import
+    failure yields ``(False, "")`` so the gate never rejects a candidate it cannot
+    physically adjudicate. Uses only ``T_min`` + measured wall time -- no PMC pass.
+    """
+    try:
+        from kore.analysis.rooflines import (
+            detect_arch, resolve_peaks, roofline, shape_to_str,
+        )
+    except Exception:  # noqa: BLE001 - analysis deps unavailable -> cannot adjudicate
+        return False, ""
+    a = arch or detect_arch()
+    peaks = resolve_peaks(a)
+    walls = dict(getattr(obs, "wall_by_shape", None) or {})
+    if not walls and getattr(obs, "wall_ms", None):
+        prim = task.shape("primary") if hasattr(task, "shape") else None
+        walls = {(prim.name if prim else "primary"): obs.wall_ms}
+    for name, wall in walls.items():
+        if not wall or wall <= 0:
+            continue
+        sh = task.shape(name) if hasattr(task, "shape") else None
+        dims = getattr(sh, "dims", None)
+        if not dims:
+            continue
+        rf = roofline(task.task_id, task.operation, task.dtype, shape_to_str(dims), dims, peaks, a)
+        if rf is None or not (rf.t_min_ms > 0):
+            continue
+        if roofline_ceiling_violation(wall, rf.t_min_ms, tol):
+            return True, (f"shape {name}: measured {wall:.4g} ms is below the roofline "
+                          f"speed-of-light T_min {rf.t_min_ms:.4g} ms (tol {tol:.2f}) -- "
+                          "physically impossible throughput; measurement exploit")
+    return False, ""
+
+
 def mask_reward_phase(rr: RewardResult, phase: str,
                       correctness_weight: float) -> RewardResult:
     """Correctness->latency curriculum mask (item 8), shared by the serial
@@ -249,7 +297,10 @@ def compute_kernel_reward(obs: Observation, source: str, task, *, mode: str = "s
                           dtype: str = "fp32", cfg=CONFIG, snr_threshold: Optional[float] = None,
                           physics_weight: float = DEFAULT_PHYSICS_WEIGHT,
                           response: Optional[str] = None,
-                          reward_phase: str = "all") -> RewardResult:
+                          reward_phase: str = "all",
+                          roofline_gate: bool = False,
+                          roofline_tol: float = DEFAULT_ROOFLINE_TOL,
+                          arch: Optional[str] = None) -> RewardResult:
     """Single dispatch point for the kernel reward used by the live training loop.
 
     ``mode="residual"`` scores with the physics residual-descent reward (roofline
@@ -264,9 +315,29 @@ def compute_kernel_reward(obs: Observation, source: str, task, *, mode: str = "s
     honors the same phase curriculum as the serial GRPO path -- previously the mask
     was serial-only and the agentic reward always included the speed term, making the
     correctness phase a no-op agentically (audit R2 grpo C1/C2).
+
+    ``roofline_gate`` (default OFF) enables the anti-reward-hack roofline SPEED-OF-LIGHT
+    ceiling BEFORE dispatch and UNIFORMLY for both modes: if the candidate's measured
+    time on any benched shape is physically impossible below that shape's ``T_min``
+    (see :func:`roofline_ceiling_violation_from_obs`, tolerance ``roofline_tol``), it is
+    rejected to the hack tier (``cfg.reward_hack``) -- a measurement exploit (warm-cache
+    / do-less / forged-timer speedup) can never be rewarded, preserving the
+    lexicographic ordering (hack < compile < incorrect < correct). With
+    ``roofline_gate=False`` the dispatch is byte-identical to the pre-gate behavior.
     """
+    # Anti-reward-hack ROOFLINE CEILING (opt-in). A super-speed-of-light measured time
+    # is a timing exploit, not a faster kernel; drop it to the hack floor uniformly
+    # across modes. Inert (and byte-identical) unless ``roofline_gate`` is set.
+    if roofline_gate:
+        violated, why = roofline_ceiling_violation_from_obs(task, obs, roofline_tol, arch)
+        if violated:
+            return RewardResult(cfg.reward_hack, False, None, "hack",
+                                ["hack", "roofline_ceiling"], why)
     if mode == "residual":
-        sig = physics_signal_from_obs(task, obs)
+        # arch defaults to None -> physics_signal_from_obs runs detect_arch() exactly as
+        # before (behavior-preserving); an explicit arch (e.g. from the ceiling gate)
+        # keeps the residual reward and the gate on the SAME roofline.
+        sig = physics_signal_from_obs(task, obs, arch)
         if sig is not None:
             rr = compute_residual_reward(
                 obs, sig, source=source, dtype=dtype, cfg=cfg,

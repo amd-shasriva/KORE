@@ -541,12 +541,45 @@ transfer. For the release we additionally:
 
 ---
 
+## 4.8 What's already implemented (`kore/eval/`), vs. what's still aspirational above
+
+Sections 1-4 above are a **build spec** for growing the taxonomy toward 200-400 tasks; the
+*evaluation machinery* they assume is largely already real, in `kore/eval/`:
+
+- **`fastp.py`** - the `fast_p` metric itself (fraction correct AND `>p`× faster than baseline).
+- **`kernelbench_amd.py`** - the **KernelBench-AMD adapter**: `spec_to_task` maps a KernelBench-style
+  problem (Level 1/2 `Model.forward` + input generator) onto a genuine KORE `Task` so it runs through
+  KORE's own verified pipeline, and `to_kernelbench_report` renders a KORE result back into the
+  field-standard `fast_p@{1.0,1.5,2.0}` shape for cross-comparison. Ships bundled offline fixtures
+  (elementwise/gemm/fused) so the bridge is CPU-testable without a real KernelBench checkout.
+- **`robust_eval.py`** - **Robust-kbench-style hardening** of the eval-time correctness verdict:
+  reseeded random inits, the enumerated adversarial regimes, non-contiguous inputs, a differential
+  fp64 oracle (catches a precision downgrade that plain `allclose` waves through), and the
+  permutation/homogeneity/additivity metamorphic relations - all pure functions over a
+  candidate/reference callable pair, so they're CPU/torch-testable without a GPU.
+- **`paired_stats.py`** - **paired significance** for "KORE vs. baseline/Opus" claims: geometric-mean
+  speedup ratio as the effect size, a paired bootstrap 95% CI, the exact sign test, and the Wilcoxon
+  signed-rank test - because both sides are scored on the same held-out tasks under a matched budget
+  (`bakeoff.py`/`vs_opus.py`), so per-task deltas are paired and far more powerful than an unpaired
+  comparison.
+
+What's still aspirational (not yet built): the `author.py` semi-automatic task generator (§3), the
+`coverage_report.py` completeness checker (§4.1), and growing the registry from its current 282
+tasks (§5.1) toward the 200-400-task taxonomy in §1. Tests: `kore/eval/tests/test_eval_frontier.py`
+and `tests/test_korebench.py`.
+
+---
+
 ## 5. PRIORITIZED BUILD ORDER
 
 ### 5.1 First ~50 tasks (highest value = Amdahl weight × headroom × already-have-baseline)
 
-These reuse the existing 15 hand-authored tasks + `aiter_ref*.py` wrappers, so the vendor
-bindings largely exist. Order:
+The registry has grown past this blueprint's original snapshot - `kore/tasks/registry.py` holds
+**282 tasks today** (55 hand-authored + 201 `gen_*` + 26 `genv_*` vendor-baselined; see
+[`kore/tasks/README.md`](../kore/tasks/README.md) for the live count), and many of the "first ~50"
+below already exist with a real vendor binding (marked `(have)`). Re-derive what's actually
+missing from `registry.all_tasks()` rather than this list before starting new authoring work.
+Order:
 
 1. **GEMM core (10):** G1 bf16 square, G2 MLP-up, G6 fp8 per-tensor, G7 fp8 a8w8 (have),
    G8 fp8 block-scale, G9 int8 W8A8, G4 skinny decode-GEMV, G5 huge-N logits, G16 epilogue-

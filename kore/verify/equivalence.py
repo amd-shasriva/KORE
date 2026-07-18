@@ -491,6 +491,7 @@ def verify_equivalence(
     tol: Optional[Tolerance] = None,
     adversarial: bool = True,
     metamorphic: bool = True,
+    adversarial_inputs_fn: Optional[Callable] = None,
     seed0: int = 0,
 ) -> VerificationResult:
     """Run the full multi-pronged equivalence check on a candidate kernel.
@@ -512,6 +513,12 @@ def verify_equivalence(
         battery layout and the metamorphic identity set.
     arity
         Number of input operands. Inferred from ``input_gen`` output if omitted.
+    adversarial_inputs_fn
+        Optional drop-in replacement for :func:`kore.verify.adversarial.adversarial_inputs`
+        (same signature) supplying the adversarial prong's cases. ``None`` (default) uses
+        the fixed enumerated battery and is byte-identical to omitting it. Pass
+        ``FoldResult.adversarial_inputs_fn()`` (from the coevolution fold) to strengthen
+        the deterministic prong with auto-discovered breaking regimes.
 
     Returns a :class:`VerificationResult`. ``torch`` is only touched (lazily) if the
     kernels/generators use it; the orchestration itself is torch-free.
@@ -550,12 +557,19 @@ def verify_equivalence(
 
     # ---- 2. adversarial prong (deterministic) ------------------------------ #
     if adversarial:
-        from kore.verify.adversarial import adversarial_inputs
+        # Default (None) is BYTE-IDENTICAL to before: use the fixed enumerated battery.
+        # A caller may inject a drop-in generator (same signature) - e.g. the
+        # coevolution fold's ``FoldResult.adversarial_inputs_fn()`` - to add discovered
+        # breaking regimes to this deterministic prong. OFF by default.
+        if adversarial_inputs_fn is None:
+            from kore.verify.adversarial import adversarial_inputs as _adv_fn
+        else:
+            _adv_fn = adversarial_inputs_fn
 
         adv_pairs = []
         adv_labels = []
-        for name, inputs in adversarial_inputs(shape, dtype, arity=arity,
-                                               op_class=op_class, device=device):
+        for name, inputs in _adv_fn(shape, dtype, arity=arity,
+                                    op_class=op_class, device=device):
             ref_out = reference_fn(*inputs)
             cand = _call(candidate_fn, inputs)
             if isinstance(cand, Exception):

@@ -300,9 +300,10 @@ def test_fast_math_recip_uses_hardware_reciprocal():
 
 
 def test_exact_transforms_keep_the_kernel_wellformed():
-    # An exact rewrite preserves the structural skeleton of the kernel.
-    for name in ("set_num_warps", "swizzle_group_m", "vectorize_loads", "reorder_loads"):
-        params = {"value": 8} if name == "set_num_warps" else (
+    # An exact rewrite preserves the structural skeleton of the kernel. (Uses only
+    # GENUINELY-exact transforms; set_num_warps is now honestly typed approx.)
+    for name in ("set_num_stages", "swizzle_group_m", "vectorize_loads", "reorder_loads"):
+        params = {"value": 4} if name == "set_num_stages" else (
             {"value": 16} if name == "swizzle_group_m" else {})
         out = get(name).apply(GEMM, **params)
         assert out and "@triton.jit" in out and "def gemm(" in out
@@ -363,10 +364,12 @@ def test_relation_algebra_helpers():
 
 
 def test_exact_only_trajectory_stays_exact_and_spends_nothing():
+    # NOTE: set_num_warps is now (honestly) approx, so this uses two GENUINELY
+    # bit-preserving moves - num_stages (pipelining) + GROUP_M (program swizzle).
     budget = _fresh(total=0.5)
     new, applied, rejected, state = apply_sequence(
         GEMM,
-        [("set_num_warps", {"value": 8}), ("swizzle_group_m", {"value": 16})],
+        [("set_num_stages", {"value": 4}), ("swizzle_group_m", {"value": 16})],
         budget)
     assert len(applied) == 2 and not rejected
     assert state["relation"] == RELATION_EXACT

@@ -369,10 +369,13 @@ class GRPOConfig(DistributedMixin):
     # per-turn return instead of hard-zeroing it -- densifies the gradient in the
     # deceptive not-yet-correct band while keeping correctness lexicographically
     # dominant. physics_shaping_weight: weight on the potential-based shaping
-    # F_t = gamma*Phi(s_{t+1}) - Phi(s_t) with Phi = roofline attainment rho
-    # (kore.reward.whitebox.phi_potential). By the Ng-Harada-Russell theorem this is
-    # policy-invariant at ANY weight, so it cannot introduce a reward-hacking
-    # incentive -- it only densifies per-turn credit toward the roofline.
+    # F_t = gamma*Phi(s_{t+1}) - Phi(s_t) with Phi = roofline attainment
+    # (kore.reward.whitebox.phi_potential; online the PMC-free eta, since rollout
+    # sites call it without counters -- the named-residual rho is offline-only). By
+    # Ng-Harada-Russell this is only APPROXIMATELY policy-invariant here (the offset
+    # feeds GRPO's std-normalized group-relative advantage; a correct->incorrect
+    # boundary leaves a small bounded ~0.06 leak) -- an expected-gradient-neutral
+    # state-dependent baseline. The anti-hack spine is the correctness gate, not this.
     credit_incorrect_turns: bool = False
     physics_shaping_weight: float = 0.0
 
@@ -390,6 +393,31 @@ class GRPOConfig(DistributedMixin):
     # OFF-POLICY distillation target (fed to coevolve_distill_path), never attributed
     # to the on-policy gradient -- so it is sound at any setting.
     search_every: int = 25
+    # --- Paradigm-v3 DEEP search (all default OFF -> byte-identical to the shallow
+    # flat search above). search_bnb: roofline admissible branch-and-bound pruning
+    # (kore.search.make_roofline_ub_fn); search_value_prior: use the trained value
+    # model (value_model_path) as the PUCT prior via kore.value.rerank.score_candidates;
+    # search_k_expand/search_max_depth: widen/deepen the transform tree. The hook stays
+    # off-policy search-then-distill, so any setting is sound (never on-policy credit).
+    search_bnb: bool = False
+    search_value_prior: bool = False
+    search_k_expand: int = 4
+    search_max_depth: Optional[int] = None
+
+    # --- Paradigm-v3 anti-reward-hack + physics (default OFF) ---
+    # roofline_gate: reject any measured time physically FASTER than the Speed-of-Light
+    # roofline T_min (a measurement exploit) -> hack tier (Sakana/CUDA-L1 defense). Also
+    # read from KORE_ROOFLINE_GATE in the agentic tool path (ToolExecutor has no config).
+    roofline_gate: bool = False
+    roofline_tol: float = 0.25
+    # physics_live_counters: thread per-turn rocprofv3 counters into the PBS potential so
+    # Phi is the R^2~0.98 named-residual rho (not the PMC-free eta). Serial path reuses
+    # the dense-profile counters (free); the agentic path reads KORE_PHYSICS_LIVE_COUNTERS
+    # and profiles the benched-correct kernel (extra rocprofv3 cost -> deliberate opt-in).
+    physics_live_counters: bool = False
+    # transform_discover: merge SNR-gated discovered rewrites (kore.transform.discover)
+    # into the search action space. Off -> curated library only.
+    transform_discover: bool = False
 
     # --- Paradigm-v2 open-ended minting (P3) ---
     # coevolve_mint: let the CoevolutionController mint NET-NEW correct-by-construction
@@ -397,6 +425,18 @@ class GRPOConfig(DistributedMixin):
     # curriculum open-endedly (measured-roofline QD + learning-progress).
     coevolve_mint: bool = False
     coevolve_mint_batch: int = 8
+    # coevolve_evolve_grammar: self-referential minter -- evolve the grammar productions
+    # so the minted-task space is open-ended (the 8-check construction gate + materialize
+    # self-check still enforce correctness per task). Also read from KORE_MINTER_EVOLVE_
+    # GRAMMAR by the minter. coevolve_regret_vs_opus + coevolve_opus_scores_path: weight
+    # served tasks by regret-vs-Opus x learnability (needs an Opus-score map; inert
+    # otherwise). All default OFF -> byte-identical curriculum.
+    coevolve_evolve_grammar: bool = False
+    coevolve_regret_vs_opus: bool = False
+    coevolve_opus_scores_path: Optional[str] = None
+    # adversarial_coevolve: escalate the correctness battery during RL via co-evolved
+    # adversarial tests (kore.verify.adversarial). Staged OFF (hot-path cost).
+    adversarial_coevolve: bool = False
 
     # --- Agentic tool-use RL (ToolRL reward shaping) ---
     agentic: bool = False                   # rollouts drive build/test/bench/pmc tools

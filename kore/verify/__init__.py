@@ -19,6 +19,16 @@ Public API
     false_accept_probability
     adversarial_inputs / adversarial_patterns / dtype_extremes
     metamorphic_relations / MetamorphicRelation
+
+Coevolutionary adversarial generation (ADDITIVE, OFF BY DEFAULT; nothing above invokes
+it - a caller opts in explicitly):
+    coevolve_tests          minimal-criterion coevolution that evolves test-cases to
+                            BREAK currently-passing candidates (injectable, pure CPU)
+    TestCase / generate_cases / mutate_case / crossover_cases   evolvable case genomes
+    random_search           undirected baseline (the honest control)
+    fold_breaking_cases     fold discovered breaks into a strengthened deterministic
+                            battery -> verify_equivalence(..., adversarial_inputs_fn=...)
+    CoevolutionResult / RoundStats / CaseOutcome / RandomSearchResult / FoldResult
 """
 
 from __future__ import annotations
@@ -36,10 +46,24 @@ from kore.verify.equivalence import (
     verify_equivalence,
 )
 from kore.verify.adversarial import (
+    CaseOutcome,
+    CoevolutionResult,
+    FoldResult,
+    RandomSearchResult,
+    RoundStats,
+    TestCase,
     adversarial_inputs,
     adversarial_patterns,
+    coevolve_tests,
+    crossover_cases,
     dtype_extremes,
     dtype_max,
+    fold_breaking_cases,
+    generate_cases,
+    list_families,
+    make_strengthened_inputs,
+    mutate_case,
+    random_search,
 )
 from kore.verify.metamorphic import MetamorphicRelation, metamorphic_relations
 
@@ -60,4 +84,19 @@ __all__ = [
     "dtype_max",
     "metamorphic_relations",
     "MetamorphicRelation",
+    # coevolutionary adversarial test-case generation (additive, off by default)
+    "TestCase",
+    "list_families",
+    "generate_cases",
+    "mutate_case",
+    "crossover_cases",
+    "coevolve_tests",
+    "CoevolutionResult",
+    "RoundStats",
+    "CaseOutcome",
+    "random_search",
+    "RandomSearchResult",
+    "fold_breaking_cases",
+    "FoldResult",
+    "make_strengthened_inputs",
 ]

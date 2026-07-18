@@ -13,14 +13,20 @@ Everything needed to run KORE end-to-end: the campaign orchestrator, the portabl
 | `tmux_campaign.sh` | Run the conductor launcher in a durable detached tmux session |
 | `run_full_14b.sh` | Legacy full-14B launcher with **hardcoded** dev-node paths (`/root/Kore-rl/kore`) |
 | `run_e2e_14b.sh` | Bounded end-to-end validation run |
+| `run_grpo_resilient.sh` | GRPO launcher for a **heavily-shared node**: dynamically picks the GPUs that are free right now and retries across transient VRAM spikes from other users' jobs |
+| `run_v2_reuse_14b.sh` | v2 rerun that **reuses v1 kernels** instead of regenerating: `reverify` (re-measure existing kernels, no teacher) → `datagen` (coverage holes only) → `build` → `midtrain..eval` |
 | `launch_distributed.sh` | `accelerate launch` wrapper for a single FSDP stage |
-| `kore_supervise.py` | Keep the full `datagen..eval` campaign alive across transient deaths (relaunch + `--force` resume, sparse ALERTs) |
+| `kore_supervise.py` | Keep a `run_campaign.py --full-ft` invocation alive across transient deaths (relaunch, resumes via the manifest, sparse ALERTs; `--force`/`--stages` are env-gated - see below) |
 | `kore_monitor.py` | **Read-only** stage/health monitor: tails the live log, emits ALERT lines (no launching) |
 | `kore_pause_after_datagen.py` | Halt the run cleanly at the **datagen→build boundary** so new code can land before the training stages |
 | `kore_resume_supervise.py` | Wait for the pause sentinel, then auto-relaunch **build→eval** on the new code + supervise |
 | `grpo_smoke.py`, `sft_smoke.py`, `smoke_env.py` | Tiny real runs to prove a subsystem works |
 | `test_amd_gateway.py` | One-call check that the Claude gateway key works |
 | `_repro_grpo_step.py` | Minimal GRPO-step reproduction harness |
+| `eval_bakeoff_multi.py` | Matched-budget bake-off across the improvement ladder (seed → base → midtrain → SFT → DPO, optionally vs. Opus): `fast_p`, correctness rate, geomean speedup |
+| `prove_dense_reward.py` | One-off proof that the dense hardware-counter reward (`--profile-reward`) is actually live on-silicon (not silently inert): exercises `env.collect_counters → roofline_dense_score` on a real compute-bound kernel |
+| `prove_new_ops.py` | GPU-proves a batch of new task seeds compile + pass rigorous correctness + beat baseline; exits non-zero on any failure (a poison gate before registering new tasks) |
+| `_validate_benchboth.py` | A/B check that a batched timing path (`--bench-both`) reproduces the legacy per-impl timing's speedup distribution within run-to-run variance |
 
 ---
 
@@ -31,15 +37,19 @@ flowchart LR
   subgraph resume[manifest resume]
     M["campaign_manifest.json<br/>done_stages + ckpts"]
   end
-  DG[datagen] --> AG[agentic] --> BU[build] --> MT[midtrain] --> SFT[sft] --> DPO[dpo] --> GRPO[grpo] --> SP[soup] --> EV[eval]
-  M -.->|skip if done_stages ∧ artifact_ok| DG
-  M -.-> MT
+  MT[midtrain] --> DG[datagen] --> AG[agentic] --> BU[build] --> SFT[sft] --> DPO[dpo] --> GRPO[grpo] --> SP[soup] --> EV[eval]
+  M -.->|skip if done_stages ∧ artifact_ok| MT
+  M -.-> DG
   M -.-> SFT
 ```
+
+`DEFAULT_STAGES` (9 stages, run in this order when `--stages` is omitted) is `midtrain, datagen, agentic, build, sft, dpo, grpo, soup, eval` - midtrain runs FIRST because continued-pretraining trains on a general Triton/HIP corpus, not on the task-specific datagen output, so it has no dependency on `datagen`/`agentic`/`build`. A `--stages` list you pass explicitly is executed in the order you give it (e.g. the live run's `--stages midtrain,build,sft,dpo,grpo,soup,eval` skips `datagen`/`agentic` because that data was already generated in a prior invocation and is being reused/resumed).
 
 **Resume logic.** After each stage the manifest records `done_stages` and the real checkpoint path (atomic write). On restart a stage is skipped only if it is in `done_stages` **and** `_artifact_ok(stage)` finds its on-disk artifact - so a stale "done" flag with a missing checkpoint correctly re-runs. `--force --stages <s>` re-runs regardless. Datagen additionally resumes at shard level (see [`kore/data`](../kore/data/README.md)).
 
 **Retention gates** run after midtrain/sft/dpo/grpo; a FAIL hard-stops the campaign (see [`kore/eval`](../kore/eval/README.md)).
+
+**Full-FT dispatch.** Under `--full-ft`, each of `midtrain`/`sft`/`dpo`/`grpo` is rendered into a resolved JSON and shelled out to `scripts/launch_distributed.sh <stage> <resolved.json>` (`accelerate launch`); see [`configs/README.md`](../configs/README.md) for exactly how the resolved config is built (`_launch_distributed`) and where it's written under `<data_root>/launch/`.
 
 ### Key CLI flags (defaults)
 
@@ -84,13 +94,13 @@ Four Python helpers wrap a live, multi-day campaign. They all emit sparse `ALERT
 | Script | Launches? | Scope | Role |
 | --- | --- | --- | --- |
 | `kore_monitor.py` | no (read-only) | any live campaign | Observe + alert only |
-| `kore_supervise.py` | yes | full `datagen..eval` | Keep the run alive across deaths |
+| `kore_supervise.py` | yes | `build..eval` by default (`KORE_SUP_STAGES` extends it, e.g. to `midtrain,datagen,...`) | Keep the run alive across deaths |
 | `kore_pause_after_datagen.py` | no (stops procs) | at `datagen→build` | Halt cleanly so new code can land |
 | `kore_resume_supervise.py` | yes | `build..eval` | Auto-resume on the new code + supervise |
 
 **`kore_monitor.py`** - a **read-only** watcher. It polls the newest campaign log (from `/tmp/kore_foldin_logpath.txt`, else the newest `runs/full/logs/campaign_foldin_*.log`) and the campaign pid every `KORE_MONITOR_POLL_S` (default 180s), and additionally alerts on a **429 rate-limit *storm*** (a big jump, not the odd retry). It self-terminates on `campaign complete` or a confirmed death (pid gone two consecutive polls). It never launches or kills the campaign.
 
-**`kore_supervise.py`** - owns the **full** `datagen,build,midtrain,sft,dpo,grpo,soup,eval` lifecycle. Each attempt: reap our stale workers → (re)launch `run_campaign.py --full-ft --force …` (which resumes via `shard_done` + the manifest) → poll its log, alerting on the events above. On a non-completion exit it relaunches with bounded retries (`KORE_SUP_MAX_RETRIES`, default 12) + cooldown (`KORE_SUP_COOLDOWN_S`, default 90s); it stops on completion or exhausted retries. Writes the active log path to `/tmp/kore_foldin_logpath.txt`.
+**`kore_supervise.py`** - keeps a `run_campaign.py --full-ft` invocation alive across transient deaths. Its default `--stages` is `build,sft,dpo,grpo,soup,eval` (env-overridable via `KORE_SUP_STAGES`, e.g. to prepend `midtrain` and/or `datagen`) - resume relies on the campaign manifest + `shard_done`, so `--force` is only appended when `KORE_SUP_FORCE=1` is set (default off, so a relaunch resumes rather than re-running completed stages). Each attempt: reap our stale workers → (re)launch `run_campaign.py --full-ft --use-hf --teacher claude --adaptive-steps [--force] …` → poll its log, alerting on the events above. On a non-completion exit it relaunches with bounded retries (`KORE_SUP_MAX_RETRIES`, default 12) + cooldown (`KORE_SUP_COOLDOWN_S`, default 90s); it stops on completion or exhausted retries. Writes the active log path to `/tmp/kore_foldin_logpath.txt`. `KORE_DATAGEN_WORKERS` defaults to 64 in this script (higher than `run_conductor_14b.sh`'s 32 default below) and is passed through as `--datagen-workers`; it also hard-sets `KORE_VERIFIED_CORRECTNESS`/`KORE_COMPILE_BASELINE`/`KORE_SHAPE_AUGMENT`/`KORE_BENCH_COLD=1` (via `setdefault`, so an explicit env still wins) so every training subprocess it launches inherits the rigorous verification gates.
 
 ### The paradigm-v2 fold-in (pause → resume)
 

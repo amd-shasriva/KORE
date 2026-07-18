@@ -1,6 +1,6 @@
 # `kore/tasks` - kernel task registry
 
-Every RL "environment instance" is a **kernel-optimization task**: a Triton kernel to make fast, an fp32 **reference oracle** for correctness, a **production vendor baseline** to beat (AITER / hipBLASLt / framework), a set of evaluation **shapes**, and a driver contract the verifier speaks. Tasks are discovered from `<task_id>/task.yaml` directories. Today the registry holds **251 tasks** (249 train, 2 held-out): 24 hand-authored, 201 generated (`gen_*`, torch/framework baseline), 26 vendor-baselined (`genv_*`, real AITER/hipBLASLt baseline).
+Every RL "environment instance" is a **kernel-optimization task**: a Triton kernel to make fast, an fp32 **reference oracle** for correctness, a **production vendor baseline** to beat (AITER / hipBLASLt / framework), a set of evaluation **shapes**, and a driver contract the verifier speaks. Tasks are discovered from `<task_id>/task.yaml` directories. Today the registry holds **282 tasks** (280 train, 2 held-out): 55 hand-authored, 201 generated (`gen_*`, torch/framework baseline), 26 vendor-baselined (`genv_*`, real AITER/hipBLASLt baseline). (`registry.all_tasks()` is the live source of truth; the hand-authored count has grown well past earlier snapshots as the flash-attention/GEMM-fp8/MoE families were fleshed out - re-derive it with `PYTHONPATH=. python -c "from kore.tasks import registry; print(len(registry.all_tasks()))"` rather than trusting any hardcoded number, including this one.)
 
 The registry also defines the **authoritative train / held-out split** by operator family and architecture, so generalization can never be leaked.
 
@@ -97,7 +97,7 @@ flowchart TD
 flowchart LR
   GO[generate_ops.py] --> GEN["gen_*/ dirs"]
   GVO[generate_vendor_ops.py] --> GENV["genv_*/ dirs"]
-  HAND[24 hand-authored tasks] --> REG
+  HAND[55 hand-authored tasks] --> REG
   GEN --> REG[registry discovery]
   GENV --> REG
   REG --> TRAIN[train_tasks]

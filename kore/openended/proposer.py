@@ -15,6 +15,18 @@ by three signals:
   * **novelty** - distance from the current task archive's occupied niches, so
     the proposer expands into unexplored regions of behavior space.
 
+An OPTIONAL fourth signal (OFF by default) anchors the curriculum to a
+*competitor*. When a per-task ``opus_scores`` map is supplied to
+:func:`score_descriptor` / :func:`rank_descriptors` / :func:`propose` (values are
+a ``regret_vs_opus`` signal in ``[0, 1]`` - e.g. a normalized
+``opus_speedup - kore_speedup`` gap, higher => more headroom to overtake Opus),
+each task gets an additive ``opus_regret * regret_vs_opus * learnability`` boost.
+Multiplying by learnability concentrates compute on tasks that are BOTH learnable
+AND where KORE is closest to overtaking Opus 4.8. It is fully fail-safe (missing
+ids / NaN / non-finite / out-of-range values fall back to the plain score) and,
+when ``opus_scores`` is ``None`` (the default), scoring is byte-identical to the
+learnability+regret+novelty behavior below.
+
 Guardrails against collapse: descriptors with strong evidence of being
 *unsolvable* (``p ~ 0``) or *trivial* (``p ~ 1``) are hard-filtered (score 0);
 and :func:`propose` enforces per-niche diversity so the frontier can't collapse
@@ -27,8 +39,10 @@ not import :mod:`kore.openended.archive` (keeps the dependency graph acyclic).
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
+from typing import Optional
 
 from kore.openended import task_space as ts
 
@@ -59,9 +73,21 @@ class DescriptorStats:
 
 @dataclass(frozen=True)
 class ScoreWeights:
+    """Relative weights of the frontier-scoring signals.
+
+    ``opus_regret`` weights the OPTIONAL competitor-anchored term
+    ``opus_regret * regret_vs_opus * learnability`` and is only ever applied when
+    a per-task ``regret_vs_opus`` value is supplied (see :func:`score_descriptor`);
+    with no ``opus_scores`` the term is absent, so its value cannot change the
+    default learnability+regret+novelty score. The default ``1.0`` makes a task at
+    peak learnability with maximal ``regret_vs_opus`` receive a boost equal to its
+    learnability contribution - a strong-but-bounded pull toward the Opus frontier.
+    """
+
     learnability: float = 1.0
     regret: float = 0.5
     novelty: float = 0.5
+    opus_regret: float = 1.0
 
 
 DEFAULT_WEIGHTS = ScoreWeights()
@@ -69,6 +95,24 @@ DEFAULT_WEIGHTS = ScoreWeights()
 
 def clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, float(x)))
+
+
+def _sanitize_regret_vs_opus(value) -> Optional[float]:
+    """Coerce an externally-supplied ``regret_vs_opus`` value to ``[0, 1]`` or drop it.
+
+    Fail-safe by design so a noisy competitor signal can never corrupt the
+    curriculum: ``None``, non-numeric, ``NaN`` and non-finite (``+/-inf``) values
+    return ``None`` (=> the task keeps its plain score), and in-range/out-of-range
+    finite values are clamped to ``[0, 1]``."""
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v):        # NaN or +/-inf -> ignore (treat as missing)
+        return None
+    return clamp(v)
 
 
 def learnability(p: float) -> float:
@@ -87,17 +131,31 @@ def is_viable(stats: DescriptorStats) -> bool:
 
 
 def score_descriptor(stats: DescriptorStats,
-                     weights: ScoreWeights = DEFAULT_WEIGHTS) -> float:
-    """Frontier score = learnability (+ regret + novelty), 0 if guardrail-filtered.
+                     weights: ScoreWeights = DEFAULT_WEIGHTS,
+                     *, regret_vs_opus: Optional[float] = None) -> float:
+    """Frontier score = learnability (+ regret + novelty [+ opus]), 0 if filtered.
 
     With ``regret == novelty == 0`` the score reduces to learnability and thus
     peaks at ``p = 0.5``. Trivial / unsolvable descriptors (with evidence) score
-    exactly ``0.0`` regardless of novelty/regret so they are never proposed."""
+    exactly ``0.0`` regardless of novelty/regret so they are never proposed.
+
+    ``regret_vs_opus`` is the OPTIONAL competitor-anchored signal for this task
+    (a normalized ``[0, 1]`` gap to Opus 4.8, higher => more headroom to overtake).
+    When supplied, an additive ``weights.opus_regret * regret_vs_opus *
+    learnability`` term is blended in - MULTIPLIED by learnability so a task must be
+    both learnable AND close-to-overtaking to be boosted. It is fail-safe (see
+    :func:`_sanitize_regret_vs_opus`): a ``None`` / NaN / non-finite value adds
+    nothing, so with ``regret_vs_opus=None`` (the default) the returned score is
+    byte-identical to the learnability+regret+novelty score."""
     if not is_viable(stats):
         return 0.0
-    score = weights.learnability * learnability(stats.solve_rate)
+    lp = learnability(stats.solve_rate)
+    score = weights.learnability * lp
     score += weights.regret * clamp(stats.headroom_regret)
     score += weights.novelty * clamp(stats.novelty)
+    r = _sanitize_regret_vs_opus(regret_vs_opus)
+    if r is not None:
+        score += weights.opus_regret * r * lp
     return score
 
 
@@ -144,16 +202,41 @@ def _resolve_stats(desc: ts.TaskDescriptor, history: dict, archive) -> Descripto
     )
 
 
+def _lookup_regret_vs_opus(opus_scores, desc) -> Optional[float]:
+    """Look up ``desc``'s ``regret_vs_opus`` in an ``opus_scores`` map (or ``None``).
+
+    The map is keyed by ``task_id`` (the external orchestrator's natural key, e.g.
+    ``gen_relu_bf16`` / ``genv_rmsnorm_bf16``); a descriptor object key is also
+    accepted as a convenience. Missing ids / empty / ``None`` map / any lookup
+    error => ``None`` (the task keeps its plain score), so an incomplete competitor
+    map is safe: only the tasks it actually names get the competitor boost."""
+    if not opus_scores:
+        return None
+    try:
+        tid = desc.task_id
+        if tid in opus_scores:
+            return opus_scores[tid]
+        return opus_scores.get(desc)
+    except (TypeError, AttributeError):
+        return None
+
+
 def rank_descriptors(pool, history=None, archive=None,
-                     weights: ScoreWeights = DEFAULT_WEIGHTS) -> list:
+                     weights: ScoreWeights = DEFAULT_WEIGHTS,
+                     *, opus_scores=None) -> list:
     """Return ``[(score, descriptor), ...]`` sorted by score desc (deterministic).
 
-    Ties are broken by the descriptor's total order so the ranking is stable."""
+    Ties are broken by the descriptor's total order so the ranking is stable.
+
+    ``opus_scores`` (optional) is a ``{task_id: regret_vs_opus}`` map that, when
+    given, blends the competitor-anchored term into each task's score (see
+    :func:`score_descriptor`). ``None`` (default) => byte-identical ranking."""
     history = history or {}
     scored = []
     for desc in pool:
         stats = _resolve_stats(desc, history, archive)
-        scored.append((score_descriptor(stats, weights), desc))
+        rvo = _lookup_regret_vs_opus(opus_scores, desc)
+        scored.append((score_descriptor(stats, weights, regret_vs_opus=rvo), desc))
     scored.sort(key=lambda item: (item[0], ts._sort_key(item[1])), reverse=True)
     return scored
 
@@ -163,7 +246,8 @@ def propose(archive, history, n, seed: int = 0, *,
             weights: ScoreWeights = DEFAULT_WEIGHTS,
             mutate: bool = True,
             max_per_niche: int = 2,
-            candidate_pool=None) -> list:
+            candidate_pool=None,
+            opus_scores=None) -> list:
     """Propose ``n`` frontier tasks by selecting + mutating high-learnability ones.
 
     Steps: (1) build a candidate pool (measured history ∪ the full parametric
@@ -176,7 +260,12 @@ def propose(archive, history, n, seed: int = 0, *,
     Deterministic given ``seed``. Guardrail: guardrail-filtered (trivial /
     unsolvable) descriptors have score ``0`` and are skipped in the primary pass;
     a novelty-driven fallback guarantees ``n`` tasks are still returned even when
-    every measured task has collapsed to trivial/unsolvable."""
+    every measured task has collapsed to trivial/unsolvable.
+
+    ``opus_scores`` (optional ``{task_id: regret_vs_opus}`` map, default ``None``)
+    is threaded into the ranking so the competitor-anchored term concentrates the
+    proposed batch on tasks that are BOTH learnable AND close to overtaking Opus
+    (see :func:`score_descriptor`). ``None`` => byte-identical to prior behavior."""
     if n <= 0:
         return []
     rng = random.Random(seed)
@@ -186,7 +275,7 @@ def propose(archive, history, n, seed: int = 0, *,
     else:
         pool = list(dict.fromkeys(
             list(history.keys()) + ts.enumerate_descriptors(include_vendor)))
-    ranked = rank_descriptors(pool, history, archive, weights)
+    ranked = rank_descriptors(pool, history, archive, weights, opus_scores=opus_scores)
 
     out: list = []
     niche_count: dict = {}

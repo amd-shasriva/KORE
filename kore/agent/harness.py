@@ -74,7 +74,7 @@ class AgentEpisode:
     turn_rewards: list[float] = field(default_factory=list)   # per-turn verified reward
     turn_correct: list[bool] = field(default_factory=list)    # per-turn correctness
     turn_speedups: list = field(default_factory=list)         # per-turn MEASURED speedup (or None)
-    turn_phis: list = field(default_factory=list)             # per-turn roofline potential Phi=rho (or None)
+    turn_phis: list = field(default_factory=list)             # per-turn roofline potential Phi (online eta; rho w/ counters) or None
     turn_codes: list[str] = field(default_factory=list)       # per-turn candidate kernel source
     reflections: list[dict] = field(default_factory=list)     # structured reflect turns
     phase_trace: list[dict] = field(default_factory=list)     # [{turn, phase}]

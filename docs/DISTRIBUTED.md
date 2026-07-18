@@ -119,9 +119,11 @@ from the config:
   SNR-progress reward (below `correctness_weight`) instead of a hard zero, so the
   gradient is not flat across the not-yet-correct band; and
 - **P0b** `physics_shaping_weight` - the roofline-attainment potential
-  `Φ(s)=ρ` (`kore.reward.whitebox.phi_potential`) is added as Ng-Harada-Russell
-  PBS `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` (`kore.reward.shaping`), policy-invariant at
-  any weight.
+  `Φ(s)` (`kore.reward.whitebox.phi_potential`; online the PMC-free `η`, not the
+  named-residual `ρ`) is added as Ng-Harada-Russell PBS
+  `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` (`kore.reward.shaping`), *approximately* policy-
+  invariant (an expected-gradient-neutral state-dependent baseline, not an exact
+  at-any-weight theorem here).
 
 Both travel in the resolved GRPO JSON (`credit_incorrect_turns=true`,
 `physics_shaping_weight=0.15` in `configs/grpo_14b_full.json`), so switching
@@ -130,7 +132,7 @@ change the credit assignment - only the sharding does. (The sharded path applies
 this credit per-rank on that rank's trajectory slice; the group-relative
 advantage baseline is then computed over the all-gathered full group.)
 
-### Example training config (`configs/sft_14b_full.json`)
+### Example training config (`configs/sft_14b_full.json`, as actually shipped)
 
 ```json
 {
@@ -138,11 +140,17 @@ advantage baseline is then computed over the all-gathered full group.)
   "dataset_path": "data/sft/multicap.jsonl",
   "output_dir": "runs/sft_14b_full",
   "use_lora": false,
+  "distributed": true,
   "bf16": true,
   "gradient_checkpointing": true,
-  "per_device_train_batch_size": 1,
-  "gradient_accumulation_steps": 16,
+  "per_device_train_batch_size": 4,
+  "gradient_accumulation_steps": 4,
   "max_seq_length": 16384,
+  "num_train_epochs": 3.0,
+  "learning_rate": 1e-05,
+  "lr_scheduler_type": "cosine",
+  "warmup_ratio": 0.03,
+  "repair_loss_weight": 2.0,
   "fsdp": "full_shard auto_wrap",
   "fsdp_transformer_layer_cls": null,
   "fsdp_cpu_offload": false
@@ -162,22 +170,33 @@ DeepSeek-R1-Distill-Llama → `LlamaDecoderLayer`).
   "fsdp": "full_shard auto_wrap",           # + " offload" if fsdp_cpu_offload
   "fsdp_config": {
     "transformer_layer_cls_to_wrap": ["Qwen3DecoderLayer"],
-    "activation_checkpointing": True,       # from gradient_checkpointing
     "backward_prefetch": "backward_pre",
-    "forward_prefetch": False,
+    "forward_prefetch": True,                # overlaps the next layer's all-gather with compute
     "use_orig_params": True,
     "sync_module_states": True,
     "cpu_ram_efficient_loading": True,
     "limit_all_gathers": True,
-    "state_dict_type": "SHARDED_STATE_DICT",
+    "state_dict_type": "FULL_STATE_DICT",
   },
 }
 ```
 
-Under `full_shard`, activation checkpointing is routed through `fsdp_config`
-(not `TrainingArguments.gradient_checkpointing`) to avoid a redundant AllGather
-in the backward pass, so the trainer sets `gradient_checkpointing=False` in that
-path and lets FSDP own it.
+There is deliberately **no** `activation_checkpointing` key in `fsdp_config`. Driving activation
+checkpointing from the FSDP plugin's external `checkpoint_wrapper` on an FSDP1 +
+`use_orig_params` unit mismatches the saved-tensor count between the forward and its recompute
+(`torch.utils.checkpoint` raises `CheckpointError`). Instead each Trainer stage enables HF's own
+layer-internal gradient checkpointing directly via `TrainingArguments.gradient_checkpointing=True`
+with `gradient_checkpointing_kwargs={"use_reentrant": True}` - REENTRANT is deliberate: the ROCm
+stack has no `flash_attn` wheel, so training runs on SDPA, whose fused-kernel choice can differ
+between the checkpointed forward and its recompute (and across ranks); reentrant checkpointing
+skips the saved-tensor-count check that non-reentrant enforces and would otherwise raise on that
+swap.
+
+`state_dict_type: FULL_STATE_DICT` (not a sharded state dict) is deliberate too: it makes
+`trainer.save_model()` consolidate a plain HF checkpoint that the next stage loads directly via
+`from_pretrained` (midtrain→sft→dpo→grpo→soup handoff), matching GRPO's own save path. At 14B the
+rank-0 gather is cheap; `cpu_ram_efficient_loading` streams it for 32B/70B so the handoff still
+works there. See "Checkpointing" below.
 
 ## Per-size memory guidance & accelerate configs
 
@@ -203,9 +222,14 @@ Use the shipped file directly:
 scripts/launch_distributed.sh sft configs/sft_14b_full.json
 ```
 
-Key `fsdp_config` bits: `fsdp_reshard_after_forward: FULL_SHARD`,
-`fsdp_offload_params: false`, `fsdp_activation_checkpointing: true`,
-`fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer`.
+Key `fsdp_config` bits, as actually shipped: `fsdp_version: 1`, `fsdp_reshard_after_forward: FULL_SHARD`,
+`fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP`, `fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer`,
+`fsdp_state_dict_type: FULL_STATE_DICT`, `fsdp_use_orig_params: true`, `fsdp_offload_params: false`.
+That's the whole file - it does **not** set `fsdp_activation_checkpointing` (gradient checkpointing
+is enabled at the `TrainingArguments` level instead, per the note above) or the
+`cpu_ram_efficient_loading`/`sync_module_states`/prefetch keys (those are supplied by
+`build_fsdp_kwargs` at the Python/`TrainingArguments` layer for the Trainer stages, not the
+accelerate YAML).
 
 ### 32B - full_shard (offload optional on MI350X)
 
@@ -225,12 +249,13 @@ fsdp_config:
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
   fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer   # Qwen3-32B
   fsdp_offload_params: true            # <-- CPU offload params+grads+optim
-  fsdp_activation_checkpointing: true
-  fsdp_cpu_ram_efficient_loading: true
-  fsdp_sync_module_states: true
-  fsdp_state_dict_type: SHARDED_STATE_DICT
+  fsdp_state_dict_type: FULL_STATE_DICT   # consolidated HF ckpt for cross-stage handoff (NOT sharded)
   fsdp_use_orig_params: true
 ```
+
+(Do not add `fsdp_activation_checkpointing: true` here - gradient checkpointing is enabled at the
+`TrainingArguments` level, not the FSDP plugin; see the note above. `cpu_ram_efficient_loading` /
+`sync_module_states` are likewise supplied by `build_fsdp_kwargs`, not this YAML.)
 
 For `deepseek-ai/DeepSeek-R1-Distill-Qwen-32B` set
 `fsdp_transformer_layer_cls_to_wrap: Qwen2DecoderLayer` (and either leave
@@ -261,12 +286,11 @@ fsdp_config:
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
   fsdp_transformer_layer_cls_to_wrap: LlamaDecoderLayer   # 70B is Llama arch
   fsdp_offload_params: true
-  fsdp_activation_checkpointing: true
-  fsdp_cpu_ram_efficient_loading: true
-  fsdp_sync_module_states: true
-  fsdp_state_dict_type: SHARDED_STATE_DICT
+  fsdp_state_dict_type: FULL_STATE_DICT   # consolidated HF ckpt for cross-stage handoff (NOT sharded)
   fsdp_use_orig_params: true
 ```
+
+(Same caveat as the 32B block above: no `fsdp_activation_checkpointing` here; `cpu_ram_efficient_loading`/`sync_module_states` come from `build_fsdp_kwargs`.)
 
 Multi-node (e.g. 2 nodes × 8 GPUs = 16 ranks): set `num_machines: 2`,
 `num_processes: 16`, and per-node `machine_rank` (0 and 1), plus
@@ -277,11 +301,14 @@ launch --multi_gpu --machine_rank ...` wrapper.
 
 ## Checkpointing
 
-`fsdp_state_dict_type: SHARDED_STATE_DICT` writes sharded checkpoints (scalable
-for 32B/70B). The trainer's `save_model` / merge-on-save behavior is unchanged
-for LoRA; for full-FT the sharded state dict is consolidated by the HF Trainer on
-save. To reload into a single-file model for downstream stages (DPO/GRPO/soup),
-point those stages at the produced `output_dir` as usual.
+`fsdp_state_dict_type: FULL_STATE_DICT` is used everywhere (14B/32B/70B), not a sharded state
+dict: the HF Trainer gathers the full model to rank 0 on save and writes a plain, consolidated HF
+checkpoint - the same format `from_pretrained` expects, so the next stage (midtrain→sft→dpo→grpo→
+soup) loads it exactly like a non-distributed run, with no FSDP-mesh-matching requirement on
+reload. The trainer's `save_model` / merge-on-save behavior is unchanged for LoRA. The rank-0
+gather is cheap at 14B; at 32B/70B `fsdp_cpu_ram_efficient_loading` streams it so the save (and the
+next stage's load) still fit. To reload into a single-file model for downstream stages
+(DPO/GRPO/soup), point those stages at the produced `output_dir` as usual.
 
 ## Quick sanity checks (no real training)
 

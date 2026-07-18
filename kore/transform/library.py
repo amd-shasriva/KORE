@@ -15,13 +15,23 @@ rest of KORE already keys off, WITHOUT importing/modifying those modules:
     ``mask=`` boundary guards, ``tl.float32`` accumulation, ``multiple_of`` /
     ``max_contiguous`` vectorization hints, and low-precision IO dtypes.
 
-Exact vs approx is the whole point of the ε-typed calculus:
+Exact vs approx is the whole point of the ε-typed calculus, and the ``exact``
+label is held to a STRICT "bit-preserving" invariant (audit fix): a transform
+that can perturb output bits - even to *improve* precision - is typed ``approx``
+with a small ε, never ``exact``.
 
-  EXACT   (≡)   set_num_warps, set_num_stages, set_waves_per_eu, swizzle_group_m,
-                vectorize_loads, add_mask_boundary, reorder_loads,
-                fp32_accumulator
-  APPROX  (≈_ε) retile_block, split_k, downcast_dtype, reassociate_reduction,
-                fast_math_recip
+  EXACT   (≡)   set_num_stages, set_waves_per_eu, swizzle_group_m,
+                vectorize_loads, add_mask_boundary, reorder_loads
+  APPROX  (≈_ε) set_num_warps (cross-warp reduction reassociation),
+                fp32_accumulator (precision-IMPROVING, ε≈0, not bit-identical),
+                retile_block, split_k (zero-inits its atomic-add output),
+                downcast_dtype, reassociate_reduction, fast_math_recip
+
+The two relabels (``set_num_warps`` / ``fp32_accumulator``, previously ``exact``)
+and the ``split_k`` zero-init guard keep every transform FUNCTIONALLY identical -
+only the relation/ε typing (and, for split_k, a correctness guard) changed - so
+the honest "exact == bit-preserving" invariant now holds. Correctness remains
+enforced DOWNSTREAM by the env SNR oracle, never by these labels.
 
 Everything is regex/AST-lite over the source string - PURE, deterministic, and
 CPU-only. Rewrites return ``None`` when structurally inapplicable so the calculus
@@ -35,6 +45,15 @@ from typing import Optional
 
 from kore.transform.budget import RELATION_APPROX, RELATION_EXACT
 from kore.transform.calculus import Transformation
+
+# --------------------------------------------------------------------------- #
+# Conservative ε for the two audit-relabeled transforms. Both keep their exact
+# FUNCTIONAL rewrite; only their relation/ε typing is corrected so the calculus's
+# "exact == bit-preserving" invariant holds honestly. Correctness is still
+# SNR-gated downstream - these ε are an action-space prior, not a proof.
+# --------------------------------------------------------------------------- #
+_EPS_FP32_ACC = 1e-6        # fp32 acc is precision-IMPROVING -> ε≈0 (not bit-identical)
+_EPS_SET_NUM_WARPS = 0.005  # num_warps can reassociate a cross-warp reduction
 
 # --------------------------------------------------------------------------- #
 # Low-level string / knob helpers (mirror the KORE knob token conventions)
@@ -328,8 +347,9 @@ def _apply_reorder_loads(src, **_):
 
 def _apply_fp32_acc(src, **_):
     """Force the reduction accumulator to fp32 (CDNA4 discipline). Raising acc
-    precision only STRENGTHENS the numeric contract, so relative to the fp32
-    reference oracle this is exact."""
+    precision only STRENGTHENS the numeric contract - it moves the kernel TOWARD
+    the fp32 reference oracle - but it is NOT bit-identical to the original
+    kernel, so it is honestly typed ``approx`` with a tiny ε (≈0), not exact."""
     for _i, o, c in _iter_calls(src, "tl.zeros"):
         args = src[o + 1:c]
         m = re.search(r"(?:dtype\s*=\s*tl\.|,\s*tl\.)(bfloat16|float16|float8\w*)", args)
@@ -423,6 +443,30 @@ def _store_to_atomic(src: str) -> str:
     return src[:idx] + "tl.atomic_add(" + src[idx + len("tl.store("):]
 
 
+def _ensure_output_zero_init(src: str) -> str:
+    """Zero-initialize the epilogue's atomic-add destination (split_k guard).
+
+    ``split_k`` rewrites the epilogue ``tl.store`` into ``tl.atomic_add`` so the
+    ``SPLIT_K`` partial sums accumulate into the output - which is only correct if
+    the output buffer starts at zero. An un-zeroed ``torch.empty`` output would
+    accumulate into GARBAGE (the correctness gap flagged in the audit), which is
+    not ``≈_ε`` at all. Rewrite the RETURNED output's ``torch.empty`` /
+    ``torch.empty_like`` allocation into its zero-filled form so the approx
+    contract is honest. No-op if the output allocation can't be identified
+    (split_k still fires; the env SNR oracle stays the hard correctness guard).
+    """
+    rets = list(re.finditer(r"\breturn\s+([A-Za-z_]\w*)\b", src))
+    if not rets:
+        return src
+    out = rets[-1].group(1)  # the wrapper's returned output tensor
+    new = re.sub(rf"(\b{re.escape(out)}\s*=\s*torch\.)empty(\s*\()",
+                 r"\1zeros\2", src, count=1)
+    if new != src:
+        return new
+    return re.sub(rf"(\b{re.escape(out)}\s*=\s*torch\.)empty_like\b",
+                  r"\1zeros_like", src, count=1)
+
+
 def _apply_split_k(src, value=2, **_):
     """Split the K reduction ``value`` ways (a second grid axis) with atomic
     accumulation of the partials. Distinct partial sums re-order the reduction, so
@@ -470,6 +514,10 @@ def _apply_split_k(src, value=2, **_):
     new = _store_to_atomic(new)
     new = re.sub(r"(grid\s*=\s*\([^\n]*?)\s*,\s*\)", r"\1, SPLIT_K)", new, count=1)
     new = re.sub(r"(\bnum_warps\s*=\s*\d+)", rf"SPLIT_K={v}, \1", new, count=1)
+    # GUARD (audit): atomic_add accumulates the SPLIT_K partials into the output,
+    # so the destination MUST be zero-initialized or it accumulates into garbage.
+    # Make the ≈_ε contract honest by zero-initing the returned output allocation.
+    new = _ensure_output_zero_init(new)
     return new if new != src else None
 
 
@@ -575,13 +623,26 @@ def _apply_fast_recip(src, **_):
 # The library
 # ===========================================================================
 LIBRARY: list[Transformation] = [
-    # ---- EXACT (≡) --------------------------------------------------------
+    # ---- Scheduling / layout / structural rewrites ------------------------
+    # Mostly exact (≡). NOTE: set_num_warps + fp32_accumulator are conservatively
+    # typed approx (≈_ε) - see their per-entry NOTEs - so "exact" stays honestly
+    # bit-preserving. Their list POSITION (hence action-enumeration order) is
+    # preserved so the default action space is otherwise unchanged.
+    #
+    # NOTE (audit relabel): num_warps is approx, NOT exact. Changing the warp
+    # count can reassociate a cross-warp reduction (tl.dot / tl.sum / softmax /
+    # norm), perturbing output bits; it is bit-exact only for reduction-free
+    # elementwise kernels. Typed approx with a tiny ε so "exact" == bit-preserving
+    # holds. FUNCTIONAL rewrite is unchanged.
     Transformation(
-        name="set_num_warps", relation=RELATION_EXACT, knob="num_warps",
-        summary="Set num_warps (wavefront parallelism / occupancy).",
+        name="set_num_warps", relation=RELATION_APPROX, knob="num_warps",
+        summary="Set num_warps (wavefront parallelism / occupancy); approx - may "
+                "reassociate a cross-warp reduction (bit-exact only for "
+                "reduction-free kernels).",
         apply_fn=_apply_set_knob("num_warps"),
         cond_fn=_cond_pow2(1, 16, "num_warps"),
         grid_fn=_grid_value("num_warps", (4, 8)),
+        default_eps=_EPS_SET_NUM_WARPS,
     ),
     Transformation(
         name="set_num_stages", relation=RELATION_EXACT, knob="num_stages",
@@ -621,12 +682,18 @@ LIBRARY: list[Transformation] = [
                 "(non-reduction layout reorder).",
         apply_fn=_apply_reorder_loads,
     ),
+    # NOTE (audit relabel): fp32_accumulator is approx, NOT exact. Raising the acc
+    # dtype to fp32 changes output bits - it IMPROVES precision toward the fp32
+    # oracle, but is not bit-identical. Typed approx with ε≈0. Still a
+    # strengthening/precision-improving move; FUNCTIONAL rewrite is unchanged.
     Transformation(
-        name="fp32_accumulator", relation=RELATION_EXACT, knob="accumulator",
-        summary="Force the tl.zeros reduction accumulator to tl.float32.",
+        name="fp32_accumulator", relation=RELATION_APPROX, knob="accumulator",
+        summary="Force the tl.zeros reduction accumulator to tl.float32 "
+                "(precision-improving; approx with ε≈0, not bit-identical).",
         apply_fn=_apply_fp32_acc,
+        default_eps=_EPS_FP32_ACC,
     ),
-    # ---- APPROX (≈_ε) -----------------------------------------------------
+    # ---- Numeric-contract rewrites (approx ≈_ε) ---------------------------
     Transformation(
         name="retile_block", relation=RELATION_APPROX, knob="block",
         summary="Re-tile BLOCK_M/N/K (incl. K-split); BLOCK_K change reassociates "
@@ -637,7 +704,8 @@ LIBRARY: list[Transformation] = [
     Transformation(
         name="split_k", relation=RELATION_APPROX, knob="split_k",
         summary="Split the K reduction across a second grid axis with atomic "
-                "accumulation of partials.",
+                "accumulation of partials (zero-inits the atomic-add output so "
+                "the ≈_ε contract is honest).",
         apply_fn=_apply_split_k, cond_fn=_cond_split_k, eps_fn=_eps_split_k,
         grid_fn=lambda src: [{"value": 2}, {"value": 4}], default_eps=0.05,
     ),

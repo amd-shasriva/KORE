@@ -40,7 +40,16 @@ os.environ["PATH"] = _VENV_BIN + os.pathsep + os.environ.get("PATH", "")
 # them: honest compiler-fused baseline, enumerated adversarial+metamorphic correctness
 # battery, shape augmentation, cold-cache timing. setdefault so an explicit env wins.
 for _gk, _gv in {"KORE_VERIFIED_CORRECTNESS": "1", "KORE_COMPILE_BASELINE": "1",
-                 "KORE_SHAPE_AUGMENT": "1", "KORE_BENCH_COLD": "1"}.items():
+                 "KORE_SHAPE_AUGMENT": "1", "KORE_BENCH_COLD": "1",
+                 # Paradigm-v3 flagship levers. The agentic GRPO tool path (ToolExecutor)
+                 # has no config handle, so it reads these from the env: the anti-reward-
+                 # hack Speed-of-Light gate (rejects super-roofline timing exploits) and
+                 # the self-referential open-ended minter grammar evolution (correct-by-
+                 # construction gate still enforced per task). setdefault so an explicit
+                 # env wins. LIVE named-residual rho (KORE_PHYSICS_LIVE_COUNTERS) is left
+                 # OFF: per-turn rocprofv3 in the agentic rollout is costly (opt-in).
+                 "KORE_ROOFLINE_GATE": "1",
+                 "KORE_MINTER_EVOLVE_GRAMMAR": "1"}.items():
     os.environ.setdefault(_gk, _gv)
 WORKERS = os.environ.get("KORE_DATAGEN_WORKERS", "64")
 POLL_S = int(os.environ.get("KORE_SUP_POLL_S", "120"))

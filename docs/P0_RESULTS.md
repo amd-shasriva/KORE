@@ -2,7 +2,8 @@
 
 Status: **AITER-backed, peak-calibrated, CI'd. Verdict PARTIAL - check (b) is a decisive PASS
 (the load-bearing result), check (a) PASSES against the AITER gold baseline, check (c) is WEAK
-(expected pre-RL).**
+(expected pre-RL). All results here are OFFLINE; the live GRPO reward uses the PMC-free `η`, not the
+validated `ρ` (see the Downstream section below).**
 
 ## Node & stack
 - Host - 8× **gfx950** (AMD Instinct **MI350-class**, CDNA4), ROCm 7.2.3, `rocprofv3`. All GPU
@@ -54,6 +55,14 @@ counter-derived **named** terms - memory-stall time (`MemUnitStalled`) + occupan
 lower bound stays well above 0.9: the "named gradient" the KORE paradigm descends is real and
 measurable, not drowned by cross-terms.
 
+**But R²≈0.98 is IN-SAMPLE and does NOT transfer across operator families (OFFLINE crux).** The
+leave-one-family-out experiment (`kore.analysis.residual_transfer`) refits the named-term → residual map
+on all families but one and predicts the held-out family: pooled in-sample R² = 0.978, but **median
+out-of-family R² = 0.107 (raw) / negative (normalized)**, and families are separable in residual space.
+**Verdict: the residual value is operator-SPECIFIC, not a universal latent.** So the R²≈0.98 justifies a
+dense *per-family* signal, not a claim that a single learned residual manifold generalizes zero-shot.
+This is OFFLINE (schedule-mutation kernels, not an RL policy) - see [`kore/analysis`](../kore/analysis/README.md).
+
 **Check (a) PASSES against the AITER gold baseline** (`ρ = 0.529`, CI entirely positive
 [0.346, 0.701]): kernels nearer the roofline attain higher speedup vs the *production* vendor.
 
@@ -103,35 +112,47 @@ KORE_PEAK_HBM_BW=4.599e12 KORE_PEAK_BF16=1.273e15 PYTHONPATH=<aiter2> \
 python -m kore.analysis.plots --report data/p0_study_final.json --out figures/
 ```
 
-## Downstream (paradigm-v2) - the named residual is now wired ONLINE (mechanism, not yet trained-through)
-The P0 physics signal is no longer offline-only. **Paradigm-v2 brings the named-residual attainment
-`ρ` ONLINE as a potential-based-shaping (PBS) potential inside multi-turn GRPO**, while the *within-turn*
-reward reverts to the high-contrast vendor-relative **speedup** reward.
+## Downstream (paradigm-v2) - the roofline potential is wired online as `η`; the named residual `ρ` is BUILT but DORMANT
+The P0 `T_min` is now a live reward input, but with an important caveat: **the online potential is the
+PMC-free `η`, not the R²≈0.98 named residual `ρ`.** The within-turn reward is the vendor-relative
+**speedup** reward; the physics signal enters only as a potential-based-shaping (PBS) term on top.
 
-- **Online residual potential** (`kore.reward.whitebox` + `kore.reward.shaping`): the scalar potential
-  `Φ(s) = ρ` (roofline attainment) is folded into the per-turn Kevin credit as Ng-Harada-Russell
-  shaping `F_t = γ·Φ(s_{t+1}) − Φ(s_t)`. `whitebox.phi_potential` upgrades `Φ` from the flat
-  `η = T_min/T_meas` fallback to the **named residual** `ρ = T_min/(T_min+N)` - the *same*
-  `N = (stall_frac + occupancy_deficit)·T_meas` decomposition that carries the check-(b) R²≈0.98 -
-  **whenever rocprofv3 PMC counters are present** (`KoreEnv.collect_counters`); with no PMC it degrades
-  to `η`. By the Ng et al. (1999) theorem PBS is policy-invariant at ANY weight (the discounted shaping
-  telescopes to a start-state constant that cancels in the GRPO group baseline), so the dense term
-  densifies per-turn credit toward the roofline **without changing the optimal policy and without
-  introducing a reward-hacking incentive**. It is wired identically into BOTH the single-process and the
-  distributed GRPO credit paths, and is live in the campaign at `physics_shaping_weight=0.15` (with
+- **Online potential is `η`, not `ρ` (the #1 open item).** The scalar potential `Φ(s)` is folded into
+  the per-turn Kevin credit as `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` (`kore.reward.whitebox` +
+  `kore.reward.shaping`). `whitebox.phi_potential` *can* return the **named residual**
+  `ρ = T_min/(T_min+N)`, `N = (stall_frac + occupancy_deficit)·T_meas` - the same decomposition that
+  carries the check-(b) R²≈0.98 - **but only when rocprofv3 PMC counters are passed in.** The live
+  rollout sites (`grpo._turn_phi(task, obs)` and the agentic `ToolExecutor` via
+  `phi_potential(self.task, obs)`) call it **without a counter dict**, so `residual_descent_frac` takes
+  the `η = T_min/T_meas` branch. Result: the live PBS potential is `η` (bounded, sane, but lower-contrast
+  than `ρ`). Bringing `ρ` online - thread per-turn `KoreEnv.collect_counters` output into `phi_potential`,
+  or run `reward_mode="residual"` with real per-candidate counters - is the **#1 open item**; the R²≈0.98
+  result here remains an **offline** validation, not the live signal.
+- **PBS invariance is approximate here, not a theorem.** The discounted shaping telescopes to a
+  start-state constant `−Φ(s_0)` - the Ng-Harada-Russell result for the *vanilla expected policy
+  gradient*. KORE's estimator is not that idealization: the `−w·Φ(s_t)` offset feeds GRPO's
+  **std-normalized, group-relative, per-turn-as-sample** advantage (dividing by a σ that depends on the
+  shifted returns), and the correct→incorrect boundary (`Φ=None` zeroes the term) leaves a small
+  **bounded, action-dependent leak** of order `γ·w·Φ ≈ 0.4·0.15·1 ≈ 0.06`. So it is best described as an
+  **approximate, expected-gradient-neutral state-dependent baseline** - it re-distributes existing
+  terminal credit across turns (denser signal, variance reduction) without *adding* directional gradient,
+  and the leak is benign but real, not "zero at any weight". It is wired identically into BOTH the
+  single-process and distributed GRPO credit paths, and is live at `physics_shaping_weight=0.15` (with
   `reward_mode=speedup`, `credit_incorrect_turns=true` - `configs/grpo_14b_full.json`). Unit-tested
-  (telescoping/invariance).
-- **Within-turn reward reverted to speedup** (`reward_mode=speedup`): the tier-3 correct-kernel signal
-  is again the high-contrast `1[correct]·log(T_base/T_cand)` vendor-relative reward; the physics `ρ`
-  now enters ONLY as the policy-invariant *shaping* potential, not as the base objective. The offline
+  (telescoping on the idealized gradient).
+- **Within-turn reward is speedup** (`reward_mode=speedup`): the tier-3 correct-kernel signal
+  is the high-contrast `1[correct]·log(T_base/T_cand)` vendor-relative reward; the physics term
+  (currently `η`, see above) enters ONLY as the *shaping* potential, not as the base objective. The
   residual-descent reward (`kore.reward.physics`, `reward_mode=residual`) remains available and
-  unit-tested, but is not the campaign's within-turn objective.
+  unit-tested, but is not the campaign's within-turn objective (and would itself be `η` online until
+  per-candidate counters are threaded in).
 - **Zero-shot generalization harness** (`kore.eval.generalization`): leakage-checked hold-out of whole
   operator families; offline eval of η + residual-descent on held-out families. Unit-tested.
 
 **Honest scope (verdict unchanged).** The R²≈0.98 is the **in-sample** named-residual decomposition on
-the 132-kernel P0 study (check (b)); `η` remains the **low-contrast** correlate (check (a) ρ=0.53,
+the 132-kernel P0 study (check (b)), and it does **not** transfer across families (median out-of-family
+R² ≈ 0.11; see the crux above); `η` remains the **low-contrast** correlate (check (a) ρ=0.53,
 check (c) WEAK) and the study verdict stays **PARTIAL**. Wiring the potential online is a *mechanism*
-claim, NOT an end-to-end validation - whether the online named-residual PBS actually improves the
-policy is exactly what the GRPO run (currently gated behind the running datagen campaign) will test. No
-end-to-end GRPO training-efficacy has been demonstrated yet.
+claim, NOT an end-to-end validation - and note the live potential is `η`, not `ρ`, so even the mechanism
+does not yet carry the R²≈0.98 signal. Whether the online (`η`) PBS actually improves the policy is what
+the live GRPO run will test; no end-to-end GRPO training-efficacy has been demonstrated yet.

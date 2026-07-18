@@ -21,9 +21,15 @@ policy's kernels), which is AlphaKernel's canonical, affordable home.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
-from kore.search.alphakernel import AlphaKernelConfig, Edit, ProposeContext, search
+from kore.search.alphakernel import (
+    AlphaKernelConfig,
+    Edit,
+    ProposeContext,
+    make_roofline_ub_fn,
+    search,
+)
 
 
 class TransformProposePolicy:
@@ -77,18 +83,51 @@ class TransformProposePolicy:
 
 
 def search_from_kernel(root_source: str, task, env, *, budget: int = 64,
-                       value_model=None, reward_mode: str = "speedup",
-                       k_expand: int = 4, seed: int = 0,
-                       roofline_ub_fn=None) -> dict:
+                       value_model=None, value_fn: Optional[Callable] = None,
+                       reward_mode: str = "speedup",
+                       k_expand: int = 4, max_depth: Optional[int] = None,
+                       incumbent_min_measures: int = 1,
+                       value_leaf_weight: float = 0.0,
+                       roofline_ub_fn=None, seed: int = 0) -> dict:
     """Run AlphaKernel from ``root_source`` over the verified-transform action space.
 
     A single call that constructs the :class:`TransformProposePolicy` and runs
     :func:`kore.search.alphakernel.search`. Returns the search result dict
     (``best_source`` / ``best_speedup_lcb`` / ``best_node`` / ``tree_stats``). The
-    ``env`` supplies the perfect-verification benches (a KoreEnv in production); the
-    optional ``value_model`` sets PUCT priors (falls back to the fitted reranker).
+    ``env`` supplies the perfect-verification benches (a KoreEnv in production).
+
+    Depth / breadth (item 3 -- SAFE defaults reproduce the historical shallow search)
+    ----------------------------------------------------------------------------------
+    ``budget`` (verifier-call cap), ``k_expand`` (candidate edits per expansion) and
+    ``max_depth`` (max node depth to expand; None => unbounded) let the orchestrator
+    dial the search deeper. The defaults (64 / 4 / None) are exactly the prior search.
+
+    Value model (item 4)
+    --------------------
+    ``value_model`` -- a trained :class:`kore.value.model.ValueModel` (used via
+    ``.predict``) -- or ``value_fn(sources, task) -> [float]`` set the PUCT priors
+    (default: the rerank heuristic). ``value_leaf_weight`` > 0 additionally uses the
+    value model as a bounded PRIOR leaf value for correct-but-unmeasured nodes.
+
+    Branch-and-bound (item 1)
+    -------------------------
+    ``roofline_ub_fn`` -- an admissible ``(source, task) -> Optional[float]`` speedup
+    ceiling -- turns roofline pruning ON. Build the production bound with
+    :func:`kore.search.alphakernel.make_roofline_ub_fn`. Default None => OFF (prior
+    behavior). ``incumbent_min_measures`` raises the sample floor a node needs before
+    it can seed the (monotone) B&B pruning bound.
     """
     policy = TransformProposePolicy(k=k_expand)
-    cfg = AlphaKernelConfig(reward_mode=reward_mode, k_expand=k_expand)
+    cfg = AlphaKernelConfig(
+        reward_mode=reward_mode, k_expand=k_expand, max_depth=max_depth,
+        incumbent_min_measures=incumbent_min_measures,
+        value_leaf_weight=value_leaf_weight,
+    )
     return search(root_source, task, env, policy, value_model=value_model,
-                  budget=budget, config=cfg, roofline_ub_fn=roofline_ub_fn, seed=seed)
+                  budget=budget, config=cfg, roofline_ub_fn=roofline_ub_fn,
+                  value_fn=value_fn, seed=seed)
+
+
+# Re-exported for convenience so callers can enable branch-and-bound with a single
+# import alongside search_from_kernel (see the module docstring / README).
+__all__ = ["TransformProposePolicy", "search_from_kernel", "make_roofline_ub_fn"]

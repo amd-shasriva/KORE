@@ -8,11 +8,24 @@ The distributed launch config and the "locked" full-parameter recipes for each t
 
 | File | Purpose |
 | --- | --- |
-| `accelerate_fsdp.yaml` | The FSDP launch config (8 ranks, ZeRO-3 for Trainer stages) |
+| `accelerate_fsdp.yaml` | The FSDP launch config for the Trainer stages (midtrain/sft/dpo): 8 ranks, `FULL_SHARD` (ZeRO-3) |
+| `accelerate_fsdp_grpo.yaml` | The FSDP launch config for GRPO only: 8 ranks, `SHARD_GRAD_OP` (ZeRO-2) - GRPO's in-loop `model.generate()` would deadlock under `FULL_SHARD`'s per-decode-step re-gather, so it needs params to stay replicated between forwards |
 | `midtrain_14b_full.json` | Stage-0 continued-pretraining recipe |
 | `sft_14b_full.json` | Stage-1 SFT recipe |
 | `dpo_14b_full.json` | Stage-2 DPO recipe |
 | `grpo_14b_full.json` | Stage-3 GRPO recipe (all best-in-class levers) |
+
+## How a resolved config gets written (`_launch_distributed`)
+
+None of these JSON templates are edited by hand at run time. For every full-FT training stage (`midtrain`/`sft`/`dpo`/`grpo`), `scripts/run_campaign.py`'s `_launch_distributed` helper:
+
+1. loads the shipped template `configs/<stage>_14b_full.json`;
+2. overlays the run's dynamic overrides (`model_id`, `output_dir`, dataset paths, task ids, the anti-collapse/value-prefilter levers, …);
+3. forces `distributed=true` and `use_lora=false`;
+4. writes the result to `<data_root>/launch/<run_name>.json` (`run_name` defaults to the stage name); and
+5. shells out to `scripts/launch_distributed.sh <stage> <resolved.json>`.
+
+For GRPO specifically, `run_name` depends on `--grpo-curriculum` (default **on**): a curriculum run writes `grpo_phase1_correctness.json` then `grpo_phase2_latency.json`; a **non-curriculum** run (`--no-grpo-curriculum`) writes a single `grpo.json`, rendered fresh from `configs/grpo_14b_full.json` every time the stage starts. A `launch/grpo_phase1_correctness.json` on disk is only meaningful if the run that produced it was actually curriculum-mode - it is not automatically "the" live GRPO config, and a stale one left over from an earlier invocation should not be read as authoritative; check the run's actual CLI flags / manifest instead.
 
 ---
 
@@ -38,9 +51,11 @@ Scaling notes are inline: flip `fsdp_offload_params: true` for 32B, add nodes (`
 
 ## Stage recipes (highlights)
 
-**`sft_14b_full.json`** - full-FT, `max_seq_length=16384`, `num_train_epochs=3`, `per_device_train_batch_size=1`, `gradient_accumulation_steps=16`, `repair_loss_weight=2.0`.
+**`midtrain_14b_full.json`** - continued-pretrain on the general Triton/HIP corpus, `max_seq_length=8192`, `num_train_epochs=1`, `per_device_train_batch_size=4`, `gradient_accumulation_steps=4`, `learning_rate=1e-5` (cosine, `warmup_ratio=0.05`), `general_replay_frac=0.3` (anti-forgetting blend).
 
-**`dpo_14b_full.json`** - `beta=0.1`, `loss_type="ipo"`, `max_length=16384`, `max_prompt_length=8192`, `learning_rate=5e-6`.
+**`sft_14b_full.json`** - full-FT, `max_seq_length=16384`, `num_train_epochs=3`, `per_device_train_batch_size=4`, `gradient_accumulation_steps=4`, `learning_rate=1e-5` (cosine, `warmup_ratio=0.03`), `repair_loss_weight=2.0`.
+
+**`dpo_14b_full.json`** - `beta=0.1`, `loss_type=["sigmoid","sft"]` (a combined preference + SFT-on-chosen loss, `loss_weights=[1.0,1.0]`), `label_smoothing=0.1`, `truncation_mode="keep_end"`, `max_length=16384`, `learning_rate=5e-7` (cosine, `warmup_ratio=0.1`), `max_grad_norm=0.5`, `per_device_train_batch_size=2`, `gradient_accumulation_steps=8`.
 
 **`grpo_14b_full.json`** - the full paradigm, all levers on:
 
@@ -72,7 +87,7 @@ Nine flags tune the paradigm-v2 credit assignment, verified transform action spa
 | --- | --- | --- | --- |
 | `reward_mode` | `"speedup"` | **ON (active)** | Terminal/within-turn reward tier for a *correct* kernel. `"speedup"` = the high-contrast vendor-relative speedup (was `"residual"`, the compressed physics-residual credit). Ops with no roofline model fall back to speedup either way; anti-hack/correctness gating is identical. Consumed in `kore/policy/grpo.py`. |
 | `credit_incorrect_turns` | `true` | **ON (active)** | Feed an **incorrect** turn's *shaped progress* reward (bounded sub-threshold SNR + format signal, always `< correctness_weight`) into the Kevin per-turn return instead of hard-zeroing it - densifies the gradient in the not-yet-correct band while keeping correctness lexicographically dominant. Consumed in `build_kevin_samples` (`kore/policy/grpo.py`). |
-| `physics_shaping_weight` | `0.15` | **ON (active)** | Weight on potential-based shaping `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` with `Φ =` roofline attainment `ρ` (`kore.reward.whitebox.phi_potential`). By the Ng-Harada-Russell theorem this is **policy-invariant at any weight** (no reward-hacking incentive), only densifying per-turn credit toward the roofline. `0.0` disables it. Consumed in `build_kevin_samples`. |
+| `physics_shaping_weight` | `0.15` | **ON (active)** | Weight on potential-based shaping `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` with `Φ =` roofline attainment (`kore.reward.whitebox.phi_potential`). By Ng-Harada-Russell this is *approximately* policy-invariant (an expected-gradient-neutral state-dependent baseline), densifying per-turn credit toward the roofline; it is **not** an exact at-any-weight theorem here — the offset feeds GRPO's std-normalized group-relative advantage and the correct→incorrect boundary leaves a small bounded (≤~0.06) leak. `0.0` disables it. Consumed in `build_kevin_samples`. **Honest caveat:** `Φ` is the named-residual `ρ` (R²≈0.98 offline) only when rocprofv3 PMC counters are threaded in; the agentic tool-use rollout this flagship uses (`agentic: true`) calls `phi_potential` without counters (`kore/agent/tools.py`), so `Φ` is actually the PMC-free `η = T_min/T_meas` online today - see [`kore/env/README.md`](../kore/env/README.md). The shaping is *approximately* invariant either way; only the *quality* of the dense signal differs (`ρ` ≫ `η` in contrast). |
 | `agentic_transform_tools` | `true` | **ON (fail-safe)** | Advertise the verified ε-typed transformation calculus (`kore.transform`: real Triton rewrites, each exact `≡` / approx `≈_ε` with an error budget + side conditions) to the agent as `list_transforms`/`apply_transform` tools - a **provably-in-contract** optimization action space on top of free-form editing. Pure CPU (source rewrites); the env still verifies the result, so it cannot bypass the SNR gate. Consumed in `kore/agent/tools.py`. |
 | `use_search` | `true` | **ON (fail-safe)** | Run AlphaKernel value-guided best-first search over the **verified transform action space** (`kore.search.propose.search_from_kernel`, driven by the production `TransformProposePolicy`) with the env as a perfect simulator + roofline admissible bound. Wired as a **throttled, off-policy search-then-distill hook** (`_maybe_search_then_distill`, `kore/policy/grpo.py`): it runs AFTER the on-policy gradient sample is built from the model's own tokens, banks faster verified kernels as **distillation targets** (`coevolve_distill_path`), and is never attributed to the on-policy update - sound at any setting. Fully fail-safe (any error is a no-op). |
 | `search_budget` | `16` | **ON (fail-safe)** | Hard verifier-call cap per search invocation for `use_search`. Together with `search_every` this bounds the extra bench budget over the run (one search per `search_every` steps × up to `search_budget` benches each). |

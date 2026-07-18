@@ -29,6 +29,20 @@ Design (mirrors ``kore.tasks._genops`` conventions):
 Everything is pure and CPU-only. ``torch`` is imported lazily (inside the
 primitive tables / builders) so importing this module never needs torch or a GPU;
 only building a reference / sampling touches torch (CPU is fine).
+
+Grammar EVOLUTION (escaping the bounded encoding)
+-------------------------------------------------
+The primitive libraries above are a FIXED, bounded space; a minter that only
+composes them with fixed-depth templates hits the classic POET/OMNI "bounded
+encoding" ceiling. The :class:`Production` layer at the bottom of this module
+lifts that ceiling *without* weakening correct-by-construction: a
+:class:`Production` is an evolvable, well-typed composition operator whose body is
+always a flat tuple of the SAME name-addressable primitives. Productions compose
+from other productions (:func:`compose_productions`) - a self-referential grammar
+- so the reachable pipeline space is unbounded, yet every emitted pipeline is
+still a plain tuple of verified primitives that type-checks, behavioral-hashes,
+niches, and materializes exactly like a hand-composed one. Correctness is enforced
+per task by the minter's construction gate, so it is preserved by CONSTRUCTION.
 """
 
 from __future__ import annotations
@@ -446,3 +460,131 @@ def behavioral_hash(pipeline: Pipeline, *, dims: dict = None, seed: int = PROBE_
     q = t.round(out.double().flatten() * _HASH_GRID).to(t.int64).tolist()
     preimage = f"{tuple(out.shape)}|{q}"
     return hashlib.sha1(preimage.encode()).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Grammar evolution: self-referential productions (escape the bounded encoding)
+# --------------------------------------------------------------------------- #
+# The minter's fixed MOVES compose the primitive tables with bounded-depth
+# templates, so the reachable task set is a bounded subset of all type-valid
+# pipelines - the POET/OMNI "bounded encoding" ceiling. A :class:`Production`
+# makes the *composition rules themselves* first-class and EVOLVABLE: it is a
+# reusable, well-typed pipeline fragment whose body is a flat tuple of EXISTING
+# named primitives. New productions are built by composing existing productions
+# (:func:`compose_productions`), including previously-evolved ones, so this is a
+# self-referential grammar over ``B : MATRIX -> MATRIX`` (and terminal
+# ``T : MATRIX -> ROWVEC``) whose reachable depth/structure is unbounded.
+#
+# Why correctness-by-construction survives:
+#   * Composition is type-safe by construction - concatenating a ``t0 -> t1``
+#     fragment with a ``t1 -> t2`` fragment is exactly a ``t0 -> t2`` fragment, and
+#     a ROWVEC (terminal) fragment can never be extended - so a production can only
+#     ever denote a well-typed chain.
+#   * A production's stages are always the ORIGINAL name-addressable primitives, so
+#     :func:`pipeline_from_production` yields an ordinary flat :class:`Pipeline`.
+#     It type-checks, ``behavioral_hash``-es and niches like any other pipeline,
+#     and every stage name still resolves in ``materialize._prim_by_name`` (so the
+#     materialize self-check can pass). Nothing here bypasses the construction
+#     gate - the minter still gates every emitted task.
+@dataclass(frozen=True)
+class Production:
+    """An evolvable, well-typed grammar production (a composition operator).
+
+    Denotes a pipeline FRAGMENT that consumes ``in_type`` and produces
+    ``out_type``. ``stages`` is a flat tuple of EXISTING :class:`Primitive`
+    objects (a base production wraps one primitive; a composed production
+    concatenates the stages of its parents), and ``depth`` is the composition
+    depth (number of primitive stages), used for the growth budget / QD niche.
+
+    Because the stages are the same named primitives the fixed grammar uses, any
+    pipeline built from a production is a plain, verifiable, materialize-safe
+    pipeline; the production layer only changes HOW pipelines are *generated*
+    (an unbounded, self-referential search), never what a valid task is.
+    """
+
+    name: str
+    in_type: str
+    out_type: str
+    stages: tuple
+    depth: int = 1
+
+    def typecheck(self) -> "Production":
+        """Validate the fragment composes ``in_type -> out_type`` with no inner
+        source and no stage after a terminal. Raises :class:`GrammarTypeError`."""
+        if not self.stages:
+            raise GrammarTypeError("empty production")
+        cur = self.in_type
+        for i, st in enumerate(self.stages):
+            if st.in_type is None:
+                raise GrammarTypeError(
+                    f"production {self.name!r} stage {i} {st.name!r} is a source")
+            if st.in_type != cur:
+                raise GrammarTypeError(
+                    f"production {self.name!r} stage {i} {st.name!r} expects "
+                    f"{st.in_type!r} but got {cur!r}")
+            cur = st.out_type
+        if cur != self.out_type:
+            raise GrammarTypeError(
+                f"production {self.name!r} declares out_type {self.out_type!r} "
+                f"but its stages yield {cur!r}")
+        return self
+
+    @property
+    def aux_roles(self) -> tuple:
+        roles: list[str] = []
+        for st in self.stages:
+            roles.extend(st.aux_roles)
+        return tuple(roles)
+
+    def signature(self) -> str:
+        """Structural id over the FLAT primitive names (dedup key for productions)."""
+        return "->".join(st.name for st in self.stages)
+
+
+def base_productions() -> list[Production]:
+    """The grammar's AXIOM productions: one depth-1 production per composable
+    primitive. MATRIX->MATRIX middles become ``MATRIX->MATRIX`` block axioms and
+    terminal reducers become ``MATRIX->ROWVEC`` axioms - the seeds the evolver
+    composes into deeper, net-new productions. (Touches torch lazily via the
+    primitive tables, exactly like the rest of the module.)"""
+    prods: list[Production] = []
+    for p in middle_prims().values():
+        if p.in_type == MATRIX and p.out_type == MATRIX:
+            prods.append(Production(p.name, MATRIX, MATRIX, (p,), depth=1))
+    for p in terminal_prims().values():
+        prods.append(Production(p.name, p.in_type, p.out_type, (p,), depth=1))
+    return prods
+
+
+def compose_productions(a: Production, b: Production) -> Optional[Production]:
+    """Sequentially compose ``a`` then ``b`` - the self-referential grammar operator.
+
+    Valid iff ``a`` produces what ``b`` consumes (``a.out_type == b.in_type``); a
+    terminal (ROWVEC) fragment cannot be extended. Returns the composed production
+    (its stages the concatenation of the parents', so it is well-typed BY
+    construction) or ``None`` for an incompatible pair (fail-safe)."""
+    if a.out_type == ROWVEC:            # nothing consumes a terminal
+        return None
+    if a.out_type != b.in_type:
+        return None
+    return Production(
+        name=f"({a.name}.{b.name})",
+        in_type=a.in_type,
+        out_type=b.out_type,
+        stages=a.stages + b.stages,
+        depth=a.depth + b.depth,
+    )
+
+
+def pipeline_from_production(source: Primitive, body: Production,
+                             terminal: Optional[Production] = None) -> Pipeline:
+    """Instantiate a full, type-checked :class:`Pipeline` from a SOURCE primitive,
+    a body production (``MATRIX->MATRIX``) and an optional terminal production
+    (``MATRIX->ROWVEC``). Flattens everything into a single tuple of named
+    primitives, so the result is an ordinary gate-ready, materialize-safe pipeline."""
+    if source.in_type is not None:
+        raise GrammarTypeError(f"{source.name!r} is not a source")
+    stages = [source, *body.stages]
+    if terminal is not None:
+        stages.extend(terminal.stages)
+    return Pipeline(tuple(stages)).typecheck()

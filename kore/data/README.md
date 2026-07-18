@@ -6,16 +6,20 @@ Every record is *verified before it is kept* - a repair is only recorded if the 
 
 ---
 
-## Record types (`schemas.py`)
+## Record types
 
-| Type | Curriculum stage | Key fields |
-| --- | --- | --- |
-| `RepairRecord` | Stage 1 (repair SFT) | `failure_class` (`compile_fail`/`snr_fail`), `error_text`, `messages`, `child_snr_db` |
-| `RankedGroupRecord` | Stage 2 (RFT + DPO) | `candidates[{source,wall_us,snr_db,rank}]`, `preferences[[chosen,rejected]]` |
-| `WinRecord` | Stage 3 (win trajectories) | `trajectory`, `initial/final_wall_us`, `speedup`, `final_source` |
-| `AgenticTrajectoryRecord` | Stage 4 (agentic) | `messages`, `tool_trace`, `best_kernel`, `success` (see [`kore/agent`](../agent/README.md)) |
+Three of the four record types live in `schemas.py`; `AgenticTrajectoryRecord` is defined in [`kore/agent/schema.py`](../agent/README.md) instead (it re-uses `schemas.py`'s `write_jsonl`/`read_jsonl` rather than duplicating them, so all four still round-trip through the same JSONL machinery).
+
+| Type | Defined in | Curriculum stage | Key fields |
+| --- | --- | --- | --- |
+| `RepairRecord` | `schemas.py` | Stage 1 (repair SFT) | `failure_class` (`compile_fail`/`snr_fail`), `error_text`, `messages`, `child_snr_db` |
+| `RankedGroupRecord` | `schemas.py` | Stage 2 (RFT + DPO) | `candidates[{source,wall_us,snr_db,rank}]`, `preferences[[chosen,rejected]]`; optionally `counters`/`parent_counters`/`parent_wall_us` (rocprofv3 PMC for the rank-0 candidate + a slower-correct parent, populated when `--ground-reasoning` is on - see below) |
+| `WinRecord` | `schemas.py` | Stage 3 (win trajectories) | `trajectory`, `initial/final_wall_us`, `speedup`, `final_source` |
+| `AgenticTrajectoryRecord` | `agent/schema.py` | Stage 4 (agentic) | `messages`, `tool_trace`, `best_kernel`, `best_reward`, `turns_to_best`, `success`, `reflections`, `phase_trace` (see [`kore/agent`](../agent/README.md)) |
 
 All carry provenance (`operation`, `arch`, `shape`) for leakage-safe splitting. `read_jsonl` skips malformed lines with a warning, so one corrupt line can't poison a shard.
+
+**Profiler-grounded reasoning (`grounded_reasoning.py`, `--ground-reasoning`).** The templated gold-win reasoning otherwise teaches the model to *say* optimization words without evidence. When `--ground-reasoning` is on, `RankedGroupRecord.counters`/`parent_counters` carry real rocprofv3 PMC for the best and a slower-correct-parent candidate, and `diagnose_bottleneck`/`counter_grounded_prompt` turn them into a teacher prompt that must cite a measured counter; `verify_reasoning_grounding` rejects fabricated/ungrounded CoT that doesn't reference the diagnosed bottleneck. Pure CPU + fail-safe (falls back to the templated path on any gap); `collect_counters` is the only GPU touch.
 
 ---
 
@@ -56,7 +60,7 @@ flowchart TB
 
 Generators: `gen_repair` (inject breakage → teacher fix → keep only if verified), `gen_groups` (n_parents × k candidates, ranked correct>speed>SNR with a noise-margin gate), `gen_wins` (greedy multi-turn, keep if net >2% faster), `gen_agentic` (tool-use trajectories). `evolve.py` adds a D-MAB bandit (UCB1 + Page-Hinkley) over mutation operators with MAP-Elites islands and a value prefilter.
 
-**Agentic slice - two ways to fill it.** The live `gen_agentic` path drives the teacher + GPU harness per task (tens of GPU-hours). `synth_agentic.py` is the **CPU-only alternative**: it *reconstructs* faithful Hermes tool-use trajectories from the already-verified `repair` / `wins` / `groups` records, so every `role:"tool"` result carries a **real measured** number (verifier SNR, walltime, error text) with **no GPU and no teacher**. It maps 1:1 onto the live curriculum - `repair`→`test(broken)→reflect→test(fixed)→keep`, `wins`→`bench(seed)→bench(optimized)→keep`, `groups`→`bench(candidates)→keep(fastest)` - and writes `agentic/_synth_{repair,wins,groups}.jsonl` which `assemble._agentic_rows` picks up (the SFT mixer then blends the web tool-use replay on top). Select the mode with `run_campaign.py --agentic {live,synth,both}` (`--synth-agentic-cap`, default 4000).
+**Agentic slice - two ways to fill it.** The `gen_agentic` path drives the teacher + GPU harness per task (tens of GPU-hours) - real live rollouts, but GPU/teacher-bound. `synth_agentic.py` is the **CPU-only alternative**: it *reconstructs* faithful Hermes tool-use trajectories from the already-verified `repair` / `wins` / `groups` records, so every `role:"tool"` result carries a **real measured** number (verifier SNR, walltime, error text) with **no GPU and no teacher**. It maps 1:1 onto the live curriculum - `repair`→`test(broken)→reflect→test(fixed)→keep`, `wins`→`bench(seed)→bench(optimized)→keep`, `groups`→`bench(candidates)→keep(fastest)` - and writes `agentic/_synth_{repair,wins,groups}.jsonl` which `assemble._agentic_rows` picks up (the SFT mixer then blends the web tool-use replay on top). Select the mode with `run_campaign.py --agentic {live,synth,both}` (`--synth-agentic-cap`, default 4000); **`synth` is the default** - an earlier `live` default needed the GPU harness and often left the slice empty (leaving `agentic` training on generic ToolACE data only), so the campaign now defaults to the reliable, always-populating CPU reconstruction and treats `live`/`both` as opt-in.
 
 **Gold wins - rebalancing the thinnest family.** `gen_wins` yields ~1 trajectory/task, so pure-optimization demos are scarce next to `repair`. `gold_wins.py` mints extra optimization-win `WinRecord`s from the **rank-0** (robustly-best, correct) candidate in each ranked `group` - code that `build_sft` otherwise sees only via DPO. It frames a slower correct sibling as the parent and emits the real-wins format (`SYSTEM_PROMPT` + `build_turn_prompt` + `ANALYSIS: … FULL_KERNEL:`), writing `wins/_gold_from_groups.jsonl`. The build stage mints these **before** the raw gather, so they pass the SAME dedup + leakage split + **RFT speedup gate** as real wins - only genuinely-faster-than-parent gold survives. On by default (`--gold-wins` / `--no-gold-wins`, `--gold-wins-cap` default 3000). This is rejection-sampling (ReST-EM) on already-verified data: gold *code*, measurement-grounded reasoning, zero new GPU.
 
@@ -102,6 +106,6 @@ midtrain/corpus.jsonl   sft/multicap.jsonl   dpo/pairs.jsonl   dagger/round{N}.j
 campaign_manifest.json  campaign_events.jsonl  launch/*.json
 ```
 
-Campaign datagen defaults: `n_repair=50`, `n_parents=20`, `k=6`, `wins_gens=8`, `n_agentic=16`, `--agentic live` (use `--agentic synth` for the GPU-free reconstructed slice).
+Campaign datagen defaults: `n_repair=50`, `n_parents=20`, `k=6`, `wins_gens=8`, `n_agentic=16`, `--agentic synth` (the GPU-free reconstructed slice; use `--agentic live` or `--agentic both` to add real GPU/teacher-driven trajectories).
 
 See also: [`kore/agent`](../agent/README.md), [`kore/openended`](../openended/README.md), [`kore/policy`](../policy/README.md), [`docs/DATASET_SPEC.md`](../../docs/DATASET_SPEC.md).

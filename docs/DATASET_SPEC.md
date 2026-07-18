@@ -4,6 +4,8 @@ Target: frontier ROCm GPU-kernel-generation model. Hardware: **AMD Instinct MI35
 
 This spec is directly implementable against the KORE codebase (`kore/kore/data/*`, `kore/kore/tasks/*`, `kore/kore/verifier/*`) and the record schemas in `kore/kore/data/schemas.py` (`RepairRecord`, `RankedGroupRecord`, `WinRecord`).
 
+> **v1 predates the agentic stage.** This spec was written before Stage 4 (agentic tool-use SFT/RL) landed, so it does not cover `AgenticTrajectoryRecord` (defined in `kore/kore/agent/schema.py`, not `schemas.py`: `messages`, `tool_trace`, `best_kernel`, `best_reward`, `turns_to_best`, `success`, `reflections`, `phase_trace`). See [`kore/data/README.md`](../kore/data/README.md) and [`kore/agent/README.md`](../kore/agent/README.md) for that record type and how it's generated (`gen_agentic.py`, live GPU/teacher trajectories) or reconstructed CPU-only from already-verified repair/wins/groups records (`synth_agentic.py`, the default `--agentic synth` mode). Sections 1-4 below (coverage, edge cases, volumes, verification rigor) still apply to `RepairRecord`/`RankedGroupRecord`/`WinRecord` as originally written.
+
 ---
 
 ## 0. What makes this data genuinely the best (design principles)
@@ -276,7 +278,7 @@ Rationale for the pyramid: it mirrors the natural scarcity (KORE.pdf §2: of ~30
 vendor-relative **speedup** signal that Stages 1-2 assemble on (`reward_mode=speedup`; the SFT
 speedup gate and the DPO `faster-correct > slower-correct` ranking below), so all three stages
 optimize one objective - the prior SFT/DPO-vs-GRPO mismatch is resolved. The physics named-residual
-`ρ` is added ONLY as a *policy-invariant* potential-based-shaping term (`physics_shaping_weight`,
+the roofline attainment (online the PMC-free `η`, not the named-residual `ρ`) is added ONLY as an *approximately policy-invariant* potential-based-shaping term (`physics_shaping_weight`,
 Ng-Harada-Russell), which densifies per-turn credit toward the roofline **without** changing the
 optimal policy, so it never re-introduces an objective mismatch. This is a *training-objective*
 alignment: **the datagen record generation is unchanged** (no new record types, mutators, or
@@ -340,7 +342,7 @@ Every correctness/perf label MUST be produced by this pipeline (extends `verifie
 5. **Determinism reruns.** Re-run the winning kernel ≥3× (fresh process). If SNR/wall variance exceeds tolerance (nondeterminism, C2), **flag and quarantine** - do not admit to corpus.
 6. **Independent re-verification.** Re-verify accepted wins in a *separate process / separate harness invocation* (KORE.pdf §4: "re-verify independently"). Candidate is loaded and run **before** the reference (defeats output-recycling hack H4).
 7. **Timing hygiene.** Warmup (≥10 iters) + median of ≥30 timed iters + CUDA-event timing + `torch.cuda.synchronize()` + **variance gate CV < 3%** (KORE.pdf §4). Reject measurements with CV ≥ 3%.
-8. **Reward is lexicographic.** `r = 1[correct] · log(T_base / T_cand)`. Speed counts only if correct; a fast-but-wrong kernel scores 0. No dense/intermediate compile-or-run reward that could change the objective (KORE.pdf §4; prevents over-optimization cheating). The paradigm-v2 online physics term is the sole dense signal, and it is added as *policy-invariant* Ng-Harada-Russell potential-based shaping (`Φ=ρ`), which telescopes to a start-state constant and therefore cannot shift the optimum or reward-hack - it densifies per-turn GRPO credit without weakening this lexicographic guarantee.
+8. **Reward is lexicographic.** `r = 1[correct] · log(T_base / T_cand)`. Speed counts only if correct; a fast-but-wrong kernel scores 0. No dense/intermediate compile-or-run reward that could change the objective (KORE.pdf §4; prevents over-optimization cheating). The paradigm-v2 online physics term is the sole dense signal, added as *approximately policy-invariant* Ng-Harada-Russell potential-based shaping (`Φ = η` online; the named-residual `ρ` needs per-rollout PMC counters not yet threaded). For the vanilla estimator it telescopes to a start-state constant; under GRPO's std-normalized group-relative advantage the invariance is approximate (a small bounded ≤~0.06 leak at the correct→incorrect boundary), so it densifies per-turn GRPO credit without weakening the lexicographic guarantee — which remains the true anti-hack spine.
 9. **Baseline = production op, measured on-box.** `--impl reference` calls AITER/hipBLASLt/rocBLAS/CK for `T_base`; never a torch fallback.
 
 ### 4.2 Anti-cheat AST/static gate (pre-execution)

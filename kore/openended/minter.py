@@ -22,6 +22,12 @@ Four minting MOVES:
      brand-new op defined purely by its torch reference.
   d. **mutation / crossover** - lift REGISTERED descriptors
      (:mod:`kore.openended.task_space`) into the grammar and perturb / recombine.
+  e. **grammar evolution** (opt-in, ``evolve_grammar``) - EVOLVE the grammar
+     itself: grow new well-typed productions by composing existing ones
+     (self-referential; :mod:`kore.openended.grammar`) to reach depths/structures
+     the fixed templates never enumerate - escaping the bounded encoding. OFF by
+     default so minting is byte-identical; enabling it only ADDS tasks, all of
+     which still pass the same gate below.
 
 Every candidate passes a CONSTRUCTION GATE before it can enter the curriculum
 (type-check, executes on CPU, deterministic, finite, non-degenerate - output
@@ -37,6 +43,7 @@ Pure and CPU-only; ``torch`` is used only for the CPU gate / probes (never a GPU
 
 from __future__ import annotations
 
+import os
 import random
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -82,6 +89,28 @@ _REGIMES_GEMM = {
 # held-out tokens (defense in depth on top of the grammar having NO attention/
 # mla/paged primitives at all - so a held-out task is unrepresentable).
 _HELDOUT_TOKENS = ("mla", "paged", "latent_attn", "latent_attention")
+
+# --- open-ended grammar EVOLUTION (paradigm-v2 P3+): default OFF -------------- #
+# The four MOVES above compose the FIXED grammar with bounded-depth templates - a
+# bounded task distribution (the POET/OMNI "bounded encoding" ceiling). When
+# ``evolve_grammar`` is enabled the minter ADDS a self-referential grammar-evolution
+# move that grows new well-typed productions (:mod:`kore.openended.grammar`) and
+# mints tasks from them, reaching structures/depths the templates never enumerate -
+# WITHOUT weakening correctness (every task still runs the full construction gate;
+# survivors materialize identically because a production's stages are the same named
+# primitives). Off by default so minting is byte-identical; the ``KORE_MINTER_EVOLVE_
+# GRAMMAR`` env var flips the default so the LIVE controller (which builds a
+# ``TaskMinter`` with no evolve kwarg) can opt in without any code change.
+_EVOLVE_GRAMMAR_ENV = "KORE_MINTER_EVOLVE_GRAMMAR"
+GRAMMAR_MAX_DEPTH = 8          # max body-composition depth (the fusion move reaches ~5)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean toggle from the environment (unset -> ``default``)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 # --------------------------------------------------------------------------- #
@@ -362,21 +391,46 @@ class _Candidate:
     dtype: str
     regime: str
     move: str
+    # For the grammar-evolution move: the evolved production this pipeline came
+    # from, promoted into the grammar iff its task passes the gate (self-reference).
+    production: Optional[g.Production] = None
 
 
 class TaskMinter:
-    """Deterministic (seeded), LLM-free minter of verifiable curriculum tasks."""
+    """Deterministic (seeded), LLM-free minter of verifiable curriculum tasks.
 
+    With ``evolve_grammar=False`` (the default) minting is byte-identical to the
+    fixed-grammar behavior. With ``evolve_grammar=True`` a fifth, self-referential
+    ``"grammar"`` move is appended to the cycle that EVOLVES the grammar itself
+    (see :mod:`kore.openended.grammar` productions) to escape the bounded encoding;
+    every minted task still passes the full construction gate + dedup + niching.
+    """
+
+    # The base move cycle (fixed grammar). ``"grammar"`` is appended per-instance
+    # only when evolution is enabled, so the RNG draw order is unchanged when off.
     MOVES = ("fusion", "extrapolate", "novel", "mutate_crossover")
 
     def __init__(self, seed: int = 0, *, include_vendor: bool = True,
-                 ai_ridge: float = AI_RIDGE):
+                 ai_ridge: float = AI_RIDGE,
+                 evolve_grammar: Optional[bool] = None,
+                 grammar_max_depth: int = GRAMMAR_MAX_DEPTH):
         self.rng = random.Random(seed)
         self.include_vendor = include_vendor
         self.ai_ridge = ai_ridge
         self._seen: set = set()            # dedup keys of accepted tasks
         self._pool: list = []              # accepted pipelines (bases for extrapolation)
         self._libs_cache = None
+        # -- open-ended grammar evolution (default OFF -> identical minting) ---- #
+        if evolve_grammar is None:
+            evolve_grammar = _env_flag(_EVOLVE_GRAMMAR_ENV, False)
+        self.evolve_grammar = bool(evolve_grammar)
+        self.grammar_max_depth = max(2, int(grammar_max_depth))
+        # Instance move cycle: EQUAL to ``MOVES`` when evolution is off (so the
+        # attempt->move mapping, and thus every minted task, is unchanged).
+        self._moves = self.MOVES + (("grammar",) if self.evolve_grammar else ())
+        self._productions = None           # lazy grammar (grows via promotion)
+        self._prod_seen: set = set()       # production signatures already in the pool
+        self._grammar_promoted = 0         # observability: net-new productions evolved
 
     # -- primitive libraries (lazy: torch only touched here) ---------------- #
     def _libs(self):
@@ -471,6 +525,78 @@ class TaskMinter:
         dtype = d1.dtype if d1.dtype in MINT_DTYPES else self.rng.choice(MINT_DTYPES)
         return _Candidate(pipeline, dtype, self._choose_regime(pipeline), "mutate_crossover")
 
+    # -- MOVE (e): SELF-REFERENTIAL GRAMMAR EVOLUTION ---------------------- #
+    # Escape the bounded encoding. Instead of composing primitives with a fixed
+    # template, GROW a new, deeper well-typed production (kore.openended.grammar)
+    # by composing existing productions - including productions evolved earlier in
+    # this run (self-reference) - then instantiate it as a pipeline. The reachable
+    # depth/structure is unbounded, yet the emitted pipeline is a plain tuple of
+    # the SAME named primitives, so it type-checks, behavioral-hashes, niches, and
+    # materializes like any other task AND still runs the full construction gate.
+    # This move is only in the cycle when ``evolve_grammar`` is enabled.
+    def _grammar_prods(self) -> list:
+        """The evolving production set (lazy). Seeded with the grammar axioms
+        (:func:`grammar.base_productions`); grows as gate-passing productions are
+        promoted, so later proposals can re-compose them into deeper structures."""
+        if self._productions is None:
+            self._productions = g.base_productions()
+            self._prod_seen = {pr.signature() for pr in self._productions}
+        return self._productions
+
+    def _promote_production(self, prod: g.Production) -> None:
+        """Add a production that YIELDED A GATE-PASSING task to the grammar so it
+        can seed still-deeper productions later (the self-referential lever).
+        Dedup'd by structural signature; a no-op for one already present."""
+        prods = self._grammar_prods()
+        sig = prod.signature()
+        if sig in self._prod_seen:
+            return
+        self._prod_seen.add(sig)
+        prods.append(prod)
+        self._grammar_promoted += 1
+
+    def _propose_production(self) -> Optional[g.Production]:
+        """Grow a net-new ``MATRIX->MATRIX`` production by composing existing ones.
+
+        Starts from a random production and composes additional blocks (drawn from
+        the SAME growing pool, so evolved productions are re-usable) up to
+        ``grammar_max_depth`` - reaching depths/structures the fixed templates
+        never enumerate. Returns ``None`` if nothing composes (fail-safe)."""
+        pool = self._grammar_prods()
+        matrix_prods = [p for p in pool
+                        if p.in_type == g.MATRIX and p.out_type == g.MATRIX]
+        if not matrix_prods:
+            return None
+        body = self.rng.choice(matrix_prods)
+        extra = self.rng.randint(1, max(1, self.grammar_max_depth - 1))
+        for _ in range(extra):
+            if body.depth >= self.grammar_max_depth:
+                break
+            composed = g.compose_productions(body, self.rng.choice(matrix_prods))
+            if composed is None or composed.depth > self.grammar_max_depth:
+                continue
+            body = composed
+        return body
+
+    def _move_grammar(self) -> Optional[_Candidate]:
+        src, _mid, _term = self._libs()
+        body = self._propose_production()
+        if body is None:
+            return None
+        head = src["matmul"] if self.rng.random() < 0.3 else src["input"]
+        terminal = None
+        if self.rng.random() < 0.25:                       # optional terminal reduction
+            terms = [p for p in self._grammar_prods() if p.out_type == g.ROWVEC]
+            if terms:
+                terminal = self.rng.choice(terms)
+        try:
+            pipeline = g.pipeline_from_production(head, body, terminal)
+        except g.GrammarTypeError:
+            return None
+        dtype = self.rng.choice(MINT_DTYPES)
+        return _Candidate(pipeline, dtype, self._choose_regime(pipeline), "grammar",
+                          production=body)
+
     def _descriptor_to_pipeline(self, desc: ts.TaskDescriptor):
         """Lift a registered descriptor into the grammar (None if unmappable)."""
         src, mid, _term = self._libs()
@@ -555,6 +681,8 @@ class TaskMinter:
                 return self._move_novel()
             if move == "mutate_crossover":
                 return self._move_mutate_crossover()
+            if move == "grammar":
+                return self._move_grammar()
         except Exception:  # noqa: BLE001 - a bad draw is just skipped
             return None
         return None
@@ -630,6 +758,12 @@ class TaskMinter:
         mt = self._build(cand)
         if mt is None:
             return None
+        # Self-referential growth: a production that produced a task passing the
+        # FULL construction gate is promoted into the grammar so it can seed deeper
+        # productions. Gated on CORRECTNESS (not novelty), and only when evolution
+        # is on - so this is a no-op for the default/fixed-grammar minting path.
+        if self.evolve_grammar and cand.move == "grammar" and cand.production is not None:
+            self._promote_production(cand.production)
         if mt.dedup_key in self._seen:         # behavioral-hash dedup
             return None
         self._seen.add(mt.dedup_key)
@@ -653,15 +787,17 @@ class TaskMinter:
     def mint_batch(self, archive, policy_p_fn, n: int, *,
                    progress_fn: Optional[Callable] = None,
                    max_attempts: Optional[int] = None) -> list:
-        """Mint up to ``n`` net-new tasks: cycle the four moves, gate + dedup each,
-        score + niche-place survivors. Deterministic given the minter seed."""
+        """Mint up to ``n`` net-new tasks: cycle the moves, gate + dedup each,
+        score + niche-place survivors. Deterministic given the minter seed. The
+        move cycle is the four base moves, plus the ``"grammar"`` evolution move
+        when ``evolve_grammar`` is enabled (identical order otherwise)."""
         if n <= 0:
             return []
         out: list = []
         budget = max_attempts if max_attempts is not None else max(64, 48 * n)
         attempt = 0
         while len(out) < n and attempt < budget:
-            move = self.MOVES[attempt % len(self.MOVES)]
+            move = self._moves[attempt % len(self._moves)]
             attempt += 1
             cand = self._make_candidate(move)
             if cand is None:
@@ -678,7 +814,9 @@ class TaskMinter:
 def mint_batch(archive, policy_p_fn, n: int, seed: int, *,
                progress_fn: Optional[Callable] = None,
                include_vendor: bool = True,
-               max_attempts: Optional[int] = None) -> list:
+               max_attempts: Optional[int] = None,
+               evolve_grammar: Optional[bool] = None,
+               grammar_max_depth: int = GRAMMAR_MAX_DEPTH) -> list:
     """Mint, gate, dedup, and niche-place ``n`` net-new tasks (seeded).
 
     Parameters
@@ -693,7 +831,14 @@ def mint_batch(archive, policy_p_fn, n: int, seed: int, *,
     progress_fn:
         Optional ``(MintedTask) -> deltaP`` learning-progress callback; when given,
         it becomes the proposer reward (else the learnability prior is used).
+    evolve_grammar:
+        Enable the self-referential grammar-evolution move (default ``None`` ->
+        ``KORE_MINTER_EVOLVE_GRAMMAR`` env var, else OFF -> byte-identical minting).
+    grammar_max_depth:
+        Max production-composition depth when evolving (ignored when off).
     """
-    minter = TaskMinter(seed=seed, include_vendor=include_vendor)
+    minter = TaskMinter(seed=seed, include_vendor=include_vendor,
+                        evolve_grammar=evolve_grammar,
+                        grammar_max_depth=grammar_max_depth)
     return minter.mint_batch(archive, policy_p_fn, n, progress_fn=progress_fn,
                              max_attempts=max_attempts)

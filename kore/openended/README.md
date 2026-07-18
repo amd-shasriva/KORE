@@ -98,6 +98,8 @@ A `MintedTask` is an **in-memory RL-curriculum task** whose six-field ABI (`name
 - **Measured-roofline QD:** survivors get a MAP-Elites niche from **measured CPU proxies** (`arithmetic_intensity` compute/memory-bound at a FLOPs/byte ridge of 20, fusion depth, dtype precision, shape scale) - the same `task_space.descriptor_features` keys, so minted ops niche-place alongside registered ones in the archive.
 - **Learning progress:** learnability is `4·p·(1-p)` from a supplied rollout success-rate `p`, novelty is Hamming distance to occupied niches, and the **proposer reward is the injected learning-progress delta** (`progress_fn`, falling back to the learnability prior).
 
+> **Honest scope of "correct-by-construction."** The construction gate + materialize-time self-check guarantee only that a minted task has a **valid, executable, non-degenerate** oracle - *not* that the task is **realistic** or well-distributed in difficulty. Random torch-primitive compositions can be numerically valid yet unrepresentative of real kernel workloads; the difficulty knobs (fusion depth / dtype / shape) are heuristic priors, not a calibrated curriculum. Minting *grows the space soundly*; it does not by itself guarantee the *hard, useful* problem. Also note the seed: a minted task's **seed kernel is the torch reference, not a Triton kernel** (`materialize._seed_source`), so the Triton-source transform library ([`kore/transform`](../transform/README.md)) is inapplicable to a minted *seed* - AlphaKernel searched from a minted seed yields ~0 children (see [`kore/search`](../search/README.md)). At train time the policy still writes Triton for it, so the "make this correct kernel fast" task itself is well-posed.
+
 ### Held-out safety (by construction)
 
 Minting inherits and strengthens the SELECT-path guard: the grammar has **no** attention / MLA / paged-KV primitive at all, so a held-out task is literally *unrepresentable*. The gate additionally rejects any candidate whose name/family hits the held-out tokens or the canonical registry classifier (`kore.tasks.registry`), so the guard can never drift from the train/held-out split.
@@ -107,3 +109,16 @@ from kore.openended import minter
 tasks = minter.mint_batch(archive, policy_p_fn, n=8, seed=0,   # deterministic, LLM-free
                           progress_fn=learning_progress_delta)  # wired via coevolve_mint (ON in the flagship)
 ```
+
+---
+
+## Novelty & honest limitations
+
+The mechanics above are **correct and sound**, but most of the machinery is **incremental prior art** and should not be oversold:
+
+- **Proposer + archive are faithful re-implementations, not novel.** Frontier scoring is textbook **UED/PLR** (learnability `4·p·(1-p)` + regret) and the archive is textbook **MAP-Elites**; the generation loop is **POET-shaped**. Correctly applied, but not new.
+- **The genuinely-new bit is the *substrate*: roofline-coordinate QD niching over a verifiable kernel task space.** Every kernel task is cheaply generatable, ground-truth **verifiable**, and carries a **continuous performance-headroom regret** (unrealized speedup vs. the roofline), so the usual blockers for open-ended RL - unverifiable reward and hard-to-estimate regret - largely dissolve here. That grounding, plus minting *net-new correct-by-construction* tasks, is the paradigm contribution.
+- **The minter is the strongest piece** - correct-by-construction synthesis from a typed torch-primitive grammar with a rigorous 8-check gate + materialize-time self-check is a genuinely-new-leaning combination for kernel curricula - **but** it guarantees *valid* tasks, not *realistic or hard* ones (see the scope note above).
+- **Live status.** These levers are on in the flagship **template** (`coevolve`, `coevolve_mint`), but they only engage **when the GRPO stage runs**. The run is currently in midtrain, so the co-evolution / minting curriculum is **days away** from actually driving task selection.
+
+See also: [`kore/search`](../search/README.md) (test-time search over the transform calculus), [`kore/transform`](../transform/README.md) (the verified action space), [`kore/tasks`](../tasks/README.md), [`kore/policy`](../policy/README.md) (the GRPO wiring), [`kore/reward`](../reward/README.md).

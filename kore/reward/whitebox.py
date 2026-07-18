@@ -3,26 +3,30 @@
 The live campaign's residual reward degrades to the PMC-free ``eta = T_min/T_meas``
 because :func:`kore.reward.physics.physics_signal_from_obs` never populates
 ``stall_frac``/``occupancy`` -- so the *named* residual ``rho_phys`` (the signal
-with the R^2~=0.98 backing in ``docs/P0_RESULTS.md``) is dormant online, and the
-live gradient is the low-contrast ``0.3 + eta``.
-
-This module closes that gap WITHOUT touching the datagen pipeline or the existing
-reward ABI:
+with the R^2~=0.98 backing in ``docs/P0_RESULTS.md``) is dormant online. HONEST
+STATUS: in the flagship (``reward_mode=speedup``) the base reward is vendor speedup;
+physics enters ONLY as the PMC-free ``eta`` potential-based-shaping term (weight
+``physics_shaping_weight``), NOT as ``0.3 + eta`` (that is the residual-mode reward
+formula). This module provides the machinery to close the ``rho`` gap once per-turn
+counters are threaded, WITHOUT touching the datagen pipeline or the reward ABI:
 
   * :func:`physics_signal_from_counters` -- build a :class:`PhysicsSignal` with the
     named-residual terms populated from rocprofv3 counters, so
     :func:`kore.reward.physics.residual_descent_frac` uses ``rho = T_min/(T_min+N)``
     instead of the flat ``eta`` fallback.
   * :func:`whitebox_attainment` -- the ``(rho, pmc_used)`` credit for a kernel.
-  * :func:`whitebox_structural_score` -- a hack-RESISTANT [0,1] score derived from
-    *what the silicon actually did* (issue efficiency + roofline attainment +
-    baseline-relative traffic). A memset / cache-reuse / "do-less" kernel attains
-    ~0 useful work and therefore scores ~0 by construction -- this is the
-    reward-hacking-immune surface the field (Kevin/CUDA-L1/Sakana) never had.
-  * :func:`phi_potential` -- the scalar potential ``Phi(s) = rho`` used by the
-    potential-based cross-turn shaping in :mod:`kore.reward.shaping` (Ng et al.
-    policy-invariance), so the dense signal can be added with a *theorem* that it
-    cannot change the optimal policy or introduce a hacking incentive.
+  * :func:`whitebox_structural_score` -- a [0,1] score derived from *what the
+    silicon actually did* (issue efficiency + roofline attainment + baseline-
+    relative traffic). NOTE (honest): this score is NOT hack-proof by its own
+    structure -- it consumes ``measured_ms`` and roofline ATTAINMENT, so a fast
+    "do-less" / memset kernel can INFLATE it (attainment clamps to 1.0, issue
+    efficiency runs high). Its hack-resistance comes from the correctness / SNR /
+    determinism GATE that fences it to the CORRECT tier, not from the formula. It is
+    used in tests / behind ``profile_reward_weight`` and is not on the live gradient.
+  * :func:`phi_potential` -- the scalar potential ``Phi(s)`` (``rho`` with counters,
+    else ``eta``) used by the potential-based cross-turn shaping in
+    :mod:`kore.reward.shaping` (Ng et al.). The invariance is APPROXIMATE under
+    GRPO's std-normalized group-relative advantage -- see the honest caveat there.
 
 Everything here is PURE and CPU-testable given a counter dict; the single GPU touch
 (``KoreEnv.collect_counters``) is performed by the caller and injected as ``counters``.
@@ -99,10 +103,13 @@ def occupancy_from_counters(counters: dict) -> Optional[float]:
         from kore.verifier.pmc import est_occupancy
 
         occ = est_occupancy(int(vgpr), int(lds or 0), int(warps or 4))
-        if occ is None:
+        # est_occupancy returns an Occupancy record whose ``.occupancy`` field is the
+        # achieved waves/SIMD as a fraction of the arch max, already in [0, 1]. (The
+        # record itself is not float()-able -- reading the field is the robust path.)
+        frac = getattr(occ, "occupancy", None) if occ is not None else None
+        if frac is None:
             return None
-        # est_occupancy returns a fraction in [0,1] (waves/SIMD over the max).
-        return _clamp01(float(occ))
+        return _clamp01(float(frac))
     except Exception:  # noqa: BLE001 - resource model unavailable -> no occupancy term
         return None
 
@@ -165,13 +172,15 @@ def whitebox_structural_score(counters: dict, *, flops: Optional[float] = None,
 
 def phi_potential(task, obs, counters: Optional[dict] = None,
                   arch: Optional[str] = None) -> Optional[float]:
-    """The scalar potential ``Phi(s) = rho`` for potential-based cross-turn shaping.
+    """The scalar potential ``Phi(s)`` (``rho`` with counters, else ``eta``) for PBS.
 
     Using the named-residual attainment as the potential means the shaping reward
     ``F = gamma*Phi(s') - Phi(s)`` (see :mod:`kore.reward.shaping`) densifies the
-    gradient in the flat correct-but-slow valley while, by the Ng-Harada-Russell
-    theorem, leaving the optimal policy unchanged -- so it is safe to add at any
-    weight and cannot be reward-hacked. Returns None when no potential is defined
+    gradient in the flat correct-but-slow valley while (by Ng-Harada-Russell) being
+    APPROXIMATELY expected-gradient-neutral -- see the honest caveat in
+    :mod:`kore.reward.shaping` (invariance is approximate under GRPO's std-normalized
+    group-relative advantage; the correctness gate, not this term, is the anti-hack
+    spine). Returns None when no potential is defined
     (op not modelable / kernel not correct-and-timed), which the shaper treats as a
     zero-contribution boundary.
     """

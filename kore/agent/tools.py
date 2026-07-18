@@ -271,6 +271,12 @@ class ToolExecutor:
         # (the calculus refuses a move once the budget is spent). Built on first use
         # so the base tool path never imports kore.transform. Reset on reseed.
         self._transform_budget = None
+        # 1-entry memo of the extended (curated + discovered) transform library for
+        # the last working source, so a list_transforms -> apply_transform on the
+        # SAME kernel does not rebuild it twice. Only populated when the
+        # KORE_TRANSFORM_DISCOVER lever is ON (default OFF => curated LIBRARY, never
+        # built). Keyed by source string, so it self-invalidates as the kernel edits.
+        self._disc_library_cache: Optional[tuple[str, Any]] = None
 
     # -- helpers ---------------------------------------------------------- #
     def set_turn(self, turn: int) -> None:
@@ -292,6 +298,41 @@ class ToolExecutor:
             except Exception:  # noqa: BLE001 - transform is optional; degrade gracefully
                 self._transform_budget = None
         return self._transform_budget
+
+    def _transform_library(self, src: Optional[str]):
+        """The transform action space for the transform tools (``list_transforms`` /
+        ``apply_transform``).
+
+        Default (``KORE_TRANSFORM_DISCOVER`` unset / not ``"1"``) -> ``None`` == the
+        curated :data:`kore.transform.library.LIBRARY`, byte-identical to the legacy
+        transform tools. When the lever is ON, the curated library is extended with
+        the self-extending library's SNR-gated discovered proposals
+        (:func:`kore.transform.discover.extend_library`), seeded from ``src`` so the
+        model only sees discovered moves relevant to its CURRENT kernel. The
+        ToolExecutor has no config handle, so this is env-gated exactly like
+        ``KORE_ROOFLINE_GATE`` in :meth:`_evaluate`.
+
+        Fail-safe: any discovery error (or an empty result) falls back to the curated
+        library (``None``) and never raises into the tool loop. Discovered rewrites
+        are conservatively-typed PROPOSALS, not proofs -- an out-of-contract move is
+        still caught downstream by the env's SNR gate when the model build/test/benches
+        the rewritten kernel.
+        """
+        if os.environ.get("KORE_TRANSFORM_DISCOVER", "0") != "1":
+            return None  # lever OFF -> curated LIBRARY (byte-identical default)
+        if not src:
+            return None
+        cache = self._disc_library_cache
+        if cache is not None and cache[0] == src:
+            return cache[1]
+        lib = None
+        try:
+            from kore.transform.discover import extend_library
+            lib = extend_library(source=src) or None
+        except Exception:  # noqa: BLE001 - discovery is opt-in + a bonus, never fatal
+            lib = None
+        self._disc_library_cache = (src, lib)
+        return lib
 
     def reseed_lineage(self) -> dict:
         """Abandon the current candidate lineage and roll back to the seed.
@@ -548,7 +589,7 @@ class ToolExecutor:
                     "error": "transform calculus unavailable"}
         try:
             from kore.transform import admissible_actions
-            actions = admissible_actions(src, budget)
+            actions = admissible_actions(src, budget, self._transform_library(src))
         except Exception as e:  # noqa: BLE001 - never crash the loop
             return {"ok": False, "tool": "list_transforms", "error": f"transform error: {e}"}
         return {
@@ -572,7 +613,7 @@ class ToolExecutor:
         try:
             from kore.transform import apply_sequence
             new_src, applied, rejected, budget_state = apply_sequence(
-                src, [(name, params)], budget)
+                src, [(name, params)], budget, self._transform_library(src))
         except Exception as e:  # noqa: BLE001 - never crash the loop
             return {"ok": False, "tool": "apply_transform", "error": f"transform error: {e}"}
         ok = bool(applied) and not rejected

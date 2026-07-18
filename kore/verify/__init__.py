@@ -67,6 +67,24 @@ from kore.verify.adversarial import (
 )
 from kore.verify.metamorphic import MetamorphicRelation, metamorphic_relations
 
+# Safe, throttled GRPO-loop bridge for the co-evolved adversarial verifier (additive,
+# OFF unless KORE_ADVERSARIAL_COEVOLVE=1). Imported AFTER equivalence + adversarial so
+# there is no cycle; nothing above depends on it.
+from kore.verify.adversarial_hook import (
+    AdversarialHook,
+    AdversarialRegistry,
+    HookBudget,
+    HookReport,
+    default_hook,
+    default_registry,
+    enabled_from_env,
+    get_adversarial_inputs_fn,
+    maybe_coevolve,
+    registry_key,
+    registry_stats,
+    reset_registry,
+)
+
 __all__ = [
     "verify_equivalence",
     "equivalence_verdict",
@@ -99,4 +117,17 @@ __all__ = [
     "fold_breaking_cases",
     "FoldResult",
     "make_strengthened_inputs",
+    # safe, throttled GRPO-loop hook + per-(op,dtype) accumulated battery registry
+    "maybe_coevolve",
+    "get_adversarial_inputs_fn",
+    "enabled_from_env",
+    "AdversarialHook",
+    "AdversarialRegistry",
+    "HookBudget",
+    "HookReport",
+    "default_hook",
+    "default_registry",
+    "registry_key",
+    "registry_stats",
+    "reset_registry",
 ]

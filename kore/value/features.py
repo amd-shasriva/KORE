@@ -226,6 +226,9 @@ def extract_schedule_features(source: str) -> dict:
 
     has_tl_dot = bool(re.search(r"\btl\.dot\s*\(", src))
     has_mfma = bool(re.search(r"mfma|matrix_core|v_mfma", src, re.IGNORECASE))
+    # atomics (tl.atomic_add/cas/...) serialize across programs; a useful signal
+    # for the source heuristic (dense compute kernels rarely want them).
+    has_atomic = bool(re.search(r"\btl\.atomic_\w+\s*\(", src))
     has_fp32_acc = bool(
         re.search(r"tl\.zeros\([^)]*float32", src)
         or re.search(r"dtype\s*=\s*tl\.float32", src)
@@ -250,6 +253,8 @@ def extract_schedule_features(source: str) -> dict:
 
     return {
         "has_source": has_source,
+        "source_len": len(src),
+        "has_atomic": has_atomic,
         "block_m": bm,
         "block_n": bn,
         "block_k": bk,

@@ -60,12 +60,26 @@ class CoevolutionController:
         Include vendor-baselined ops in the space.
     weights:
         Proposer scoring weights.
+    opus_scores:
+        OPTIONAL competitor anchor: a ``{task_id: regret_vs_opus in [0, 1]}`` map
+        (built from EXISTING Opus-teacher data by
+        :func:`kore.openended.opus_baseline.build_opus_scores`) that is threaded into
+        the proposer so the curriculum concentrates on tasks that are both learnable
+        AND where a strong Opus 4.8 result is still to be matched. ``None`` (default)
+        => the map is inert and selection is byte-identical to the plain
+        learnability+regret+novelty curriculum.
+    opus_scores_path:
+        OPTIONAL path to a JSON opus-scores cache (the orchestrator's
+        ``coevolve_opus_scores_path``); loaded fail-safe when ``opus_scores`` is not
+        given directly. A missing/unreadable/empty file leaves the anchor inert.
     """
 
     def __init__(self, task_ids, *, seed: int = 0, batch: Optional[int] = None,
                  k_attempts: int = 1, include_vendor: bool = True,
                  weights: ScoreWeights = DEFAULT_WEIGHTS,
-                 mint: bool = False, mint_batch: int = 8, mint_pool_cap: int = 256):
+                 mint: bool = False, mint_batch: int = 8, mint_pool_cap: int = 256,
+                 opus_scores: Optional[dict] = None,
+                 opus_scores_path: Optional[str] = None):
         self.allowed = list(dict.fromkeys(task_ids))
         self.allowed_set = set(self.allowed)
         # Menu: registered descriptors, one representative per task_id (prefer the
@@ -85,6 +99,10 @@ class CoevolutionController:
         self.k_attempts = max(1, int(k_attempts))
         self.weights = weights
         self.include_vendor = include_vendor
+        # Competitor anchor (optional, fail-safe): normalized to a non-empty
+        # {task_id: regret_vs_opus in [0,1]} map or None. When None the proposer term
+        # is absent, so the served curriculum is byte-identical to the default.
+        self.opus_scores = self._resolve_opus_scores(opus_scores, opus_scores_path)
         self.batch = batch if batch is not None else max(1, min(64, len(self.menu)))
         self._queue: list[str] = []               # proposed task_ids to serve
         self._refills = 0
@@ -108,6 +126,45 @@ class CoevolutionController:
         self._minted_rejected = 0
 
     # ------------------------------------------------------------------ #
+    # competitor anchor (regret-vs-Opus)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _resolve_opus_scores(opus_scores: Optional[dict],
+                             opus_scores_path: Optional[str]) -> Optional[dict]:
+        """Normalize the competitor-anchor inputs to a non-empty
+        ``{task_id: regret_vs_opus in [0,1]}`` map or ``None`` (=> feature inert).
+
+        Fully fail-safe: an explicit ``opus_scores`` dict wins; otherwise a JSON
+        cache at ``opus_scores_path`` is loaded (via
+        :func:`kore.openended.opus_baseline.load_opus_scores`). Only ``str`` keys with
+        finite values clamped to ``[0, 1]`` survive; an empty/invalid result collapses
+        to ``None`` so scoring stays byte-identical to the default curriculum."""
+        raw = opus_scores
+        if not raw and opus_scores_path:
+            try:
+                from kore.openended.opus_baseline import load_opus_scores
+                raw = load_opus_scores(opus_scores_path)
+            except Exception:  # noqa: BLE001 - anchor is optional; degrade to inert
+                raw = None
+        if not raw:
+            return None
+        clean: dict = {}
+        try:
+            for k, v in dict(raw).items():
+                if not isinstance(k, str):
+                    continue
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if not (fv == fv) or fv in (float("inf"), float("-inf")):  # NaN/inf
+                    continue
+                clean[k] = max(0.0, min(1.0, fv))
+        except (TypeError, AttributeError, ValueError):
+            return None
+        return clean or None
+
+    # ------------------------------------------------------------------ #
     # selection
     # ------------------------------------------------------------------ #
     def _round_robin(self) -> str:
@@ -124,7 +181,8 @@ class CoevolutionController:
         if self.menu:
             proposed = propose(self.archive, self.history, self.batch,
                                seed=self.seed + self._refills - 1, weights=self.weights,
-                               mutate=False, candidate_pool=self.menu)
+                               mutate=False, candidate_pool=self.menu,
+                               opus_scores=self.opus_scores)
             for d in proposed:
                 tid = d.task_id
                 if tid in self.allowed_set and tid not in seen:
@@ -263,4 +321,6 @@ class CoevolutionController:
             "minted_materialized": self._minted_materialized,
             "minted_rejected": self._minted_rejected,
             "minted_pool": len(self._minted),
+            "opus_anchored": self.opus_scores is not None,
+            "opus_tasks": len(self.opus_scores) if self.opus_scores else 0,
         }

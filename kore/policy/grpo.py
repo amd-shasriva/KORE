@@ -595,6 +595,9 @@ def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inproc
     # Self-referential open-ended minter grammar evolution (correct-by-construction):
     if getattr(config, "coevolve_evolve_grammar", False):
         _os.environ["KORE_MINTER_EVOLVE_GRAMMAR"] = "1"
+    # Self-extending transform action space in the agentic tool path:
+    if getattr(config, "transform_discover", False):
+        _os.environ["KORE_TRANSFORM_DISCOVER"] = "1"
     return _train_grpo_inprocess(config, tasks)
 
 
@@ -989,6 +992,24 @@ def _search_value_fn(config):
         return None
 
 
+def _build_opus_scores(config):
+    """Competitor-anchored regret-vs-Opus per-task score map for the co-evolution
+    curriculum, mined from the EXISTING Opus-teacher datagen (no new API calls), or
+    None when disabled/unavailable. Fail-safe: any gap -> None (curriculum unchanged).
+    """
+    if not getattr(config, "coevolve_regret_vs_opus", False):
+        return None
+    try:
+        from pathlib import Path
+        from kore.openended.opus_baseline import build_opus_scores
+        distill = getattr(config, "coevolve_distill_path", None)
+        data_root = str(Path(distill).parent) if distill else "data/full14b"
+        cache = getattr(config, "coevolve_opus_scores_path", None)
+        return build_opus_scores(data_root, cache_path=cache) or None
+    except Exception:  # noqa: BLE001 - regret curriculum is a bonus; never block
+        return None
+
+
 def _maybe_search_then_distill(groups, config, distill_sink, step):
     """AlphaKernel test-time search from the step's BEST kernel, feeding the distill
     sink (paradigm-v2 P1b). Sound + cheap by construction:
@@ -1036,6 +1057,7 @@ def _maybe_search_then_distill(groups, config, distill_sink, step):
             budget=int(getattr(config, "search_budget", 64)),
             k_expand=int(getattr(config, "search_k_expand", 4)),
             max_depth=getattr(config, "search_max_depth", None),
+            discover=bool(getattr(config, "transform_discover", False)),
             reward_mode=getattr(config, "reward_mode", "speedup"), seed=step, **skw)
         src, su = res.get("best_source"), res.get("best_speedup_lcb")
         base = float(g.get("best_speedup") or 0.0)
@@ -1165,7 +1187,8 @@ def _train_grpo_fallback(config, tasks):
             k_attempts=config.num_trajectories,
             include_vendor=getattr(config, "coevolve_include_vendor", True),
             mint=getattr(config, "coevolve_mint", False),
-            mint_batch=getattr(config, "coevolve_mint_batch", 8))
+            mint_batch=getattr(config, "coevolve_mint_batch", 8),
+            opus_scores=_build_opus_scores(config))
         log.info("coevolve: frontier curriculum active", **controller.report())
 
     def _one_group(task, seed):
@@ -2069,7 +2092,8 @@ def _train_grpo_distributed(config, tasks):
             k_attempts=config.num_trajectories,
             include_vendor=getattr(config, "coevolve_include_vendor", True),
             mint=getattr(config, "coevolve_mint", False),
-            mint_batch=getattr(config, "coevolve_mint_batch", 8))
+            mint_batch=getattr(config, "coevolve_mint_batch", 8),
+            opus_scores=_build_opus_scores(config))
         if rank == 0:
             log.info("coevolve: frontier curriculum active (distributed)", **controller.report())
 

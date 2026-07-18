@@ -37,17 +37,54 @@ class TransformProposePolicy:
 
     ``k`` bounds the children returned per expansion (AlphaKernel also passes its own
     ``k_expand``; the min applies). ``library`` overrides the default transform set.
+
+    ``discover`` (default False) opts into the self-extending transform library
+    (:func:`kore.transform.discover.extend_library`): when enabled AND no explicit
+    ``library`` is given, the action space is the curated LIBRARY *plus* SNR-gated
+    discovered proposals, seeded ONCE from the first (root) source expanded and
+    reused for every node. Default OFF => the curated LIBRARY, byte-identical to the
+    prior policy. An explicit ``library`` always wins (the caller is fully in
+    control). Fail-safe: any discovery error falls back to the curated library and
+    NEVER raises into the search (discovered rewrites are proposals, not proofs -
+    correctness stays enforced downstream by the env's SNR gate).
     """
 
-    def __init__(self, *, k: int = 4, library=None):
+    def __init__(self, *, k: int = 4, library=None, discover: bool = False):
         self.k = max(1, int(k))
         self.library = library
+        self.discover = bool(discover)
+        # Lazily-built curated+discovered action space (cache) for the discover path,
+        # plus a flag so the one-time build is attempted at most once even on failure.
+        self._ext_library = None
+        self._ext_ready = False
 
     def _budget(self, task):
         from kore.transform import ErrorBudget
         op = getattr(task, "operation", None) or getattr(task, "task_id", "") or ""
         dtype = getattr(task, "dtype", "fp32") or "fp32"
         return ErrorBudget.for_op(op, dtype)
+
+    def _effective_library(self, src: str):
+        """The transform action space for this expansion.
+
+        An explicit ``library`` override always wins. Otherwise, with ``discover``
+        OFF (the default) return None -> the curated LIBRARY, byte-identical to the
+        historical policy. With ``discover`` ON, build the curated+discovered library
+        ONCE (seeded from ``src`` -- the first/root source) and reuse it for every
+        node. Fail-safe: any discovery error falls back to the curated library.
+        """
+        if self.library is not None:
+            return self.library
+        if not self.discover:
+            return None
+        if not self._ext_ready:
+            self._ext_ready = True
+            try:
+                from kore.transform.discover import extend_library
+                self._ext_library = extend_library(source=src) or None
+            except Exception:  # noqa: BLE001 - discovery is a bonus, never a hard dep
+                self._ext_library = None
+        return self._ext_library
 
     def propose(self, state: ProposeContext) -> list[Edit]:
         """Return up to ``k`` child kernels, one per admissible transform. Fail-safe:
@@ -59,8 +96,9 @@ class TransformProposePolicy:
             from kore.transform import admissible_actions, apply_sequence
         except Exception:  # noqa: BLE001 - transform optional -> no expansion
             return []
+        lib = self._effective_library(src)
         try:
-            actions = admissible_actions(src, self._budget(state.task), self.library)
+            actions = admissible_actions(src, self._budget(state.task), lib)
         except Exception:  # noqa: BLE001
             return []
         edits: list[Edit] = []
@@ -73,7 +111,7 @@ class TransformProposePolicy:
                 # SNR gate is the hard guard on any path that drifts too far).
                 budget = self._budget(state.task)
                 new_src, applied, rejected, _ = apply_sequence(
-                    src, [a.as_step()], budget, self.library)
+                    src, [a.as_step()], budget, lib)
             except Exception:  # noqa: BLE001 - a bad rewrite is just skipped
                 continue
             if applied and not rejected and new_src and new_src != src:
@@ -82,13 +120,35 @@ class TransformProposePolicy:
         return edits
 
 
+def _resolve_search_library(root_source: str, discover: bool, library):
+    """Pick the transform action space for a search.
+
+    Precedence: an explicit ``library`` wins (caller fully in control); else
+    ``discover=True`` extends the curated LIBRARY with SNR-gated discovered
+    proposals seeded from ``root_source`` (:func:`kore.transform.discover.
+    extend_library`); else None => the curated LIBRARY (byte-identical to the prior
+    search). Fail-safe: any discovery error falls back to the curated library and
+    never raises into the search path.
+    """
+    if library is not None:
+        return library
+    if not discover:
+        return None
+    try:
+        from kore.transform.discover import extend_library
+        return extend_library(source=root_source) or None
+    except Exception:  # noqa: BLE001 - discovery is opt-in + a bonus, never fatal
+        return None
+
+
 def search_from_kernel(root_source: str, task, env, *, budget: int = 64,
                        value_model=None, value_fn: Optional[Callable] = None,
                        reward_mode: str = "speedup",
                        k_expand: int = 4, max_depth: Optional[int] = None,
                        incumbent_min_measures: int = 1,
                        value_leaf_weight: float = 0.0,
-                       roofline_ub_fn=None, seed: int = 0) -> dict:
+                       roofline_ub_fn=None, discover: bool = False,
+                       library=None, seed: int = 0) -> dict:
     """Run AlphaKernel from ``root_source`` over the verified-transform action space.
 
     A single call that constructs the :class:`TransformProposePolicy` and runs
@@ -116,8 +176,20 @@ def search_from_kernel(root_source: str, task, env, *, budget: int = 64,
     :func:`kore.search.alphakernel.make_roofline_ub_fn`. Default None => OFF (prior
     behavior). ``incumbent_min_measures`` raises the sample floor a node needs before
     it can seed the (monotone) B&B pruning bound.
+
+    Self-extending transform library (``transform_discover`` lever)
+    --------------------------------------------------------------
+    ``discover=True`` broadens the action space with the self-extending transform
+    library: the curated LIBRARY *plus* SNR-gated discovered proposals seeded from
+    ``root_source`` (:func:`kore.transform.discover.extend_library`). ``library=``
+    passes an explicit action space and always wins. Both default OFF/None => the
+    curated LIBRARY, byte-identical to the prior search. Fail-safe: any discovery
+    error falls back to the curated library (never raises into the search). The
+    discovered rewrites are conservatively-typed PROPOSALS, not proofs -- an
+    out-of-contract child still fails the env's SNR gate and is pruned.
     """
-    policy = TransformProposePolicy(k=k_expand)
+    lib = _resolve_search_library(root_source, discover, library)
+    policy = TransformProposePolicy(k=k_expand, library=lib)
     cfg = AlphaKernelConfig(
         reward_mode=reward_mode, k_expand=k_expand, max_depth=max_depth,
         incumbent_min_measures=incumbent_min_measures,

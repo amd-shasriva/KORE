@@ -627,17 +627,37 @@ class HumanEvalScorer:
 
     @staticmethod
     def build_program(item: dict, completion: str) -> str:
-        """Assemble prompt + completion + test into a runnable program.
+        """Assemble prompt + completion + test into a runnable program, tolerant
+        of chat-style output.
 
-        Accepts either a bare function body (indented) or a full ``def`` - if the
-        completion already re-declares the entry point we use it standalone.
+        A model SFT'd on multi-turn dialogues answers conversationally (prose
+        before/after the code, with or without a markdown fence). The old parser
+        only handled a bare body or a fenced full-def, so any prose outside a
+        fence made the assembled program a SyntaxError -> pass@1 scored 0 even
+        when the code was correct (the post-SFT ``humaneval 0.30->0.018`` gate
+        artifact). This robustly extracts the entry-point function block.
         """
         comp = _strip_code_fences(completion)
         entry = item["entry_point"]
-        if re.search(rf"^\s*def\s+{re.escape(entry)}\b", comp, re.MULTILINE):
-            body = comp
+        m = re.search(rf"^[ \t]*def\s+{re.escape(entry)}\b", comp, re.MULTILINE)
+        if m:
+            # Drop leading prose before the def; keep only the contiguous function
+            # block (def line + indented/blank lines), dropping trailing prose.
+            lines = comp[m.start():].splitlines()
+            block = [lines[0]]
+            for ln in lines[1:]:
+                if ln.strip() == "" or ln[:1] in (" ", "\t"):
+                    block.append(ln)
+                else:
+                    break
+            body = "\n".join(block)
         else:
-            body = item["prompt"] + comp
+            # Body-only completion: strip leading non-indented prose, then graft
+            # the body onto the signature from the prompt.
+            lines = comp.splitlines()
+            while lines and lines[0].strip() and lines[0][:1] not in (" ", "\t"):
+                lines.pop(0)
+            body = item["prompt"] + "\n".join(lines)
         return body + "\n\n" + item["test"] + "\n"
 
     def score(self, model_generate: ModelGenerate) -> dict:

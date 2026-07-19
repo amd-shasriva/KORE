@@ -1028,6 +1028,8 @@ def run_retention_suite(
     n: Optional[int] = None,
     data_dir: Optional[Path] = None,
     scorers: Optional[Sequence[Scorer]] = None,
+    cache_dir: Optional[Path] = None,
+    cache_tag: str = "",
 ) -> dict:
     """Run the general-retention battery and return per-bench + aggregate scores.
 
@@ -1074,11 +1076,33 @@ def run_retention_suite(
     if scorers is None:
         scorers = [build_scorer(b, judge=judge, data_dir=data_dir, full=full, n=n) for b in benches]
 
+    # Optional per-benchmark score cache: on a contended/flaky node the ~1.75h gate
+    # can be SIGKILLed mid-suite; caching each bench's result to disk lets a relaunch
+    # SKIP the benches already scored instead of redoing them from scratch. base and
+    # candidate are stable across restarts, so the caller encodes the model
+    # fingerprint in ``cache_tag`` to keep the cache valid + role-separated.
+    _cache = Path(cache_dir) if cache_dir else None
+    if _cache is not None:
+        _cache.mkdir(parents=True, exist_ok=True)
+
     per_bench: dict[str, dict] = {}
     scores: dict[str, float] = {}
     sources: dict[str, Optional[str]] = {}
     for sc in scorers:
-        result = sc.score(model_generate)
+        _cf = (_cache / f"{cache_tag}__{sc.name}.json") if _cache is not None else None
+        result = None
+        if _cf is not None and _cf.exists():
+            try:
+                result = json.loads(_cf.read_text())
+            except Exception:  # noqa: BLE001 - corrupt/partial cache -> recompute
+                result = None
+        if result is None:
+            result = sc.score(model_generate)
+            if _cf is not None:
+                try:
+                    _cf.write_text(json.dumps(result))
+                except Exception:  # noqa: BLE001 - caching is best-effort, never fatal
+                    pass
         per_bench[sc.name] = result
         scores[sc.name] = float(result.get("score", 0.0))
         sources[sc.name] = result.get("source", getattr(sc, "source", None))

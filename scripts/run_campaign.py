@@ -1910,8 +1910,28 @@ def _retention_gate(ctx, *, stage, candidate, base):
     # downstream anyway. Use a principled default (2%) that still catches genuine
     # catastrophic forgetting; overridable via --retention-epsilon.
     epsilon = float(getattr(ctx["args"], "retention_epsilon", 0.02))
-    base_scores = run_retention_suite(base_gen)
-    cand_scores = run_retention_suite(cand_gen)
+    # Per-benchmark score cache so a SIGKILL mid-gate (contended/flaky node) resumes
+    # from the benches already scored instead of redoing the ~1.75h suite from
+    # scratch. Tag by stage + role + a model fingerprint (path + config mtime) so a
+    # changed checkpoint invalidates only its own cache; base + candidate are stable
+    # across restarts, so the cache is valid across relaunches.
+    from pathlib import Path as _Path
+    import hashlib as _hashlib
+    _cache_dir = _Path(str(candidate)).parent / "retention_cache"
+
+    def _model_fp(p):
+        pp = _Path(str(p))
+        try:
+            key = pp / "config.json"
+            mt = key.stat().st_mtime if key.exists() else pp.stat().st_mtime
+        except Exception:  # noqa: BLE001 - HF hub id / missing path -> stable 0
+            mt = 0.0
+        return _hashlib.sha1(f"{pp}|{mt:.0f}".encode()).hexdigest()[:12]
+
+    base_scores = run_retention_suite(
+        base_gen, cache_dir=_cache_dir, cache_tag=f"{stage}_base_{_model_fp(base)}")
+    cand_scores = run_retention_suite(
+        cand_gen, cache_dir=_cache_dir, cache_tag=f"{stage}_cand_{_model_fp(candidate)}")
     # mtbench here is scored by the length/overlap STUB judge (no real LLM judge is
     # injected), so it must not HARD-gate a multi-day run on verbosity noise - a
     # more-direct post-SFT answer style depresses the proxy while true quality holds.

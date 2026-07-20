@@ -1893,9 +1893,13 @@ def _retention_gate(ctx, *, stage, candidate, base):
     # torch.cuda.OutOfMemoryError) or a corrupt-checkpoint load error (OSError)
     # is a REAL failure and MUST propagate to fail the run - never swallow it, or
     # the hard-stop retention gate silently disables itself.
+    # Pin the gate's model loads to the run's GPUs (free GPUs on a shared node),
+    # matching the FSDP training pinning, so device_map="auto" never grabs a busy
+    # co-tenant GPU.
+    _gate_gpus = _gpu_ids(ctx) or None
     try:
-        base_gen = load_generate(base)
-        cand_gen = load_generate(candidate)
+        base_gen = load_generate(base, gpu_ids=_gate_gpus)
+        cand_gen = load_generate(candidate, gpu_ids=_gate_gpus)
     except ImportError as e:
         _log(stage, f"WARNING: retention gate NOT enforced - serving backend not "
                     f"provisioned (torch/vLLM unavailable: {e})")

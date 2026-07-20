@@ -174,7 +174,7 @@ def _apply_chat_no_think(tok, messages):
 
 
 def load_generate(model_id: str, *, backend: str = "hf", tensor_parallel_size: int = 1,
-                  max_new_tokens: int = 1024, **kw):
+                  max_new_tokens: int = 1024, gpu_ids: Optional[list[int]] = None, **kw):
     """Load ``model_id`` and return a single-example ``generate`` callable.
 
     The returned ``generate(prompt_or_messages, max_tokens=, temperature=0.0) ->
@@ -187,7 +187,8 @@ def load_generate(model_id: str, *, backend: str = "hf", tensor_parallel_size: i
       - ``"vllm"`` : :class:`VLLMPolicy` (fast rollout serving on ROCm).
     """
     if backend == "vllm":
-        policy = VLLMPolicy(model_id, tensor_parallel_size=tensor_parallel_size, **kw)
+        policy = VLLMPolicy(model_id, tensor_parallel_size=tensor_parallel_size,
+                            gpu_ids=gpu_ids, **kw)
 
         def generate(prompt_or_messages, max_tokens: int = max_new_tokens,
                      temperature: float = 0.0) -> str:
@@ -203,6 +204,11 @@ def load_generate(model_id: str, *, backend: str = "hf", tensor_parallel_size: i
         return generate
 
     if backend == "hf":
+        # Pin device_map="auto" to the requested physical GPUs BEFORE the first HIP
+        # init (from_pretrained below), so the retention gate stays on the free GPUs
+        # of a shared node instead of grabbing every visible (incl. busy) GPU.
+        if gpu_ids:
+            configure_rocm_env(gpu_ids)
         import torch  # guarded heavy import
         from transformers import AutoModelForCausalLM, AutoTokenizer
 

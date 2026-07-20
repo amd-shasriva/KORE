@@ -7,6 +7,8 @@
 # On PASS it marks 'sft' done in the manifest and stops (never touches DPO).
 #
 # Env: GATE_NGPU=3 SFT_UTIL_MAX=20 SFT_VRAM_MAX_GB=8 SFT_MAX_RETRIES=48
+#      GATE_GPUS=0,2,5  # optional: prefer this exact GPU set (still intersected with
+#                       # the live-idle set for co-tenant safety - never stomps a busy GPU)
 set -u
 REPO=/home/shasriva/Kore-RL/KORE
 VENV=/home/shasriva/kore-venv/bin/python
@@ -17,6 +19,7 @@ export PATH="$(dirname "$VENV"):$PATH"
 UTIL_MAX="${SFT_UTIL_MAX:-20}"
 VRAM_MAX_GB="${SFT_VRAM_MAX_GB:-8}"
 NGPU="${GATE_NGPU:-3}"           # 2x14B (base+candidate) fits comfortably; small footprint
+GATE_GPUS="${GATE_GPUS:-}"       # optional preferred GPU set (intersected with idle)
 MAX_RETRIES="${SFT_MAX_RETRIES:-48}"
 WAIT_S="${SFT_WAIT_S:-120}"
 COOLDOWN_S="${SFT_COOLDOWN_S:-60}"
@@ -56,7 +59,20 @@ for attempt in $(seq 1 "$MAX_RETRIES"); do
     echo "ALERT no idle GPUs; waiting ${WAIT_S}s [attempt $attempt] $(date)"
     sleep "$WAIT_S"; continue
   fi
-  SEL=$(echo "$IDLE" | tr ',' '\n' | head -n "$NGPU" | paste -sd,)
+  if [ -n "$GATE_GPUS" ]; then
+    # co-tenant safe: use only the preferred GPUs that are ACTUALLY idle right now
+    SEL=""
+    for g in $(echo "$GATE_GPUS" | tr ',' ' '); do
+      case ",$IDLE," in *",$g,"*) SEL="${SEL:+$SEL,}$g";; esac
+    done
+    SEL=$(echo "$SEL" | tr ',' '\n' | grep -v '^$' | head -n "$NGPU" | paste -sd,)
+    if [ -z "$SEL" ]; then
+      echo "ALERT preferred GATE_GPUS=[${GATE_GPUS}] none idle now (idle=[${IDLE}]); waiting ${WAIT_S}s [attempt $attempt] $(date)"
+      sleep "$WAIT_S"; continue
+    fi
+  else
+    SEL=$(echo "$IDLE" | tr ',' '\n' | head -n "$NGPU" | paste -sd,)
+  fi
   TS=$(date +%Y%m%d_%H%M%S)
   LOG="runs/full/logs/sft_gate_${TS}.log"
   echo "ALERT GATE_LAUNCH attempt=${attempt} idle=[${IDLE}] using=[${SEL}] log=$(basename "$LOG") $(date)"

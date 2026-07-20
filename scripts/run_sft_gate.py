@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Standalone SFT retention gate - the gating test WITHOUT any (re)training.
+
+The campaign's sft stage couples a full-FT (re)train with the retention gate, so
+"just gate the finished SFT" ends up re-running SFT when the step schedule rescales
+to a different GPU count. This script runs ONLY the gate: it scores the base model
+vs the finished SFT checkpoint on the retention suite and applies the gate, then
+stops (it never touches DPO). On PASS it marks 'sft' done in the campaign manifest
+so a later `run_campaign` resume proceeds straight to DPO.
+
+It reuses the fixed gate stack: the hardened HumanEval parse, the per-benchmark
+score CACHE (so a mid-gate kill resumes), the capability-only gate keys (mtbench is
+stub-judged -> advisory), and GPU-aware loading (pins device_map to --gpu-ids so it
+stays on the free GPUs of a shared node). 2x 14B fits on 1-2 GPUs.
+
+    python scripts/run_sft_gate.py --candidate runs/full/sft --gpu-ids 3,4 --mark-done
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+# capability benchmarks with real (non-stub) scorers; mtbench uses the length/overlap
+# stub judge here, so it is advisory (not a hard gate) - matches run_campaign.
+_GATE_KEYS = ("mmlu", "humaneval", "ifeval", "bfcl", "livecodebench")
+
+
+def _fp(p: str) -> str:
+    pp = Path(str(p))
+    try:
+        key = pp / "config.json"
+        mt = key.stat().st_mtime if key.exists() else pp.stat().st_mtime
+    except Exception:  # noqa: BLE001
+        mt = 0.0
+    return hashlib.sha1(f"{pp}|{mt:.0f}".encode()).hexdigest()[:12]
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--base", default="Qwen/Qwen3-14B")
+    ap.add_argument("--candidate", default="runs/full/sft")
+    ap.add_argument("--gpu-ids", default="", help="comma-separated physical GPU ids to pin to")
+    ap.add_argument("--epsilon", type=float, default=0.02)
+    ap.add_argument("--manifest", default="data/full14b/campaign_manifest.json")
+    ap.add_argument("--mark-done", action="store_true",
+                    help="on PASS, add 'sft' to the manifest done_stages")
+    a = ap.parse_args(argv)
+    gpu_ids = [int(x) for x in a.gpu_ids.split(",") if x.strip() != ""] or None
+
+    from kore.eval.gates import format_gate_report, retention_gate
+    from kore.eval.retention import run_retention_suite
+    from kore.policy.serve import load_generate
+
+    cache_dir = Path(a.candidate).parent / "retention_cache"
+    print(f"[gate] base={a.base} candidate={a.candidate} gpu_ids={gpu_ids} "
+          f"cache={cache_dir}", flush=True)
+
+    base_gen = load_generate(a.base, gpu_ids=gpu_ids)
+    cand_gen = load_generate(a.candidate, gpu_ids=gpu_ids)
+    base = run_retention_suite(base_gen, cache_dir=cache_dir,
+                               cache_tag=f"sft_base_{_fp(a.base)}")
+    cand = run_retention_suite(cand_gen, cache_dir=cache_dir,
+                               cache_tag=f"sft_cand_{_fp(a.candidate)}")
+
+    b = {k: v for k, v in base["scores"].items() if k in _GATE_KEYS}
+    c = {k: v for k, v in cand["scores"].items() if k in _GATE_KEYS}
+    res = retention_gate(b, c, epsilon=a.epsilon)
+    print(format_gate_report(res, title="KORE retention gate [sft] (standalone)"), flush=True)
+    print(f"[gate] base scores: {base['scores']}", flush=True)
+    print(f"[gate] cand scores: {cand['scores']}", flush=True)
+    print(f"[gate] mtbench (advisory, stub-judged): base={base['scores'].get('mtbench')} "
+          f"cand={cand['scores'].get('mtbench')}", flush=True)
+
+    if not res.passed:
+        print("[gate] RESULT: FAIL", flush=True)
+        return 1
+    print("[gate] RESULT: PASS", flush=True)
+    if a.mark_done:
+        mp = Path(a.manifest)
+        m = json.loads(mp.read_text())
+        ds = set(m.get("done_stages", []))
+        ds.add("sft")
+        m["done_stages"] = sorted(ds)
+        m["sft_ckpt"] = a.candidate
+        mp.write_text(json.dumps(m, indent=2))
+        print(f"[gate] marked sft done in manifest -> {m['done_stages']} "
+              f"(a later run_campaign resume proceeds to DPO)", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -84,17 +84,24 @@ for attempt in $(seq 1 "$MAX_RETRIES"); do
   [ "$USE" -gt "$NUM_IDLE" ] && USE="$NUM_IDLE"
   SEL=$(printf '%s\n' "${_IDLE[@]}" | head -n "$USE" | paste -sd,)
   N=$(echo "$SEL" | tr ',' '\n' | grep -c .)
-  REMAP=$(seq -s, 0 $((N - 1)))
   TS=$(date +%Y%m%d_%H%M%S)
   LOG="runs/full/logs/sft_finish_${TS}.log"
-  echo "ALERT LAUNCH attempt=${attempt} idle=[${IDLE}] using=[${SEL}] (masked->${REMAP}) n=${N} log=$(basename "$LOG") $(date)"
+  echo "ALERT LAUNCH attempt=${attempt} idle=[${IDLE}] using=[${SEL}] n=${N} log=$(basename "$LOG") $(date)"
 
-  ROCR_VISIBLE_DEVICES="$SEL" HIP_VISIBLE_DEVICES="$SEL" PYTHONPATH=. \
+  # Isolation on this shared node via --gpu-ids=$SEL (PHYSICAL idle GPUs), the design's
+  # shared-node pinning lever:
+  #  * FSDP SFT resume: run_campaign forwards GPU_IDS -> accelerate --gpu_ids (physical,
+  #    authoritative) so the sharded workers run only on the idle GPUs.
+  #  * retention GATE: run_campaign now passes gpu_ids to load_generate ->
+  #    configure_rocm_env pins HF device_map="auto" to the idle GPUs before HIP init.
+  # No parent VISIBLE_DEVICES mask (it fights accelerate's own --gpu_ids remap); both
+  # paths target $SEL, so neither can touch a busy container GPU.
+  PYTHONPATH=. \
     KORE_VERIFIED_CORRECTNESS=1 KORE_COMPILE_BASELINE=1 KORE_BENCH_COLD=1 \
     KORE_SHAPE_AUGMENT=1 \
     "$VENV" scripts/run_campaign.py --model Qwen/Qwen3-14B --full-ft --use-hf \
       --teacher claude --adaptive-steps --stages build,sft --sft-total 13000 \
-      --gpu-ids "$REMAP" --datagen-workers 16 --ground-reasoning \
+      --gpu-ids "$SEL" --datagen-workers 16 --ground-reasoning \
       --profile-reward 0.15 --data-root data/full14b \
       --midtrain-out runs/full/midtrain --sft-out runs/full/sft \
       --dpo-out runs/full/dpo --grpo-out runs/full/grpo --soup-out runs/full/soup \

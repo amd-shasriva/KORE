@@ -24,60 +24,33 @@ MAX_RETRIES="${SFT_MAX_RETRIES:-48}"
 WAIT_S="${SFT_WAIT_S:-120}"
 COOLDOWN_S="${SFT_COOLDOWN_S:-60}"
 
-pick_idle_gpus() {
-  SFT_UTIL_MAX="$UTIL_MAX" SFT_VRAM_MAX_GB="$VRAM_MAX_GB" "$VENV" - <<'PY'
-import os, re, subprocess, time
-util_max = float(os.environ.get("SFT_UTIL_MAX", "20"))
-vram_max = float(os.environ.get("SFT_VRAM_MAX_GB", "8")) * 1e9
-def smi(args):
-    try:
-        return subprocess.run(["rocm-smi", *args], capture_output=True, text=True, timeout=60).stdout
-    except Exception:
-        return ""
-util, vram = {}, {}
-for s in range(2):
-    if s:
-        time.sleep(3)
-    u = smi(["--showuse"]); m = smi(["--showmeminfo", "vram"])
-    for ln in u.splitlines():
-        mm = re.search(r"GPU\[(\d+)\].*?GPU use \(%\):\s*(\d+)", ln)
-        if mm:
-            g = int(mm.group(1)); util[g] = max(util.get(g, 0.0), float(mm.group(2)))
-    for ln in m.splitlines():
-        mm = re.search(r"GPU\[(\d+)\].*?Used Memory \(B\):\s*(\d+)", ln)
-        if mm:
-            g = int(mm.group(1)); vram[g] = max(vram.get(g, 0.0), float(mm.group(2)))
-idle = [g for g in sorted(util) if util.get(g, 100) <= util_max and vram.get(g, 9e12) <= vram_max]
-print(",".join(map(str, idle)))
-PY
+# Emits "<hip_csv>\t<phys_csv>" for idle GPUs. GATE_GPUS filters by PHYSICAL (rocm-smi)
+# id; the emitted HIP ids are what HIP_VISIBLE_DEVICES needs (rocm-smi and HIP index
+# orders DIFFER on this node - see scripts/gpu_pick_hip.py).
+pick_idle_hip() {
+  SFT_UTIL_MAX="$UTIL_MAX" SFT_VRAM_MAX_GB="$VRAM_MAX_GB" GATE_NGPU="$NGPU" \
+  GATE_GPUS="$GATE_GPUS" "$VENV" scripts/gpu_pick_hip.py 2>/dev/null
 }
 
-echo "SFT_GATE_SUPERVISOR start ngpu=${NGPU} util_max=${UTIL_MAX}% vram_max=${VRAM_MAX_GB}GB $(date)"
+echo "SFT_GATE_SUPERVISOR start ngpu=${NGPU} util_max=${UTIL_MAX}% vram_max=${VRAM_MAX_GB}GB pref=[${GATE_GPUS:-any}] $(date)"
 for attempt in $(seq 1 "$MAX_RETRIES"); do
-  IDLE=$(pick_idle_gpus)
-  if [ -z "$IDLE" ]; then
-    echo "ALERT no idle GPUs; waiting ${WAIT_S}s [attempt $attempt] $(date)"
+  PICK=$(pick_idle_hip)
+  HIP_SEL=$(printf '%s' "$PICK" | cut -f1)
+  PHYS_SEL=$(printf '%s' "$PICK" | cut -f2)
+  if [ -z "$HIP_SEL" ]; then
+    echo "ALERT no idle GPUs (pref=[${GATE_GPUS:-any}]); waiting ${WAIT_S}s [attempt $attempt] $(date)"
     sleep "$WAIT_S"; continue
-  fi
-  if [ -n "$GATE_GPUS" ]; then
-    # co-tenant safe: use only the preferred GPUs that are ACTUALLY idle right now
-    SEL=""
-    for g in $(echo "$GATE_GPUS" | tr ',' ' '); do
-      case ",$IDLE," in *",$g,"*) SEL="${SEL:+$SEL,}$g";; esac
-    done
-    SEL=$(echo "$SEL" | tr ',' '\n' | grep -v '^$' | head -n "$NGPU" | paste -sd,)
-    if [ -z "$SEL" ]; then
-      echo "ALERT preferred GATE_GPUS=[${GATE_GPUS}] none idle now (idle=[${IDLE}]); waiting ${WAIT_S}s [attempt $attempt] $(date)"
-      sleep "$WAIT_S"; continue
-    fi
-  else
-    SEL=$(echo "$IDLE" | tr ',' '\n' | head -n "$NGPU" | paste -sd,)
   fi
   TS=$(date +%Y%m%d_%H%M%S)
   LOG="runs/full/logs/sft_gate_${TS}.log"
-  echo "ALERT GATE_LAUNCH attempt=${attempt} idle=[${IDLE}] using=[${SEL}] log=$(basename "$LOG") $(date)"
+  echo "ALERT GATE_LAUNCH attempt=${attempt} physical=[${PHYS_SEL}] hip=[${HIP_SEL}] log=$(basename "$LOG") $(date)"
+  # Mask via HIP index in the ENV before python starts - the authoritative pin. torch
+  # only ever sees these physical GPUs, so device_map="auto" cannot leak onto busy /
+  # factory GPUs. HIP only (no ROCR) to avoid a broken composed remap. --gpu-ids ""
+  # so run_sft_gate.py does not re-mask.
+  HIP_VISIBLE_DEVICES="$HIP_SEL" \
   PYTHONPATH=. KORE_EVAL_FULL=1 "$VENV" scripts/run_sft_gate.py \
-    --base Qwen/Qwen3-14B --candidate runs/full/sft --gpu-ids "$SEL" --mark-done \
+    --base Qwen/Qwen3-14B --candidate runs/full/sft --gpu-ids "" --mark-done \
     > "$LOG" 2>&1
   rc=$?
   if grep -q "RESULT: PASS" "$LOG" 2>/dev/null; then

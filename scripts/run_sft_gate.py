@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
 # capability benchmarks with real (non-stub) scorers; mtbench uses the length/overlap
@@ -41,24 +42,38 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="Qwen/Qwen3-14B")
     ap.add_argument("--candidate", default="runs/full/sft")
-    ap.add_argument("--gpu-ids", default="", help="comma-separated physical GPU ids to pin to")
+    ap.add_argument("--gpu-ids", default="",
+                    help="comma-separated HIP/torch GPU indices to pin to (NOT rocm-smi "
+                         "physical ids - they differ on this node; use "
+                         "run_sft_gate_dynamic.sh / gpu_pick_hip.py to map physical->HIP)")
     ap.add_argument("--epsilon", type=float, default=0.02)
     ap.add_argument("--manifest", default="data/full14b/campaign_manifest.json")
     ap.add_argument("--mark-done", action="store_true",
                     help="on PASS, add 'sft' to the manifest done_stages")
     a = ap.parse_args(argv)
-    gpu_ids = [int(x) for x in a.gpu_ids.split(",") if x.strip() != ""] or None
+
+    # Pin GPUs via the ENVIRONMENT *before* importing anything that initialises
+    # torch/HIP (the kore.eval.* imports below pull torch in transitively). Setting
+    # HIP_VISIBLE_DEVICES after torch's first CUDA context is a silent no-op - which
+    # is why an in-Python device_map pin can leak the model onto busy/co-tenant GPUs.
+    # HIP only (not ROCR) to avoid a broken composed remap. If a launcher already
+    # masked the devices, respect that existing mask.
+    if a.gpu_ids.strip() and not os.environ.get("HIP_VISIBLE_DEVICES"):
+        os.environ["HIP_VISIBLE_DEVICES"] = a.gpu_ids.strip()
+    visible = os.environ.get("HIP_VISIBLE_DEVICES", "(all)")
 
     from kore.eval.gates import format_gate_report, retention_gate
     from kore.eval.retention import run_retention_suite
     from kore.policy.serve import load_generate
 
     cache_dir = Path(a.candidate).parent / "retention_cache"
-    print(f"[gate] base={a.base} candidate={a.candidate} gpu_ids={gpu_ids} "
-          f"cache={cache_dir}", flush=True)
+    print(f"[gate] base={a.base} candidate={a.candidate} "
+          f"HIP_VISIBLE_DEVICES={visible} cache={cache_dir}", flush=True)
 
-    base_gen = load_generate(a.base, gpu_ids=gpu_ids)
-    cand_gen = load_generate(a.candidate, gpu_ids=gpu_ids)
+    # The env mask above already restricts device_map="auto" to the idle GPUs, so
+    # pass gpu_ids=None to avoid a redundant (and too-late) in-Python remask.
+    base_gen = load_generate(a.base, gpu_ids=None)
+    cand_gen = load_generate(a.candidate, gpu_ids=None)
     base = run_retention_suite(base_gen, cache_dir=cache_dir,
                                cache_tag=f"sft_base_{_fp(a.base)}")
     cand = run_retention_suite(cand_gen, cache_dir=cache_dir,

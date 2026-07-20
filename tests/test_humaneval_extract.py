@@ -73,12 +73,40 @@ _BODY_ONLY_INDENTED = """    for i in range(len(numbers)):
     return False
 """
 
+# Whole solution emitted UNIFORMLY INDENTED (chat/list formatting) - the def lands
+# at col>0 and the program starts with "unexpected indent" unless we dedent.
+_UNIFORM_INDENT_FENCED = """Sure! Here is the implementation:
+
+```python
+    from typing import List
+
+    def has_close_elements(numbers: List[float], threshold: float) -> bool:
+        for i in range(len(numbers)):
+            for j in range(i + 1, len(numbers)):
+                if abs(numbers[i] - numbers[j]) < threshold:
+                    return True
+        return False
+```
+"""
+
+_UNIFORM_INDENT_BARE = """    from typing import List
+
+    def has_close_elements(numbers: List[float], threshold: float) -> bool:
+        for i in range(len(numbers)):
+            for j in range(i + 1, len(numbers)):
+                if abs(numbers[i] - numbers[j]) < threshold:
+                    return True
+        return False
+"""
+
 _CASES = {
     "fenced_with_import": _FENCED_WITH_IMPORT,
     "bare_with_import": _BARE_WITH_IMPORT,
     "helper_after": _HELPER_AFTER,
     "body_only_flush": _BODY_ONLY_FLUSH,
     "body_only_indented": _BODY_ONLY_INDENTED,
+    "uniform_indent_fenced": _UNIFORM_INDENT_FENCED,
+    "uniform_indent_bare": _UNIFORM_INDENT_BARE,
 }
 
 

@@ -39,6 +39,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -566,10 +567,13 @@ def _extract_python_solution(completion: str, entry_point: str = "", prompt: str
     text = chosen if chosen is not None else completion
 
     if entry_re is None or entry_re.search(text):
-        return _strip_outer_prose(text)
+        # dedent removes uniform leading indentation (a fenced/chat block emitted
+        # wholly indented put the def at col>0 -> "unexpected indent"); no-op on
+        # already-flush code.
+        return textwrap.dedent(_strip_outer_prose(text)).strip("\n")
 
-    # Body-only: re-indent to one level (if flush-left) and graft onto the signature.
-    body = _strip_outer_prose(text)
+    # Body-only: dedent, re-indent one level (if flush-left), graft onto the signature.
+    body = textwrap.dedent(_strip_outer_prose(text)).strip("\n")
     if body and not body.startswith((" ", "\t")):
         body = "\n".join(("    " + ln) if ln.strip() else ln for ln in body.splitlines())
     return prompt.rstrip("\n") + "\n" + body

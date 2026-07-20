@@ -99,6 +99,27 @@ _UNIFORM_INDENT_BARE = """    from typing import List
         return False
 """
 
+# The exact real candidate output style: first body statement flush-left, the rest
+# indented one level (captured live from the SFT checkpoint on HumanEval/0).
+_REAL_CAND_FLUSH_FIRST = (
+    "numbers.sort()\n"
+    "    for i in range(len(numbers) - 1):\n"
+    "        if abs(numbers[i] - numbers[i+1]) < threshold:\n"
+    "            return True\n"
+    "    return False"
+)
+
+# Same quirk wrapped in prose + a fence, to be safe.
+_REAL_CAND_FLUSH_FENCED = (
+    "Here's the function body:\n\n```python\n"
+    "numbers.sort()\n"
+    "    for i in range(len(numbers) - 1):\n"
+    "        if abs(numbers[i] - numbers[i+1]) < threshold:\n"
+    "            return True\n"
+    "    return False\n"
+    "```\n"
+)
+
 _CASES = {
     "fenced_with_import": _FENCED_WITH_IMPORT,
     "bare_with_import": _BARE_WITH_IMPORT,
@@ -107,6 +128,8 @@ _CASES = {
     "body_only_indented": _BODY_ONLY_INDENTED,
     "uniform_indent_fenced": _UNIFORM_INDENT_FENCED,
     "uniform_indent_bare": _UNIFORM_INDENT_BARE,
+    "real_cand_flush_first": _REAL_CAND_FLUSH_FIRST,
+    "real_cand_flush_fenced": _REAL_CAND_FLUSH_FENCED,
 }
 
 

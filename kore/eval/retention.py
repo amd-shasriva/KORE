@@ -536,6 +536,35 @@ def _strip_outer_prose(code: str) -> str:
     return "\n".join(lines[i:j]).strip("\n")
 
 
+def _fix_leading_underindent(body: str) -> str:
+    """Repair an instruct-model body whose FIRST statement is flush-left while the
+    rest of the body is one level in, e.g.::
+
+        numbers.sort()
+            for i in range(...):        # <- indented relative to a non-block stmt
+
+    That is invalid Python (a statement without a trailing ``:`` cannot open a
+    block), so grafting it produces an ``unexpected indent``. Raise each leading
+    line that is LESS indented than the body's baseline (the 2nd non-blank line)
+    and cannot itself open a block, up to that baseline.
+    """
+    lines = body.split("\n")
+    nb = [i for i, ln in enumerate(lines) if ln.strip()]
+    if len(nb) < 2:
+        return body
+    def _ind(s: str) -> int:
+        return len(s) - len(s.lstrip())
+    base = _ind(lines[nb[1]])
+    if base == 0:
+        return body
+    for i in nb:
+        if _ind(lines[i]) < base and not lines[i].rstrip().endswith(":"):
+            lines[i] = " " * base + lines[i].lstrip()
+        else:
+            break
+    return "\n".join(lines)
+
+
 def _extract_python_solution(completion: str, entry_point: str = "", prompt: str = "") -> str:
     """Extract a runnable Python module from a possibly chatty / fenced / body-only
     completion, preserving imports and helper definitions.
@@ -572,8 +601,10 @@ def _extract_python_solution(completion: str, entry_point: str = "", prompt: str
         # already-flush code.
         return textwrap.dedent(_strip_outer_prose(text)).strip("\n")
 
-    # Body-only: dedent, re-indent one level (if flush-left), graft onto the signature.
-    body = textwrap.dedent(_strip_outer_prose(text)).strip("\n")
+    # Body-only: align an under-indented leading statement, dedent, then re-indent
+    # one level (if flush-left) and graft onto the prompt signature.
+    body = _fix_leading_underindent(_strip_outer_prose(text))
+    body = textwrap.dedent(body).strip("\n")
     if body and not body.startswith((" ", "\t")):
         body = "\n".join(("    " + ln) if ln.strip() else ln for ln in body.splitlines())
     return prompt.rstrip("\n") + "\n" + body

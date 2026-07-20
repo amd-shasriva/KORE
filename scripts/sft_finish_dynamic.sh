@@ -26,6 +26,11 @@ VENV=/home/shasriva/kore-venv/bin/python
 cd "$REPO" || exit 1
 mkdir -p runs/full/logs
 
+# CRITICAL: put the venv bin on PATH so launch_distributed.sh's bare `accelerate`
+# resolves. Running "$VENV" (the venv python) directly does NOT activate the venv,
+# so without this the FSDP launch dies with exit 127 (accelerate: not found).
+export PATH="$(dirname "$VENV"):$PATH"
+
 UTIL_MAX="${SFT_UTIL_MAX:-20}"
 VRAM_MAX_GB="${SFT_VRAM_MAX_GB:-8}"
 RESERVE="${SFT_RESERVE:-1}"

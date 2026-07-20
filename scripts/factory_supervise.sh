@@ -32,25 +32,30 @@ pick_gpus() {
   [ -n "$sel" ] && echo "$sel" || echo "$GPUS_FALLBACK"
 }
 
-# BREADTH-ONLY: this factory exists to produce the NEW genb_* op-class families
-# (the frontier expansion for the 32B). The 280 base tasks already have data
-# (data/full14b, ~152k records the 14B trained on), so we spend 100% of factory
-# compute on breadth. The genb_ set is read live from the registry so every newly
-# authored+materialized family is picked up automatically on the next relaunch.
-# Empty (=> full registry) only if the query fails (fail-safe).
-TASKS=$(PYTHONPATH=. "$VENV" -c "
+# BREADTH-ONLY + FRONTIER-FIRST: target only genb_* op-class tasks that do NOT yet
+# have verified group data, so a relaunch never re-walks completed tasks (those just
+# replay-cache-hit and burn no-op cycles - GPUs idle, no new records). Recomputed
+# each relaunch so covered tasks drop out automatically; once every task is covered
+# it falls back to the full genb_ set (a depth pass). Empty only if the query fails.
+compute_todo() {
+  PYTHONPATH=. "$VENV" -c "
+import os, glob
 from kore.tasks.registry import train_tasks
 ids=sorted(t.task_id for t in train_tasks() if t.task_id.startswith('genb_'))
-print(','.join(ids))
-" 2>/dev/null)
-TASKS_ARG=""; [ -n "$TASKS" ] && TASKS_ARG="--tasks $TASKS"
-NBREADTH=$(printf '%s' "$TASKS" | tr ',' '\n' | grep -c . )
-echo "FACTORY_SUPERVISOR start (dynamic idle GPUs, cap=${MAX_GPUS}) workers=$WORKERS breadth_only_tasks=$NBREADTH $(date)"
+covered={os.path.basename(f)[:-6] for f in glob.glob('${DATA_ROOT}/groups/*.jsonl') if os.path.getsize(f)>0}
+todo=[i for i in ids if i not in covered]
+print(','.join(todo if todo else ids))
+" 2>/dev/null
+}
+echo "FACTORY_SUPERVISOR start (dynamic idle GPUs cap=${MAX_GPUS}, frontier-first) workers=$WORKERS $(date)"
 while true; do
   if ! pgrep -u shasriva -f "run_campaign.py.*${DATA_ROOT}" >/dev/null 2>&1; then
     SEL=$(pick_gpus)
+    TASKS=$(compute_todo)
+    TASKS_ARG=""; [ -n "$TASKS" ] && TASKS_ARG="--tasks $TASKS"
+    NTODO=$(printf '%s' "$TASKS" | tr ',' '\n' | grep -c .)
     TS=$(date +%Y%m%d_%H%M%S)
-    echo "ALERT relaunch datagen (resumable, breadth-only) gpus=[${SEL}] workers=${WORKERS} -> factory_${TS}.log $(date)"
+    echo "ALERT relaunch datagen (frontier-first) gpus=[${SEL}] workers=${WORKERS} uncovered_tasks=${NTODO} -> factory_${TS}.log $(date)"
     setsid nohup env KORE_VERIFIED_CORRECTNESS=1 KORE_COMPILE_BASELINE=1 \
       KORE_BENCH_COLD=1 KORE_SHAPE_AUGMENT=1 PYTHONPATH=. \
       "$VENV" scripts/run_campaign.py --model Qwen/Qwen3-14B --stages datagen \

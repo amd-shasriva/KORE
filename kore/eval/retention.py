@@ -499,6 +499,82 @@ def _strip_code_fences(text: str) -> str:
     return text
 
 
+# Recognizes a line that is Python code (vs natural-language prose), used to trim
+# chat prose from around a code block without discarding imports/helpers/decorators.
+_CODE_LINE_RE = re.compile(
+    r"""^\s*(
+        import\b | from\b | def\b | class\b | async\b | return\b | yield\b | raise\b |
+        assert\b | pass\b | break\b | continue\b | if\b | elif\b | else\b | for\b |
+        while\b | with\b | try\b | except\b | finally\b | global\b | nonlocal\b | del\b |
+        lambda\b | @ | \# | \"\"\" | ''' |
+        [A-Za-z_][\w.\[\]]* \s* (?: =(?!=) | :=  | \( | \+= | -= | \*= | /= | :\s ) |
+        \) | \] | \}
+    )""",
+    re.VERBOSE,
+)
+
+
+def _is_code_line(s: str) -> bool:
+    """True for blank, indented, or code-looking lines; False for prose lines."""
+    if not s.strip():
+        return True
+    if s[:1] in (" ", "\t"):
+        return True
+    return bool(_CODE_LINE_RE.match(s))
+
+
+def _strip_outer_prose(code: str) -> str:
+    """Drop leading/trailing runs of natural-language prose around a code body,
+    keeping every code line (imports, helpers, decorators) and blank lines between."""
+    lines = code.splitlines()
+    i, j = 0, len(lines)
+    while i < j and not _is_code_line(lines[i]):
+        i += 1
+    while j > i and not _is_code_line(lines[j - 1]):
+        j -= 1
+    return "\n".join(lines[i:j]).strip("\n")
+
+
+def _extract_python_solution(completion: str, entry_point: str = "", prompt: str = "") -> str:
+    """Extract a runnable Python module from a possibly chatty / fenced / body-only
+    completion, preserving imports and helper definitions.
+
+    A model SFT'd on multi-turn dialogue answers conversationally: prose around the
+    code, a markdown fence, sometimes only the function body. This:
+
+    - Prefers a fenced ```code``` block - the one defining ``entry_point`` if given,
+      else the largest - so prose outside the fence is dropped cleanly (an unterminated
+      final fence, cut off by the token budget, is still captured).
+    - Keeps the WHOLE code block (imports + helpers + the function), trimming only the
+      prose around it. It never slices at the entry ``def`` - doing so dropped the
+      imports the signature needs (a ``List`` annotation -> ``NameError``) and any
+      helper defined after it.
+    - For a body-only completion, re-indents one level and grafts it onto ``prompt``'s
+      signature (a flush-left body onto an unindented signature was an ``IndentationError``).
+    """
+    entry_re = (re.compile(rf"(?m)^[ \t]*def[ \t]+{re.escape(entry_point)}\b")
+                if entry_point else None)
+    blocks = re.findall(r"```[^\n]*\n(.*?)(?:```|\Z)", completion, re.DOTALL)
+    chosen = None
+    if blocks:
+        if entry_re is not None:
+            for b in blocks:
+                if entry_re.search(b):
+                    chosen = b  # last block that defines the entry point
+        if chosen is None:
+            chosen = max(blocks, key=len)
+    text = chosen if chosen is not None else completion
+
+    if entry_re is None or entry_re.search(text):
+        return _strip_outer_prose(text)
+
+    # Body-only: re-indent to one level (if flush-left) and graft onto the signature.
+    body = _strip_outer_prose(text)
+    if body and not body.startswith((" ", "\t")):
+        body = "\n".join(("    " + ln) if ln.strip() else ln for ln in body.splitlines())
+    return prompt.rstrip("\n") + "\n" + body
+
+
 def _extract_first_json(text: str) -> Optional[dict]:
     """Extract the first balanced ``{...}`` JSON object from free-form text."""
     start = text.find("{")
@@ -627,38 +703,16 @@ class HumanEvalScorer:
 
     @staticmethod
     def build_program(item: dict, completion: str) -> str:
-        """Assemble prompt + completion + test into a runnable program, tolerant
-        of chat-style output.
+        """Assemble the model's solution + the test into a runnable program.
 
-        A model SFT'd on multi-turn dialogues answers conversationally (prose
-        before/after the code, with or without a markdown fence). The old parser
-        only handled a bare body or a fenced full-def, so any prose outside a
-        fence made the assembled program a SyntaxError -> pass@1 scored 0 even
-        when the code was correct (the post-SFT ``humaneval 0.30->0.018`` gate
-        artifact). This robustly extracts the entry-point function block.
+        A model SFT'd on multi-turn dialogue answers conversationally (prose around
+        the code, a markdown fence, sometimes only the function body).
+        :func:`_extract_python_solution` extracts the whole solution module - imports
+        and helper definitions included - grafting a body-only answer onto the
+        prompt signature, so a correct kernel is never scored 0 for a parsing reason.
         """
-        comp = _strip_code_fences(completion)
-        entry = item["entry_point"]
-        m = re.search(rf"^[ \t]*def\s+{re.escape(entry)}\b", comp, re.MULTILINE)
-        if m:
-            # Drop leading prose before the def; keep only the contiguous function
-            # block (def line + indented/blank lines), dropping trailing prose.
-            lines = comp[m.start():].splitlines()
-            block = [lines[0]]
-            for ln in lines[1:]:
-                if ln.strip() == "" or ln[:1] in (" ", "\t"):
-                    block.append(ln)
-                else:
-                    break
-            body = "\n".join(block)
-        else:
-            # Body-only completion: strip leading non-indented prose, then graft
-            # the body onto the signature from the prompt.
-            lines = comp.splitlines()
-            while lines and lines[0].strip() and lines[0][:1] not in (" ", "\t"):
-                lines.pop(0)
-            body = item["prompt"] + "\n".join(lines)
-        return body + "\n\n" + item["test"] + "\n"
+        code = _extract_python_solution(completion, item["entry_point"], item["prompt"])
+        return code.rstrip() + "\n\n" + item["test"] + "\n"
 
     def score(self, model_generate: ModelGenerate) -> dict:
         items = self._load()
@@ -704,8 +758,9 @@ class LiveCodeBenchScorer:
         times: list[float] = []
         per_item = []
         for it in items:
-            comp = _strip_code_fences(
-                model_generate(format_livecodebench_prompt(it), max_tokens=1024, temperature=0.0)
+            comp = _extract_python_solution(
+                model_generate(format_livecodebench_prompt(it), max_tokens=1024, temperature=0.0),
+                it.get("entry_point", ""),
             )
             program = comp + "\n\n" + it["test"] + "\n"
             limit = float(it.get("time_limit_s", 5.0))

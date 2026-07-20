@@ -20,6 +20,8 @@ UTIL_MAX="${SFT_UTIL_MAX:-20}"
 VRAM_MAX_GB="${SFT_VRAM_MAX_GB:-8}"
 NGPU="${GATE_NGPU:-3}"           # 2x14B (base+candidate) fits comfortably; small footprint
 GATE_GPUS="${GATE_GPUS:-}"       # optional preferred GPU set (intersected with idle)
+EVAL_N="${KORE_EVAL_N:-300}"     # items/bench cap - matches run_campaign --eval-n (fast ~1.75h
+                                 # gate); WITHOUT this the full 14k MMLU split makes it ~10h+
 MAX_RETRIES="${SFT_MAX_RETRIES:-48}"
 WAIT_S="${SFT_WAIT_S:-120}"
 COOLDOWN_S="${SFT_COOLDOWN_S:-60}"
@@ -49,7 +51,7 @@ for attempt in $(seq 1 "$MAX_RETRIES"); do
   # factory GPUs. HIP only (no ROCR) to avoid a broken composed remap. --gpu-ids ""
   # so run_sft_gate.py does not re-mask.
   HIP_VISIBLE_DEVICES="$HIP_SEL" \
-  PYTHONPATH=. KORE_EVAL_FULL=1 "$VENV" scripts/run_sft_gate.py \
+  PYTHONPATH=. KORE_EVAL_FULL=1 KORE_EVAL_N="$EVAL_N" "$VENV" scripts/run_sft_gate.py \
     --base Qwen/Qwen3-14B --candidate runs/full/sft --gpu-ids "" --mark-done \
     > "$LOG" 2>&1
   rc=$?

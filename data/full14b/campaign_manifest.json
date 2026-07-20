@@ -2,15 +2,13 @@
   "model": "Qwen/Qwen3-14B",
   "midtrain_ckpt": "runs/full/midtrain",
   "sft_ckpt": "runs/full/sft",
-  "dpo_ckpt": "runs/full/dpo",
+  "dpo_ckpt": null,
   "grpo_ckpt": null,
   "final": null,
   "done_stages": [
     "agentic",
     "build",
-    "dpo",
-    "midtrain",
-    "sft"
+    "midtrain"
   ],
   "train_tasks": [
     "fused_add_rmsnorm_bf16",

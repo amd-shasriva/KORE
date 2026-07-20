@@ -1,6 +1,6 @@
-# `tests/` - the test suite
+# `tests/` — the test suite
 
-CPU-safe `pytest` tests (66 files) covering the science, reward, data, RL math, and campaign wiring. Tests import `kore.*` and avoid GPU work by design (roofline formulas, reward gating, family split, pure RL math, and wiring are all exercised without a device), so the suite runs on any box. (Re-count with `ls tests/*.py | wc -l` rather than trusting this number as the suite grows.)
+CPU-safe `pytest` tests (67 files) covering the science, reward, data, RL math, and campaign wiring. Tests import `kore.*` and avoid GPU work by design — roofline formulas, reward gating, family split, pure RL math, and orchestration wiring are all exercised without a device — so the suite runs on any machine. (Re-count with `ls tests/*.py | wc -l` as the suite grows.)
 
 ```bash
 PYTHONPATH=. python -m pytest -q                                   # whole suite
@@ -21,8 +21,8 @@ PYTHONPATH=. python -m pytest tests/test_campaign_wiring.py -q     # one file
 | Open-ended curriculum | `test_openended_proposer.py`, `test_openended_task_space.py`, `test_openended_archive.py`, `test_openended_coevolve.py`, `test_openended_controller.py`, `test_coevolve_distill.py` |
 | Policy / RL | `test_rl_core.py`, `test_policy.py`, `test_grpo_fsdp.py`, `test_grpo_distill_hook.py`, `test_dynamic_steps.py`, `test_midtrain.py`, `test_distributed.py`, `test_frontier_ops_wiring.py`, `test_deep_cot_contract.py` |
 | Value model | `test_value.py`, `test_value_replay_train.py` |
-| Agent | `test_agent.py` |
+| Agent / transforms | `test_agent.py`, `test_agent_transform_discover.py` |
 | Eval / gates | `test_eval.py`, `test_generalization.py`, `test_retention.py`, `test_champion.py`, `test_korebench.py`, `test_vs_opus.py` |
 | Infra | `test_campaign_wiring.py`, `test_obs.py`, `test_contract.py` |
 
-`test_campaign_wiring.py` and `test_distributed.py` are the fastest confidence check that the orchestration and FSDP config are coherent. Some tests that need real datasets/permissions may skip in a bare environment - that is expected.
+`test_campaign_wiring.py` and `test_distributed.py` are the fastest confidence check that the orchestration and FSDP configuration are coherent. Tests that need real datasets or permissions skip in a bare environment, which is expected.

@@ -1,11 +1,10 @@
-# KORE-Bench: the definitive open dataset of hard AMD ROCm/Triton kernel-optimization tasks
+# KORE-Bench: an open benchmark of hard AMD ROCm/Triton kernel-optimization tasks
 
-**Goal.** A provably-best-in-world OPEN benchmark of *hard* GPU-kernel-optimization
-TASKS for **AMD Instinct MI350X (`gfx950` / CDNA4, the KORE target)**, where every task is
-graded against a **real production vendor baseline** (AITER / hipBLASLt / Composable
-Kernel / AOTriton), not torch-eager. 200-400 tasks spanning every operator family that
-matters for LLM training + inference. Serves both KORE RL training and the open-source /
-AMD community.
+**Goal.** An open benchmark of hard GPU-kernel-optimization tasks for **AMD Instinct MI350X
+(`gfx950` / CDNA4, the KORE target)**, where every task is graded against a **real production
+vendor baseline** (AITER / hipBLASLt / Composable Kernel / AOTriton), not torch-eager. 200–400
+tasks spanning every operator family that matters for LLM training and inference. Serves both KORE
+RL training and the open-source / AMD community.
 
 This document is the build spec. It is grounded in the KORE task ABI
 (`kore/kore/tasks/base.py`, `_genops.py`, `aiter_ref.py`, `aiter_ref_attn.py`,
@@ -15,7 +14,7 @@ authoring harness that produces them at scale, and the release plan for KORE-Ben
 
 ---
 
-## 0. What "task" means here, and what makes this best-in-world
+## 0. What "task" means here, and what distinguishes KORE-Bench
 
 A KORE task is a directory `kore/tasks/<id>/`:
 
@@ -33,13 +32,13 @@ A KORE task is a directory `kore/tasks/<id>/`:
     timing; `reference` is the **real vendor op**; post-timing anti-hack re-verification on
     the cached module.
 
-The five properties that make KORE-Bench provably the best kernel-optimization dataset:
+Five properties define KORE-Bench:
 
 1. **Real-vendor baseline, measured on silicon.** `--impl reference` calls the exact kernel
    the production serving stack calls (AITER `flash_attn_varlen_func`, hipBLASLt via
-   `tgemm.mm`, CK `gemm_a8w8`, AOTriton SDPA). Beating torch is worthless; beating AITER is
-   best-in-world. No other public kernel benchmark (KernelBench, TritonBench, KernelBook)
-   does this - they all bench vs torch-eager on NVIDIA.
+   `tgemm.mm`, CK `gemm_a8w8`, AOTriton SDPA). Beating torch-eager has no production value; the
+   bar is the production vendor kernel. Public kernel benchmarks (KernelBench, TritonBench,
+   KernelBook) bench against torch-eager on NVIDIA.
 2. **Headroom-verified.** A task is admitted only if a hand-written expert Triton/HIP kernel
    can get within, or beat, a defined fraction of the vendor kernel - i.e. the op has *real*
    optimization headroom vs the vendor kernel on `gfx950` (the target). Ops where AITER is already

@@ -1,6 +1,6 @@
-# `kore/env` - the verified GPU environment
+# `kore/env` — the verified GPU environment
 
-`KoreEnv` is where a candidate kernel meets real silicon. It compiles the kernel, checks correctness on every shape against the fp32 oracle, benchmarks it cold-cache against the production baseline with variance control, optionally collects rocprofv3 counters, and caches the result. It is hardened against verdict forgery, mode-sniffing, stateful-timing hacks, and filesystem escape, and it distinguishes **infra** failures (timeout/OOM/HIP flake) from **kernel** failures.
+`KoreEnv` is where a candidate kernel meets real silicon. It compiles the kernel, checks correctness on every shape against the fp32 oracle, benchmarks it cold-cache against the production baseline with variance control, optionally collects rocprofv3 counters, and caches the result. It is hardened against verdict forgery, mode-sniffing, stateful-timing hacks, and filesystem escape, and it separates **infra** failures (timeout / OOM / HIP flake) from **kernel** failures.
 
 ---
 
@@ -8,8 +8,8 @@
 
 | File | Purpose |
 | --- | --- |
-| `kore_env.py` | `KoreEnv` - `step` / `evaluate` / `_run`, correctness + bench + profile |
-| `replay.py` | `ReplayCache` - JSONL-backed `(task_id, source) → Observation` |
+| `kore_env.py` | `KoreEnv` — `step` / `evaluate` / `_run`; correctness + bench + profile |
+| `replay.py` | `ReplayCache` — JSONL-backed `(task_id, source) → Observation` |
 
 ---
 
@@ -52,11 +52,11 @@ The returned `Observation` (defined in [`kore/reward`](../reward/README.md)) car
 | Stateful timing | post-timing correctness poison → whole eval flagged as hack |
 | One-easy-shape win | `wall_ms = max` over shapes, `snr_db = min` over shapes |
 | Filesystem escape | staged in a temp workdir; reference/driver copied read-only (chmod 444) |
-| Runaway process | `timeout` + process-group `killpg` in `_exec` (no `RLIMIT_AS` - ROCm needs a huge VA space) |
+| Runaway process | `timeout` + process-group `killpg` in `_exec` (no `RLIMIT_AS` — ROCm needs a huge VA space) |
 
-> **Concurrency gotcha (fixed):** `RLIMIT_NPROC` is **per-UID**, so a low per-subprocess cap throttles the *whole user*. An earlier 512 cap made OpenBLAS `blas_thread_init` fail (→ `import numpy` died) inside the driver under concurrent datagen, silently marking **every** candidate `compiled=False`. `_preexec` now raises the soft limit to the hard cap, and `_env` caps `OPENBLAS/OMP/MKL/NUMEXPR_NUM_THREADS=4` so the driver doesn't spawn one BLAS thread per core (×96) per subprocess.
+> **Concurrency and `RLIMIT_NPROC`.** `RLIMIT_NPROC` is **per-UID**: it counts every process and thread the user owns, not just the child, so a low per-subprocess soft cap throttles the *whole user*. Under concurrent datagen — dozens of workers spawning thousands of torch/OpenBLAS threads — a low cap makes OpenBLAS `blas_thread_init` fail and `import numpy` die inside the driver, which marks **every** candidate `compiled=False`. `_preexec` therefore raises the soft limit to the hard cap, and `_env` caps `OPENBLAS/OMP/MKL/NUMEXPR_NUM_THREADS=4` so the driver spawns a bounded thread pool instead of one BLAS thread per core (×96) per subprocess. Runaway containment is the `timeout` + `killpg` in `_exec`, not a per-child nproc cap.
 
-**Infra vs. kernel classification** (`_classify`): timeouts, OOM, and HIP flakes are `infra_error=True` and are **never cached** and **never scored as incorrect** - a transient node problem must not poison the replay cache or punish a good kernel.
+**Infra vs. kernel classification** (`_classify`): timeouts, OOM, and HIP flakes are `infra_error=True`; they are **never cached** and **never scored as incorrect**, so a transient node problem cannot poison the replay cache or penalize a good kernel.
 
 ---
 
@@ -83,9 +83,11 @@ JSONL records are filtered to the current `Observation` field set on load, so sc
 
 When `profile_reward_weight > 0`, `_collect_profile` runs rocprofv3 with `--bench-mode` on the primary shape and produces a `profile_efficiency ∈ [0,1]` (see [`kore/verifier`](../verifier/README.md) for counter sets and [`kore/reward`](../reward/README.md) for how it shapes reward). rocprof requires `--bench-mode`; without it candidate/reference profiles are degenerate.
 
-`collect_counters(source, shape=primary)` is the PUBLIC rocprofv3 PMC entry point: it stages an isolated workdir, profiles the candidate, and returns aggregated `{counter: value}` (the gfx950 derived metrics `MemUnitStalled` / `OccupancyPercent`, plus captured `vgpr_count` / `lds_bytes` / `num_warps`) or `None` if the profiler is unavailable - fully fail-safe. Those *named* counters can feed the **online named-residual roofline potential** used by the paradigm-v2 training reward: `kore.reward.whitebox.phi_potential` turns them into `Φ = ρ = T_min/(T_min+N)` (the check-(b) `N = stall + occupancy-deficit` decomposition), which GRPO adds as an *approximately* policy-invariant potential-based-shaping term (`physics_shaping_weight`, see [`kore/reward`](../reward/README.md); the invariance is approximate under GRPO's std-normalized group-relative advantage). When no PMC is collected the potential degrades to the counter-free `η = T_min/T_meas` attainment.
+`collect_counters(source, shape=primary)` is the public rocprofv3 PMC entry point: it stages an isolated workdir, profiles the candidate, and returns aggregated `{counter: value}` (the gfx950 derived metrics `MemUnitStalled` / `OccupancyPercent`, plus captured `vgpr_count` / `lds_bytes` / `num_warps`) or `None` when the profiler is unavailable — fully fail-safe.
 
-> **Honest status: `ρ` is offline-validated, `η` is what actually runs online today.** The named-residual `ρ` (R²≈0.98 backing, `docs/P0_RESULTS.md`) needs `stall_frac`/`occupancy` from `collect_counters`. That per-turn threading exists for the *non-agentic* serial GRPO rollout (`kore.policy.grpo._dense_profile_bonus`, gated on `--profile-reward`/`profile_reward_weight>0`, itself a separate dense bonus term from the shaping potential) - but the agentic tool-use rollout (`agentic_transform_tools`/`config.agentic=true`, the mode the flagship run uses) calls `phi_potential(task, obs)` **without** counters (`kore/agent/tools.py`), so `Φ` falls back to the PMC-free `η` for every agentic turn today. The reward is still `reward_mode="speedup"` (vendor-relative, real and correct) either way; only the *dense shaping* term is running on the cheaper proxy. Threading per-turn PMC through the agentic path is an open item, not yet done.
+These named counters feed the roofline shaping potential. `kore.reward.whitebox.phi_potential` turns them into `Φ = ρ = T_min/(T_min + N)`, the counter-grounded named-residual attainment (`N = stall + occupancy-deficit`), which GRPO adds as an approximately policy-invariant potential-based-shaping term (`physics_shaping_weight`; the invariance is approximate under GRPO's std-normalized group-relative advantage — see [`kore/reward`](../reward/README.md)). The online potential is the PMC-free attainment `η = T_min/T_measured`; `ρ` is its counter-grounded refinement, validated offline at R² ≈ 0.98 (`docs/P0_RESULTS.md`).
+
+Per-candidate PMC is expensive, so the two rollout paths differ in how they compute the potential. The agentic tool-use rollout (`agentic_transform_tools` / `config.agentic=true`) calls `phi_potential(task, obs)` without counters (`kore/agent/tools.py`), so `Φ = η`. The serial GRPO rollout can thread per-turn counters through `kore.policy.grpo._dense_profile_bonus` (gated on `--profile-reward` / `profile_reward_weight > 0`), a dense bonus term distinct from the shaping potential. In both paths the reward is `reward_mode="speedup"` (vendor-relative); only the dense shaping term varies between the counter-grounded `ρ` and the PMC-free `η`.
 
 ---
 

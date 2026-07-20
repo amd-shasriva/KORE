@@ -20,7 +20,7 @@ Full fine-tuning at 14B / 32B / 70B is a **documented one-command path** - you d
 **not** write a config or invoke `accelerate` yourself:
 
 ```bash
-# Full best-in-world 14B run, single command. The campaign spawns the FSDP
+# Full 14B run, single command. The campaign spawns the FSDP
 # processes under the hood (LoRA is the default; --full-ft opts into full-FT).
 PYTHONPATH=. python scripts/run_campaign.py --model Qwen/Qwen3-14B \
     --tasks rmsnorm_aiter,gemm_bf16,flash_attn_decode_bf16 \
@@ -107,23 +107,22 @@ family) and the **Kevin + anti-collapse levers** (`rc_grpo` / `variance_floor` /
 `sc_grpo` / `gtpo_codesim` / `value_prefilter`, all on by default -
 `configs/grpo_14b_full.json`).
 
-### Identical per-turn credit: single-process == distributed
+### Identical per-turn credit: single-process and distributed
 
-The single-process and distributed GRPO paths now compute **identical per-turn
-credit**. Both `_one_group` (serial) and `_rollout_slice_distributed` (sharded)
-feed their per-trajectory `(rewards, correct, infra, phis)` traces through the
-*same* `build_kevin_samples(...)` call with the *same* paradigm-v2 levers read
-from the config:
+The single-process and distributed GRPO paths compute identical per-turn credit.
+Both `_one_group` (serial) and `_rollout_slice_distributed` (sharded) feed their
+per-trajectory `(rewards, correct, infra, phis)` traces through the same
+`build_kevin_samples(...)` call with the same config levers:
 
-- **P0d** `credit_incorrect_turns` - an incorrect turn keeps its bounded shaped
+- `credit_incorrect_turns` - an incorrect turn keeps its bounded shaped
   SNR-progress reward (below `correctness_weight`) instead of a hard zero, so the
   gradient is not flat across the not-yet-correct band; and
-- **P0b** `physics_shaping_weight` - the roofline-attainment potential
-  `Φ(s)` (`kore.reward.whitebox.phi_potential`; online the PMC-free `η`, not the
-  named-residual `ρ`) is added as Ng-Harada-Russell PBS
-  `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` (`kore.reward.shaping`), *approximately* policy-
-  invariant (an expected-gradient-neutral state-dependent baseline, not an exact
-  at-any-weight theorem here).
+- `physics_shaping_weight` - the roofline-attainment potential `Φ(s)`
+  (`kore.reward.whitebox.phi_potential`; online `Φ = η = T_min/T_measured`) is
+  added as a Ng-Harada-Russell potential-based-shaping term
+  `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` (`kore.reward.shaping`), an
+  expected-gradient-neutral state-dependent baseline that densifies per-turn
+  credit toward the roofline.
 
 Both travel in the resolved GRPO JSON (`credit_incorrect_turns=true`,
 `physics_shaping_weight=0.15` in `configs/grpo_14b_full.json`), so switching
@@ -143,8 +142,8 @@ advantage baseline is then computed over the all-gathered full group.)
   "distributed": true,
   "bf16": true,
   "gradient_checkpointing": true,
-  "per_device_train_batch_size": 4,
-  "gradient_accumulation_steps": 4,
+  "per_device_train_batch_size": 2,
+  "gradient_accumulation_steps": 8,
   "max_seq_length": 16384,
   "num_train_epochs": 3.0,
   "learning_rate": 1e-05,

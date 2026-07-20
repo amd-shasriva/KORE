@@ -1,24 +1,24 @@
-# KORE Training-Data Design Specification (v1)
+# KORE Training-Data Design Specification
 
-Target: frontier ROCm GPU-kernel-generation model. Hardware: **AMD Instinct MI350X, CDNA4, `gfx950`** (the sole KORE target), wavefront 64, 256 CUs, 160 KiB LDS/CU, FP8 = **OCP** `e4m3fn`, with native MX-FP4 / MX-FP6 scaled-MFMA. (The previous-gen MI300X / MI325X `gfx942` / CDNA3 used the **FNUZ** FP8 variant and 64 KB LDS/CU; it appears here only as legacy training-data provenance, never as a target - see Section 1.2.)
+Target: a production ROCm GPU-kernel-generation model. Hardware: **AMD Instinct MI350X, CDNA4, `gfx950`** (the sole KORE target), wavefront 64, 256 CUs, 160 KiB LDS/CU, FP8 = **OCP** `e4m3fn`, with native MX-FP4 / MX-FP6 scaled-MFMA. (The previous-gen MI300X / MI325X `gfx942` / CDNA3 uses the **FNUZ** FP8 variant and 64 KB LDS/CU; it appears here only as legacy training-data provenance, never as a target — see Section 1.2.)
 
 This spec is directly implementable against the KORE codebase (`kore/kore/data/*`, `kore/kore/tasks/*`, `kore/kore/verifier/*`) and the record schemas in `kore/kore/data/schemas.py` (`RepairRecord`, `RankedGroupRecord`, `WinRecord`).
 
-> **v1 predates the agentic stage.** This spec was written before Stage 4 (agentic tool-use SFT/RL) landed, so it does not cover `AgenticTrajectoryRecord` (defined in `kore/kore/agent/schema.py`, not `schemas.py`: `messages`, `tool_trace`, `best_kernel`, `best_reward`, `turns_to_best`, `success`, `reflections`, `phase_trace`). See [`kore/data/README.md`](../kore/data/README.md) and [`kore/agent/README.md`](../kore/agent/README.md) for that record type and how it's generated (`gen_agentic.py`, live GPU/teacher trajectories) or reconstructed CPU-only from already-verified repair/wins/groups records (`synth_agentic.py`, the default `--agentic synth` mode). Sections 1-4 below (coverage, edge cases, volumes, verification rigor) still apply to `RepairRecord`/`RankedGroupRecord`/`WinRecord` as originally written.
+> **Agentic trajectory records.** The agentic tool-use stage adds `AgenticTrajectoryRecord` (defined in `kore/kore/agent/schema.py`: `messages`, `tool_trace`, `best_kernel`, `best_reward`, `turns_to_best`, `success`, `reflections`, `phase_trace`). See [`kore/data/README.md`](../kore/data/README.md) and [`kore/agent/README.md`](../kore/agent/README.md) for that record type and how it is generated (`gen_agentic.py`, live GPU/teacher trajectories) or reconstructed CPU-only from already-verified repair/wins/groups records (`synth_agentic.py`, the default `--agentic synth` mode). Sections 1–4 below (coverage, edge cases, volumes, verification rigor) apply to `RepairRecord`/`RankedGroupRecord`/`WinRecord`.
 
 ---
 
-## 0. What makes this data genuinely the best (design principles)
+## 0. Design principles
 
-Five principles derived from the evidence (Kevin, ConCuR, GEAK, KORE.pdf) that every subsequent section enforces:
+Five principles, grounded in the kernel-RL literature (Kevin, ConCuR, GEAK, the KORE design study), that every subsequent section enforces:
 
-1. **The baseline is the production kernel, not torch.** Every performance label is a speedup vs the *real* serving op (AITER / hipBLASLt / rocBLAS / CK), measured on-box (`--impl reference`), never vs `torch.matmul`/eager. This is the single most important differentiator from KernelBench/Kevin (which use PyTorch Eager) and is already the KORE convention (`kore/kore/tasks/aiter_ref.py`, every `task.yaml` `comparison_baseline`). A model that only beats torch is worthless in production; a model that beats AITER is best-in-world.
+1. **The baseline is the production kernel, not torch.** Every performance label is a speedup versus the real serving op (AITER / hipBLASLt / rocBLAS / CK), measured on-box (`--impl reference`), never versus `torch.matmul`/eager. This is the primary differentiator from KernelBench/Kevin (which use PyTorch eager) and is the KORE convention (`kore/kore/tasks/aiter_ref.py`, every `task.yaml` `comparison_baseline`). A kernel that only beats torch-eager has no production value; the objective is to match or beat the production vendor library.
 2. **Measured, not asserted.** Only *executed* outcomes enter the corpus. Every correctness/speedup label is produced by the verifier on real gfx950 silicon, re-verified independently, with a variance gate. No teacher-claimed number is ever trusted (Section 4).
 3. **Learn from the abundant, RL-manufacture the scarce.** Repairs and ranked candidates are cheap and plentiful; strong wins are scarce (~15-20 per ~300 audited trajectories per KORE.pdf §2). The curriculum warm-starts on the plentiful (repair SFT → DPO/RFT) then uses RL to produce wins (Kevin's result: 56%→82% correct via multi-turn RL).
 4. **Hard negatives are first-class data, labeled.** Reward hacking is the dominant failure at small scale (Kevin §6.2: 7B copies reference, recycles reference output tensor, wraps in try/except). We *manufacture* these as labeled negatives so the reward model / DPO explicitly learns to reject them (Section 2.6).
 5. **Conciseness of reasoning is a quality signal.** ConCuR's central finding: for a fixed task, the *shortest* CoT that achieves the *highest* speedup is the best training example. We adopt CoT-length × speedup as a curation score for reasoning traces (Section 3.6).
 
-**Sources.** KORE.pdf (`/root/Kore-rl/plans/KORE.pdf`); Kevin arXiv:2507.11948 (https://arxiv.org/abs/2507.11948, https://cognition.ai/blog/kevin-32b); ConCuR arXiv:2510.07356 (https://arxiv.org/html/2510.07356v1); KernelBench arXiv:2502.10517; GEAK arXiv:2507.23194 (https://www.arxiv.org/pdf/2507.23194), ROCm GEAK blogs (https://rocm.blogs.amd.com/artificial-intelligence/geak-agents-family/README.html); KernelBook (https://huggingface.co/datasets/GPUMODE/KernelBook); MI350X / CDNA4 specs (https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html, CDNA4 white paper), with the legacy MI300X / MI325X / CDNA3 white paper kept only for reference.
+**Sources.** The KORE design study; Kevin arXiv:2507.11948 (https://arxiv.org/abs/2507.11948, https://cognition.ai/blog/kevin-32b); ConCuR arXiv:2510.07356 (https://arxiv.org/html/2510.07356v1); KernelBench arXiv:2502.10517; GEAK arXiv:2507.23194 (https://www.arxiv.org/pdf/2507.23194), ROCm GEAK blogs (https://rocm.blogs.amd.com/artificial-intelligence/geak-agents-family/README.html); KernelBook (https://huggingface.co/datasets/GPUMODE/KernelBook); MI350X / CDNA4 specs (https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html, CDNA4 white paper), with the legacy MI300X / MI325X / CDNA3 white paper kept only for reference.
 
 ---
 
@@ -274,15 +274,14 @@ Rationale for the pyramid: it mirrors the natural scarcity (KORE.pdf §2: of ~30
 | On-policy trajectories | 16 parallel × 4 refinement turns (train), 8 turns (test) - Kevin recipe; each turn = one training sample; summarize prior CoTs to bound context; discounted intermediate reward across turns |
 | Group-relative advantage | `A_i=(r_i-mean r)/(std r+ε)`; reward-conditioned + turn-level credit to avoid zero-advantage collapse on ties (KORE.pdf §3, refs [8][9][10]) |
 
-**Objective alignment with SFT/DPO (paradigm-v2).** GRPO's within-turn reward is the SAME
-vendor-relative **speedup** signal that Stages 1-2 assemble on (`reward_mode=speedup`; the SFT
-speedup gate and the DPO `faster-correct > slower-correct` ranking below), so all three stages
-optimize one objective - the prior SFT/DPO-vs-GRPO mismatch is resolved. The physics named-residual
-the roofline attainment (online the PMC-free `η`, not the named-residual `ρ`) is added ONLY as an *approximately policy-invariant* potential-based-shaping term (`physics_shaping_weight`,
-Ng-Harada-Russell), which densifies per-turn credit toward the roofline **without** changing the
-optimal policy, so it never re-introduces an objective mismatch. This is a *training-objective*
-alignment: **the datagen record generation is unchanged** (no new record types, mutators, or
-verification changes) - only how the already-verified records are scored/assembled.
+**Objective alignment with SFT/DPO.** GRPO's within-turn reward is the same vendor-relative
+**speedup** signal that Stages 1–2 assemble on (`reward_mode=speedup`; the SFT speedup gate and the
+DPO `faster-correct > slower-correct` ranking below), so all three stages optimize one objective. The
+roofline attainment (online, the potential `Φ = η = T_min/T_measured`) enters GRPO only as a
+potential-based-shaping term (`physics_shaping_weight`, Ng–Harada–Russell) that densifies per-turn
+credit toward the roofline without changing the ranking of returns. This is a training-objective
+alignment: the datagen record generation is unchanged (no new record types, mutators, or verification
+changes) — only how the already-verified records are scored and assembled.
 
 ### 3.3 Memory-bound vs compute-bound balance
 
@@ -342,7 +341,7 @@ Every correctness/perf label MUST be produced by this pipeline (extends `verifie
 5. **Determinism reruns.** Re-run the winning kernel ≥3× (fresh process). If SNR/wall variance exceeds tolerance (nondeterminism, C2), **flag and quarantine** - do not admit to corpus.
 6. **Independent re-verification.** Re-verify accepted wins in a *separate process / separate harness invocation* (KORE.pdf §4: "re-verify independently"). Candidate is loaded and run **before** the reference (defeats output-recycling hack H4).
 7. **Timing hygiene.** Warmup (≥10 iters) + median of ≥30 timed iters + CUDA-event timing + `torch.cuda.synchronize()` + **variance gate CV < 3%** (KORE.pdf §4). Reject measurements with CV ≥ 3%.
-8. **Reward is lexicographic.** `r = 1[correct] · log(T_base / T_cand)`. Speed counts only if correct; a fast-but-wrong kernel scores 0. No dense/intermediate compile-or-run reward that could change the objective (KORE.pdf §4; prevents over-optimization cheating). The paradigm-v2 online physics term is the sole dense signal, added as *approximately policy-invariant* Ng-Harada-Russell potential-based shaping (`Φ = η` online; the named-residual `ρ` needs per-rollout PMC counters not yet threaded). For the vanilla estimator it telescopes to a start-state constant; under GRPO's std-normalized group-relative advantage the invariance is approximate (a small bounded ≤~0.06 leak at the correct→incorrect boundary), so it densifies per-turn GRPO credit without weakening the lexicographic guarantee — which remains the true anti-hack spine.
+8. **Reward is lexicographic.** `r = 1[correct] · log(T_base / T_cand)`. Speed counts only if correct; a fast-but-wrong kernel scores 0. There is no dense compile-or-run reward that could change the objective. The physics roofline term is the sole dense signal, added as a Ng–Harada–Russell potential-based-shaping term (`Φ = η` online) that densifies per-turn GRPO credit toward the roofline without changing the ranking of returns, so the lexicographic guarantee — the anti-hack spine — is preserved.
 9. **Baseline = production op, measured on-box.** `--impl reference` calls AITER/hipBLASLt/rocBLAS/CK for `T_base`; never a torch fallback.
 
 ### 4.2 Anti-cheat AST/static gate (pre-execution)

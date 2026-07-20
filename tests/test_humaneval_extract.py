@@ -120,7 +120,20 @@ _REAL_CAND_FLUSH_FENCED = (
     "```\n"
 )
 
+# First line is a block opener at col 0, its block body at col 8, and the real
+# function body at col 4 (captured pattern: sum_product / find_zero style).
+_REAL_CAND_BLOCK_FIRST = (
+    "if len(numbers) < 2:\n"
+    "        return False\n"
+    "    numbers.sort()\n"
+    "    for i in range(len(numbers) - 1):\n"
+    "        if abs(numbers[i] - numbers[i+1]) < threshold:\n"
+    "            return True\n"
+    "    return False"
+)
+
 _CASES = {
+    "real_cand_block_first": _REAL_CAND_BLOCK_FIRST,
     "fenced_with_import": _FENCED_WITH_IMPORT,
     "bare_with_import": _BARE_WITH_IMPORT,
     "helper_after": _HELPER_AFTER,

@@ -537,16 +537,17 @@ def _strip_outer_prose(code: str) -> str:
 
 
 def _fix_leading_underindent(body: str) -> str:
-    """Repair an instruct-model body whose FIRST statement is flush-left while the
-    rest of the body is one level in, e.g.::
+    """Repair a body whose FIRST statement lost its leading indent while the rest of
+    the body kept theirs - a common instruct-model quirk. The first line may be a
+    plain statement OR a block opener / helper def, e.g.::
 
-        numbers.sort()
-            for i in range(...):        # <- indented relative to a non-block stmt
+        if not numbers:            # <- col 0
+                return (0, 1)      # <- col 8 (its block)
+            sum_result = 0         # <- col 4 (the real body baseline)
 
-    That is invalid Python (a statement without a trailing ``:`` cannot open a
-    block), so grafting it produces an ``unexpected indent``. Raise each leading
-    line that is LESS indented than the body's baseline (the 2nd non-blank line)
-    and cannot itself open a block, up to that baseline.
+    which is invalid Python ("unindent does not match ..."). Raise the first line to
+    the body's true baseline = the MINIMUM indent of the remaining non-blank lines,
+    leaving its (correctly deeper) block body untouched. No-op on consistent bodies.
     """
     lines = body.split("\n")
     nb = [i for i, ln in enumerate(lines) if ln.strip()]
@@ -554,14 +555,10 @@ def _fix_leading_underindent(body: str) -> str:
         return body
     def _ind(s: str) -> int:
         return len(s) - len(s.lstrip())
-    base = _ind(lines[nb[1]])
-    if base == 0:
-        return body
-    for i in nb:
-        if _ind(lines[i]) < base and not lines[i].rstrip().endswith(":"):
-            lines[i] = " " * base + lines[i].lstrip()
-        else:
-            break
+    baseline = min(_ind(lines[i]) for i in nb[1:])
+    first = nb[0]
+    if _ind(lines[first]) < baseline:
+        lines[first] = " " * baseline + lines[first].lstrip()
     return "\n".join(lines)
 
 

@@ -1,6 +1,6 @@
-# `configs/` - FSDP & per-stage full-FT recipes
+# `configs/` — FSDP and per-stage full fine-tuning recipes
 
-The distributed launch config and the "locked" full-parameter recipes for each training stage. `scripts/run_campaign.py --full-ft` overlays the run's dynamic fields (model / dataset / output dir) onto these templates, writes the resolved config into `<data-root>/launch/`, and shells out to `scripts/launch_distributed.sh` → `accelerate launch`.
+The distributed launch configuration and the full-parameter recipes for each training stage. When `scripts/run_campaign.py` runs with `--full-ft`, it overlays the run's dynamic fields (model / dataset / output directory) onto the shipped template, writes the resolved config into `<data-root>/launch/`, and shells out to `scripts/launch_distributed.sh` → `accelerate launch`. See the root [training pipeline](../README.md#the-training-pipeline) for where these stages sit.
 
 ---
 
@@ -8,24 +8,24 @@ The distributed launch config and the "locked" full-parameter recipes for each t
 
 | File | Purpose |
 | --- | --- |
-| `accelerate_fsdp.yaml` | The FSDP launch config for the Trainer stages (midtrain/sft/dpo): 8 ranks, `FULL_SHARD` (ZeRO-3) |
-| `accelerate_fsdp_grpo.yaml` | The FSDP launch config for GRPO only: 8 ranks, `SHARD_GRAD_OP` (ZeRO-2) - GRPO's in-loop `model.generate()` would deadlock under `FULL_SHARD`'s per-decode-step re-gather, so it needs params to stay replicated between forwards |
-| `midtrain_14b_full.json` | Stage-0 continued-pretraining recipe |
-| `sft_14b_full.json` | Stage-1 SFT recipe |
-| `dpo_14b_full.json` | Stage-2 DPO recipe |
-| `grpo_14b_full.json` | Stage-3 GRPO recipe (all best-in-class levers) |
+| `accelerate_fsdp.yaml` | FSDP launch config for the Trainer stages (`midtrain` / `sft` / `dpo`): 8 ranks, `FULL_SHARD` (ZeRO-3) |
+| `accelerate_fsdp_grpo.yaml` | FSDP launch config for `grpo`: 8 ranks, `SHARD_GRAD_OP` (ZeRO-2). GRPO's in-loop `model.generate()` deadlocks under `FULL_SHARD`'s per-decode re-gather, so params must stay replicated between forwards |
+| `midtrain_14b_full.json` | Continued-pretraining recipe |
+| `sft_14b_full.json` | SFT recipe |
+| `dpo_14b_full.json` | DPO recipe |
+| `grpo_14b_full.json` | GRPO recipe |
 
-## How a resolved config gets written (`_launch_distributed`)
+## How a resolved config is written (`_launch_distributed`)
 
-None of these JSON templates are edited by hand at run time. For every full-FT training stage (`midtrain`/`sft`/`dpo`/`grpo`), `scripts/run_campaign.py`'s `_launch_distributed` helper:
+The JSON templates are never edited by hand at run time. For each full-FT training stage (`midtrain` / `sft` / `dpo` / `grpo`), `run_campaign.py`'s `_launch_distributed` helper:
 
 1. loads the shipped template `configs/<stage>_14b_full.json`;
-2. overlays the run's dynamic overrides (`model_id`, `output_dir`, dataset paths, task ids, the anti-collapse/value-prefilter levers, …);
+2. overlays the run's dynamic overrides (`model_id`, `output_dir`, dataset paths, task ids, the anti-collapse and value-prefilter fields, …);
 3. forces `distributed=true` and `use_lora=false`;
 4. writes the result to `<data_root>/launch/<run_name>.json` (`run_name` defaults to the stage name); and
 5. shells out to `scripts/launch_distributed.sh <stage> <resolved.json>`.
 
-For GRPO specifically, `run_name` depends on `--grpo-curriculum` (default **on**): a curriculum run writes `grpo_phase1_correctness.json` then `grpo_phase2_latency.json`; a **non-curriculum** run (`--no-grpo-curriculum`) writes a single `grpo.json`, rendered fresh from `configs/grpo_14b_full.json` every time the stage starts. A `launch/grpo_phase1_correctness.json` on disk is only meaningful if the run that produced it was actually curriculum-mode - it is not automatically "the" live GRPO config, and a stale one left over from an earlier invocation should not be read as authoritative; check the run's actual CLI flags / manifest instead.
+For GRPO, `run_name` depends on `--grpo-curriculum` (default on): a curriculum run writes `grpo_phase1_correctness.json` then `grpo_phase2_latency.json`; a non-curriculum run (`--no-grpo-curriculum`) writes a single `grpo.json`, rendered fresh from `configs/grpo_14b_full.json` each time the stage starts. A `launch/grpo_phase1_correctness.json` on disk is authoritative only for a curriculum-mode run — check the run's CLI flags or manifest rather than assuming a leftover file describes the live config.
 
 ---
 
@@ -37,7 +37,7 @@ num_processes: 8                 # one rank per gfx950 (MI350X) GPU
 mixed_precision: bf16
 fsdp_config:
   fsdp_version: 1
-  fsdp_reshard_after_forward: FULL_SHARD          # ZeRO-3 (params+grads+optim)
+  fsdp_reshard_after_forward: FULL_SHARD          # ZeRO-3 (params + grads + optim)
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
   fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer
   fsdp_state_dict_type: FULL_STATE_DICT           # consolidate a plain HF ckpt for cross-stage handoff
@@ -45,56 +45,61 @@ fsdp_config:
   fsdp_offload_params: false                      # 14B: keep on GPU (set true for 32B/70B)
 ```
 
-Scaling notes are inline: flip `fsdp_offload_params: true` for 32B, add nodes (`num_machines>1`) for 70B.
+`grpo` uses `accelerate_fsdp_grpo.yaml`, identical except that it pins `SHARD_GRAD_OP` (ZeRO-2) through both `fsdp_sharding_strategy` and `fsdp_reshard_after_forward` so params stay replicated between forwards and in-loop generation runs locally on each rank (grads and optimizer state are still sharded, so a 14B full-FT still fits on 8× MI350X). Scaling is documented inline in both files: set `fsdp_offload_params: true` for 32B, add nodes (`num_machines>1`) and switch the wrap class to `LlamaDecoderLayer` for the 70B.
 
 ---
 
-## Stage recipes (highlights)
+## Stage recipes
 
-**`midtrain_14b_full.json`** - continued-pretrain on the general Triton/HIP corpus, `max_seq_length=8192`, `num_train_epochs=1`, `per_device_train_batch_size=4`, `gradient_accumulation_steps=4`, `learning_rate=1e-5` (cosine, `warmup_ratio=0.05`), `general_replay_frac=0.3` (anti-forgetting blend).
+**`midtrain_14b_full.json`** — continued pretraining on the general Triton/HIP corpus: `max_seq_length=8192`, `num_train_epochs=1`, `per_device_train_batch_size=4`, `gradient_accumulation_steps=4`, `learning_rate=1e-5` (cosine, `warmup_ratio=0.05`), `general_replay_frac=0.3` (anti-forgetting blend).
 
-**`sft_14b_full.json`** - full-FT, `max_seq_length=16384`, `num_train_epochs=3`, `per_device_train_batch_size=4`, `gradient_accumulation_steps=4`, `learning_rate=1e-5` (cosine, `warmup_ratio=0.03`), `repair_loss_weight=2.0`.
+**`sft_14b_full.json`** — full-FT: `max_seq_length=16384`, `num_train_epochs=3`, `per_device_train_batch_size=2`, `gradient_accumulation_steps=8`, `learning_rate=1e-5` (cosine, `warmup_ratio=0.03`), `repair_loss_weight=2.0`.
 
-**`dpo_14b_full.json`** - `beta=0.1`, `loss_type=["sigmoid","sft"]` (a combined preference + SFT-on-chosen loss, `loss_weights=[1.0,1.0]`), `label_smoothing=0.1`, `truncation_mode="keep_end"`, `max_length=16384`, `learning_rate=5e-7` (cosine, `warmup_ratio=0.1`), `max_grad_norm=0.5`, `per_device_train_batch_size=2`, `gradient_accumulation_steps=8`.
+**`dpo_14b_full.json`** — `beta=0.1`, `loss_type=["sigmoid","sft"]` (a combined preference + SFT-on-chosen loss, `loss_weights=[1.0,1.0]`), `label_smoothing=0.1`, `truncation_mode="keep_end"`, `max_length=16384`, `learning_rate=5e-7` (cosine, `warmup_ratio=0.1`), `max_grad_norm=0.5`, `per_device_train_batch_size=2`, `gradient_accumulation_steps=8`.
 
-**`grpo_14b_full.json`** - the full paradigm, all levers on:
+**`grpo_14b_full.json`** — the multi-turn agentic GRPO recipe (key fields):
 
 ```jsonc
 {
   "num_trajectories": 16, "num_turns": 4, "tasks_per_step": 8,
   "learning_rate": 2e-6, "max_grad_norm": 0.5, "ref_anchor_coef": 1e-3,
+  "temperature": 0.9, "max_prompt_length": 16384, "max_response_length": 16384,
   "agentic": true, "starpo_s": true, "dynamic_sampling": true,
-  "rc_grpo": true, "sc_grpo": true, "gtpo_codesim": true, "value_prefilter": true,
-  "coevolve": true, "coevolve_include_vendor": true,     // open-ended curriculum (SELECT)
-  "reward_mode": "speedup", "physics_weight": 1.0,       // vendor-relative speedup reward
-  "credit_incorrect_turns": true, "physics_shaping_weight": 0.15,  // paradigm-v2 credit (ON)
-  "agentic_transform_tools": true,                       // paradigm-v2 verified transform tools (ON)
-  "use_search": true, "search_budget": 16, "search_every": 50,     // paradigm-v2 test-time search (ON)
-  "coevolve_mint": true, "coevolve_mint_batch": 6,       // paradigm-v2 open-ended minting (ON)
-  "reward_phase": "all",
+  "rc_grpo": true, "variance_floor": 0.1, "sc_grpo": true,
+  "gtpo_codesim": true, "value_prefilter": true,
+  "coevolve": true, "coevolve_include_vendor": true,          // open-ended curriculum (SELECT)
+  "coevolve_distill_path": "data/full14b/coevolve_wins.jsonl",
+  "reward_phase": "all", "reward_mode": "speedup", "physics_weight": 1.0,
+  "credit_incorrect_turns": true, "physics_shaping_weight": 0.15,
+  "agentic_transform_tools": true,
+  "use_search": true, "search_budget": 32, "search_every": 50,
+  "search_bnb": true, "search_k_expand": 6, "search_max_depth": 6, "search_value_prior": true,
+  "roofline_gate": true, "roofline_tol": 0.25, "physics_live_counters": true,
+  "transform_discover": true,
+  "coevolve_mint": true, "coevolve_mint_batch": 6,
+  "coevolve_evolve_grammar": true, "coevolve_regret_vs_opus": true,
+  "total_steps": 2000, "save_steps": 100,
   "fsdp_version": 1, "zero_stage": 3, "synced_gpus": true, "cpu_offload": false,
   "bf16": true, "gradient_checkpointing": true
 }
 ```
 
-> Note: the `zero_stage: 3` and `synced_gpus: true` fields above are superseded at runtime. Distributed GRPO runs ZeRO-2 (`SHARD_GRAD_OP`, set authoritatively in `accelerate_fsdp_grpo.yaml`) and rolls out against a full-weight local replica synced once per step, so `model.generate()` never triggers an FSDP all-gather. See [`kore/policy`](../kore/policy/README.md) FSDP notes.
+> The `zero_stage: 3` and `synced_gpus: true` fields are superseded at launch. Distributed GRPO runs ZeRO-2 (`SHARD_GRAD_OP`, set authoritatively in `accelerate_fsdp_grpo.yaml`) and rolls out against a full-weight local replica synced once per step, so `model.generate()` never triggers an FSDP all-gather. See [`kore/policy`](../kore/policy/README.md) for the FSDP notes.
 
-### Paradigm-v2 GRPO flags
+### GRPO credit, search, and curriculum fields
 
-Nine flags tune the paradigm-v2 credit assignment, verified transform action space, test-time search, and open-ended curriculum. Each maps to a `GRPOConfig` field (`kore/policy/configs.py`); the "flagship" column is the value shipped in `grpo_14b_full.json`. All nine are **ON** in the flagship, and every backing module is fail-safe (any runtime error degrades to a no-op).
+These fields configure GRPO's credit assignment, verified transform action space, test-time search, and open-ended curriculum. Each maps to a `GRPOConfig` dataclass field (`kore/policy/configs.py`), where the defaults are conservative (off) and this template turns them on. Every backing module is fail-safe: a runtime error degrades to a no-op rather than failing the run.
 
-| Flag | Flagship | State | What it does |
-| --- | --- | --- | --- |
-| `reward_mode` | `"speedup"` | **ON (active)** | Terminal/within-turn reward tier for a *correct* kernel. `"speedup"` = the high-contrast vendor-relative speedup (was `"residual"`, the compressed physics-residual credit). Ops with no roofline model fall back to speedup either way; anti-hack/correctness gating is identical. Consumed in `kore/policy/grpo.py`. |
-| `credit_incorrect_turns` | `true` | **ON (active)** | Feed an **incorrect** turn's *shaped progress* reward (bounded sub-threshold SNR + format signal, always `< correctness_weight`) into the Kevin per-turn return instead of hard-zeroing it - densifies the gradient in the not-yet-correct band while keeping correctness lexicographically dominant. Consumed in `build_kevin_samples` (`kore/policy/grpo.py`). |
-| `physics_shaping_weight` | `0.15` | **ON (active)** | Weight on potential-based shaping `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` with `Φ =` roofline attainment (`kore.reward.whitebox.phi_potential`). By Ng-Harada-Russell this is *approximately* policy-invariant (an expected-gradient-neutral state-dependent baseline), densifying per-turn credit toward the roofline; it is **not** an exact at-any-weight theorem here — the offset feeds GRPO's std-normalized group-relative advantage and the correct→incorrect boundary leaves a small bounded (≤~0.06) leak. `0.0` disables it. Consumed in `build_kevin_samples`. **Honest caveat:** `Φ` is the named-residual `ρ` (R²≈0.98 offline) only when rocprofv3 PMC counters are threaded in; the agentic tool-use rollout this flagship uses (`agentic: true`) calls `phi_potential` without counters (`kore/agent/tools.py`), so `Φ` is actually the PMC-free `η = T_min/T_meas` online today - see [`kore/env/README.md`](../kore/env/README.md). The shaping is *approximately* invariant either way; only the *quality* of the dense signal differs (`ρ` ≫ `η` in contrast). |
-| `agentic_transform_tools` | `true` | **ON (fail-safe)** | Advertise the verified ε-typed transformation calculus (`kore.transform`: real Triton rewrites, each exact `≡` / approx `≈_ε` with an error budget + side conditions) to the agent as `list_transforms`/`apply_transform` tools - a **provably-in-contract** optimization action space on top of free-form editing. Pure CPU (source rewrites); the env still verifies the result, so it cannot bypass the SNR gate. Consumed in `kore/agent/tools.py`. |
-| `use_search` | `true` | **ON (fail-safe)** | Run AlphaKernel value-guided best-first search over the **verified transform action space** (`kore.search.propose.search_from_kernel`, driven by the production `TransformProposePolicy`) with the env as a perfect simulator + roofline admissible bound. Wired as a **throttled, off-policy search-then-distill hook** (`_maybe_search_then_distill`, `kore/policy/grpo.py`): it runs AFTER the on-policy gradient sample is built from the model's own tokens, banks faster verified kernels as **distillation targets** (`coevolve_distill_path`), and is never attributed to the on-policy update - sound at any setting. Fully fail-safe (any error is a no-op). |
-| `search_budget` | `16` | **ON (fail-safe)** | Hard verifier-call cap per search invocation for `use_search`. Together with `search_every` this bounds the extra bench budget over the run (one search per `search_every` steps × up to `search_budget` benches each). |
-| `search_every` | `50` | **ON (fail-safe)** | Throttle: run the search-then-distill hook once every `search_every` steps, on the step's single best group only (rank-0), so the extra verifier budget stays bounded rather than multiplied across every rollout. |
-| `coevolve_mint` | `true` | **ON (fail-safe)** | Let the `CoevolutionController` **mint** net-new correct-by-construction tasks (`kore.openended.minter`) beyond the registered menu (measured-roofline QD + learning-progress), then **materialize** them into runnable task dirs with a materialize-time self-check (`kore.openended.materialize`) before they enter the curriculum. Complements the SELECT-only curriculum (`coevolve: true`). See [`kore/openended`](../kore/openended/README.md). |
-| `coevolve_mint_batch` | `6` | **ON (fail-safe)** | Number of candidate tasks the controller mints per minting round; each must pass the materialize self-check to be admitted. Inert while `coevolve_mint` is `false`. |
+| Field | `grpo_14b_full.json` | Description |
+| --- | --- | --- |
+| `reward_mode` | `"speedup"` | Terminal / within-turn reward tier for a *correct* kernel. `"speedup"` awards the high-contrast vendor-relative speedup; `"residual"` awards the compressed physics-residual credit. Operators with no roofline model fall back to speedup under either setting, and the anti-hack and correctness gating are identical. Consumed in `kore/policy/grpo.py`. |
+| `credit_incorrect_turns` | `true` | Feed an incorrect turn's bounded shaped-progress reward (sub-threshold SNR + format signal, always `< correctness_weight`) into the per-turn return instead of zeroing it, densifying the gradient in the not-yet-correct band while keeping correctness lexicographically dominant. Consumed in `build_kevin_samples`. |
+| `physics_shaping_weight` | `0.15` | Weight on potential-based shaping `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` with `Φ =` roofline attainment (`kore.reward.whitebox.phi_potential`), adding dense per-turn credit toward the roofline; `0.0` disables it. By Ng–Harada–Russell this is approximately policy-invariant. In the agentic rollout (`agentic: true`) `Φ` is the PMC-free `η = T_min/T_measured`; with rocprofv3 counters threaded in it becomes the counter-grounded `ρ`. Consumed in `build_kevin_samples`. |
+| `agentic_transform_tools` | `true` | Expose the ε-typed transform calculus (`kore.transform`: real Triton rewrites, each exact `≡` or approximate `≈_ε` with an error budget and side conditions) to the agent as `list_transforms` / `apply_transform` tools — a verified, in-contract optimization action space alongside free-form editing. CPU-only source rewrites; the env still verifies the result. Consumed in `kore/agent/tools.py`. |
+| `use_search` | `true` | Run AlphaKernel value-guided best-first search over the verified transform action space (`kore.search.propose.search_from_kernel`) as a throttled, off-policy search-then-distill hook (`_maybe_search_then_distill`). It runs after the on-policy gradient sample is built, banks faster verified kernels as distillation targets (`coevolve_distill_path`), and is never attributed to the on-policy update. |
+| `search_budget` | `32` | Verifier-call cap per search invocation. |
+| `search_every` | `50` | Run the search-then-distill hook once every N steps, on the step's single best group (rank 0), so the extra verifier budget stays bounded. |
+| `coevolve_mint` | `true` | Let the `CoevolutionController` mint new correct-by-construction tasks (`kore.openended.minter`) beyond the registered menu, then materialize them with a materialize-time self-check (`kore.openended.materialize`) before they enter the curriculum. Complements the SELECT-only curriculum (`coevolve: true`). See [`kore/openended`](../kore/openended/README.md). |
+| `coevolve_mint_batch` | `6` | Candidate tasks minted per round; each must pass the materialize self-check to be admitted. Inert while `coevolve_mint` is `false`. |
 
-All nine flags are **active in this flagship run** and consumed in the GRPO training loop: the credit-assignment trio (`reward_mode`, `credit_incorrect_turns`, `physics_shaping_weight`) shapes the on-policy gradient; `agentic_transform_tools` hands the agent the verified transform action space; the search trio (`use_search`, `search_budget`, `search_every`) runs the throttled, off-policy search-then-distill hook *after* each on-policy gradient step (banking faster verified kernels as distillation targets); and the minting pair (`coevolve_mint`, `coevolve_mint_batch`) expands the curriculum with materialized, self-checked correct-by-construction tasks. Each is a `GRPOConfig` field (default off in `configs.py`) whose backing module is fail-safe + unit-tested, so any runtime error degrades to a no-op rather than corrupting the run.
-
-Every field maps to a `GRPOConfig` dataclass field (`kore/policy/configs.py`). See [`scripts/README.md`](../scripts/README.md) for how these are launched and [`docs/DISTRIBUTED.md`](../docs/DISTRIBUTED.md) for sizing.
+See [`scripts/README.md`](../scripts/README.md) for how these configs are launched and [`docs/DISTRIBUTED.md`](../docs/DISTRIBUTED.md) for sizing.

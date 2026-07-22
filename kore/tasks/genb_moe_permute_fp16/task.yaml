@@ -1,0 +1,20 @@
+task_id: genb_moe_permute_fp16
+operation: moe_permute
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_moe_permute
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 64, E: 8, D: 128}
+  primary: {M: 4096, E: 64, D: 4096}
+  validation:
+    - {M: 16384, E: 128, D: 4096}
+    - {M: 8192, E: 256, D: 4096}
+    - {M: 4095, E: 64, D: 4096}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_moe_permute

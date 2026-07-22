@@ -1,0 +1,20 @@
+task_id: genb_cv_conv3d_3x3x3_s2_bf16
+operation: cv_conv3d_3x3x3_s2
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_cv_conv3d_3x3x3_s2
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {N: 1, Cin: 16, D: 8, H: 16, W: 16, Cout: 16}
+  primary: {N: 2, Cin: 32, D: 8, H: 28, W: 28, Cout: 32}
+  validation:
+    - {N: 1, Cin: 64, D: 16, H: 28, W: 28, Cout: 64}
+    - {N: 2, Cin: 32, D: 4, H: 56, W: 56, Cout: 32}
+    - {N: 1, Cin: 48, D: 6, H: 30, W: 30, Cout: 48}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_cv_conv3d_3x3x3_s2

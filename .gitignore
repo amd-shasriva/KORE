@@ -25,3 +25,7 @@ runs_smoke/
 /repos/
 # rocprofv3 profiler dumps (machine-local, regenerable)
 .rocprofv3/
+
+# breadth datagen output (large, regenerable; preserved on disk + /shareddata)
+data/b05factory/
+data/b05factory_synced/

@@ -1,0 +1,20 @@
+task_id: genb_grad_clip_global_norm_bf16
+operation: grad_clip_global_norm
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_grad_clip_global_norm
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {G: 4, N: 1024}
+  primary: {G: 16, N: 4096}
+  validation:
+    - {G: 8, N: 8192}
+    - {G: 32, N: 4096}
+    - {G: 16, N: 14336}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_grad_clip_global_norm

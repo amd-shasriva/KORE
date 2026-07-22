@@ -1,0 +1,20 @@
+task_id: genb_tr_grad_clip_per_layer_fp16
+operation: tr_grad_clip_per_layer
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_tr_grad_clip_per_layer
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {G: 4, N: 256}
+  primary: {G: 16, N: 4096}
+  validation:
+    - {G: 32, N: 4096}
+    - {G: 8, N: 14336}
+    - {G: 16, N: 8192}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_tr_grad_clip_per_layer

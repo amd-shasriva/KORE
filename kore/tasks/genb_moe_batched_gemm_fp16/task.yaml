@@ -1,0 +1,20 @@
+task_id: genb_moe_batched_gemm_fp16
+operation: moe_batched_gemm
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_moe_batched_gemm
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {E: 4, m: 16, N: 64, K: 64}
+  primary: {E: 8, m: 512, N: 4096, K: 4096}
+  validation:
+    - {E: 16, m: 256, N: 4096, K: 4096}
+    - {E: 8, m: 512, N: 14336, K: 4096}
+    - {E: 8, m: 511, N: 512, K: 512}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_moe_batched_gemm

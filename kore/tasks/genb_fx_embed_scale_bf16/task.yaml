@@ -1,0 +1,20 @@
+task_id: genb_fx_embed_scale_bf16
+operation: fx_embed_scale
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_fx_embed_scale
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {V: 128, D: 64, M: 32}
+  primary: {V: 32000, D: 4096, M: 4096}
+  validation:
+    - {V: 128256, D: 4096, M: 8192}
+    - {V: 32000, D: 8192, M: 4096}
+    - {V: 50257, D: 4096, M: 4095}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_fx_embed_scale

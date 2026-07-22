@@ -1,0 +1,20 @@
+task_id: genb_norm_batchnorm_bf16
+operation: norm_batchnorm
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_norm_batchnorm
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {N: 2, C: 32, L: 64}
+  primary: {N: 8, C: 256, L: 1024}
+  validation:
+    - {N: 16, C: 128, L: 512}
+    - {N: 4, C: 512, L: 256}
+    - {N: 8, C: 256, L: 1023}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_norm_batchnorm

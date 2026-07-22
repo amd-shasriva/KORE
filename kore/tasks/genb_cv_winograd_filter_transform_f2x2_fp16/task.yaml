@@ -1,0 +1,20 @@
+task_id: genb_cv_winograd_filter_transform_f2x2_fp16
+operation: cv_winograd_filter_transform_f2x2
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_cv_winograd_filter_transform_f2x2
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {Cout: 64, Cin: 64}
+  primary: {Cout: 256, Cin: 128}
+  validation:
+    - {Cout: 512, Cin: 256}
+    - {Cout: 128, Cin: 512}
+    - {Cout: 96, Cin: 192}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_cv_winograd_filter_transform_f2x2

@@ -1,0 +1,20 @@
+task_id: genb_gemm_fp8_batched_fp8
+operation: gemm_fp8_batched
+dtype: fp8
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 25.0
+op_family: breadth_gemm_fp8_batched
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 2, M: 64, N: 128, K: 128}
+  primary: {B: 8, M: 512, N: 4096, K: 4096}
+  validation:
+    - {B: 16, M: 256, N: 4096, K: 4096}
+    - {B: 4, M: 512, N: 8192, K: 4096}
+    - {B: 8, M: 513, N: 4096, K: 4096}
+targets:
+  snr_db: 25.0
+  comparison_baseline: torch_gemm_fp8_batched

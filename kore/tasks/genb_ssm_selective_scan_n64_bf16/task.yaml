@@ -1,0 +1,20 @@
+task_id: genb_ssm_selective_scan_n64_bf16
+operation: ssm_selective_scan_n64
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_ssm_selective_scan_n64
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, L: 256, D: 256, N: 64}
+  primary: {B: 2, L: 2048, D: 2048, N: 64}
+  validation:
+    - {B: 4, L: 4096, D: 1024, N: 64}
+    - {B: 1, L: 4096, D: 2048, N: 64}
+    - {B: 2, L: 2047, D: 2048, N: 64}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_ssm_selective_scan_n64

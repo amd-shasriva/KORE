@@ -1,0 +1,20 @@
+task_id: genb_red_cross_entropy_zloss_bf16
+operation: red_cross_entropy_zloss
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_red_cross_entropy_zloss
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 64, V: 2048}
+  primary: {M: 4096, V: 32000}
+  validation:
+    - {M: 16384, V: 32000}
+    - {M: 4096, V: 128256}
+    - {M: 4096, V: 32001}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_red_cross_entropy_zloss

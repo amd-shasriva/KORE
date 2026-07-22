@@ -1,0 +1,20 @@
+task_id: genb_fx_softcap_softmax_bf16
+operation: fx_softcap_softmax
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_fx_softcap_softmax
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {R: 32, Ncol: 40}
+  primary: {R: 131072, Ncol: 4096}
+  validation:
+    - {R: 65536, Ncol: 2048}
+    - {R: 40960, Ncol: 8192}
+    - {R: 8192, Ncol: 8191}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_fx_softcap_softmax

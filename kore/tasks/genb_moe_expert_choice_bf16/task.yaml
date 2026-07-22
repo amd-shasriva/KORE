@@ -1,0 +1,20 @@
+task_id: genb_moe_expert_choice_bf16
+operation: moe_expert_choice
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_moe_expert_choice
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 16, E: 4, cap: 8}
+  primary: {M: 4096, E: 64, cap: 512}
+  validation:
+    - {M: 16384, E: 128, cap: 1024}
+    - {M: 8192, E: 64, cap: 1024}
+    - {M: 4097, E: 64, cap: 512}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_moe_expert_choice

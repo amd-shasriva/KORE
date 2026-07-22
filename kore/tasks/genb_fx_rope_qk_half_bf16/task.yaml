@@ -1,0 +1,20 @@
+task_id: genb_fx_rope_qk_half_bf16
+operation: fx_rope_qk_half
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_fx_rope_qk_half
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, S: 16, H: 4, D: 64}
+  primary: {B: 1, S: 4096, H: 32, D: 128}
+  validation:
+    - {B: 2, S: 2048, H: 32, D: 128}
+    - {B: 1, S: 8192, H: 40, D: 128}
+    - {B: 1, S: 4096, H: 16, D: 96}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_fx_rope_qk_half

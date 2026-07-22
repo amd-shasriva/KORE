@@ -1,0 +1,19 @@
+task_id: genb_moe_block_silu_k8_e256_fp16
+operation: moe_block_silu_k8_e256
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_moe_block_silu_k8_e256
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 64, E: 256, topk: 8, D: 128, I: 256}
+  primary: {M: 4096, E: 256, topk: 8, D: 4096, I: 14336}
+  validation:
+    - {M: 16384, E: 256, topk: 8, D: 4096, I: 14336}
+    - {M: 8193, E: 256, topk: 8, D: 4096, I: 14336}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_moe_block_silu_k8_e256

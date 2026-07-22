@@ -1,0 +1,20 @@
+task_id: genb_attn2_cacheappend_mqa_fp16
+operation: attn2_cacheappend_mqa
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_attn2_cacheappend_mqa
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, H: 8, HKV: 1, SKctx: 64, SQ: 16, D: 128}
+  primary: {B: 2, H: 32, HKV: 1, SKctx: 4096, SQ: 256, D: 128}
+  validation:
+    - {B: 4, H: 16, HKV: 1, SKctx: 2048, SQ: 128, D: 128}
+    - {B: 1, H: 32, HKV: 1, SKctx: 8192, SQ: 64, D: 128}
+    - {B: 2, H: 16, HKV: 1, SKctx: 2047, SQ: 65, D: 128}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_attn2_cacheappend_mqa

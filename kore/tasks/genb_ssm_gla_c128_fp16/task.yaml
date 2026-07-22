@@ -1,0 +1,20 @@
+task_id: genb_ssm_gla_c128_fp16
+operation: ssm_gla_c128
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_ssm_gla_c128
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, H: 8, L: 256, Dh: 64, chunk: 128}
+  primary: {B: 2, H: 8, L: 2048, Dh: 64, chunk: 128}
+  validation:
+    - {B: 4, H: 8, L: 4096, Dh: 64, chunk: 128}
+    - {B: 1, H: 8, L: 8192, Dh: 64, chunk: 128}
+    - {B: 2, H: 8, L: 2047, Dh: 64, chunk: 128}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_ssm_gla_c128

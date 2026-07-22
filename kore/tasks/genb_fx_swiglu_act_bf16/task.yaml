@@ -1,0 +1,20 @@
+task_id: genb_fx_swiglu_act_bf16
+operation: fx_swiglu_act
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_fx_swiglu_act
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 64, N: 512}
+  primary: {M: 4096, N: 28672}
+  validation:
+    - {M: 16384, N: 22016}
+    - {M: 4096, N: 28672}
+    - {M: 8192, N: 22014}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_fx_swiglu_act

@@ -45,8 +45,58 @@ HELDOUT_FAMILIES: tuple[str, ...] = ("mla", "paged_attention")
 # KV-cache mechanism) and MLA (DeepSeek latent attention, the hardest novel variant).
 # This is the "best product model AND a frontier generalization eval" split.
 HELDOUT_TASKS: frozenset = frozenset({
+    # (1) FAR generalization - structurally novel seeds (also held out WHOLE by
+    #     HELDOUT_FAMILIES): paged-KV decode + MLA (DeepSeek latent attention).
     "paged_attn_decode_bf16",
     "mla_decode_bf16",
+    # (2) NEAR generalization - a STRATIFIED, deterministic ~43-task breadth probe:
+    #     3-4 genb_ tasks per major family, picked at even positions in each sorted
+    #     family so the policy trains on the REST of the family and is tested on an
+    #     UNSEEN member. Spans every op class + dtype (bf16/fp16/fp32/fp8/int8/int4),
+    #     turning the generalization eval from a 2-point claim into a real one.
+    "genb_attn2_cross_gqa_step_fp16",
+    "genb_attn2_decode_mqa_hd256_bf16",
+    "genb_attn2_varlen_gqa_causal_bf16",
+    "genb_attn_fp8_mha_hd128_causal_fp8",
+    "genb_attn_mha_hd128_noncausal_fp16",
+    "genb_attn_mqa_hd64_causal_bf16",
+    "genb_cv_conv2d_1x1_s2_fp16",
+    "genb_cv_conv2d_7x7_s1_d1_fp16",
+    "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+    "genb_cv_depthwise_conv2d_5x5_s1_bf16",
+    "genb_fx_embed_scale_bf16",
+    "genb_fx_reglu_act_fp16",
+    "genb_fx_rope_qk_half_qknorm_bf16",
+    "genb_gemm_bf16_residual_bf16",
+    "genb_gemm_fp8_channelwise_fp8",
+    "genb_gemm_int4_asym_group_fp16",
+    "genb_gemm_int8_pertensor_int8",
+    "genb_moe_block_silu_k8_e256_bf16",
+    "genb_moe_fused_moe_silu_fp16",
+    "genb_moe_grouped_mlp_gelu_bf16",
+    "genb_moe_sigmoid_topk_norenorm_fp16",
+    "genb_norm_groupnorm_bf16",
+    "genb_norm_layernorm_bwd_fp32",
+    "genb_norm_layernorm_quant_fp8_fp8",
+    "genb_norm_rmsnorm_h16384_bf16",
+    "genb_qx_int4_unpack_group_bf16",
+    "genb_qx_quant_fp8_block2d_fp8",
+    "genb_qx_quant_int8_pertoken_int8",
+    "genb_red_entropy_bf16",
+    "genb_red_log_softmax_bwd_fp32",
+    "genb_red_rms_bf16",
+    "genb_red_topk256_bf16",
+    "genb_smp_repetition_penalty_bf16",
+    "genb_smp_rope_yarn_bf16",
+    "genb_smp_topk_sample_bf16",
+    "genb_ssm_gated_retention_c128_bf16",
+    "genb_ssm_lightning_attn_bf16",
+    "genb_ssm_mamba2_ssd_c128_n128_bf16",
+    "genb_ssm_retnet_c64_bf16",
+    "genb_tr_adamw_8bit_bf16",
+    "genb_tr_foreach_sgd_bf16",
+    "genb_tr_ls_ce_bwd_bf16",
+    "genb_tr_rmsprop_centered_momentum_fp32",
 })
 
 

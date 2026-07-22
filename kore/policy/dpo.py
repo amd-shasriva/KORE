@@ -105,11 +105,16 @@ def build_trl_dpo_kwargs(config) -> dict:
         report_to=config.report_to,
         dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
         dataloader_pin_memory=getattr(config, "dataloader_pin_memory", True),
-        # THROUGHPUT (audit R2 perf): persist workers + deeper prefetch, and
-        # group_by_length to cut pad-to-longest waste at micro-batch>1 on SDPA.
+        # THROUGHPUT (audit R2 perf): persist workers + deeper prefetch.
         dataloader_persistent_workers=getattr(config, "dataloader_num_workers", 8) > 0,
         dataloader_prefetch_factor=getattr(config, "dataloader_prefetch_factor", 4),
-        group_by_length=getattr(config, "group_by_length", True),
+        # group_by_length MUST be False for DPO: TRL preference rows are
+        # {prompt, chosen, rejected} with NO tokenized 'input_ids' column, so HF's
+        # LengthGroupedSampler raises "Can only automatically infer lengths for
+        # datasets whose items are dictionaries with an 'input_ids' key" and hard-
+        # stops the stage. SFT keeps group_by_length on (its rows ARE tokenized);
+        # for DPO the per-batch pad-to-longest cost is negligible (~164 steps).
+        group_by_length=getattr(config, "group_by_length", False),
         dataset_num_proc=getattr(config, "dataset_num_proc", 32),
     )
     # loss_type may be a STRING ("sigmoid"/"ipo") OR a LIST of components for a

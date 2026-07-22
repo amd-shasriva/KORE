@@ -1,0 +1,20 @@
+task_id: genb_ssd_chunk_scan_fp16
+operation: ssd_chunk_scan
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_ssd_chunk_scan
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, L: 128, D: 256, N: 16}
+  primary: {B: 2, L: 2048, D: 2048, N: 16}
+  validation:
+    - {B: 4, L: 1024, D: 1024, N: 16}
+    - {B: 1, L: 4096, D: 1536, N: 16}
+    - {B: 2, L: 2047, D: 1024, N: 16}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_ssd_chunk_scan

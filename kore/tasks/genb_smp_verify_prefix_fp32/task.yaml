@@ -1,0 +1,20 @@
+task_id: genb_smp_verify_prefix_fp32
+operation: smp_verify_prefix
+dtype: fp32
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 40.0
+op_family: breadth_smp_verify_prefix
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 4, K: 4}
+  primary: {M: 64, K: 5}
+  validation:
+    - {M: 256, K: 8}
+    - {M: 1, K: 4}
+    - {M: 64, K: 7}
+targets:
+  snr_db: 40.0
+  comparison_baseline: torch_smp_verify_prefix

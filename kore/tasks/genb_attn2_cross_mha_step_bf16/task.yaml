@@ -1,0 +1,20 @@
+task_id: genb_attn2_cross_mha_step_bf16
+operation: attn2_cross_mha_step
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_attn2_cross_mha_step
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, H: 8, HKV: 8, SQ: 1, SK: 48, D: 128}
+  primary: {B: 4, H: 32, HKV: 32, SQ: 1, SK: 2048, D: 128}
+  validation:
+    - {B: 8, H: 16, HKV: 16, SQ: 1, SK: 1024, D: 128}
+    - {B: 2, H: 32, HKV: 32, SQ: 1, SK: 4096, D: 128}
+    - {B: 2, H: 16, HKV: 16, SQ: 1, SK: 1023, D: 128}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_attn2_cross_mha_step

@@ -1,0 +1,20 @@
+task_id: genb_ssm_conv_ssd_n64_fp16
+operation: ssm_conv_ssd_n64
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_ssm_conv_ssd_n64
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, L: 256, D: 256, N: 64, K: 4, chunk: 128}
+  primary: {B: 2, L: 2048, D: 2048, N: 64, K: 4, chunk: 128}
+  validation:
+    - {B: 4, L: 4096, D: 1024, N: 64, K: 4, chunk: 128}
+    - {B: 1, L: 4096, D: 2048, N: 64, K: 4, chunk: 128}
+    - {B: 2, L: 2047, D: 2048, N: 64, K: 4, chunk: 128}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_ssm_conv_ssd_n64

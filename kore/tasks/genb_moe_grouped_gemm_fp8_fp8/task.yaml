@@ -1,0 +1,20 @@
+task_id: genb_moe_grouped_gemm_fp8_fp8
+operation: moe_grouped_gemm_fp8
+dtype: fp8
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 25.0
+op_family: breadth_moe_grouped_gemm_fp8
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 64, E: 8, N: 256, K: 256}
+  primary: {M: 4096, E: 64, N: 4096, K: 4096}
+  validation:
+    - {M: 16384, E: 128, N: 4096, K: 4096}
+    - {M: 4096, E: 256, N: 2048, K: 4096}
+    - {M: 8192, E: 64, N: 4096, K: 4095}
+targets:
+  snr_db: 25.0
+  comparison_baseline: torch_moe_grouped_gemm_fp8

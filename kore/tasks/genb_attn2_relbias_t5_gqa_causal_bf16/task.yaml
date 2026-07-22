@@ -1,0 +1,20 @@
+task_id: genb_attn2_relbias_t5_gqa_causal_bf16
+operation: attn2_relbias_t5_gqa_causal
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_attn2_relbias_t5_gqa_causal
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, H: 8, HKV: 2, SQ: 64, SK: 64, D: 128}
+  primary: {B: 2, H: 32, HKV: 8, SQ: 4096, SK: 4096, D: 128}
+  validation:
+    - {B: 4, H: 16, HKV: 4, SQ: 512, SK: 512, D: 128}
+    - {B: 1, H: 32, HKV: 8, SQ: 2048, SK: 2048, D: 128}
+    - {B: 2, H: 16, HKV: 4, SQ: 2047, SK: 2047, D: 128}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_attn2_relbias_t5_gqa_causal

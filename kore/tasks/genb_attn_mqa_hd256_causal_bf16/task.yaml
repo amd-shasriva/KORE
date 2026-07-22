@@ -1,0 +1,20 @@
+task_id: genb_attn_mqa_hd256_causal_bf16
+operation: attn_mqa_hd256_causal
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_attn_mqa_hd256_causal
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, H: 8, HKV: 1, SQ: 64, SK: 64, D: 256}
+  primary: {B: 2, H: 32, HKV: 1, SQ: 2048, SK: 2048, D: 256}
+  validation:
+    - {B: 4, H: 16, HKV: 1, SQ: 512, SK: 512, D: 256}
+    - {B: 1, H: 32, HKV: 1, SQ: 4096, SK: 4096, D: 256}
+    - {B: 2, H: 16, HKV: 1, SQ: 2047, SK: 2047, D: 256}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_attn_mqa_hd256_causal

@@ -1,0 +1,20 @@
+task_id: genb_fused_linear_cross_entropy_bf16
+operation: fused_linear_cross_entropy
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_fused_linear_cross_entropy
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 64, H: 512, V: 2048}
+  primary: {M: 4096, H: 4096, V: 32000}
+  validation:
+    - {M: 8192, H: 4096, V: 32000}
+    - {M: 4096, H: 4096, V: 128256}
+    - {M: 2048, H: 4096, V: 128256}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_fused_linear_cross_entropy

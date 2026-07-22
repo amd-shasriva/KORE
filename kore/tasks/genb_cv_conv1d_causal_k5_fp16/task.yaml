@@ -1,0 +1,20 @@
+task_id: genb_cv_conv1d_causal_k5_fp16
+operation: cv_conv1d_causal_k5
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_cv_conv1d_causal_k5
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {N: 1, Cin: 64, L: 2048, Cout: 64}
+  primary: {N: 8, Cin: 128, L: 2048, Cout: 128}
+  validation:
+    - {N: 4, Cin: 256, L: 4096, Cout: 256}
+    - {N: 1, Cin: 512, L: 1024, Cout: 512}
+    - {N: 2, Cin: 96, L: 3000, Cout: 96}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_cv_conv1d_causal_k5

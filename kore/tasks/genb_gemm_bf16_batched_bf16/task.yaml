@@ -1,0 +1,20 @@
+task_id: genb_gemm_bf16_batched_bf16
+operation: gemm_bf16_batched
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_gemm_bf16_batched
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 2, M: 64, N: 128, K: 128}
+  primary: {B: 8, M: 512, N: 4096, K: 4096}
+  validation:
+    - {B: 16, M: 256, N: 4096, K: 4096}
+    - {B: 4, M: 512, N: 8192, K: 4096}
+    - {B: 8, M: 513, N: 4096, K: 4096}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_gemm_bf16_batched

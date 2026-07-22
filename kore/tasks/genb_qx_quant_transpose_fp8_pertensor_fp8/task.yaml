@@ -1,0 +1,20 @@
+task_id: genb_qx_quant_transpose_fp8_pertensor_fp8
+operation: qx_quant_transpose_fp8_pertensor
+dtype: fp8
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 25.0
+op_family: breadth_qx_quant_transpose_fp8_pertensor
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 256, K: 256}
+  primary: {M: 4096, K: 4096}
+  validation:
+    - {M: 2048, K: 4096}
+    - {M: 8192, K: 2048}
+    - {M: 8193, K: 4096}
+targets:
+  snr_db: 25.0
+  comparison_baseline: torch_qx_quant_transpose_fp8_pertensor

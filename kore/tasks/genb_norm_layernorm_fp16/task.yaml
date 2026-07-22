@@ -1,0 +1,20 @@
+task_id: genb_norm_layernorm_fp16
+operation: norm_layernorm
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_norm_layernorm
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 64, N: 2048}
+  primary: {M: 4096, N: 8192}
+  validation:
+    - {M: 16384, N: 4096}
+    - {M: 4096, N: 16384}
+    - {M: 8192, N: 8191}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_norm_layernorm

@@ -1,0 +1,20 @@
+task_id: genb_fx_add_rmsnorm_quant_fp8_fp8
+operation: fx_add_rmsnorm_quant_fp8
+dtype: fp8
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 25.0
+op_family: breadth_fx_add_rmsnorm_quant_fp8
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 64, N: 2048}
+  primary: {M: 4096, N: 8192}
+  validation:
+    - {M: 16384, N: 4096}
+    - {M: 4096, N: 16384}
+    - {M: 8192, N: 8191}
+targets:
+  snr_db: 25.0
+  comparison_baseline: torch_fx_add_rmsnorm_quant_fp8

@@ -1,0 +1,20 @@
+task_id: genb_conv2d_nchw_bf16
+operation: conv2d_nchw
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_conv2d_nchw
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {N: 1, Cin: 64, H: 32, W: 32, Cout: 64, K: 3}
+  primary: {N: 8, Cin: 128, H: 56, W: 56, Cout: 128, K: 3}
+  validation:
+    - {N: 4, Cin: 256, H: 28, W: 28, Cout: 256, K: 3}
+    - {N: 1, Cin: 512, H: 14, W: 14, Cout: 512, K: 3}
+    - {N: 2, Cin: 64, H: 112, W: 112, Cout: 128, K: 3}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_conv2d_nchw

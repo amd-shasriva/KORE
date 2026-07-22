@@ -1,0 +1,21 @@
+task_id: genb_smp_repetition_penalty_bf16
+operation: smp_repetition_penalty
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_smp_repetition_penalty
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 4, V: 128}
+  primary: {M: 64, V: 32000}
+  validation:
+    - {M: 1, V: 32000}
+    - {M: 256, V: 128256}
+    - {M: 64, V: 50257}
+    - {M: 64, V: 32001}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_smp_repetition_penalty

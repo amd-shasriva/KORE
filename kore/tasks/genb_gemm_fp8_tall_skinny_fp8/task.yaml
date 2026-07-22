@@ -1,0 +1,20 @@
+task_id: genb_gemm_fp8_tall_skinny_fp8
+operation: gemm_fp8_tall_skinny
+dtype: fp8
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 25.0
+op_family: breadth_gemm_fp8_tall_skinny
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 512, N: 128, K: 128}
+  primary: {M: 16384, N: 1024, K: 1024}
+  validation:
+    - {M: 8192, N: 2048, K: 1024}
+    - {M: 16384, N: 512, K: 2048}
+    - {M: 16385, N: 1024, K: 1024}
+targets:
+  snr_db: 25.0
+  comparison_baseline: torch_gemm_fp8_tall_skinny

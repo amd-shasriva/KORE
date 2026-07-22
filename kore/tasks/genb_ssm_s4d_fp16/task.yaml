@@ -1,0 +1,20 @@
+task_id: genb_ssm_s4d_fp16
+operation: ssm_s4d
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_ssm_s4d
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, D: 64, L: 256, N: 64}
+  primary: {B: 2, D: 2048, L: 2048, N: 64}
+  validation:
+    - {B: 4, D: 1024, L: 4096, N: 64}
+    - {B: 1, D: 4096, L: 2048, N: 64}
+    - {B: 2, D: 1536, L: 2047, N: 64}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_ssm_s4d

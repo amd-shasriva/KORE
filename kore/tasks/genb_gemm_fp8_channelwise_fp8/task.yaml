@@ -1,0 +1,20 @@
+task_id: genb_gemm_fp8_channelwise_fp8
+operation: gemm_fp8_channelwise
+dtype: fp8
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 25.0
+op_family: breadth_gemm_fp8_channelwise
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 256, N: 256, K: 256}
+  primary: {M: 4096, N: 4096, K: 4096}
+  validation:
+    - {M: 2048, N: 4096, K: 4096}
+    - {M: 8192, N: 2048, K: 4096}
+    - {M: 8193, N: 4096, K: 4064}
+targets:
+  snr_db: 25.0
+  comparison_baseline: torch_gemm_fp8_channelwise

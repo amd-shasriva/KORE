@@ -1,0 +1,20 @@
+task_id: genb_linear_attention_bf16
+operation: linear_attention
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_linear_attention
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, H: 2, L: 128, Dh: 32}
+  primary: {B: 2, H: 16, L: 1024, Dh: 64}
+  validation:
+    - {B: 1, H: 32, L: 2048, Dh: 64}
+    - {B: 2, H: 8, L: 512, Dh: 128}
+    - {B: 1, H: 16, L: 1023, Dh: 64}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_linear_attention

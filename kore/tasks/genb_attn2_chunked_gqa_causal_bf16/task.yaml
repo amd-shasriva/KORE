@@ -1,0 +1,20 @@
+task_id: genb_attn2_chunked_gqa_causal_bf16
+operation: attn2_chunked_gqa_causal
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_attn2_chunked_gqa_causal
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, H: 8, HKV: 2, SQ: 32, SK: 96, D: 128}
+  primary: {B: 2, H: 32, HKV: 8, SQ: 512, SK: 2560, D: 128}
+  validation:
+    - {B: 4, H: 16, HKV: 4, SQ: 256, SK: 4352, D: 128}
+    - {B: 1, H: 32, HKV: 8, SQ: 128, SK: 2176, D: 128}
+    - {B: 2, H: 16, HKV: 4, SQ: 200, SK: 1223, D: 128}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_attn2_chunked_gqa_causal

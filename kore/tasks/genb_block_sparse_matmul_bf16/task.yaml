@@ -1,0 +1,20 @@
+task_id: genb_block_sparse_matmul_bf16
+operation: block_sparse_matmul
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_block_sparse_matmul
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 64, K: 128, N: 128}
+  primary: {M: 4096, K: 4096, N: 4096}
+  validation:
+    - {M: 2048, K: 2048, N: 4096}
+    - {M: 1024, K: 4096, N: 2048}
+    - {M: 4096, K: 2048, N: 2048}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_block_sparse_matmul

@@ -1,0 +1,20 @@
+task_id: genb_moe_biased_grouped_topk_bf16
+operation: moe_biased_grouped_topk
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_moe_biased_grouped_topk
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 64, E: 8, topk: 2, n_groups: 2, topk_group: 1}
+  primary: {M: 4096, E: 64, topk: 8, n_groups: 8, topk_group: 4}
+  validation:
+    - {M: 16384, E: 128, topk: 8, n_groups: 8, topk_group: 4}
+    - {M: 4096, E: 256, topk: 8, n_groups: 8, topk_group: 4}
+    - {M: 8193, E: 64, topk: 8, n_groups: 8, topk_group: 4}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_moe_biased_grouped_topk

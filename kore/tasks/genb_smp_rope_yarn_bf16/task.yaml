@@ -1,0 +1,20 @@
+task_id: genb_smp_rope_yarn_bf16
+operation: smp_rope_yarn
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_smp_rope_yarn
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 4, D: 64}
+  primary: {M: 64, D: 128}
+  validation:
+    - {M: 256, D: 128}
+    - {M: 1, D: 64}
+    - {M: 64, D: 96}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_smp_rope_yarn

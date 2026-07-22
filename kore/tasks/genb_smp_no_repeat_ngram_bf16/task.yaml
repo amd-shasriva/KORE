@@ -1,0 +1,20 @@
+task_id: genb_smp_no_repeat_ngram_bf16
+operation: smp_no_repeat_ngram
+dtype: bf16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_smp_no_repeat_ngram
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {M: 4, V: 128, L: 8}
+  primary: {M: 64, V: 32000, L: 16}
+  validation:
+    - {M: 256, V: 128256, L: 32}
+    - {M: 1, V: 32000, L: 8}
+    - {M: 64, V: 50257, L: 17}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_smp_no_repeat_ngram

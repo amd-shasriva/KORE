@@ -1,0 +1,20 @@
+task_id: genb_attn_decode_mha_fp16
+operation: attn_decode_mha
+dtype: fp16
+backend: triton
+gpu_target: gfx950
+seed_kernel_name: seed_triton.py
+snr_threshold: 30.0
+op_family: breadth_attn_decode_mha
+baseline_tier: breadth
+generated: true
+shapes:
+  minimal: {B: 1, H: 8, HKV: 8, SQ: 1, SK: 128, D: 128}
+  primary: {B: 4, H: 32, HKV: 32, SQ: 1, SK: 4096, D: 128}
+  validation:
+    - {B: 1, H: 32, HKV: 32, SQ: 1, SK: 8192, D: 128}
+    - {B: 8, H: 16, HKV: 16, SQ: 1, SK: 2048, D: 128}
+    - {B: 2, H: 32, HKV: 32, SQ: 1, SK: 2047, D: 128}
+targets:
+  snr_db: 30.0
+  comparison_baseline: torch_attn_decode_mha

@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from kore.data.amd_knowledge import live_system_prompt
 from kore.data.prompts import (
     SYSTEM_PROMPT,
     build_turn_prompt,
@@ -614,7 +615,11 @@ def make_repair_record(
     ]
     ctx = getattr(_ctx, "attempt", None) or {}
     t_teacher = time.time()
-    response = teacher.generate(messages)
+    # Tier 1: give the TEACHER the AMD-Triton playbook for a better fix; the STORED
+    # record keeps the canonical SYSTEM_PROMPT (no train/deploy contract drift).
+    response = teacher.generate(
+        [{"role": "system", "content": live_system_prompt(SYSTEM_PROMPT)}, messages[1]]
+    )
     teacher_ms = round((time.time() - t_teacher) * 1000.0, 1)
     fixed_src = extract_kernel(response)
 
@@ -758,8 +763,10 @@ def mine_natural_failures(
             attempts += 1
             mode = rng.choice(["exploit", "explore"])
             prompt = build_turn_prompt(parent_source=seed_src, mode=mode)
+            # Tier 1: playbook-primed teacher yields more realistic candidates to mine
+            # (this sampling turn is NOT stored, so it needs no clean-contract copy).
             messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": live_system_prompt(SYSTEM_PROMPT)},
                 {"role": "user", "content": prompt},
             ]
             response = teacher.generate(messages)

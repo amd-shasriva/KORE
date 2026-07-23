@@ -18,6 +18,7 @@ import random
 import time
 
 from kore.config import CONFIG
+from kore.data.amd_knowledge import live_system_prompt
 from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, extract_kernel
 from kore.data.schemas import RankedGroupRecord
 from kore.data.teacher import TeacherClient
@@ -191,8 +192,10 @@ def generate_groups(
             for c in range(k):
                 mode = modes[c % len(modes)] if k >= 3 else rng.choice(modes)
                 prompt = build_turn_prompt(parent_source=parent_src, mode=mode)
+                # Tier 1: playbook-primed teacher proposes better/more-diverse group
+                # candidates (only kernels are stored, so no contract copy needed).
                 messages = [
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": live_system_prompt(SYSTEM_PROMPT)},
                     {"role": "user", "content": prompt},
                 ]
                 response = teacher.generate(messages)

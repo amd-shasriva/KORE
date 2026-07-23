@@ -19,7 +19,7 @@ KORE_ROOT = Path(__file__).resolve().parent.parent          # repo root (the kor
 WORKSPACE_ROOT = KORE_ROOT.parent                            # umbrella workspace (repo root's parent)
 REPOS_DIR = WORKSPACE_ROOT / "repos"
 DATA_DIR = KORE_ROOT / "data"
-RUNS_DIR = KORE_ROOT / "runs"
+RUNS_DIR = Path(os.environ.get("KORE_RUNS_DIR", KORE_ROOT / "runs"))
 CONFIGS_DIR = KORE_ROOT / "configs"
 
 

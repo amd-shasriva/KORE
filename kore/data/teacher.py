@@ -40,6 +40,10 @@ def _retry_call(fn: Callable[[], Any], *, what: str, stats: Optional[dict] = Non
     (capped at ``_BACKOFF_CAP``) between attempts. Re-raises the last exception
     if every attempt fails so the caller can decide to skip the sample.
 
+    Deterministic client errors (most HTTP 4xx responses) fail immediately.
+    Retrying an invalid model, header, or request can never succeed and otherwise
+    wastes roughly two minutes per sample. 408, 409, and 429 remain retryable.
+
     ``stats`` (optional) is populated with ``attempt`` (1-based count of the call
     that succeeded / the total made) and ``retries`` (number of failed attempts)
     for observability; it never affects control flow.
@@ -54,6 +58,24 @@ def _retry_call(fn: Callable[[], Any], *, what: str, stats: Optional[dict] = Non
             return result
         except Exception as e:  # noqa: BLE001 - transient network/server errors
             last_exc = e
+            status = getattr(e, "status_code", None)
+            non_retryable = (
+                isinstance(status, int)
+                and 400 <= status < 500
+                and status not in (408, 409, 429)
+            )
+            if non_retryable:
+                if stats is not None:
+                    stats["attempt"] = attempt + 1
+                    stats["retries"] = attempt
+                log.error(
+                    f"{what} non-retryable client failure",
+                    what=what, attempt=attempt + 1, status_code=status,
+                    exc_type=type(e).__name__, exc=str(e)[:200],
+                )
+                raise RuntimeError(
+                    f"{what} failed with non-retryable HTTP {status}"
+                ) from e
             if attempt == _MAX_RETRIES - 1:
                 break
             delay = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
@@ -251,7 +273,9 @@ class ClaudeTeacher:
             raise RuntimeError("AMD_LLM_API_KEY not set (put it in .env.local)")
         base_url = os.environ.get("AMD_LLM_GATEWAY_URL", self.GATEWAY_URL)
         user = self._resolve_user()
-        version = os.environ.get("AMD_LLM_API_VERSION", "2023-10-16")
+        # 2023-06-01 is the Anthropic native API version accepted by AMD's
+        # AzureOpenAI-backed gateway. The former 2023-10-16 default is invalid.
+        version = os.environ.get("AMD_LLM_API_VERSION", "2023-06-01")
         # AMD gateway auth is via the Ocp-Apim header; the SDK api_key is a dummy.
         self.client = anthropic.Anthropic(
             api_key="dummy", base_url=base_url,

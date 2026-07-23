@@ -1,6 +1,8 @@
-"""Data-factory smoke for b05-2: prove teacher -> GPU-verify datagen works on an
-idle GPU, co-existing with other containers. Generates ONE win record for one
-simple task pinned to a chosen physical GPU.
+"""Data-factory smoke: prove teacher -> GPU-verify datagen works on one GPU.
+
+On SPUR, request the full ``gpu:mi355x:8`` node: partial-GPU GRES allocations do
+not expose a usable ROCm device. Generates one win record for one simple task
+pinned to a chosen physical GPU.
 
     GPU=3 python scripts/_factory_smoke.py
 """
@@ -12,6 +14,10 @@ import sys
 
 def main() -> int:
     gpu = int(os.environ.get("GPU", "3"))
+    # Full-node SPUR jobs inherit a physical ROCR list. KORE pins the verifier
+    # with HIP_VISIBLE_DEVICES; retaining both masks can hide every child device.
+    os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     from kore.data.gen_wins import generate_wins
     from kore.data.teacher import make_teacher
     from kore.env.kore_env import KoreEnv
@@ -30,7 +36,7 @@ def main() -> int:
     r = recs[0]
     print(f"[smoke] RESULT: records={len(recs)} correct={getattr(r,'correct',None)} "
           f"speedup={getattr(r,'speedup',None)}", flush=True)
-    print("[smoke] OK -- teacher + GPU verify both work on b05-2", flush=True)
+    print("[smoke] OK -- teacher + GPU verify both work", flush=True)
     return 0
 
 

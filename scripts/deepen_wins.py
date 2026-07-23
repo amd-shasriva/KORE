@@ -54,6 +54,7 @@ def _load_existing(path: Path):
 
 def deepen_one(task_id: str, data_root, target: int, gens: int, teacher, cfg):
     """Additively top up ONE task's wins to `target`. Returns (status, have, added, attempts)."""
+    from kore.data.amd_knowledge import ExperienceLedger
     from kore.data.gen_wins import generate_wins
     from kore.data.schemas import write_jsonl
     from kore.env.kore_env import KoreEnv
@@ -73,10 +74,14 @@ def deepen_one(task_id: str, data_root, target: int, gens: int, teacher, cfg):
     max_attempts = max(need * 3, need + 2)
     added = []
     attempts = 0
+    # Tier 3: ONE experience ledger shared across every trajectory for this task, so
+    # the do-NOT-repeat constraints learned in attempt 1 steer attempts 2..N (the N
+    # trajectories no longer re-walk the same dead-ends - the point of deepening).
+    ledger = ExperienceLedger()
     while (have + len(added)) < target and attempts < max_attempts:
         attempts += 1
         try:
-            ws = generate_wins(task, teacher, env, gens=gens, cfg=cfg)
+            ws = generate_wins(task, teacher, env, gens=gens, cfg=cfg, ledger=ledger)
         except Exception as e:  # noqa: BLE001 - one bad trajectory never aborts the task
             print(f"[deepen] {task_id} attempt {attempts}: ERROR {type(e).__name__}: {str(e)[:120]}", flush=True)
             continue

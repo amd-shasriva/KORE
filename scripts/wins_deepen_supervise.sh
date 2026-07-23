@@ -8,7 +8,7 @@
 #      wins shard, so the deepener reads + preserves existing wins everywhere);
 #   2. split genb_ TRAIN tasks into DISJOINT halves - b05-1 deepens A, b05-2 deepens B
 #      - so no shard is written by both nodes (no merge conflict, nothing lost);
-#   3. deepen in parallel (b05-1: 8 GPUs; b05-2: free co-tenant-safe GPUs);
+#   3. deepen in parallel (b05-1: 8 GPUs; b05-2: 8 GPUs - user holds the full box);
 #   4. one-way DISJOINT merge of each node's deepened half -> canonical b05-2.
 # The deepener itself (scripts/deepen_wins.py) is additive + resume-safe: existing
 # wins are never lost or regenerated, tasks already at target cost zero teacher calls.
@@ -27,19 +27,24 @@ log(){ echo "[wins_deepen] $* $(date)"; }
 # 1) wait for split datagen on BOTH nodes ([d]atagen bracket-trick: never self-match).
 log "waiting for split datagen to finish on both nodes"
 while true; do
-  l=$(pgrep -f '[d]atagen_half.sh' | wc -l)
-  p=$(ssh -o BatchMode=yes "$PEER" "pgrep -f '[d]atagen_half.sh' | wc -l" 2>/dev/null | tail -1); p=${p:-1}
+  # argv-EXACT match (only the real 'bash scripts/datagen_half.sh' loop). pgrep -f
+  # would ALSO match the tmux server whose argv embeds the launch command -> a ghost
+  # that never dies and deadlocks this wait. awk on argv[0]/argv[1] avoids that.
+  l=$(ps -eo cmd --no-headers | awk '$1=="bash" && $2=="scripts/datagen_half.sh"' | wc -l)
+  p=$(ssh -o BatchMode=yes "$PEER" "ps -eo cmd --no-headers | awk '\$1==\"bash\" && \$2==\"scripts/datagen_half.sh\"' | wc -l" 2>/dev/null | tail -1); p=${p:-1}
   log "datagen running? local=$l peer=$p"
   { [ "$l" = "0" ] && [ "$p" = "0" ]; } && break
   sleep 180
 done
 log "split datagen COMPLETE on both nodes"
 
-# 2) consolidate: pull the peer's full dataset onto b05-1 (which holds only half_A).
-#    b05-2 already holds everything via the running merge loop, so after this BOTH
-#    nodes hold every wins shard.
-log "consolidating full dataset b05-2 -> b05-1"
-rsync -a --timeout=900 "$PEER":"$REPO/$DR/" "$REPO/$DR/" 2>/dev/null && log "consolidate OK" || log "consolidate WARN"
+# 2) consolidate: make BOTH nodes hold every task's repair/groups/wins shard before the
+#    disjoint deepen split. No merge loop is assumed. The datagen halves are DISJOINT, so
+#    a two-way rsync is lossless: push b05-1's half_A -> b05-2, then pull b05-2's union
+#    -> b05-1. --ignore-existing => never clobber a shard a node already holds.
+log "consolidating base dataset across both nodes (bidirectional, disjoint-safe)"
+rsync -a --ignore-existing --timeout=900 "$REPO/$DR/" "$PEER":"$REPO/$DR/" 2>/dev/null && log "push b05-1->b05-2 OK" || log "push WARN"
+rsync -a --ignore-existing --timeout=900 "$PEER":"$REPO/$DR/" "$REPO/$DR/" 2>/dev/null && log "pull b05-2->b05-1 OK" || log "pull WARN"
 
 # 3) disjoint split of genb_ TRAIN tasks (held-out already excluded by train_tasks).
 PYTHONPATH=. "$VENV" - <<'PY'
@@ -58,17 +63,20 @@ log "split: A(b05-1)=$(tr ',' '\n' </tmp/deepen_A.txt|grep -c .)  B(b05-2)=$(tr 
 # 4) deploy deepener + B-list to peer; launch peer deepener on its free GPUs.
 scp -o BatchMode=yes scripts/deepen_wins.py "$PEER":"$REPO/scripts/deepen_wins.py" >/dev/null 2>&1
 scp -o BatchMode=yes /tmp/deepen_B.txt "$PEER":/tmp/deepen_B.txt >/dev/null 2>&1
-PEER_GPUS=$(ssh -o BatchMode=yes "$PEER" "cd $REPO && SFT_UTIL_MAX=30 SFT_VRAM_MAX_GB=40 GATE_NGPU=6 PYTHONPATH=. $VENV scripts/gpu_pick_hip.py 2>/dev/null | cut -f1" 2>/dev/null | tail -1)
-PEER_GPUS=${PEER_GPUS:-1,3,2,0,5,7}
-log "launching b05-2 deepener (deepen_B) on GPUs=$PEER_GPUS"
-ssh -o BatchMode=yes "$PEER" "cd $REPO && setsid nohup env PYTHONPATH=. $VENV scripts/deepen_wins.py --data-root $DR --tasks \"\$(cat /tmp/deepen_B.txt)\" --gpu-ids $PEER_GPUS --workers $WORKERS --target $TARGET --gens $GENS > runs/deepen_B_b05-2.log 2>&1 < /dev/null & echo peer_deepen_pid=\$!" 2>/dev/null | grep -i pid= || true
+# User holds the full box (coordinated with owner), so deepen on ALL 8 GPUs on b05-2 too.
+PEER_GPUS="${WINS_PEER_GPUS:-0,1,2,3,4,5,6,7}"
+log "launching b05-2 deepener (deepen_B) on GPUs=$PEER_GPUS in tmux (robust, survives ssh teardown)"
+ssh -o BatchMode=yes "$PEER" "tmux kill-session -t deepenB 2>/dev/null; tmux new-session -d -s deepenB 'cd $REPO && env PYTHONPATH=. $VENV scripts/deepen_wins.py --data-root $DR --tasks \"\$(cat /tmp/deepen_B.txt)\" --gpu-ids $PEER_GPUS --workers $WORKERS --target $TARGET --gens $GENS > runs/deepen_B_b05-2.log 2>&1'; sleep 3; tmux ls 2>&1 | grep -q deepenB && echo peer_deepen_STARTED" 2>/dev/null | grep -qi STARTED && log "b05-2 deepener STARTED in tmux deepenB" || log "WARN: b05-2 deepener may not have started - check runs/deepen_B_b05-2.log"
+# Guard: give the peer deepener a moment to spin up so the completion-wait below never
+# reads a premature pgrep=0 during its torch-import startup.
+sleep 45
 
 # 5) run b05-1 deepener (deepen_A) in the foreground on all 8 GPUs.
 log "running b05-1 deepener (deepen_A) on 8 GPUs"
 "$VENV" scripts/deepen_wins.py --data-root "$DR" --tasks "$(cat /tmp/deepen_A.txt)" \
   --gpu-ids 0,1,2,3,4,5,6,7 --workers "$WORKERS" --target "$TARGET" --gens "$GENS"
 log "b05-1 deepener done; waiting for b05-2 deepener"
-while [ "$(ssh -o BatchMode=yes "$PEER" "pgrep -f '[d]eepen_wins.py' | wc -l" 2>/dev/null | tail -1)" != "0" ]; do sleep 120; done
+while [ "$(ssh -o BatchMode=yes "$PEER" "ps -eo cmd --no-headers | awk '\$2==\"scripts/deepen_wins.py\"' | wc -l" 2>/dev/null | tail -1)" != "0" ]; do sleep 120; done
 log "b05-2 deepener done"
 
 # 6) one-way DISJOINT merge: b05-1's deepened A shards -> b05-2 (b05-2 keeps its own

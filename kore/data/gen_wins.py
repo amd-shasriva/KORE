@@ -26,11 +26,18 @@ turns:
 from __future__ import annotations
 
 import difflib
+import os
 import re
 from dataclasses import dataclass
 from typing import Optional
 
 from kore.config import CONFIG
+from kore.data.amd_knowledge import ExperienceLedger, live_system_prompt
+from kore.data.grounded_reasoning import (
+    _transform_hint,
+    collect_counters as _collect_counters,
+    diagnose_bottleneck_rich as _diagnose_rich,
+)
 from kore.data.prompts import (
     SYSTEM_PROMPT,
     build_turn_prompt,
@@ -45,6 +52,13 @@ from kore.reward.reward import compute_reward
 log = get_logger("data.gen_wins")
 
 _IMPROVE_FACTOR = 0.98  # a kept step must beat best wall by >= 2%
+
+# Tier 2 (PMC-guided feedback): collecting rocprofv3 counters is a few extra
+# profiled replays, so it is gated + budgeted per trajectory. On by default;
+# degrades to wall-only feedback when the profiler is unavailable (CPU box / no
+# rocprof) or the flag is cleared.
+_PMC_ON = os.environ.get("KORE_WINS_PMC", "1") != "0"
+_MAX_PMC_COLLECTS = int(os.environ.get("KORE_WINS_PMC_MAX", "4"))
 
 
 # --------------------------------------------------------------------------- #
@@ -75,7 +89,23 @@ def _fmt_correct_feedback(wall_us: Optional[float], speedup: Optional[float],
     return f"Correct? YES. wall={_us(wall_us)} speedup={_x(speedup)}. {suffix}"
 
 
-def _feedback(obs, rr) -> str:
+def _bottleneck_feedback(counters: Optional[dict]) -> str:
+    """Tier 2: turn measured rocprofv3 counters into a targeted next-move hint so the
+    teacher optimizes the REAL limiter (memory / LDS / matrix-cores / occupancy)
+    instead of guessing "make it faster". Empty string when no counters / unknown."""
+    if not counters:
+        return ""
+    try:
+        label, evidence = _diagnose_rich(counters)
+        if not label or label == "unknown":
+            return ""
+        return (f"\nHARDWARE COUNTERS (rocprofv3): {label} - {evidence}. "
+                f"Target this next: {_transform_hint(label)}.")
+    except Exception:  # noqa: BLE001 - counter feedback is advisory; never fatal
+        return ""
+
+
+def _feedback(obs, rr, counters: Optional[dict] = None) -> str:
     # error_text is Optional[str]: it is None for a compiled-but-incorrect kernel
     # (an SNR failure carries no error string), so guard before slicing - otherwise
     # a correctness miss (common on the tighter fp16 SNR thresholds) crashes the
@@ -91,7 +121,9 @@ def _feedback(obs, rr) -> str:
     wall_us = obs.wall_ms * 1000.0 if obs.wall_ms is not None else None
     # wall_ms/speedup can be None when timing is unmeasurable on this stack
     # (e.g. fp8 on ROCm) - format defensively so the wins shard isn't lost.
-    return _fmt_correct_feedback(wall_us, rr.speedup)
+    base = _fmt_correct_feedback(wall_us, rr.speedup)
+    bn = _bottleneck_feedback(counters)  # Tier 2: append counter-grounded diagnosis
+    return f"{base}{bn}" if bn else base
 
 
 # --------------------------------------------------------------------------- #
@@ -343,12 +375,38 @@ def generate_wins(
     cfg=CONFIG,
     *,
     include_regression_lesson: bool = True,
+    ledger: Optional[ExperienceLedger] = None,
 ) -> list[WinRecord]:
     """Run a single evolve trajectory of ``gens`` turns; return [WinRecord] if it
-    produced a net, verified, convergent speedup, else []."""
+    produced a net, verified, convergent speedup, else [].
+
+    Search-intelligence layers (adapted from Hyperloom-Forge), all improving the
+    LIVE generation only - the STORED SFT trajectory keeps the canonical contract:
+      * Tier 1 - the live teacher context is primed with the AMD-Triton playbook
+        (:func:`kore.data.amd_knowledge.live_system_prompt`) so the teacher applies
+        gfx950/CDNA4 discipline from the first move.
+      * Tier 2 - the seed and every KEPT improvement are re-profiled and the
+        counter-diagnosed bottleneck is fed back so the next change targets the real
+        limiter (budgeted + gated by ``KORE_WINS_PMC``; degrades to wall-only).
+      * Tier 3 - failed / regressed attempts distill into a deduped 'do-NOT-repeat'
+        ``ledger`` injected into later turns; pass a shared ledger across a task's
+        ``deepen_wins`` trajectories so no dead-end is re-walked.
+    """
+    if ledger is None:
+        ledger = ExperienceLedger()
+    _pmc_left = [_MAX_PMC_COLLECTS if _PMC_ON else 0]
     with log.stage("generate_wins", task=task.task_id, gens=gens):
         seed_src = task.seed_source
         best_src = seed_src
+
+        def _counters(src):
+            """Budgeted, fail-safe rocprofv3 counter collection (Tier 2)."""
+            if _pmc_left[0] <= 0:
+                return None
+            c = _collect_counters(env, src)
+            if c:
+                _pmc_left[0] -= 1
+            return c
 
         # Measure the seed as the starting point.
         obs = env.step(seed_src, full_validation=True, multi_shape=True)
@@ -357,12 +415,16 @@ def generate_wins(
         initial_snr = obs.snr_db
         best_wall = initial_wall
         best_snr = obs.snr_db
+        # Tier 2: profile the seed so turn 1 already targets the real bottleneck.
+        seed_counters = _counters(seed_src) if rr.correct else None
 
         # ``context`` is the LIVE chat fed to the teacher (multi-turn generation is
         # unchanged); ``turns`` records the structured, verifier-measured outcome of
         # each turn so the STORED trajectory can be reconstructed cleanly afterwards.
-        context: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-        feedback = _feedback(obs, rr)
+        # Tier 1: prime the LIVE system prompt with the AMD-Triton playbook; the
+        # STORED trajectory (build_convergent_trajectory) keeps the plain SYSTEM_PROMPT.
+        context: list[dict] = [{"role": "system", "content": live_system_prompt(SYSTEM_PROMPT)}]
+        feedback = _feedback(obs, rr, counters=seed_counters)
         mode = "exploit"
         turns: list[WinTurn] = []
 
@@ -379,7 +441,8 @@ def generate_wins(
         for turn in range(gens):
             turn_mode = mode
             improved = False
-            prompt = build_turn_prompt(parent_source=best_src, feedback=feedback, mode=mode)
+            prompt = build_turn_prompt(parent_source=best_src, feedback=feedback,
+                                       tuning_hints=ledger.render(), mode=mode)
             context.append({"role": "user", "content": prompt})
             response = teacher.generate(context)
             # Store the assistant turn in the CANONICAL contract (Pillar 0): the raw
@@ -390,6 +453,7 @@ def generate_wins(
             cand_src = extract_kernel(response)
             if not cand_src:
                 feedback = "No kernel found in your response. Output a full FULL_KERNEL block."
+                ledger.record(outcome="no kernel emitted")
                 mode = "repair"
                 _emit_turn(turn, turn_mode, improved)
                 continue
@@ -398,6 +462,7 @@ def generate_wins(
                 c_obs = env.step(cand_src, full_validation=True, multi_shape=True)
             except Exception as e:
                 feedback = f"Verifier crashed: {str(e)[:200]}"
+                ledger.record(error_text=str(e), outcome="verifier crashed")
                 mode = "repair"
                 _emit_turn(turn, turn_mode, improved)
                 continue
@@ -407,9 +472,11 @@ def generate_wins(
             turns.append(WinTurn(response=response, cand_src=cand_src,
                                  correct=bool(c_rr.correct), wall_us=cand_wall,
                                  snr_db=c_obs.snr_db, mode=turn_mode))
-            feedback = _feedback(c_obs, c_rr)
 
             if not c_rr.correct:
+                feedback = _feedback(c_obs, c_rr)
+                ledger.record(error_text=c_obs.error_text or "",
+                              outcome=f"incorrect (snr_db={c_obs.snr_db})")  # Tier 3
                 mode = "repair"
                 _emit_turn(turn, turn_mode, improved)
                 continue
@@ -424,7 +491,12 @@ def generate_wins(
                 best_wall = cand_wall
                 best_snr = c_obs.snr_db
                 mode = "exploit"
+                # Tier 2: re-profile the new best so the next turn targets its bottleneck.
+                feedback = _feedback(c_obs, c_rr, counters=_counters(cand_src))
             else:
+                # correct but NOT faster: record the dead-end, pivot dimension (Tier 3).
+                feedback = _feedback(c_obs, c_rr)
+                ledger.record(outcome="correct but not faster than the current best")
                 mode = "explore"  # plateau -> try a structural change next
             _emit_turn(turn, turn_mode, improved)
 

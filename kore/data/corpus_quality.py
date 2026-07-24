@@ -118,6 +118,10 @@ _VENDOR_DIR_PARTS = frozenset({
     "googletest", "gtest", "pybind11",
 })
 
+# Draft task/source trees are explicitly unverified. They must never become
+# training roots, even if their contents happen to pass all text heuristics.
+_DRAFT_DIR_PARTS = frozenset({"_drafts"})
+
 #: Filename suffixes that mark generated sources (protobuf, …).
 _GENERATED_SUFFIXES = ("_pb2.py", ".pb.h", ".pb.cc", ".pb.go")
 
@@ -167,10 +171,13 @@ _SLASH_COMMENT_EXTS = frozenset({
 
 #: Stable vocabulary of drop reasons (useful for tests / dashboards).
 CODE_DROP_REASONS = (
-    "lockfile", "vendored_path", "generated_path", "generated_marker",
+    "lockfile", "vendored_path", "draft_path", "unverified_source",
+    "generated_path", "generated_marker",
     "long_lines", "low_alnum", "too_trivial", "repetitive",
 )
-DOC_DROP_REASONS = ("doc_too_short", "license_only", "low_prose")
+DOC_DROP_REASONS = (
+    "draft_path", "unverified_source", "doc_too_short", "license_only", "low_prose",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -234,7 +241,11 @@ def _has_generated_name(name: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Code quality
 # --------------------------------------------------------------------------- #
-def code_quality_reason(text: str, path=None) -> Optional[str]:
+def code_quality_reason(
+    text: str,
+    path=None,
+    source_metadata: Optional[dict] = None,
+) -> Optional[str]:
     """Return ``None`` to KEEP a code file, else a short reason string to DROP.
 
     Checks (in order; the first failure is the reported reason):
@@ -254,12 +265,16 @@ def code_quality_reason(text: str, path=None) -> Optional[str]:
     p = _as_path(path)
     if p is not None:
         name = p.name.lower()
+        if {part.lower() for part in p.parts} & _DRAFT_DIR_PARTS:
+            return "draft_path"
         if name in _LOCKFILE_NAMES:
             return "lockfile"
         if {part.lower() for part in p.parts} & _VENDOR_DIR_PARTS:
             return "vendored_path"
         if _has_generated_name(name):
             return "generated_path"
+    if source_metadata is not None and source_metadata.get("verified") is not True:
+        return "unverified_source"
 
     if not text or not text.strip():
         return "too_trivial"
@@ -314,9 +329,9 @@ def code_quality_reason(text: str, path=None) -> Optional[str]:
     return None
 
 
-def code_quality_ok(text: str, path=None) -> bool:
+def code_quality_ok(text: str, path=None, source_metadata: Optional[dict] = None) -> bool:
     """True to KEEP a code file (see :func:`code_quality_reason`)."""
-    return code_quality_reason(text, path) is None
+    return code_quality_reason(text, path, source_metadata) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -360,7 +375,11 @@ def _doc_prose(text: str, drop_license: bool = False) -> str:
     return prose
 
 
-def doc_quality_reason(text: str, path=None) -> Optional[str]:
+def doc_quality_reason(
+    text: str,
+    path=None,
+    source_metadata: Optional[dict] = None,
+) -> Optional[str]:
     """Return ``None`` to KEEP a markdown doc, else a short reason to DROP.
 
     Checks (in order):
@@ -371,6 +390,11 @@ def doc_quality_reason(text: str, path=None) -> Optional[str]:
          prose remains (< ``MIN_DOC_PROSE_CHARS`` alpha chars or
          < ``MIN_DOC_WORDS`` words): nav-only / badge-only stubs.
     """
+    p = _as_path(path)
+    if p is not None and {part.lower() for part in p.parts} & _DRAFT_DIR_PARTS:
+        return "draft_path"
+    if source_metadata is not None and source_metadata.get("verified") is not True:
+        return "unverified_source"
     if not text or not text.strip():
         return "doc_too_short"
     if len(text.strip()) < MIN_DOC_CHARS:
@@ -391,9 +415,9 @@ def doc_quality_reason(text: str, path=None) -> Optional[str]:
     return None
 
 
-def doc_quality_ok(text: str, path=None) -> bool:
+def doc_quality_ok(text: str, path=None, source_metadata: Optional[dict] = None) -> bool:
     """True to KEEP a markdown doc (see :func:`doc_quality_reason`)."""
-    return doc_quality_reason(text, path) is None
+    return doc_quality_reason(text, path, source_metadata) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -422,7 +446,8 @@ def quality_filter(
     for item in files:
         n_in += 1
         path, text = item[0], item[1]
-        reason = reason_fn(text, path)
+        source_metadata = item[2] if len(item) > 2 and isinstance(item[2], dict) else None
+        reason = reason_fn(text, path, source_metadata)
         if reason is None:
             kept.append(item)
         else:

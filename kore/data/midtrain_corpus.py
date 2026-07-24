@@ -1,204 +1,532 @@
-"""Stage-0 mid-train corpus assembly (continued pretraining on ROCm/HIP/Triton).
+"""Leakage-safe Stage-0 corpus assembly.
 
-KORE's Stage-0 continues pretraining the base model on a domain corpus so the
-policy enters SFT already fluent in the ROCm/HIP/Triton/Composable-Kernel world
-(the strong-distribution-shift regime the plan calls out). This module assembles
-that corpus from REAL local sources on the box - no network, fully offline and
-deterministic - and mixes in a small general-replay slice to guard against
-catastrophic forgetting during the shift.
+Production builds are fail-closed and reproducible:
 
-Sources (each reported separately in the returned counts):
-  - ``kore_tasks``            : the KORE task seed kernels + references + drivers
-                                (``kore/tasks/*/*.py``).
-  - ``pytorch_triton_pairs``  : PyTorch reference <-> Triton seed kernel pairs
-                                built from each task's ``reference.py`` +
-                                ``seed_triton.py`` (real torch->Triton examples).
-  - ``triton``                : Triton kernel Python files found under the local
-                                repos (AITER / Composable-Kernel / hipBLASLt /
-                                Triton / FlagGems / vLLM / rocPRIM / ... - every
-                                repo discovered under the repos dir).
-  - ``rocm_hip``              : HIP/CUDA/Composable-Kernel/hipBLASLt device source
-                                (``*.cu``, ``*.cuh``, ``*.hip``, ``*.cpp``,
-                                ``*.hpp``, ``*.h``, ``*.cc``) under the local repos
-                                (AITER / CK / hipBLASLt / rocPRIM / ...).
-  - ``amd_asm``               : AMD GCN/CDNA ISA assembly device code (``*.s`` /
-                                ``*.S``) - hand-written Tensile CustomKernels and
-                                other ``.amdgcn_target`` MFMA assembly under the
-                                repos (deepest AMD-native ISA signal). No-op when
-                                absent.
-  - ``docs``                  : ROCm / rocprof / CDNA / ISA / tuning / perf-guide
-                                Markdown AND reStructuredText docs (``*.md`` /
-                                ``*.rst``) under the local repos (path/keyword-
-                                filtered so the corpus stays a kernel/ROCm corpus,
-                                not all docs).
-  - ``general_replay``        : ~``config.general_replay_frac`` general shards
-                                (code/math/chat/IF/tool-use) via
-                                :func:`kore.data.general_replay.load_general_replay`
-                                (offline bundled fallback).
+* repository/dataset lineages are split and held out before pairs or chunks are
+  derived;
+* every output row carries source provenance and SHA-256 ancestry;
+* external datasets and the model tokenizer use explicit immutable revisions;
+* the full frozen benchmark-text artifact is mandatory;
+* chunk admission is measured with the actual tokenizer, not a four-character
+  estimate; and
+* exact/near dedup is source-channel aware, so intentional weighting channels
+  survive while duplicate origins remain auditable.
 
-Output: JSONL of ``{"text": <chunk>, "source": <source>}`` rows, chunked to
-``config.max_seq_length`` (a char-budget approximation so it stays CPU/offline -
-no tokenizer download) and deduplicated by normalized-text hash.
-
-Everything is deterministic given ``seed`` (sorted file walks + seeded replay
-sampling), so two builds from the same tree produce byte-identical output.
+Tests and local smoke work must opt into ``development_mode=True``. Development
+uses an exact UTF-8 byte tokenizer and bundled smoke benchmark references, and
+labels both choices in every build report.
 """
 
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import os
 import random
 import re
+import subprocess
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from kore.data.general_replay import REPLAY_KINDS, load_general_replay
 from kore.obs import get_logger
 
 log = get_logger("data.midtrain_corpus")
 
-# Char-per-token approximation for the chunker. Mid-train chunking is by
-# characters (deterministic, offline, no tokenizer download); ~4 chars/token is
-# the standard rule of thumb for code+English, so a ``max_seq_length`` token
-# budget maps to ``max_seq_length * CHARS_PER_TOKEN`` characters.
+SOURCE_METADATA_SCHEMA_VERSION = "1.0"
+
+# Deprecated compatibility constant. It remains importable for callers that used
+# it for estimates, but corpus admission never uses it.
 CHARS_PER_TOKEN = 4
 
-# HIP / CUDA / Composable-Kernel source extensions.
 _HIP_EXTS = (".cu", ".cuh", ".hip", ".cpp", ".cc", ".hpp", ".h")
-
-# AMD GCN/CDNA ISA assembly (hand-written Tensile CustomKernels, .amdgcn_target
-# MFMA assembly). Case-variant ``.S`` is included for portability; both no-op when
-# absent. This is genuinely arch-specific device text (e.g. gfx942 CustomKernels)
-# and is therefore treated as EXTERNAL (never arch-normalized - see write step).
 _ASM_EXTS = (".s", ".S")
-
-# Documentation extensions: Markdown + reStructuredText. ROCm / CK / hipBLASLt /
-# rocPRIM ship a large fraction of their conceptual + optimization + ISA docs as
-# ``.rst`` (Sphinx), which the old ``.md``-only pass missed entirely.
 _DOC_EXTS = (".md", ".rst")
-
-# Markers that identify a Triton kernel Python file (any one is enough).
 _TRITON_MARKERS = ("import triton", "triton.jit", "triton.language", "tl.")
-
-
-def _is_heldout_task_dir(dir_name: str) -> bool:
-    """True if ``kore/tasks/<dir_name>`` is a held-out eval task (or family).
-
-    Used to decontaminate the pretrain corpus: the held-out generalization set
-    (task-level: paged-KV decode + MLA; plus any reserved family) must never enter
-    training as source text. Core attention (prefill/decode/sliding/varlen/fp8) now
-    TRAINS, so it is intentionally NOT excluded. Import is lazy + guarded so the
-    corpus builder still runs if the registry is unavailable.
-    """
-    try:
-        from kore.data.decontam import _family_of, heldout_families, heldout_task_ids
-        if dir_name in heldout_task_ids():           # task-level holdout (paged / MLA)
-            return True
-        return _family_of(dir_name) in heldout_families()   # family-level holdout (if any)
-    except Exception:  # noqa: BLE001 - registry missing -> do not exclude (safe)
-        return False
-
-# Path/content keywords that keep the ``docs`` slice a ROCm/kernel/perf corpus
-# rather than pulling in every unrelated doc file in the repos. Broadened for the
-# CDNA4/gfx950 target so real AMD ISA + optimization guides (CK ck_tile concepts,
-# CDNA/MFMA/wavefront/LDS tuning, rocprofiler/omniperf roofline) pass the filter.
-_DOC_KEYWORDS = (
-    # tooling + perf
-    "rocprof", "rocprofiler", "omniperf", "tuning", "perf", "optimize",
-    "occupancy", "roofline", "benchmark", "profil",
-    # stack / backends
-    "triton", "hip", "rocm", "kernel", "composable", "ck_tile", "tensile",
-    "hipblaslt", "rocblas", "aiter",
-    # hardware / arch
-    "amd", "gpu", "instinct", "mi300", "mi325", "mi350", "mi355", "mi200",
-    "gfx", "cdna", "wavefront", "wave", "lds", "vgpr", "mfma", "wmma", "isa",
-    "swizzle", "tile",
-    # ops / dtypes
-    "matmul", "gemm", "attention", "quant", "fp8", "bf16", "mxfp4", "mxfp8",
-    "microscaling",
-)
-
-# Directory names we never descend into (build/cache/vendor noise).
 _SKIP_DIR_PARTS = frozenset({
     "__pycache__", ".git", "node_modules", ".venv", "venv", "build", "dist",
-    ".mypy_cache", ".pytest_cache", ".egg-info",
+    ".mypy_cache", ".pytest_cache", ".egg-info", "_drafts",
 })
+_DOC_KEYWORDS = (
+    "rocprof", "rocprofiler", "omniperf", "tuning", "perf", "optimize",
+    "occupancy", "roofline", "benchmark", "profil", "triton", "hip", "rocm",
+    "kernel", "composable", "ck_tile", "tensile", "hipblaslt", "rocblas",
+    "aiter", "amd", "gpu", "instinct", "mi300", "mi325", "mi350", "mi355",
+    "mi200", "gfx", "cdna", "wavefront", "wave", "lds", "vgpr", "mfma",
+    "wmma", "isa", "swizzle", "tile", "matmul", "gemm", "attention", "quant",
+    "fp8", "bf16", "mxfp4", "mxfp8", "microscaling",
+)
+_HELDOUT_CONCEPT_RE = re.compile(
+    r"(mla|multi.?head.?latent|flashmla|paged?[_.\-]?(attn|attention|kv|cache|decode|prefill))",
+    re.IGNORECASE,
+)
+_KORE_AUTHORED_SOURCES = frozenset({"kore_tasks", "pytorch_triton_pairs"})
+_DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
+    "amd_kernels": 2.0,
+    "pytorch_triton_pairs": 2.0,
+    "kore_tasks": 1.5,
+    "kernelbook": 1.5,
+}
+_MUTABLE_REVISIONS = frozenset({"", "main", "master", "head", "latest"})
+
+
+@dataclass(frozen=True)
+class SourceRoot:
+    path: Path
+    repository_url: str
+    commit: str
+    license: str
+    source_id: str
+    lineage_id: str
+    verified: bool
+    source_timestamp: Optional[str] = None
+    development_mode: bool = False
+    path_prefix: str = ""
+
+
+@dataclass(frozen=True)
+class SourceDocument:
+    path: Path
+    text: str
+    source: str
+    metadata: Mapping[str, Any]
+
+
+class _DevelopmentByteTokenizer:
+    """Exact offline tokenizer for explicitly labeled development builds."""
+
+    name_or_path = "kore/development-utf8-bytes"
+    revision = "development-byte-v1"
+
+    @staticmethod
+    def encode(text: str, add_special_tokens: bool = False) -> list[int]:
+        del add_special_tokens
+        return list((text or "").encode("utf-8"))
+
+
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sha256(text: str) -> str:
+    return "sha256:" + hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _norm_hash(text: str) -> str:
+    normalized = " ".join((text or "").split())
+    return "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _immutable_revision(value: Any) -> bool:
+    return str(value or "").strip().lower() not in _MUTABLE_REVISIONS
+
+
+def _safe_git(path: Path, *args: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _license_from_root(path: Path) -> str:
+    try:
+        candidates = sorted(
+            child for child in path.iterdir()
+            if child.is_file() and child.name.lower().startswith(("license", "copying"))
+        )
+    except OSError:
+        return ""
+    if not candidates:
+        return ""
+    try:
+        head = candidates[0].read_text(encoding="utf-8", errors="ignore")[:4096]
+    except OSError:
+        return f"FILE:{candidates[0].name}"
+    match = re.search(r"SPDX-License-Identifier:\s*([A-Za-z0-9_.+\-]+)", head)
+    return match.group(1) if match else f"FILE:{candidates[0].name}"
 
 
 def _is_skippable(path: Path) -> bool:
-    parts = set(path.parts)
-    if parts & _SKIP_DIR_PARTS:
+    if set(path.parts) & _SKIP_DIR_PARTS:
         return True
-    return any(p.endswith(".egg-info") for p in path.parts)
+    return any(part.endswith(".egg-info") for part in path.parts)
+
+
+def _is_heldout_concept(path: Any) -> bool:
+    try:
+        return bool(_HELDOUT_CONCEPT_RE.search(str(path)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _is_heldout_task_dir(dir_name: str) -> bool:
+    try:
+        from kore.data.decontam import _family_of, heldout_families, heldout_task_ids
+
+        return dir_name in heldout_task_ids() or _family_of(dir_name) in heldout_families()
+    except Exception:  # noqa: BLE001
+        # Fail closed for the explicit held-out names even in a minimal import env.
+        return _is_heldout_concept(dir_name)
+
+
+def _read_text_info(path: Path, max_chars: int) -> Optional[tuple[str, str, bool]]:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="strict")
+    except (UnicodeDecodeError, OSError, ValueError):
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    root_hash = _sha256(raw)
+    truncated = len(raw) > max_chars
+    return raw[:max_chars] if truncated else raw, root_hash, truncated
 
 
 def _read_text(path: Path, max_chars: int) -> Optional[str]:
-    """Best-effort UTF-8 read of a source file, truncated to ``max_chars``.
-
-    Returns ``None`` for unreadable/binary/empty files so the caller can skip.
-    """
-    try:
-        text = path.read_text(encoding="utf-8", errors="strict")
-    except (UnicodeDecodeError, OSError, ValueError):
-        return None
-    text = text.strip()
-    if not text:
-        return None
-    if len(text) > max_chars:
-        text = text[:max_chars]
-    return text
+    info = _read_text_info(path, max_chars)
+    return info[0] if info else None
 
 
-# --------------------------------------------------------------------------- #
-# Source-tree discovery (offline / local only)
-# --------------------------------------------------------------------------- #
 def _kore_task_root() -> Optional[Path]:
     import kore
+
     root = Path(kore.__file__).resolve().parent / "tasks"
     return root if root.is_dir() else None
 
 
 def discover_repo_roots() -> list[Path]:
-    """Locate the local source repos (GEAK/KernelBench/KernelForge*/vllm/...).
-
-    Checks ``KORE_REPOS_DIR`` then a set of candidate locations relative to the
-    cwd and the installed ``kore`` package. Returns every existing candidate
-    (de-duplicated, order-stable) so a build works regardless of where it runs.
-    """
+    """Locate local source containers without reading or mutating them."""
     import kore
 
     candidates: list[Path] = []
-    env = os.environ.get("KORE_REPOS_DIR")
-    if env:
-        candidates.append(Path(env))
-    pkg = Path(kore.__file__).resolve()   # .../<REPO>/kore/__init__.py
-    candidates += [
+    if os.environ.get("KORE_REPOS_DIR"):
+        candidates.append(Path(os.environ["KORE_REPOS_DIR"]))
+    package = Path(kore.__file__).resolve()
+    candidates.extend([
         Path.cwd() / "repos",
         Path.cwd().parent / "repos",
-        pkg.parents[1] / "repos",   # .../<REPO>/kore/__init__.py -> .../<REPO>/repos (CORRECT)
-        pkg.parents[2] / "repos",   # extra fallback for a nested <repo>/kore/kore layout
-    ]
+        package.parents[1] / "repos",
+        package.parents[2] / "repos",
+    ])
     seen: set[Path] = set()
     out: list[Path] = []
-    for c in candidates:
+    for candidate in candidates:
         try:
-            rc = c.resolve()
-            # is_dir() stats the path, which raises PermissionError (an OSError) for
-            # e.g. /root on a non-root box - must be inside the guard, not after it.
-            if rc in seen or not rc.is_dir():
+            resolved = candidate.resolve()
+            if resolved in seen or not resolved.is_dir():
                 continue
         except OSError:
             continue
-        seen.add(rc)
-        out.append(rc)
+        seen.add(resolved)
+        out.append(resolved)
     return out
 
 
-# --------------------------------------------------------------------------- #
-# File collection
-# --------------------------------------------------------------------------- #
+def _load_source_catalog(
+    artifact: Optional[str | os.PathLike | Mapping[str, Any]],
+) -> dict:
+    if artifact is None:
+        artifact = os.environ.get("KORE_SOURCE_METADATA")
+    if artifact is None:
+        return {
+            "schema_version": SOURCE_METADATA_SCHEMA_VERSION,
+            "sources": [],
+            "datasets": [],
+            "holdouts": {},
+            "_base_dir": str(Path.cwd()),
+        }
+    if isinstance(artifact, Mapping):
+        obj = dict(artifact)
+        base_dir = Path.cwd()
+    else:
+        path = Path(artifact)
+        if not path.is_file():
+            raise FileNotFoundError(f"source metadata artifact unavailable: {path}")
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        base_dir = path.resolve().parent
+    validate_source_metadata_artifact(obj)
+    obj["_base_dir"] = str(base_dir)
+    return obj
+
+
+def validate_source_metadata_artifact(obj: Mapping[str, Any]) -> None:
+    """Validate the source metadata schema used by production corpus builds."""
+    if str(obj.get("schema_version")) != SOURCE_METADATA_SCHEMA_VERSION:
+        raise ValueError(f"unsupported source metadata schema: {obj.get('schema_version')!r}")
+    for index, source in enumerate(obj.get("sources", ())):
+        if not isinstance(source, dict):
+            raise ValueError(f"sources[{index}] must be an object")
+        for key in ("local_path", "repository_url", "commit", "license", "lineage_id"):
+            if not str(source.get(key) or "").strip():
+                raise ValueError(f"sources[{index}] missing {key}")
+        if source.get("verified") is not True:
+            raise ValueError(f"sources[{index}] is not verified")
+    for index, dataset in enumerate(obj.get("datasets", ())):
+        if not isinstance(dataset, dict):
+            raise ValueError(f"datasets[{index}] must be an object")
+        for key in ("dataset_id", "revision", "license"):
+            if not str(dataset.get(key) or "").strip():
+                raise ValueError(f"datasets[{index}] missing {key}")
+        if not _immutable_revision(dataset.get("revision")):
+            raise ValueError(f"datasets[{index}] has mutable revision")
+        if dataset.get("verified") is not True:
+            raise ValueError(f"datasets[{index}] is not verified")
+
+
+def _catalog_sources(catalog: Mapping[str, Any]) -> dict[Path, dict]:
+    base = Path(str(catalog.get("_base_dir") or Path.cwd()))
+    out: dict[Path, dict] = {}
+    for source in catalog.get("sources", ()):
+        try:
+            path = Path(str(source["local_path"]))
+            resolved = (base / path).resolve() if not path.is_absolute() else path.resolve()
+        except (KeyError, OSError):
+            continue
+        metadata = dict(source)
+        metadata["_resolved_local_path"] = str(resolved)
+        out[resolved] = metadata
+    return out
+
+
+def _catalog_source_for(path: Path, sources: Mapping[Path, dict]) -> Optional[dict]:
+    """Return the nearest catalog root containing ``path``."""
+    resolved = path.resolve()
+    matches = [
+        (root, metadata)
+        for root, metadata in sources.items()
+        if root == resolved or root in resolved.parents
+    ]
+    if not matches:
+        return None
+    return dict(max(matches, key=lambda item: len(item[0].parts))[1])
+
+
+def _dataset_metadata(catalog: Mapping[str, Any], dataset_id: str) -> Optional[dict]:
+    for dataset in catalog.get("datasets", ()):
+        if isinstance(dataset, dict) and dataset.get("dataset_id") == dataset_id:
+            return dict(dataset)
+    return None
+
+
+def _lineage_paths(path: Path) -> list[Path]:
+    """Split a source container into repository lineages before file derivation."""
+    if (path / ".git").exists():
+        return [path]
+    try:
+        children = sorted(
+            child for child in path.iterdir()
+            if child.is_dir() and not _is_skippable(child)
+        )
+    except OSError:
+        return []
+    # ``repos/`` containers and parents with Git children are lineage containers.
+    if path.name.lower() in {"repos", "sources", "repositories"} or any(
+        (child / ".git").exists() for child in children
+    ):
+        return children
+    return [path]
+
+
+def _root_from_path(
+    path: Path,
+    explicit: Optional[Mapping[str, Any]],
+    *,
+    development_mode: bool,
+) -> SourceRoot:
+    resolved = path.resolve()
+    explicit = dict(explicit or {})
+    repository_url = str(explicit.get("repository_url") or _safe_git(resolved, "remote", "get-url", "origin"))
+    commit = str(explicit.get("commit") or _safe_git(resolved, "rev-parse", "HEAD"))
+    license_id = str(explicit.get("license") or _license_from_root(resolved))
+    source_id = str(explicit.get("source_id") or repository_url or resolved)
+    lineage_id = str(explicit.get("lineage_id") or f"{source_id}@{commit or 'unversioned'}")
+    explicit_verified = explicit.get("verified")
+    inferred_verified = bool(repository_url and commit and license_id)
+    if explicit_verified is False:
+        # An explicit failed verification is authoritative in every mode.
+        verified = False
+    elif development_mode:
+        verified = True
+        repository_url = repository_url or f"development-local://{resolved}"
+        commit = commit or "development-unpinned"
+        license_id = license_id or "DEVELOPMENT-UNKNOWN"
+    else:
+        verified = explicit_verified is True or inferred_verified
+    path_prefix = ""
+    explicit_root = explicit.get("_resolved_local_path") or explicit.get("local_path")
+    if explicit_root:
+        try:
+            base = Path(str(explicit_root))
+            if not base.is_absolute():
+                base = base.resolve()
+            path_prefix = resolved.relative_to(base.resolve()).as_posix()
+            if path_prefix == ".":
+                path_prefix = ""
+        except (OSError, ValueError):
+            path_prefix = ""
+    return SourceRoot(
+        path=resolved,
+        repository_url=repository_url,
+        commit=commit,
+        license=license_id,
+        source_id=source_id,
+        lineage_id=lineage_id,
+        verified=verified,
+        source_timestamp=explicit.get("source_timestamp") or explicit.get("timestamp"),
+        development_mode=development_mode,
+        path_prefix=path_prefix,
+    )
+
+
+def _resolve_source_roots(
+    roots: Iterable[Any],
+    catalog: Mapping[str, Any],
+    *,
+    development_mode: bool,
+) -> tuple[list[SourceRoot], int]:
+    catalog_by_path = _catalog_sources(catalog)
+    specs: list[SourceRoot] = []
+    excluded = 0
+    seen: set[Path] = set()
+    for value in roots:
+        descriptor = dict(value) if isinstance(value, Mapping) else {}
+        raw_path = descriptor.get("path") or descriptor.get("local_path") if descriptor else value
+        path = Path(raw_path)
+        if not path.is_dir():
+            continue
+        for lineage_path in _lineage_paths(path.resolve()):
+            if lineage_path in seen or "_drafts" in lineage_path.parts:
+                continue
+            seen.add(lineage_path)
+            explicit = (
+                catalog_by_path.get(lineage_path)
+                or descriptor
+                or _catalog_source_for(path.resolve(), catalog_by_path)
+            )
+            if explicit and lineage_path != path.resolve() and lineage_path not in catalog_by_path:
+                # A container-level descriptor still yields distinct child
+                # lineages. Source-level holdouts can use the shared source_id;
+                # lineage-level holdouts remain repository-specific.
+                explicit = dict(explicit)
+                suffix = lineage_path.relative_to(path.resolve()).as_posix()
+                base_lineage = str(explicit.get("lineage_id") or explicit.get("source_id") or path)
+                explicit["lineage_id"] = f"{base_lineage}:{suffix}"
+            root = _root_from_path(lineage_path, explicit, development_mode=development_mode)
+            if not root.verified or (explicit and explicit.get("holdout") is True):
+                excluded += 1
+                continue
+            specs.append(root)
+    return sorted(specs, key=lambda item: (item.lineage_id, str(item.path))), excluded
+
+
+def _metadata_for_file(
+    root: SourceRoot,
+    path: Path,
+    text: str,
+    root_hash: str,
+    *,
+    source: str,
+    truncated: bool,
+) -> dict:
+    try:
+        local_rel = path.relative_to(root.path).as_posix()
+    except ValueError:
+        local_rel = path.as_posix()
+    rel = (
+        (Path(root.path_prefix) / local_rel).as_posix()
+        if root.path_prefix else local_rel
+    )
+    from kore.data.decontam import _family_of
+
+    return {
+        "schema_version": SOURCE_METADATA_SCHEMA_VERSION,
+        "repository_url": root.repository_url,
+        "commit": root.commit,
+        "path": rel,
+        "license": root.license,
+        "row_id": rel,
+        "source_id": root.source_id,
+        "lineage_id": root.lineage_id,
+        "family": _family_of(rel),
+        "source_timestamp": root.source_timestamp,
+        "verified": root.verified,
+        "development_mode": root.development_mode,
+        "root_content_hash": root_hash,
+        "content_hash": _sha256(text),
+        "truncated": truncated,
+        "derivation": ["source_file"],
+    }
+
+
+def _source_is_heldout(root: SourceRoot, policy) -> bool:
+    from kore.data.decontam import is_contaminated_record
+
+    return is_contaminated_record({
+        "operation": "",
+        "source_metadata": {
+            "source_id": root.source_id,
+            "lineage_id": root.lineage_id,
+            "source_timestamp": root.source_timestamp,
+        },
+    }, policy)
+
+
+def _collect_documents(
+    roots: Iterable[SourceRoot],
+    exts: tuple[str, ...],
+    source: str,
+    max_files: int,
+    scan_budget: int,
+    content_filter: Optional[Callable[[str], bool]] = None,
+    max_chars_per_file: int = 200_000,
+    policy=None,
+) -> tuple[list[SourceDocument], int]:
+    candidates: list[tuple[str, SourceRoot, Path]] = []
+    dropped_lineage = 0
+    for root in roots:
+        if _source_is_heldout(root, policy):
+            dropped_lineage += 1
+            continue
+        for ext in exts:
+            for path in root.path.rglob(f"*{ext}"):
+                if _is_skippable(path) or not path.is_file():
+                    continue
+                try:
+                    rel = path.relative_to(root.path).as_posix()
+                except ValueError:
+                    rel = path.as_posix()
+                # Family/concept holdout happens before reading/chunk derivation.
+                if _is_heldout_concept(rel):
+                    dropped_lineage += 1
+                    continue
+                candidates.append((f"{root.lineage_id}\0{rel}", root, path))
+    candidates.sort(key=lambda item: item[0])
+    out: list[SourceDocument] = []
+    for _, root, path in candidates[:scan_budget]:
+        if len(out) >= max_files:
+            break
+        info = _read_text_info(path, max_chars_per_file)
+        if info is None:
+            continue
+        text, root_hash, truncated = info
+        if content_filter is not None and not content_filter(text):
+            continue
+        metadata = _metadata_for_file(
+            root, path, text, root_hash, source=source, truncated=truncated,
+        )
+        out.append(SourceDocument(path, text, source, metadata))
+    return out, dropped_lineage
+
+
 def _collect_files(
     roots: Iterable[Path],
     exts: tuple[str, ...],
@@ -207,269 +535,593 @@ def _collect_files(
     content_filter: Optional[Callable[[str], bool]] = None,
     max_chars_per_file: int = 200_000,
 ) -> list[tuple[Path, str]]:
-    """Deterministically collect up to ``max_files`` ``(path, text)`` pairs.
-
-    Walks ``roots`` for files with the given extensions in a globally sorted
-    order (by relative path), reading at most ``scan_budget`` candidates and
-    keeping those that pass ``content_filter`` (if any). Sorting makes the result
-    order-stable and therefore the whole corpus deterministic.
-    """
-    # Gather (sort_key, path) so ordering is stable across roots.
-    cands: list[tuple[str, Path]] = []
-    for root in roots:
-        for ext in exts:
-            for p in root.rglob(f"*{ext}"):
-                if _is_skippable(p) or not p.is_file():
-                    continue
-                try:
-                    key = str(p.relative_to(root))
-                except ValueError:
-                    key = str(p)
-                cands.append((f"{key}\x00{p}", p))
-    cands.sort(key=lambda kp: kp[0])
-
-    out: list[tuple[Path, str]] = []
-    scanned = 0
-    for _, p in cands:
-        if len(out) >= max_files or scanned >= scan_budget:
-            break
-        scanned += 1
-        text = _read_text(p, max_chars_per_file)
-        if text is None:
-            continue
-        if content_filter is not None and not content_filter(text):
-            continue
-        out.append((p, text))
-    return out
+    """Backward-compatible path/text collector used by external callers."""
+    specs = [
+        _root_from_path(Path(root), None, development_mode=True)
+        for root in roots if Path(root).is_dir()
+    ]
+    docs, _ = _collect_documents(
+        specs, exts, "compat", max_files, scan_budget, content_filter,
+        max_chars_per_file, policy={"families": (), "task_ids": ()},
+    )
+    return [(doc.path, doc.text) for doc in docs]
 
 
-# --------------------------------------------------------------------------- #
-# Chunking + dedup
-# --------------------------------------------------------------------------- #
+def _normalize_document(doc: SourceDocument) -> SourceDocument:
+    if doc.source not in _KORE_AUTHORED_SOURCES:
+        return doc
+    from kore.data.arch_normalize import normalize_text
+
+    normalized = normalize_text(doc.text)
+    if normalized == doc.text:
+        return doc
+    metadata = dict(doc.metadata)
+    metadata["parent_content_hash"] = metadata.get("content_hash")
+    metadata["content_hash"] = _sha256(normalized)
+    metadata["derivation"] = [*metadata.get("derivation", ()), "arch_normalize"]
+    return replace(doc, text=normalized, metadata=metadata)
+
+
+def _derive_pair(task_id: str, reference: SourceDocument, seed: SourceDocument) -> SourceDocument:
+    text = (
+        f"# PyTorch reference implementation ({task_id})\n\n{reference.text}\n\n"
+        f"# Equivalent Triton kernel for {task_id}\n\n{seed.text}\n"
+    )
+    metadata = dict(seed.metadata)
+    pair_path = (Path(str(seed.metadata.get("path") or task_id)).parent / "pair.py").as_posix()
+    metadata.update({
+        "path": pair_path,
+        "row_id": pair_path,
+        "family": reference.metadata.get("family") or seed.metadata.get("family"),
+        "content_hash": _sha256(text),
+        "root_content_hash": reference.metadata.get("root_content_hash"),
+        "parent_content_hashes": [
+            reference.metadata.get("content_hash"),
+            seed.metadata.get("content_hash"),
+        ],
+        "parent_paths": [
+            reference.metadata.get("path"),
+            seed.metadata.get("path"),
+        ],
+        "derivation": ["source_pair"],
+    })
+    return SourceDocument(seed.path.parent / "pair.py", text, "pytorch_triton_pairs", metadata)
+
+
 def chunk_text(text: str, budget_chars: int) -> list[str]:
-    """Split ``text`` into <= ``budget_chars`` chunks on line boundaries.
-
-    Accumulates whole lines up to the budget; a single line longer than the
-    budget is hard-split so no emitted chunk ever exceeds ``budget_chars``.
-    Deterministic and independent of any tokenizer.
-    """
+    """Legacy deterministic character chunker (not used for corpus admission)."""
     if budget_chars <= 0:
         return [text] if text else []
     chunks: list[str] = []
-    buf: list[str] = []
+    buffer: list[str] = []
     size = 0
     for line in text.splitlines(keepends=True):
-        # Hard-split an over-long single line.
         while len(line) > budget_chars:
-            if buf:
-                chunks.append("".join(buf))
-                buf, size = [], 0
+            if buffer:
+                chunks.append("".join(buffer))
+                buffer, size = [], 0
             chunks.append(line[:budget_chars])
             line = line[budget_chars:]
-        if size + len(line) > budget_chars and buf:
-            chunks.append("".join(buf))
-            buf, size = [], 0
-        buf.append(line)
+        if buffer and size + len(line) > budget_chars:
+            chunks.append("".join(buffer))
+            buffer, size = [], 0
+        buffer.append(line)
         size += len(line)
-    if buf:
-        chunks.append("".join(buf))
-    return [c.strip() for c in chunks if c.strip()]
+    if buffer:
+        chunks.append("".join(buffer))
+    return [chunk.strip() for chunk in chunks if chunk.strip()]
 
 
-def _norm_hash(text: str) -> str:
-    return hashlib.sha1(" ".join(text.split()).encode("utf-8")).hexdigest()
+def _token_ids(tokenizer: Any, text: str) -> list:
+    if hasattr(tokenizer, "encode"):
+        try:
+            # Match the trainer/tokenizer default, including BOS/EOS wrappers.
+            value = tokenizer.encode(text, add_special_tokens=True)
+        except TypeError:
+            value = tokenizer.encode(text)
+    elif callable(tokenizer):
+        value = tokenizer(text)
+    else:
+        raise TypeError("tokenizer must expose encode(text) or be callable")
+    if isinstance(value, dict):
+        value = value.get("input_ids")
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, list) and value and isinstance(value[0], list):
+        value = value[0]
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("tokenizer did not return an input-id sequence")
+    return list(value)
+
+
+def count_tokens(tokenizer: Any, text: str) -> int:
+    return len(_token_ids(tokenizer, text))
+
+
+def _largest_token_prefix(text: str, max_tokens: int, tokenizer: Any) -> int:
+    low, high, best = 1, len(text), 0
+    while low <= high:
+        middle = (low + high) // 2
+        if count_tokens(tokenizer, text[:middle]) <= max_tokens:
+            best = middle
+            low = middle + 1
+        else:
+            high = middle - 1
+    if best == 0:
+        raise ValueError("tokenizer emits more than max_tokens for one character")
+    return best
+
+
+def chunk_text_tokens(text: str, max_tokens: int, tokenizer: Any) -> list[str]:
+    """Line-aware chunks measured with ``tokenizer``; every chunk is rechecked."""
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be positive")
+    if not text:
+        return []
+    chunks: list[str] = []
+    buffer = ""
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line
+        while line and count_tokens(tokenizer, line) > max_tokens:
+            if buffer.strip():
+                chunks.append(buffer.strip())
+                buffer = ""
+            split_at = _largest_token_prefix(line, max_tokens, tokenizer)
+            chunks.append(line[:split_at].strip())
+            line = line[split_at:]
+        candidate = buffer + line
+        if buffer and count_tokens(tokenizer, candidate) > max_tokens:
+            chunks.append(buffer.strip())
+            buffer = line
+        else:
+            buffer = candidate
+    if buffer.strip():
+        chunks.append(buffer.strip())
+    clean = [chunk for chunk in chunks if chunk]
+    if any(count_tokens(tokenizer, chunk) > max_tokens for chunk in clean):
+        raise AssertionError("token chunk exceeded max_seq_length")
+    return clean
+
+
+def _resolve_tokenizer(
+    config: Any,
+    tokenizer: Any,
+    tokenizer_id: Optional[str],
+    tokenizer_revision: Optional[str],
+    *,
+    development_mode: bool,
+) -> tuple[Any, dict]:
+    if tokenizer is None and development_mode:
+        tokenizer = _DevelopmentByteTokenizer()
+        tokenizer_id = tokenizer.name_or_path
+        tokenizer_revision = tokenizer.revision
+    else:
+        tokenizer_id = tokenizer_id or getattr(tokenizer, "name_or_path", None) or getattr(
+            config, "model_id", None
+        )
+        tokenizer_revision = (
+            tokenizer_revision
+            or getattr(tokenizer, "revision", None)
+            or os.environ.get("KORE_TOKENIZER_REVISION")
+        )
+    if not development_mode and not _immutable_revision(tokenizer_revision):
+        raise ValueError("production midtrain requires an immutable tokenizer_revision")
+    if tokenizer is None:
+        try:
+            from transformers import AutoTokenizer
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("transformers is required to load the pinned tokenizer") from exc
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_id or getattr(config, "model_id"),
+            revision=tokenizer_revision,
+            local_files_only=True,
+        )
+    # Smoke-check the adapter before source traversal.
+    count_tokens(tokenizer, "KORE tokenizer admission check")
+    return tokenizer, {
+        "id": str(tokenizer_id),
+        "revision": str(tokenizer_revision),
+        "mode": "development-byte" if development_mode and isinstance(
+            tokenizer, _DevelopmentByteTokenizer
+        ) else "pinned-tokenizer",
+        "admission_unit": "tokens",
+    }
 
 
 def _messages_to_text(messages: list[dict]) -> str:
-    """Render chat ``messages`` into a plain-text completion document."""
     parts = []
-    for m in messages:
-        role = str(m.get("role", "")).strip() or "user"
-        content = str(m.get("content", "")).strip()
+    for message in messages:
+        role = str(message.get("role", "")).strip() or "user"
+        content = str(message.get("content", "")).strip()
         if content:
             parts.append(f"{role}: {content}")
     return "\n\n".join(parts)
 
 
-def _load_kernelbook_pairs(n: int, max_chars: int) -> list:
-    """Stream real (PyTorch module -> Triton) pairs from GPUMODE/KernelBook (HF).
-
-    Returns ``[(pseudo_path, doc_text), ...]`` formatted like the local task pairs.
-    Fully fail-safe: any error (missing datasets dep / offline / schema drift)
-    returns [] so the corpus build never breaks. Used as corpus text only.
-    """
-    try:
-        from datasets import load_dataset
-    except Exception:
+def _stable_stream_select(
+    iterable: Iterable[Any],
+    n: int,
+    seed: int,
+    convert: Callable[[dict, int], Optional[tuple[str, str]]],
+    *,
+    scan_multiplier: int = 8,
+) -> list[tuple[str, str]]:
+    """Select lowest seeded content hashes from a pinned deterministic stream."""
+    if n <= 0:
         return []
-    out: list = []
-    try:
-        ds = load_dataset("GPUMODE/KernelBook", split="train", streaming=True)
-        for i, ex in enumerate(ds):
-            if len(out) >= n or i >= n * 8:
-                break
-            py = ex.get("python_code") or ex.get("pytorch_code")
-            tri = ex.get("triton_code") or ex.get("original_triton_code")
-            if not (isinstance(py, str) and isinstance(tri, str) and py.strip() and tri.strip()):
-                continue
-            doc = (f"# PyTorch module\n\n{py.strip()[:max_chars]}\n\n"
-                   f"# Equivalent Triton kernel\n\n{tri.strip()[:max_chars]}\n")
-            out.append((Path(f"kernelbook/pair_{i}.py"), doc))
-    except Exception:
-        return out  # partial results are fine; never raise
+    heap: list[tuple[int, str, tuple[str, str]]] = []
+    seen: set[str] = set()
+    budget = max(n * scan_multiplier, 256)
+    for index, raw in enumerate(iterable):
+        if index >= budget:
+            break
+        converted = convert(dict(raw), index)
+        if converted is None:
+            continue
+        row_id, text = converted
+        payload_hash = hashlib.sha256(
+            json.dumps([row_id, text], ensure_ascii=False, separators=(",", ":")).encode()
+        ).hexdigest()
+        if payload_hash in seen:
+            continue
+        seen.add(payload_hash)
+        score = int(hashlib.sha256(f"{seed}:{payload_hash}".encode()).hexdigest(), 16)
+        item = (-score, payload_hash, (row_id, text))
+        if len(heap) < n:
+            heapq.heappush(heap, item)
+        elif item > heap[0]:
+            heapq.heapreplace(heap, item)
+    selected = [(-neg_score, payload_hash, value) for neg_score, payload_hash, value in heap]
+    selected.sort(key=lambda item: (item[0], item[1]))
+    return [value for _, _, value in selected]
+
+
+def _load_kernelbook_pairs(
+    n: int,
+    max_chars: int,
+    *,
+    revision: Optional[str] = None,
+    seed: int = 0,
+) -> list[tuple[Path, str]]:
+    if not _immutable_revision(revision):
+        raise ValueError("KernelBook requires a pinned revision")
+    from datasets import load_dataset
+
+    dataset = load_dataset(
+        "GPUMODE/KernelBook", split="train", streaming=True, revision=revision,
+    )
+
+    def convert(example: dict, index: int) -> Optional[tuple[str, str]]:
+        python = example.get("python_code") or example.get("pytorch_code")
+        triton = example.get("triton_code") or example.get("original_triton_code")
+        if not (isinstance(python, str) and isinstance(triton, str)
+                and python.strip() and triton.strip()):
+            return None
+        row_id = str(example.get("id") or example.get("row_id") or index)
+        text = (
+            f"# PyTorch module\n\n{python.strip()[:max_chars]}\n\n"
+            f"# Equivalent Triton kernel\n\n{triton.strip()[:max_chars]}\n"
+        )
+        return row_id, text
+
+    return [
+        (Path(f"kernelbook/{row_id}.py"), text)
+        for row_id, text in _stable_stream_select(dataset, n, seed, convert)
+    ]
+
+
+def _load_amd_kernels(
+    n: int,
+    max_chars: int,
+    *,
+    revision: Optional[str] = None,
+    seed: int = 0,
+) -> list[tuple[Path, str]]:
+    if not _immutable_revision(revision):
+        raise ValueError("kernelbot-data requires a pinned revision")
+    from datasets import load_dataset
+
+    dataset = load_dataset(
+        "GPUMODE/kernelbot-data",
+        "amd_successful_submissions",
+        split="train",
+        streaming=True,
+        revision=revision,
+    )
+
+    def convert(example: dict, index: int) -> Optional[tuple[str, str]]:
+        if example.get("run_passed") is False:
+            return None
+        code = example.get("code")
+        if isinstance(code, (bytes, bytearray)):
+            code = code.decode("utf-8", errors="ignore")
+        if not isinstance(code, str) or not code.strip():
+            return None
+        row_id = str(example.get("id") or example.get("submission_id") or index)
+        return row_id, code.strip()[:max_chars]
+
+    return [
+        (Path(f"amd_kernels/{row_id}.py"), text)
+        for row_id, text in _stable_stream_select(dataset, n, seed, convert)
+    ]
+
+
+def _hf_documents(
+    values: Iterable[tuple[Path, str]],
+    source: str,
+    dataset_id: str,
+    dataset_meta: Mapping[str, Any],
+) -> list[SourceDocument]:
+    out: list[SourceDocument] = []
+    revision = str(dataset_meta["revision"])
+    for path, text in values:
+        row_id = path.stem
+        digest = _sha256(text)
+        metadata = {
+            "schema_version": SOURCE_METADATA_SCHEMA_VERSION,
+            "repository_url": dataset_meta.get("repository_url")
+            or f"https://huggingface.co/datasets/{dataset_id}",
+            "commit": revision,
+            "dataset_revision": revision,
+            "path": path.as_posix(),
+            "license": dataset_meta["license"],
+            "row_id": row_id,
+            "source_id": dataset_id,
+            "lineage_id": f"{dataset_id}@{revision}",
+            "family": "",
+            "verified": True,
+            "root_content_hash": digest,
+            "content_hash": digest,
+            "derivation": ["dataset_row"],
+        }
+        out.append(SourceDocument(path, text, source, metadata))
     return out
 
 
-def _load_amd_kernels(n: int, max_chars: int) -> list:
-    """Stream REAL AMD MI300 passing kernels from GPUMODE/kernelbot-data (HF).
+def _quality_filter_documents(
+    collected: list[tuple[str, list[SourceDocument]]],
+) -> tuple[list[tuple[str, list[SourceDocument]]], dict]:
+    from kore.data.corpus_quality import code_quality_reason, doc_quality_reason
 
-    The ``amd_successful_submissions`` subset holds ~60k competition kernels that
-    PASSED correctness on real MI300 hardware (fp8-gemm, MoE, MLA-decode, all2all,
-    mxfp4, ...) - the highest-signal AMD-native (gfx942) kernel corpus available.
-    Unlike KernelBook (NVIDIA/Inductor Triton), these are hand-optimized for AMD
-    and carry the ``#!POPCORN`` problem header, so the model sees real gfx942
-    idioms. ``code`` is stored as raw bytes; we decode + keep only passing rows.
-    Fully fail-safe: any error returns partial/empty so the build never breaks.
-    """
-    try:
-        from datasets import load_dataset
-    except Exception:
-        return []
-    out: list = []
-    try:
-        ds = load_dataset("GPUMODE/kernelbot-data", "amd_successful_submissions",
-                          split="train", streaming=True)
-        for i, ex in enumerate(ds):
-            if len(out) >= n or i >= n * 8:
-                break
-            if ex.get("run_passed") is False:   # subset is passing, but be strict
-                continue
-            code = ex.get("code")
-            if isinstance(code, (bytes, bytearray)):
-                code = code.decode("utf-8", errors="ignore")
-            if not (isinstance(code, str) and code.strip()):
-                continue
-            out.append((Path(f"amd_kernels/sub_{i}.py"), code.strip()[:max_chars]))
-    except Exception:
-        return out  # partial results are fine; never raise
-    return out
+    result: list[tuple[str, list[SourceDocument]]] = []
+    all_reasons: dict[str, dict[str, int]] = {}
+    for source, documents in collected:
+        reason_fn = doc_quality_reason if source == "docs" else code_quality_reason
+        kept: list[SourceDocument] = []
+        reasons: dict[str, int] = {}
+        for document in documents:
+            reason = reason_fn(document.text, document.path)
+            if reason is None:
+                kept.append(document)
+            else:
+                reasons[reason] = reasons.get(reason, 0) + 1
+        result.append((source, kept))
+        if reasons:
+            all_reasons[source] = reasons
+            log.info(
+                "midtrain quality filter",
+                source=source,
+                kept=len(kept),
+                dropped=len(documents) - len(kept),
+                reasons=reasons,
+            )
+    return result, all_reasons
 
 
-# --------------------------------------------------------------------------- #
-# Public API
-# --------------------------------------------------------------------------- #
-def _near_dedup_corpus(rows: list[dict], threshold: float = 0.7,
-                       num_perm: int = 64, bands: int = 16) -> list[dict]:
-    """Collapse near-duplicate corpus chunks via MinHash-LSH (The-Stack-v2 practice:
-    MinHash + banded LSH, Jaccard 0.7). Exact-hash dedup upstream catches
-    byte-identical chunks; this catches token-level near-dups (forked / reformatted /
-    renamed kernels copied across repos) so continued-pretraining isn't dominated by
-    redundant copies. O(n * bands) bucketing + confirm-with-Jaccard; keeps one
-    representative per near-dup cluster (first-seen, so order is stable)."""
-    from collections import defaultdict
-
-    from kore.data.dedup import jaccard, minhash_signature
-
-    n = len(rows)
-    if n < 2:
-        return rows
-    rows_per_band = max(1, num_perm // bands)
-    sigs = [minhash_signature(r.get("text", ""), num_perm=num_perm) for r in rows]
-    buckets: dict = defaultdict(list)
-    for i, sig in enumerate(sigs):
-        for b in range(bands):
-            band = tuple(sig[b * rows_per_band:(b + 1) * rows_per_band])
-            buckets[(b, band)].append(i)
-
-    parent = list(range(n))
-
-    def _find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for idxs in buckets.values():
-        if len(idxs) < 2:
-            continue
-        a = idxs[0]
-        for b0 in idxs[1:]:
-            if _find(a) == _find(b0):
-                continue
-            if jaccard(sigs[a], sigs[b0]) >= threshold:  # confirm (avoid band false-pos)
-                parent[_find(b0)] = _find(a)
-
-    seen_root: set = set()
-    kept: list[dict] = []
-    for i, r in enumerate(rows):
-        root = _find(i)
-        if root in seen_root:
-            continue
-        seen_root.add(root)
-        kept.append(r)
-    return kept
+def _chunk_metadata(document: SourceDocument, chunk: str, index: int) -> dict:
+    metadata = dict(document.metadata)
+    source_row_id = str(metadata.get("row_id") or metadata.get("path") or "")
+    metadata["source_row_id"] = source_row_id
+    metadata["row_id"] = f"{source_row_id}#chunk={index}"
+    metadata["parent_content_hash"] = metadata.get("content_hash")
+    metadata["content_hash"] = _sha256(chunk)
+    metadata["derivation"] = [*metadata.get("derivation", ()), "token_chunk"]
+    return metadata
 
 
-# KORE-authored source slices. Only these carry stale pre-retarget gfx942 labels
-# on code that is genuinely gfx950 (Triton is portable + re-verified on gfx950), so
-# only these get the gfx950 ``arch_normalize`` scrub at write time. EXTERNAL repo
-# text (``triton`` / ``rocm_hip`` / ``amd_asm`` / ``docs`` from the repos, and the
-# mined ``amd_kernels`` / ``kernelbook`` HF sets) is genuinely other-hardware text
-# (real gfx942 CustomKernels, NVIDIA-Inductor Triton, Hopper FP8 docs, ...); scrubbing
-# its arch labels would corrupt true facts (FNUZ<->OCP fp8, 64<->160 KiB LDS, register
-# counts), so it is left verbatim. ``general_replay`` is arbitrary domain text (also
-# left verbatim).
-_KORE_AUTHORED_SOURCES = frozenset({"kore_tasks", "pytorch_triton_pairs"})
+def _origin(metadata: Mapping[str, Any]) -> dict:
+    return {
+        key: metadata.get(key)
+        for key in (
+            "repository_url", "commit", "path", "license", "source_row_id",
+            "row_id", "root_content_hash", "content_hash", "lineage_id",
+        )
+    }
 
 
-# Source weighting: oversample the highest-signal channels for continued
-# pretraining. The real MI300 AMD competition kernels and the torch->Triton
-# translation pairs are the most direct signal for the target task (writing fast
-# device kernels), so they are seen more epochs than bulk repo code. Factors are
-# deliberately conservative (<=2x) - heavy repetition risks CPT memorization /
-# forgetting. Override via KORE_MIDTRAIN_WEIGHTS="src=factor,src=factor".
-_DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
-    "amd_kernels": 2.0,           # real gfx942 MI300 kernelbot submissions
-    "pytorch_triton_pairs": 2.0,  # torch -> Triton (the core task, paired)
-    "kore_tasks": 1.5,            # our own verified frontier tasks
-    "kernelbook": 1.5,            # torch -> Triton translation corpus
-}
+def _merge_origins(winner: dict, group: list[dict]) -> dict:
+    metadata = dict(winner.get("source_metadata") or {})
+    origins: list[dict] = []
+    seen: set[str] = set()
+    for row in group:
+        item = _origin(row.get("source_metadata") or {})
+        key = json.dumps(item, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            origins.append(item)
+    metadata["origins"] = origins
+    winner["source_metadata"] = metadata
+    return winner
 
 
-# Held-out generalization concepts (MLA / paged-attention). Files whose PATH hits
-# these are kept OUT of the CPT corpus so it never teaches the ops the eval measures
-# as "unseen" (verbatim n-gram decontam misses differently-written impls in
-# vllm/aiter/repos -- audit THEME B/C4). Anchored to path-segment boundaries so it
-# only matches real MLA/paged files, not incidental substrings.
-_HELDOUT_CONCEPT_RE = re.compile(
-    # match the held-out concepts as path tokens INCLUDING concatenated spellings the
-    # old regex missed: `paged_attention` (canonical vLLM/AITER: paged_attention_v1.cu),
-    # `flashmla`, and `paged_decode`/`paged_prefill` (audit R2 midtrain I2).
-    r"(mla|multi.?head.?latent|flashmla|paged?[_.\-]?(attn|attention|kv|cache|decode|prefill))",
-    re.IGNORECASE)
+def _near_dedup_corpus(
+    rows: list[dict],
+    threshold: float = 0.7,
+    num_perm: int = 64,
+    bands: int = 16,
+) -> list[dict]:
+    """Source-aware structural/MinHash dedup preserving weighted channels."""
+    del num_perm, bands
+    from kore.data.dedup import dedup_near
 
-
-def _is_heldout_concept(path) -> bool:
-    try:
-        return bool(_HELDOUT_CONCEPT_RE.search(str(path)))
-    except Exception:  # noqa: BLE001
-        return False
+    short = [row for row in rows if len(row.get("text", "")) < 200]
+    candidates = [row for row in rows if len(row.get("text", "")) >= 200]
+    for order, row in enumerate(rows):
+        row["_dedup_order"] = order
+    kept, _ = dedup_near(
+        candidates,
+        source_key="text",
+        fuzzy_threshold=threshold,
+        partition_key="source",
+        merge=_merge_origins,
+    )
+    output = sorted(short + kept, key=lambda row: row["_dedup_order"])
+    for row in rows:
+        row.pop("_dedup_order", None)
+    for row in output:
+        row.pop("_dedup_order", None)
+    return output
 
 
 def _source_weights() -> dict[str, float]:
-    """Return the source->oversample-factor map (env-overridable)."""
-    w = dict(_DEFAULT_SOURCE_WEIGHTS)
-    env = os.environ.get("KORE_MIDTRAIN_WEIGHTS", "").strip()
-    if env:
-        for part in env.split(","):
-            if "=" not in part:
-                continue
-            k, v = part.split("=", 1)
-            try:
-                w[k.strip()] = max(1.0, float(v))
-            except ValueError:
-                pass
-    return w
+    weights = dict(_DEFAULT_SOURCE_WEIGHTS)
+    for part in os.environ.get("KORE_MIDTRAIN_WEIGHTS", "").split(","):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        try:
+            weights[key.strip()] = max(1.0, float(value))
+        except ValueError:
+            continue
+    return weights
+
+
+def _replicas_for(row: Mapping[str, Any], weight: float, seed: int) -> int:
+    whole = max(1, int(weight))
+    fraction = weight - int(weight)
+    if fraction <= 0:
+        return whole
+    digest = str((row.get("source_metadata") or {}).get("content_hash") or _sha256(
+        str(row.get("text") or "")
+    ))
+    value = int(hashlib.sha256(f"{seed}:{row.get('source')}:{digest}".encode()).hexdigest(), 16)
+    unit = value / float(2**256 - 1)
+    return whole + int(unit < fraction)
+
+
+def _weighted_rows(rows: list[dict], weights: Mapping[str, float], seed: int) -> list[dict]:
+    output: list[dict] = []
+    for row in rows:
+        weight = float(weights.get(str(row.get("source")), 1.0))
+        replicas = _replicas_for(row, weight, seed)
+        for replica in range(replicas):
+            copied = dict(row)
+            metadata = dict(copied.get("source_metadata") or {})
+            metadata["sampling_weight"] = weight
+            metadata["sampling_replica"] = replica
+            copied["source_metadata"] = metadata
+            output.append(copied)
+    return output
+
+
+def _counts(rows: Iterable[Mapping[str, Any]], known: Iterable[str] = ()) -> dict[str, int]:
+    result = {source: 0 for source in known}
+    for row in rows:
+        source = str(row.get("source") or "")
+        result[source] = result.get(source, 0) + 1
+    return result
+
+
+def _doc_relevant(document: SourceDocument) -> bool:
+    tail = "/".join(part.lower() for part in document.path.parts[-3:])
+    return any(keyword in tail for keyword in _DOC_KEYWORDS) or any(
+        keyword in document.text[:2000].lower() for keyword in _DOC_KEYWORDS
+    )
+
+
+def _load_pinned_replay(
+    kind: str,
+    n: int,
+    seed: int,
+    catalog: Mapping[str, Any],
+) -> list[dict]:
+    """Load replay directly from a pinned HF revision with stable hash sampling."""
+    from datasets import load_dataset
+    from kore.data.general_replay import HF_SOURCES, _formatter_for, _row_chars
+
+    specs = HF_SOURCES[kind]
+    specs = specs if isinstance(specs, list) else [specs]
+    errors: list[str] = []
+    for spec in specs:
+        dataset_id = str(spec["path"])
+        metadata = _dataset_metadata(catalog, dataset_id)
+        if not metadata or metadata.get("verified") is not True:
+            errors.append(f"{dataset_id}: no verified pinned metadata")
+            continue
+        revision = metadata.get("revision")
+        if not _immutable_revision(revision):
+            errors.append(f"{dataset_id}: mutable revision")
+            continue
+        try:
+            dataset = load_dataset(
+                dataset_id,
+                spec.get("config"),
+                split=spec.get("split", "train"),
+                streaming=True,
+                revision=revision,
+            )
+            formatter = _formatter_for(kind, spec)
+            max_chars = spec.get("max_row_chars")
+
+            def convert(example: dict, index: int) -> Optional[tuple[str, str]]:
+                row = formatter(example, spec, kind)
+                if row is None or (max_chars and _row_chars(row) > int(max_chars)):
+                    return None
+                text = _messages_to_text(row.get("messages", []))
+                if not text:
+                    return None
+                row_id = str(example.get("id") or example.get("row_id") or index)
+                return row_id, json.dumps(row["messages"], ensure_ascii=False)
+
+            selected = _stable_stream_select(dataset, n, seed, convert, scan_multiplier=20)
+            rows: list[dict] = []
+            for row_id, payload in selected:
+                messages = json.loads(payload)
+                text = _messages_to_text(messages)
+                rows.append({
+                    "messages": messages,
+                    "_source": kind,
+                    "_source_metadata": {
+                        "schema_version": SOURCE_METADATA_SCHEMA_VERSION,
+                        "repository_url": metadata.get("repository_url")
+                        or f"https://huggingface.co/datasets/{dataset_id}",
+                        "commit": str(revision),
+                        "dataset_revision": str(revision),
+                        "path": f"{dataset_id}/{spec.get('split', 'train')}",
+                        "license": metadata["license"],
+                        "row_id": row_id,
+                        "source_id": dataset_id,
+                        "lineage_id": f"{dataset_id}@{revision}",
+                        "verified": True,
+                        "root_content_hash": _sha256(text),
+                        "content_hash": _sha256(text),
+                        "derivation": ["dataset_row", "chat_render"],
+                    },
+                })
+            if rows:
+                return rows
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{dataset_id}: {type(exc).__name__}: {exc}")
+    raise RuntimeError(f"no pinned replay source for {kind}: {'; '.join(errors)}")
+
+
+def _development_replay_metadata(kind: str, text: str, index: int) -> dict:
+    digest = _sha256(text)
+    return {
+        "schema_version": SOURCE_METADATA_SCHEMA_VERSION,
+        "repository_url": "development-bundled://kore/general-replay",
+        "commit": "development-bundled",
+        "path": f"replay_samples/{kind}.jsonl",
+        "license": "DEVELOPMENT-INTERNAL",
+        "row_id": f"{kind}:{index}:{digest[-12:]}",
+        "source_id": f"bundled-replay:{kind}",
+        "lineage_id": f"bundled-replay:{kind}",
+        "verified": True,
+        "development_mode": True,
+        "root_content_hash": digest,
+        "content_hash": digest,
+        "derivation": ["bundled_row", "chat_render"],
+    }
 
 
 def build_midtrain_corpus(
@@ -483,446 +1135,456 @@ def build_midtrain_corpus(
     max_files_per_source: int = 20000,
     scan_budget: int = 200000,
     max_chars_per_file: int = 200_000,
+    development_mode: bool = False,
+    source_metadata: Optional[str | os.PathLike | Mapping[str, Any]] = None,
+    benchmark_artifact: Optional[str | os.PathLike | Mapping[str, Any]] = None,
+    tokenizer: Any = None,
+    tokenizer_id: Optional[str] = None,
+    tokenizer_revision: Optional[str] = None,
+    replay_loader: Optional[Callable[..., list[dict]]] = None,
+    replay_replacement_attempts: int = 5,
 ) -> dict:
-    """Assemble the Stage-0 continued-pretraining corpus and write it to disk.
+    """Build the provenance-preserving Stage-0 JSONL corpus.
 
-    Defaults are sized for a FRONTIER (32B/70B) continued-pretrain: the per-source
-    file cap and scan budget are large enough to ingest the full local AMD device
-    corpus (all of AITER / Composable-Kernel / hipBLASLt / rocPRIM HIP+CK source,
-    the Tensile ISA CustomKernels, the ROCm/CK ``.rst`` optimization docs) plus the
-    full mined ``amd_kernels`` / ``kernelbook`` HF sets. Everything stays
-    env-overridable, and a single ``KORE_MIDTRAIN_SCALE`` float multiplies every
-    default cap so a bigger box can pull proportionally more (or a smoke run less)
-    without touching individual knobs.
-
-    Args:
-        out_path: destination JSONL path (parents created).
-        config: a :class:`~kore.policy.configs.MidTrainConfig` (uses
-            ``max_seq_length`` and ``general_replay_frac``).
-        seed: determinism seed (drives general-replay sampling).
-        use_hf: allow real HF general-replay sources (falls back to bundled
-            offline samples on any failure). Kernel sources are always local.
-        source_roots: override the repo roots to search (defaults to
-            :func:`discover_repo_roots`). Tests pass a tmp source tree here.
-        task_root: override the KORE task root (defaults to ``kore/tasks``).
-        max_files_per_source: BASE per-source file cap (bounds corpus size + cost);
-            scaled by ``KORE_MIDTRAIN_SCALE``, overridden by ``KORE_MIDTRAIN_MAX_FILES``.
-        scan_budget: BASE max candidate files inspected per collection pass; scaled
-            by ``KORE_MIDTRAIN_SCALE``, overridden by ``KORE_MIDTRAIN_SCAN_BUDGET``.
-        max_chars_per_file: truncate each source file to this many chars.
-
-    Env knobs (all optional):
-        ``KORE_MIDTRAIN_SCALE``          - float (default 1.0); multiplies every
-            default cap below (target corpus-size dial for a big run).
-        ``KORE_MIDTRAIN_MAX_FILES``      - absolute per-source file cap (wins over scale).
-        ``KORE_MIDTRAIN_SCAN_BUDGET``    - absolute scan budget (wins over scale).
-        ``KORE_MIDTRAIN_AMD_MAX``        - absolute cap for the mined AMD kernels.
-        ``KORE_MIDTRAIN_KERNELBOOK_MAX`` - absolute cap for the mined KernelBook pairs.
-
-    Returns:
-        A report dict: ``{"out_path", "total", "counts": {source: n},
-        "n_dropped_dup", "general_frac", "max_seq_length", "budget_chars",
-        "repo_roots", "corpus_scale", "max_files_per_source"}``.
+    Production is the default. It requires a full frozen benchmark artifact and
+    a pinned tokenizer. ``development_mode=True`` is an explicit, report-visible
+    opt-in for offline tests and smoke builds.
     """
+    from kore.data.decontam import (
+        HoldoutIndex,
+        HoldoutPolicy,
+        analyze_text_contamination,
+        eval_benchmark_references,
+        heldout_source_references,
+        load_frozen_benchmark_artifact,
+    )
+
+    development_mode = bool(development_mode or _truthy(os.environ.get("KORE_MIDTRAIN_DEVELOPMENT")))
     out_path = Path(out_path)
-    # Env-tunable volume so a frontier (32B/70B) midtrain can ingest the FULL local
-    # AMD device corpus (all AITER/CK/hipBLASLt/rocPRIM HIP+CK source, the Tensile ISA
-    # CustomKernels, ROCm/CK .rst optimization docs) + the full mined ~60k gfx942-native
-    # AMD kernels + ~18k KernelBook pairs. ``KORE_MIDTRAIN_SCALE`` is the single
-    # corpus-size dial (multiplies every default cap); explicit per-source env vars
-    # still win over it (absolute override). Small per-run values (e.g. 800) are
-    # env overrides, NOT the code default, which is now sized for a big run.
+    catalog = _load_source_catalog(source_metadata)
+    holdout_config = dict(catalog.get("holdouts") or {})
+    default_policy = HoldoutPolicy.default()
+    configured = HoldoutPolicy.coerce(holdout_config)
+    policy = HoldoutPolicy(
+        families=default_policy.families | configured.families,
+        task_ids=default_policy.task_ids | configured.task_ids,
+        source_ids=configured.source_ids,
+        lineage_ids=configured.lineage_ids,
+        training_cutoff=configured.training_cutoff,
+    )
+
+    benchmark_input = benchmark_artifact or os.environ.get("KORE_DECONTAM_BENCHMARK_ARTIFACT")
+    if development_mode and not benchmark_input:
+        benchmark_refs = eval_benchmark_references(development_mode=True)
+        benchmark_report = {
+            "scope": "smoke",
+            "mode": "development",
+            "artifact_hash": None,
+            "revisions": {},
+        }
+    else:
+        if not benchmark_input:
+            raise FileNotFoundError(
+                "production midtrain requires a full frozen benchmark artifact "
+                "(benchmark_artifact or KORE_DECONTAM_BENCHMARK_ARTIFACT)"
+            )
+        frozen = load_frozen_benchmark_artifact(benchmark_input)  # type: ignore[arg-type]
+        benchmark_refs = frozen.references
+        benchmark_report = {
+            "scope": frozen.scope,
+            "mode": frozen.mode,
+            "artifact_hash": frozen.artifact_hash,
+            "revisions": dict(frozen.revisions),
+        }
+
+    tokenizer, tokenizer_report = _resolve_tokenizer(
+        config,
+        tokenizer,
+        tokenizer_id,
+        tokenizer_revision,
+        development_mode=development_mode,
+    )
+    max_tokens = int(config.max_seq_length)
+    if max_tokens <= 0:
+        raise ValueError("config.max_seq_length must be positive")
+
     scale = 1.0
     try:
         scale = max(0.01, float(os.environ.get("KORE_MIDTRAIN_SCALE", "1.0") or 1.0))
     except (TypeError, ValueError):
-        scale = 1.0
+        pass
 
-    def _cap(env_name: str, base_default) -> int:
-        """Absolute env override if set + valid, else ``base_default`` (already scaled)."""
-        v = os.environ.get(env_name)
-        if v is not None and str(v).strip():
-            try:
-                return max(1, int(float(v)))
-            except (TypeError, ValueError):
-                pass
-        return max(1, int(base_default))
+    def cap(env_name: str, default: float) -> int:
+        value = os.environ.get(env_name)
+        try:
+            return max(1, int(float(value))) if value else max(1, int(default))
+        except (TypeError, ValueError):
+            return max(1, int(default))
 
-    max_files_per_source = _cap("KORE_MIDTRAIN_MAX_FILES", max_files_per_source * scale)
-    scan_budget = _cap("KORE_MIDTRAIN_SCAN_BUDGET", scan_budget * scale)
-    budget_chars = max(1, int(config.max_seq_length) * CHARS_PER_TOKEN)
-    frac = float(getattr(config, "general_replay_frac", 0.15) or 0.0)
+    max_files_per_source = cap(
+        "KORE_MIDTRAIN_MAX_FILES", max_files_per_source * scale,
+    )
+    scan_budget = cap("KORE_MIDTRAIN_SCAN_BUDGET", scan_budget * scale)
+    fraction = float(getattr(config, "general_replay_frac", 0.15) or 0.0)
 
-    repo_roots = [Path(r) for r in source_roots] if source_roots is not None \
-        else discover_repo_roots()
-    repo_roots = [r for r in repo_roots if r.is_dir()]
-    troot = Path(task_root) if task_root is not None else _kore_task_root()
+    raw_roots = source_roots if source_roots is not None else discover_repo_roots()
+    repo_roots, n_unverified = _resolve_source_roots(
+        raw_roots, catalog, development_mode=development_mode,
+    )
+    task_path = Path(task_root) if task_root is not None else _kore_task_root()
 
-    # (source_label, list[(path, text)]) built from local files only.
-    collected: list[tuple[str, list[tuple[Path, str]]]] = []
+    collected: list[tuple[str, list[SourceDocument]]] = []
+    dropped_lineage = 0
 
-    # 1. KORE task Python (seed kernels, references, drivers) - EXCLUDING the
-    # held-out generalization families (MLA / paged-KV decode) + arch-specific
-    # tasks, so the eval set never leaks into pretraining (decontamination,
-    # Pillar 5). Task-suite infrastructure files (_genops.py, base.py, ...) live
-    # directly under the root and are kept; only per-task <task_id>/ dirs of a
-    # held-out family are dropped.
-    task_py: list[tuple[Path, str]] = []
-    if troot is not None and troot.is_dir():
-        task_py = _collect_files(
-            [troot], (".py",), max_files=max_files_per_source,
-            scan_budget=scan_budget, max_chars_per_file=max_chars_per_file,
-            content_filter=lambda t: "__pycache__" not in t and len(t) > 20,
+    # Split each task directory into a lineage and gate it before deriving pairs.
+    task_documents: list[SourceDocument] = []
+    pair_documents: list[SourceDocument] = []
+    if task_path is not None and task_path.is_dir():
+        task_catalog = _catalog_source_for(task_path, _catalog_sources(catalog))
+        task_parent = _root_from_path(
+            task_path, task_catalog, development_mode=development_mode,
         )
-        task_py = [(p, t) for (p, t) in task_py if not _is_heldout_task_dir(p.parent.name)]
-    collected.append(("kore_tasks", task_py))
-
-    # 2. PyTorch -> Triton pairs from each task's reference.py + seed_triton.py.
-    pairs: list[tuple[Path, str]] = []
-    if troot is not None and troot.is_dir():
-        for task_dir in sorted(p for p in troot.iterdir() if p.is_dir()):
-            if _is_heldout_task_dir(task_dir.name):  # decontamination (Pillar 5)
+        per_task: dict[str, dict[str, SourceDocument]] = {}
+        try:
+            children = sorted(child for child in task_path.iterdir() if child.is_dir())
+        except OSError:
+            children = []
+        for task_dir in children:
+            if task_dir.name == "_drafts" or _is_heldout_task_dir(task_dir.name):
+                dropped_lineage += 1
                 continue
-            ref = task_dir / "reference.py"
-            seed_k = task_dir / "seed_triton.py"
-            if not (ref.is_file() and seed_k.is_file()):
-                continue
-            ref_t = _read_text(ref, max_chars_per_file)
-            seed_t = _read_text(seed_k, max_chars_per_file)
-            if not (ref_t and seed_t):
-                continue
-            doc = (
-                f"# PyTorch reference implementation ({task_dir.name})\n\n"
-                f"{ref_t}\n\n"
-                f"# Equivalent Triton kernel for {task_dir.name}\n\n"
-                f"{seed_t}\n"
+            task_root_spec = replace(
+                task_parent,
+                path=task_dir.resolve(),
+                source_id=f"{task_parent.source_id}:task:{task_dir.name}",
+                lineage_id=f"{task_parent.lineage_id}:task:{task_dir.name}",
+                path_prefix=(
+                    (Path(task_parent.path_prefix) / task_dir.name).as_posix()
+                    if task_parent.path_prefix else task_dir.name
+                ),
             )
-            pairs.append((task_dir / "pair.py", doc))
-    collected.append(("pytorch_triton_pairs", pairs))
+            if not task_root_spec.verified:
+                n_unverified += 1
+                continue
+            docs, dropped = _collect_documents(
+                [task_root_spec],
+                (".py",),
+                "kore_tasks",
+                max_files_per_source,
+                scan_budget,
+                content_filter=lambda text: len(text) > 20,
+                max_chars_per_file=max_chars_per_file,
+                policy=policy,
+            )
+            dropped_lineage += dropped
+            normalized = [_normalize_document(doc) for doc in docs]
+            task_documents.extend(normalized)
+            per_task[task_dir.name] = {doc.path.name: doc for doc in normalized}
 
-    # 2b. REAL PyTorch->Triton pairs from KernelBook (HF, use_hf only). ~18k verified
-    # (nn.Module -> Triton) pairs from torch.compile/Inductor - the best supervised
-    # translate-and-fuse corpus. Used as CORPUS TEXT only (not executed), so the
-    # NVIDIA/libdevice flavor of the Triton is fine for teaching the pattern.
-    kb_pairs: list[tuple[Path, str]] = []
+        # Root-level infrastructure is a separate lineage, never a task derivative.
+        root_spec = replace(
+            task_parent,
+            source_id=f"{task_parent.source_id}:task-infrastructure",
+            lineage_id=f"{task_parent.lineage_id}:task-infrastructure",
+        )
+        if root_spec.verified:
+            try:
+                root_files = sorted(path for path in task_path.glob("*.py") if path.is_file())
+            except OSError:
+                root_files = []
+            for path in root_files[:max_files_per_source]:
+                info = _read_text_info(path, max_chars_per_file)
+                if info is None:
+                    continue
+                text, root_hash, truncated = info
+                metadata = _metadata_for_file(
+                    root_spec, path, text, root_hash, source="kore_tasks", truncated=truncated,
+                )
+                task_documents.append(_normalize_document(
+                    SourceDocument(path, text, "kore_tasks", metadata)
+                ))
+
+        for task_id, docs in sorted(per_task.items()):
+            reference, seed_doc = docs.get("reference.py"), docs.get("seed_triton.py")
+            if reference is not None and seed_doc is not None:
+                pair_documents.append(_derive_pair(task_id, reference, seed_doc))
+    collected.append(("kore_tasks", task_documents))
+    collected.append(("pytorch_triton_pairs", pair_documents))
+
+    # Pinned external datasets. No revision means no network call.
+    kernelbook_docs: list[SourceDocument] = []
+    amd_docs: list[SourceDocument] = []
     if use_hf:
-        # Base default already scaled via max_files_per_source; captures all ~18k pairs.
-        kb_max = _cap("KORE_MIDTRAIN_KERNELBOOK_MAX", max_files_per_source)
-        kb_pairs = _load_kernelbook_pairs(n=kb_max, max_chars=max_chars_per_file)
-    collected.append(("kernelbook", kb_pairs))
-
-    # 2c. REAL AMD MI300 passing kernels from GPUMODE/kernelbot-data (HF, use_hf
-    # only). ~60k gfx942-native competition kernels (fp8-gemm/MoE/MLA/mxfp4/...) that
-    # passed correctness on real MI300 - the highest-signal AMD-native corpus, which
-    # KernelBook (NVIDIA/Inductor Triton) does not cover.
-    amd_kernels: list[tuple[Path, str]] = []
-    if use_hf:
-        # The ~60k gfx942/MI300-native passing kernels are the HIGHEST-signal source,
-        # so pull MANY more than other sources (up-weight); the MinHash near-dedup
-        # below collapses the redundant competition submissions (many per problem)
-        # into a diverse, deduped set of real AMD kernels. The default floor (60k,
-        # scaled) captures essentially the whole set; env-tunable + scaled.
-        amd_max = _cap("KORE_MIDTRAIN_AMD_MAX",
-                       max(max_files_per_source, int(60000 * scale)))
-        amd_kernels = _load_amd_kernels(n=amd_max, max_chars=max_chars_per_file)
-    collected.append(("amd_kernels", amd_kernels))
-
-    # 3. Triton kernel Python files across the repos.
-    triton_files: list[tuple[Path, str]] = []
-    if repo_roots:
-        triton_files = _collect_files(
-            repo_roots, (".py",), max_files=max_files_per_source,
-            scan_budget=scan_budget, max_chars_per_file=max_chars_per_file,
-            content_filter=lambda t: any(m in t for m in _TRITON_MARKERS),
+        kernelbook_meta = _dataset_metadata(catalog, "GPUMODE/KernelBook")
+        amd_meta = _dataset_metadata(catalog, "GPUMODE/kernelbot-data")
+        if not kernelbook_meta or not amd_meta:
+            raise ValueError("use_hf requires verified pinned metadata for KernelBook and kernelbot-data")
+        kb_max = cap("KORE_MIDTRAIN_KERNELBOOK_MAX", max_files_per_source)
+        amd_max = cap("KORE_MIDTRAIN_AMD_MAX", max(max_files_per_source, 60000 * scale))
+        kernelbook_docs = _hf_documents(
+            _load_kernelbook_pairs(
+                kb_max,
+                max_chars_per_file,
+                revision=kernelbook_meta["revision"],
+                seed=seed + 101,
+            ),
+            "kernelbook",
+            "GPUMODE/KernelBook",
+            kernelbook_meta,
         )
-    collected.append(("triton", triton_files))
-
-    # 4. HIP / CUDA / Composable-Kernel / hipBLASLt device source (AITER / CK /
-    # hipBLASLt / rocPRIM / ...). This is the bulk AMD device-code channel; the
-    # raised default cap now lets it ingest the WHOLE local HIP+CK tree instead of
-    # truncating after the alphabetically-first repos.
-    hip_files: list[tuple[Path, str]] = []
-    if repo_roots:
-        hip_files = _collect_files(
-            repo_roots, _HIP_EXTS, max_files=max_files_per_source,
-            scan_budget=scan_budget, max_chars_per_file=max_chars_per_file,
+        amd_docs = _hf_documents(
+            _load_amd_kernels(
+                amd_max,
+                max_chars_per_file,
+                revision=amd_meta["revision"],
+                seed=seed + 102,
+            ),
+            "amd_kernels",
+            "GPUMODE/kernelbot-data",
+            amd_meta,
         )
-    collected.append(("rocm_hip", hip_files))
+    collected.append(("kernelbook", kernelbook_docs))
+    collected.append(("amd_kernels", amd_docs))
 
-    # 4b. AMD GCN/CDNA ISA assembly (``.s`` / ``.S``) - hand-written Tensile
-    # CustomKernels + other ``.amdgcn_target`` MFMA assembly. The deepest AMD-native
-    # ISA signal (real VGPR/SGPR/LDS allocation, MFMA tiling, fp8). Genuinely
-    # arch-specific text, so it is EXTERNAL (never arch-normalized). No-op when the
-    # repos contain no assembly.
-    asm_files: list[tuple[Path, str]] = []
-    if repo_roots:
-        asm_files = _collect_files(
-            repo_roots, _ASM_EXTS, max_files=max_files_per_source,
-            scan_budget=scan_budget, max_chars_per_file=max_chars_per_file,
+    for source, extensions, content_filter, scan_multiplier in (
+        ("triton", (".py",), lambda text: any(marker in text for marker in _TRITON_MARKERS), 1),
+        ("rocm_hip", _HIP_EXTS, None, 1),
+        ("amd_asm", _ASM_EXTS, None, 1),
+        ("docs", _DOC_EXTS, None, 3),
+    ):
+        docs, dropped = _collect_documents(
+            repo_roots,
+            extensions,
+            source,
+            max_files_per_source,
+            scan_budget * scan_multiplier,
+            content_filter=content_filter,
+            max_chars_per_file=max_chars_per_file,
+            policy=policy,
         )
-    collected.append(("amd_asm", asm_files))
-
-    # 5. ROCm / rocprof / CDNA / ISA / tuning docs (Markdown + reStructuredText,
-    # path/keyword-filtered). ROCm/CK/hipBLASLt/rocPRIM ship their conceptual +
-    # optimization + ISA docs largely as ``.rst`` (Sphinx), which the old .md-only
-    # pass missed; both are collected here and gated to stay a kernel/ROCm corpus.
-    doc_files: list[tuple[Path, str]] = []
-    if repo_roots:
-        doc_files = _collect_files(
-            repo_roots, _DOC_EXTS, max_files=max_files_per_source,
-            scan_budget=scan_budget * 3, max_chars_per_file=max_chars_per_file,
-            content_filter=None,
-        )
-        # Match keywords against the file's own name + nearest parent dirs (NOT
-        # the top-level repo dir, whose name - e.g. "KernelBench" - would else
-        # sweep in every markdown file). Content-sniff the head as a fallback.
-        def _doc_relevant(p: Path, t: str) -> bool:
-            tail = "/".join(part.lower() for part in p.parts[-3:])
-            if any(k in tail for k in _DOC_KEYWORDS):
-                return True
-            return any(k in t[:2000].lower() for k in _DOC_KEYWORDS)
-
-        doc_files = [(p, t) for (p, t) in doc_files if _doc_relevant(p, t)][:max_files_per_source]
-    collected.append(("docs", doc_files))
-
-    # ------------------------------------------------------------------ #
-    # SOTA quality gate (The-Stack-v2 / StarCoder2 style): drop minified,
-    # autogenerated, vendored/3rd-party, boilerplate/high-repetition, and
-    # license-only files BEFORE chunking so continued-pretraining sees clean,
-    # high-signal domain code (and real dense kernels are preserved - the gate is
-    # tuned not to reject long-line/low-comment kernels). Docs use the prose gate.
-    # Gated by KORE_MIDTRAIN_QUALITY. Applied to every source incl. the mined AMD /
-    # KernelBook sets so even those are screened for junk.
-    # ------------------------------------------------------------------ #
-    # Concept-level decontam: drop files whose PATH matches a held-out generalization
-    # op (MLA / paged-attention) across ALL repo sources so the CPT corpus never
-    # teaches the concepts the eval measures as unseen (audit THEME B/C4). Gated by
-    # KORE_MIDTRAIN_DECONTAM_CONCEPTS.
-    if os.environ.get("KORE_MIDTRAIN_DECONTAM_CONCEPTS", "1") != "0":
-        _dc: list[tuple[str, list[tuple[Path, str]]]] = []
-        _n_concept = 0
-        for source, files in collected:
-            keep = [(p, t) for (p, t) in files if not _is_heldout_concept(p)]
-            _n_concept += len(files) - len(keep)
-            _dc.append((source, keep))
-        collected = _dc
-        if _n_concept:
-            log.info("midtrain concept decontam (held-out MLA/paged)", dropped=_n_concept)
+        dropped_lineage += dropped
+        if source == "docs":
+            docs = [doc for doc in docs if _doc_relevant(doc)][:max_files_per_source]
+        collected.append((source, docs))
 
     if os.environ.get("KORE_MIDTRAIN_QUALITY", "1") != "0":
-        from kore.data.corpus_quality import quality_filter
-        _filtered: list[tuple[str, list[tuple[Path, str]]]] = []
-        _q_dropped = 0
-        for source, files in collected:
-            kept, st = quality_filter(files, is_doc=(source == "docs"))
-            _filtered.append((source, kept))
-            _q_dropped += st.get("dropped", 0)
-            if st.get("dropped", 0):
-                log.info("midtrain quality filter",
-                         source=source, kept=st["kept"], dropped=st["dropped"],
-                         reasons=st.get("drop_reasons", {}))
-        collected = _filtered
+        collected, quality_reasons = _quality_filter_documents(collected)
+    else:
+        if not development_mode:
+            raise ValueError("production midtrain may not disable source quality filtering")
+        quality_reasons = {}
 
-    # ------------------------------------------------------------------ #
-    # Chunk kernel-domain sources + dedup.
-    # ------------------------------------------------------------------ #
-    # Dedup is on normalized CONTENT only (no per-file provenance header is baked
-    # into the text), so byte-identical files collapse to one set of chunks and
-    # the ``source`` field remains the provenance channel.
-    seen: set[str] = set()
+    source_names = [source for source, _ in collected]
     rows: list[dict] = []
-    counts: dict[str, int] = {}
-    n_dropped = 0
-
-    for source, files in collected:
-        n_src = 0
-        for path, text in files:
-            for chunk in chunk_text(text, budget_chars):
-                h = _norm_hash(chunk)
-                if h in seen:
-                    n_dropped += 1
+    exact: dict[tuple[str, str], dict] = {}
+    n_dropped_exact = 0
+    for source, documents in collected:
+        for document in documents:
+            for chunk_index, chunk in enumerate(
+                chunk_text_tokens(document.text, max_tokens, tokenizer)
+            ):
+                metadata = _chunk_metadata(document, chunk, chunk_index)
+                row = {"text": chunk, "source": source, "source_metadata": metadata}
+                key = (source, _norm_hash(chunk))
+                if key in exact:
+                    n_dropped_exact += 1
+                    exact[key] = _merge_origins(exact[key], [exact[key], row])
                     continue
-                seen.add(h)
-                rows.append({"text": chunk, "source": source})
-                n_src += 1
-        counts[source] = n_src
+                exact[key] = row
+                rows.append(row)
 
-    # Near-duplicate collapse (SOTA: The-Stack-v2 MinHash-LSH, Jaccard 0.7). The
-    # exact-hash pass above only catches byte-identical chunks; this removes the
-    # token-level near-dups (forked/reformatted/renamed kernels copied across the
-    # many repos we ingest) so continued-pretraining isn't dominated by redundant
-    # copies. Applied to the kernel-domain chunks only (general replay is added
-    # below and is already deduped upstream). Gated by KORE_MIDTRAIN_NEAR_DEDUP.
+    if not rows and not development_mode:
+        raise RuntimeError(
+            "production midtrain found no verified, quality-approved source documents"
+        )
+
     n_near = 0
     if os.environ.get("KORE_MIDTRAIN_NEAR_DEDUP", "1") != "0" and len(rows) > 1:
-        # Translation-pair sources (torch<->triton) are an intentional signal whose
-        # value is the PAIRING even when the triton half also appears as raw code, so
-        # they are exempt from near-dedup; only raw-code/doc redundancy is collapsed.
-        _pair_srcs = {"pytorch_triton_pairs", "kernelbook"}
-        _dedupable = [r for r in rows if r["source"] not in _pair_srcs]
-        _kept = _near_dedup_corpus(_dedupable, threshold=0.7)
-        _kept_ids = {id(r) for r in _kept}
-        _new_rows = [r for r in rows if r["source"] in _pair_srcs or id(r) in _kept_ids]
-        n_near = len(rows) - len(_new_rows)
-        rows = _new_rows
-        if n_near:
-            kept_by_src: dict[str, int] = {}
-            for r in rows:
-                kept_by_src[r["source"]] = kept_by_src.get(r["source"], 0) + 1
-            counts = {k: kept_by_src.get(k, 0) for k in counts}
+        pair_sources = {"pytorch_triton_pairs", "kernelbook"}
+        exempt = [row for row in rows if row["source"] in pair_sources]
+        candidates = [row for row in rows if row["source"] not in pair_sources]
+        kept = _near_dedup_corpus(candidates, threshold=0.7)
+        n_near = len(candidates) - len(kept)
+        # ``_merge_origins`` may return a copied representative, so identity-based
+        # filtering would erase every deduped source channel. Source grouping is
+        # deterministic; concatenate the exempt pair channels with the kept raw
+        # channels and let final source counts reflect the actual representatives.
+        rows = exempt + kept
+    elif os.environ.get("KORE_MIDTRAIN_NEAR_DEDUP", "1") == "0" and not development_mode:
+        raise ValueError("production midtrain may not disable near dedup")
 
-    # Text-level decontamination backstop (Pillar 5): drop any chunk whose n-grams
-    # overlap the HELD-OUT reference sources OR the RETENTION eval benchmarks. The
-    # kore_tasks/pairs dir-filter above already excludes held-out KORE tasks; this also
-    # catches a held-out kernel (e.g. an MLA / paged-KV-decode impl) copied into a mined
-    # source (KernelBook / amd_kernels / repo Triton), AND -- new in R2 -- any general-
-    # replay shard that carries an eval-benchmark question (MMLU/HumanEval/...), which
-    # would otherwise train-on-test and inflate the retention gate. Safe no-op if the
-    # reference sources can't be loaded.
-    # Build the decontam n-gram set ONCE (held-out KORE kernels + the retention eval
-    # benchmarks) and reuse it for BOTH the kernel rows here AND the general-replay
-    # chunks appended later -- the replay slice (OpenCodeInstruct/OpenThoughts/tulu)
-    # is the one most likely to carry a verbatim eval question, so it MUST be
-    # decontaminated too (audit R2 midtrain I1: replay previously bypassed decontam).
-    _decontam_ng: set = set()
-    n_decontam = 0
-    if os.environ.get("KORE_DECONTAM", "1") != "0":
-        from kore.data.decontam import (build_heldout_ngrams, contaminated_by_text,
-                                        eval_benchmark_texts)
-        _eval_src = (eval_benchmark_texts()
-                     if os.environ.get("KORE_DECONTAM_EVAL_BENCH", "1") != "0" else None)
-        _decontam_ng = build_heldout_ngrams(8, extra_sources=_eval_src)
-        if _decontam_ng:
-            kept = [r for r in rows if not contaminated_by_text(r["text"], _decontam_ng, 8, 0.10)]
-            n_decontam = len(rows) - len(kept)
-            rows = kept
-            if n_decontam:
-                kept_by_src: dict[str, int] = {}
-                for r in rows:
-                    kept_by_src[r["source"]] = kept_by_src.get(r["source"], 0) + 1
-                counts = {k: kept_by_src.get(k, 0) for k in counts}
+    references = [*heldout_source_references(), *benchmark_refs]
+    holdout_index = HoldoutIndex(references, n=8, policy=policy)
+    clean_rows: list[dict] = []
+    decontam_evidence: list[dict] = []
+    for index, row in enumerate(rows):
+        metadata = row["source_metadata"]
+        match = analyze_text_contamination(
+            row["text"],
+            holdout_index,
+            metadata=metadata,
+            family=str(metadata.get("family") or ""),
+            containment_threshold=0.78,
+        )
+        if match is None:
+            clean_rows.append(row)
+        else:
+            item = match.to_dict()
+            item.update({"row_index": index, "source": row["source"]})
+            decontam_evidence.append(item)
+    rows = clean_rows
 
-    # ------------------------------------------------------------------ #
-    # Source weighting: up-weight the highest-signal channels (real MI300 AMD
-    # kernels + torch->Triton pairs) by oversampling their chunks so CPT sees
-    # them for more effective epochs than bulk repo code. Fractional factors use
-    # a seeded Bernoulli for the remainder (deterministic). Applied BEFORE replay
-    # so the ~frac general slice is preserved against the weighted kernel total.
-    # Gated by KORE_MIDTRAIN_WEIGHTING.
-    # ------------------------------------------------------------------ #
-    n_weighted = 0
     weights = _source_weights()
-    if weights and os.environ.get("KORE_MIDTRAIN_WEIGHTING", "1") != "0":
-        wrng = random.Random(seed + 7)
-        wrows: list[dict] = []
-        for r in rows:
-            w = weights.get(r["source"], 1.0)
-            reps = int(w)
-            if wrng.random() < (w - reps):
-                reps += 1
-            for _ in range(max(1, reps)):
-                wrows.append(r)
-        n_weighted = len(wrows) - len(rows)
-        rows = wrows
-        if n_weighted:
-            wc: dict[str, int] = {}
-            for r in rows:
-                wc[r["source"]] = wc.get(r["source"], 0) + 1
-            counts = {k: wc.get(k, 0) for k in counts}
-            log.info("midtrain source weighting", added=n_weighted,
-                     weights={k: v for k, v in weights.items() if v != 1.0})
-
+    before_weight = len(rows)
+    if os.environ.get("KORE_MIDTRAIN_WEIGHTING", "1") != "0":
+        rows = _weighted_rows(rows, weights, seed + 7)
+    elif not development_mode:
+        raise ValueError("production midtrain may not disable deterministic weighting")
+    n_weighted = len(rows) - before_weight
     n_kernel = len(rows)
 
-    # ------------------------------------------------------------------ #
-    # General replay: ~frac of the FINAL total (n_general = frac/(1-frac)*n_kernel).
-    # ------------------------------------------------------------------ #
-    n_general_target = 0
-    if 0.0 < frac < 1.0 and n_kernel > 0:
-        n_general_target = round(frac / (1.0 - frac) * n_kernel)
+    # Replay target is based on the weighted kernel total. Replacement requests
+    # are explicit and bounded when dedup/decontam rejects the first response.
+    n_general_target = (
+        round(fraction / (1.0 - fraction) * n_kernel)
+        if 0.0 < fraction < 1.0 and n_kernel > 0 else 0
+    )
+    if n_general_target and not development_mode and not use_hf:
+        raise ValueError(
+            "production general replay requires use_hf=True with pinned dataset metadata"
+        )
+    seen_replay = {_norm_hash(str(row["text"])) for row in rows}
+    replay_requests = 0
+    replay_replacements = 0
     n_general = 0
-    if n_general_target > 0:
-        # Distribute a SAMPLE budget across kinds; each sample yields >=1 chunk,
-        # so we collect chunks in a stable order and stop exactly at the CHUNK
-        # target (keeping the general slice at ~frac of the final total).
-        kinds = list(REPLAY_KINDS)
-        base = n_general_target // len(kinds)
-        rem = n_general_target - base * len(kinds)
-        per_kind = {k: base + (1 if i < rem else 0) for i, k in enumerate(kinds)}
-        done = False
-        for i, kind in enumerate(kinds):
-            if done:
+    kinds = list(REPLAY_KINDS)
+    base = n_general_target // len(kinds) if kinds else 0
+    remainder = n_general_target - base * len(kinds)
+    targets = {kind: base + int(index < remainder) for index, kind in enumerate(kinds)}
+    load_replay = replay_loader or load_general_replay
+
+    for kind_index, kind in enumerate(kinds):
+        target = targets[kind]
+        accepted = 0
+        for attempt in range(max(1, int(replay_replacement_attempts))):
+            remaining = target - accepted
+            if remaining <= 0:
                 break
-            want = per_kind[kind]
-            if want <= 0:
-                continue
-            replay = load_general_replay(kind, want, seed=seed + 1 + i, use_hf=use_hf)
-            for r in replay:
-                if done:
-                    break
-                text = _messages_to_text(r.get("messages", []))
+            request_n = remaining if attempt == 0 else max(remaining * 2, target)
+            replay_requests += 1
+            replay_replacements += int(attempt > 0)
+            request_seed = seed + 1 + kind_index + attempt * 1009
+            if use_hf:
+                replay = _load_pinned_replay(kind, request_n, request_seed, catalog)
+            else:
+                replay = load_replay(kind, request_n, seed=request_seed, use_hf=False)
+            for row_index, replay_row in enumerate(replay):
+                text = _messages_to_text(replay_row.get("messages", []))
                 if not text:
                     continue
-                for chunk in chunk_text(text, budget_chars):
-                    if n_general >= n_general_target:
-                        done = True
+                base_metadata = (
+                    replay_row.get("_source_metadata")
+                    or replay_row.get("source_metadata")
+                    or _development_replay_metadata(kind, text, row_index)
+                )
+                document = SourceDocument(
+                    Path(str(base_metadata.get("path") or f"replay/{kind}")),
+                    text,
+                    "general_replay",
+                    dict(base_metadata),
+                )
+                for chunk_index, chunk in enumerate(
+                    chunk_text_tokens(text, max_tokens, tokenizer)
+                ):
+                    if accepted >= target:
                         break
-                    h = _norm_hash(chunk)
-                    if h in seen:
+                    normalized_hash = _norm_hash(chunk)
+                    if normalized_hash in seen_replay:
                         continue
-                    # Decontaminate the replay slice against held-out kernels + eval
-                    # benchmarks (audit R2 midtrain I1) -- a mined general row carrying
-                    # a HumanEval/MMLU item or a held-out MLA/paged kernel is train-on-
-                    # test / leakage and must not enter CPT.
-                    if _decontam_ng:
-                        from kore.data.decontam import contaminated_by_text as _cbt
-                        if _cbt(chunk, _decontam_ng, 8, 0.10):
-                            continue
-                    seen.add(h)
-                    rows.append({"text": chunk, "source": "general_replay"})
+                    metadata = _chunk_metadata(document, chunk, chunk_index)
+                    match = analyze_text_contamination(
+                        chunk,
+                        holdout_index,
+                        metadata=metadata,
+                        containment_threshold=0.78,
+                    )
+                    if match is not None:
+                        item = match.to_dict()
+                        item.update({"source": "general_replay", "replay_kind": kind})
+                        decontam_evidence.append(item)
+                        continue
+                    seen_replay.add(normalized_hash)
+                    rows.append({
+                        "text": chunk,
+                        "source": "general_replay",
+                        "source_metadata": metadata,
+                    })
+                    accepted += 1
                     n_general += 1
-    counts["general_replay"] = n_general
 
-    # ------------------------------------------------------------------ #
-    # Write JSONL (deterministic order: kernel sources then general replay).
-    # ------------------------------------------------------------------ #
+    counts = _counts(rows, [*source_names, "general_replay"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    from kore.data.arch_normalize import normalize_text
-    with out_path.open("w", encoding="utf-8") as f:
+    with out_path.open("w", encoding="utf-8") as handle:
         for row in rows:
-            # Scrub stale non-gfx950 arch labels ONLY in KORE-authored slices
-            # (kore_tasks / pytorch_triton_pairs): that code is genuinely gfx950 but
-            # carries pre-retarget gfx942 labels, so normalizing makes CPT arch-
-            # consistent with the target. EXTERNAL repo text (triton / rocm_hip /
-            # amd_asm / docs) and the mined amd_kernels / kernelbook sets are
-            # genuinely other-hardware (real gfx942 Tensile CustomKernels, NVIDIA
-            # Inductor Triton, Hopper FP8 docs); rewriting their arch tokens would
-            # corrupt true facts (FNUZ<->OCP fp8, LDS/register limits), so they - and
-            # the arbitrary general_replay slice - are written verbatim.
-            if row.get("source") in _KORE_AUTHORED_SOURCES:
-                row = {**row, "text": normalize_text(row.get("text", ""))}
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
     total = len(rows)
-    general_frac = (n_general / total) if total else 0.0
+    reason_counts: dict[str, int] = {}
+    for item in decontam_evidence:
+        reason = str(item["reason"])
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
     report = {
         "out_path": str(out_path),
+        "build_mode": "development" if development_mode else "production",
+        "source_metadata_schema_version": SOURCE_METADATA_SCHEMA_VERSION,
         "total": total,
         "counts": counts,
-        "n_dropped_dup": n_dropped,
+        "n_dropped_dup": n_dropped_exact,
         "n_dropped_near_dup": n_near,
-        "n_dropped_decontam": n_decontam,
+        "n_dropped_decontam": len(decontam_evidence),
+        "decontam_reasons": dict(sorted(reason_counts.items())),
+        "decontam_evidence": decontam_evidence,
+        "n_dropped_source_lineage": dropped_lineage,
+        "n_excluded_unverified_sources": n_unverified,
         "n_weighted_added": n_weighted,
-        "general_frac": round(general_frac, 4),
-        "max_seq_length": int(config.max_seq_length),
-        "budget_chars": budget_chars,
-        "repo_roots": [str(r) for r in repo_roots],
+        "general_frac": round((n_general / total) if total else 0.0, 4),
+        "general_target": n_general_target,
+        "general_underfill": max(0, n_general_target - n_general),
+        "replay_requests": replay_requests,
+        "replay_replacement_requests": replay_replacements,
+        "max_seq_length": max_tokens,
+        "budget_chars": None,
+        "tokenizer": tokenizer_report,
+        "benchmark_artifact": benchmark_report,
+        "repo_roots": [str(root.path) for root in repo_roots],
+        "source_lineages": [root.lineage_id for root in repo_roots],
         "corpus_scale": scale,
         "max_files_per_source": max_files_per_source,
+        "quality_drop_reasons": quality_reasons,
     }
-    log.info("midtrain corpus built", **{
-        "out": str(out_path), "total": total, "general_frac": report["general_frac"],
-        "dropped_dup": n_dropped, "dropped_near_dup": n_near, "dropped_decontam": n_decontam,
-        **{f"n_{k}": v for k, v in counts.items()},
-    })
+    log.info(
+        "midtrain corpus built",
+        out=str(out_path),
+        mode=report["build_mode"],
+        total=total,
+        general_frac=report["general_frac"],
+        dropped_dup=n_dropped_exact,
+        dropped_near_dup=n_near,
+        dropped_decontam=len(decontam_evidence),
+        **{f"n_{key}": value for key, value in counts.items()},
+    )
     return report
+
+
+__all__ = [
+    "SOURCE_METADATA_SCHEMA_VERSION",
+    "CHARS_PER_TOKEN",
+    "SourceRoot",
+    "SourceDocument",
+    "discover_repo_roots",
+    "chunk_text",
+    "chunk_text_tokens",
+    "count_tokens",
+    "validate_source_metadata_artifact",
+    "build_midtrain_corpus",
+]

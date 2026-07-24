@@ -154,8 +154,12 @@ _COMPUTE_BOUND_FAMILIES = {"gemm", "attention", "moe"}
 # more than a bare elementwise op). Everything whose family is a *raw op name* (add,
 # mul, abs, exp, row_sum, ...) - i.e. not one of the recognised structured families -
 # is treated as trivial (near-roofline single-elementwise/reduction; lowest headroom).
-_MEMORY_BOUND_FAMILIES = {"rmsnorm", "layernorm", "quant", "softmax", "rope",
-                          "activation", "moe_router"}
+# Names are the versioned-taxonomy PRODUCT families emitted by row_family/_family_of
+# (kore.tasks.taxonomy.product_family_for_name): normalization=rmsnorm/layernorm,
+# quantization=quant, reduction=softmax, positional=rope, activation=gelu/silu/relu,
+# fusion=multi-op pointwise/projection fusion. Bare elementwise ops stay OUT -> trivial.
+_MEMORY_BOUND_FAMILIES = {"normalization", "quantization", "reduction",
+                          "positional", "activation", "fusion"}
 
 
 def op_class(row: dict) -> str:

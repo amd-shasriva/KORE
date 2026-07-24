@@ -8,6 +8,35 @@ snr_threshold: 30.0
 op_family: breadth_qx_dequant_fp8_block128
 baseline_tier: breadth
 generated: true
+shape_policy:
+  schema_version: 2
+  policy_id: outer_rows
+  status: eligible
+  enabled: true
+  source: generator:breadth_qx_dequant_fp8_block128
+  reason: explicit outer_rows transform with frozen non-target dimensions
+  transforms:
+  - name: outer_rows
+    dims:
+    - M
+    relation: independent
+    multiple: 1
+    minimum: 256
+    regimes:
+    - small
+    - large
+    - non_power_of_two
+    - row_tail
+    misalign_to: 8
+    misalign_dim: null
+    preserve_singleton: true
+  constraints:
+  - kind: divisible
+    dims:
+    - K
+    value: 128
+  authored_hidden_shapes: []
+  max_elements: 134234112
 shapes:
   minimal: {M: 256, K: 256}
   primary: {M: 4096, K: 4096}

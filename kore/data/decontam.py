@@ -218,17 +218,32 @@ def is_contaminated_record(
       * the provenance-aware policy gate (task/family/source/lineage/time cutoff).
     A record is contaminated if EITHER path flags it.
     """
-    # Authoritative taxonomy/registry verdict first.
-    try:
-        from kore.tasks.registry import is_heldout_record
-
-        if is_heldout_record(rec):
-            return True
-    except Exception:  # noqa: BLE001 - registry unavailable in minimal environments
-        pass
-
     row = _record_dict(rec)
     meta = _record_metadata(rec)
+    # Authoritative taxonomy/registry verdict -- ONLY for records that carry a task
+    # identity (a real task_id or operation). Generic corpus source text (external
+    # repos, docs, device-code files) has no task identity; routing it through the
+    # registry synthesizes a placeholder id and classifies it unclassified=eval,
+    # which would drop every legitimate midtrain/corpus source. Such text is
+    # governed solely by the provenance-aware policy gate below.
+    _prov = row.get("_provenance") if isinstance(row.get("_provenance"), Mapping) else {}
+    _identity = str(
+        row.get("task_id")
+        or meta.get("task_id")
+        or _prov.get("task_id")
+        or row.get("operation")
+        or meta.get("operation")
+        or _prov.get("op")
+        or ""
+    ).strip()
+    if _identity:
+        try:
+            from kore.tasks.registry import is_heldout_record
+
+            if is_heldout_record(rec):
+                return True
+        except Exception:  # noqa: BLE001 - registry unavailable in minimal environments
+            pass
     gate = HoldoutPolicy.coerce(policy)
     task_id = str(row.get("task_id") or meta.get("task_id") or "")
     if task_id and task_id in gate.task_ids:

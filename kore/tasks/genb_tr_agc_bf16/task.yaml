@@ -8,6 +8,31 @@ snr_threshold: 30.0
 op_family: breadth_tr_agc
 baseline_tier: breadth
 generated: true
+shape_policy:
+  schema_version: 2
+  policy_id: multi_tensor_width
+  status: eligible
+  enabled: true
+  source: generator:breadth_tr_agc
+  reason: explicit multi_tensor_width transform with frozen non-target dimensions
+  transforms:
+  - name: tensor_width
+    dims:
+    - N
+    relation: independent
+    multiple: 1
+    minimum: 256
+    regimes:
+    - small
+    - large
+    - non_power_of_two
+    - reduction_tail
+    misalign_to: 8
+    misalign_dim: null
+    preserve_singleton: true
+  constraints: []
+  authored_hidden_shapes: []
+  max_elements: 524288
 shapes:
   minimal: {G: 4, N: 256}
   primary: {G: 16, N: 4096}

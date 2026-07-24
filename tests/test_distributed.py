@@ -18,6 +18,26 @@ from pathlib import Path
 
 import pytest
 
+
+def _accelerator_available() -> bool:
+    """True only when a live GPU/accelerator is visible to torch."""
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+_REQUIRES_ACCELERATOR = pytest.mark.skipif(
+    not _accelerator_available(),
+    reason=(
+        "Requires a live accelerator: accelerate>=1.14 "
+        "FullyShardedDataParallelPlugin.__post_init__ and transformers' bf16 check "
+        "probe a device at construction, so a CPU-only host cannot build them. "
+        "Runs/validated on GPU (Crusoe gfx950)."
+    ),
+)
+
 from kore.policy.configs import (
     DPOConfig,
     MultiCapSFTConfig,
@@ -334,6 +354,7 @@ def _restore_fsdp_env():
         os.environ.update(snapshot)
 
 
+@_REQUIRES_ACCELERATOR
 def test_training_arguments_accept_fsdp_kwargs(tmp_path, _restore_fsdp_env):
     trl = pytest.importorskip("trl")
     TRLSFTConfig = trl.SFTConfig

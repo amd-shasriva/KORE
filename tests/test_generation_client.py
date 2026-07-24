@@ -196,6 +196,10 @@ def test_load_generate_requires_and_forwards_adapter_revisions(
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
     monkeypatch.setitem(sys.modules, "peft", fake_peft)
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    # Isolate from an ambient CPU-hiding mask (HIP/ROCR set to "" by CI): serve.py
+    # validates the mask and rejects an empty one. Match the vllm sibling test.
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
 
     client = load_generate(
         str(adapter),

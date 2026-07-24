@@ -8,6 +8,31 @@ snr_threshold: 30.0
 op_family: breadth_ssm_hgrn
 baseline_tier: breadth
 generated: true
+shape_policy:
+  schema_version: 2
+  policy_id: sequence_extent
+  status: eligible
+  enabled: true
+  source: generator:breadth_ssm_hgrn
+  reason: explicit sequence_extent transform with frozen non-target dimensions
+  transforms:
+  - name: sequence
+    dims:
+    - L
+    relation: independent
+    multiple: 1
+    minimum: 256
+    regimes:
+    - small
+    - large
+    - non_power_of_two
+    - sequence_tail
+    misalign_to: 8
+    misalign_dim: null
+    preserve_singleton: true
+  constraints: []
+  authored_hidden_shapes: []
+  max_elements: 134217728
 shapes:
   minimal: {B: 1, D: 64, L: 256}
   primary: {B: 2, D: 2048, L: 2048}

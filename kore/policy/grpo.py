@@ -4,12 +4,10 @@ Pure, import-safe math (group advantages, discounted turn returns, asymmetric
 "clip-higher" surrogate) lives at module top so it is unit-testable without any
 heavy deps.
 
-``train_grpo`` runs a single, self-contained multi-turn GRPO loop natively on
-local AMD GPUs (transformers + PEFT), rolling out against the verified
-:class:`KoreEnv`. There is NO external server, NO extra install, and NO config
-to run it - it works out of the box on AMD. Memory is bounded by a per-sample
-micro-batched backward, so it scales from LoRA bring-up to full-FT (FSDP via
-``scripts/launch_distributed.sh``).
+``train_grpo`` runs a self-contained, full-parameter multi-turn GRPO loop
+natively on local AMD GPUs, rolling out against the verified :class:`KoreEnv`.
+The per-sample micro-batched backward bounds activation memory; model/topology
+fit is a separate measured preflight requirement. GRPO LoRA is unsupported.
 """
 
 from __future__ import annotations
@@ -562,6 +560,103 @@ def _dense_profile_bonus(env, task, code, obs, config):
 # --------------------------------------------------------------------------- #
 # training entrypoint
 # --------------------------------------------------------------------------- #
+def _feature_runtime(config):
+    return getattr(config, "_grpo_feature_runtime", None)
+
+
+def _feature_invoked(config, feature: str, count: int = 1) -> None:
+    runtime = _feature_runtime(config)
+    if runtime is not None:
+        runtime.invoked(feature, count)
+
+
+def _assert_feature_phase(config, phase: str) -> None:
+    runtime = _feature_runtime(config)
+    if runtime is not None:
+        runtime.assert_phase(phase)
+
+
+def _budget_ledger(config):
+    runtime = _feature_runtime(config)
+    return runtime.ledger if runtime is not None else None
+
+
+def _record_generated_tokens(config, tokens: int) -> None:
+    ledger = _budget_ledger(config)
+    if ledger is not None:
+        ledger.record_generated(int(tokens))
+
+
+def _record_optimizer_tokens(config, tokens: int) -> None:
+    ledger = _budget_ledger(config)
+    if ledger is not None:
+        ledger.record_optimizer(int(tokens))
+
+
+def _record_groups(config, *, attempted: int = 0, kept: int = 0) -> None:
+    ledger = _budget_ledger(config)
+    if ledger is not None:
+        ledger.record_groups(attempted=attempted, kept=kept)
+
+
+def _write_grpo_foundations_state(output_dir, config, *, ledger=None) -> None:
+    """Persist the strict profile's ledger and exact curriculum suffix."""
+
+    runtime = _feature_runtime(config)
+    if runtime is None:
+        return
+    from pathlib import Path
+
+    out = Path(output_dir)
+    (ledger or runtime.ledger).write_json(out / "budget_ledger.json")
+    scheduler = getattr(config, "_registered_scheduler", None)
+    if scheduler is not None:
+        scheduler.save_json(out / "curriculum_state.json")
+
+
+def _build_registered_scheduler(config, tasks):
+    if getattr(config, "curriculum_mode", "legacy") != "registered_stratified":
+        return None
+    existing = getattr(config, "_registered_scheduler", None)
+    if existing is not None:
+        return existing
+    from kore.policy.curriculum import RegisteredStratifiedScheduler
+
+    state_path = getattr(config, "curriculum_state_path", None)
+    if state_path:
+        scheduler = RegisteredStratifiedScheduler.from_json(
+            list(tasks), state_path, seed=int(getattr(config, "seed", 0)))
+    else:
+        scheduler = RegisteredStratifiedScheduler(
+            list(tasks), seed=int(getattr(config, "seed", 0)))
+    setattr(config, "_registered_scheduler", scheduler)
+    return scheduler
+
+
+def _initialize_optional_features(
+        config, *, build_distill_sink: bool, activate_value: bool = True):
+    """Initialize only enabled optional modules (disabled means no call/import)."""
+
+    if activate_value and bool(getattr(config, "value_prefilter", False)):
+        _activate_value_ranker(config)
+    if build_distill_sink and getattr(config, "coevolve_distill_path", None):
+        return _build_distill_sink(config)
+    return None
+
+
+def _run_optional_search(groups, config, distill_sink, step):
+    """Do not even call the search hook when search is disabled."""
+
+    if bool(getattr(config, "use_search", False)):
+        _feature_invoked(config, "use_search")
+        if getattr(config, "search_bnb", False):
+            _feature_invoked(config, "search_bnb")
+        if getattr(config, "search_value_prior", False):
+            _feature_invoked(config, "search_value_prior")
+        return _maybe_search_then_distill(groups, config, distill_sink, step)
+    return None
+
+
 def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inprocess"):
     """Run multi-turn GRPO natively on AMD; return the output checkpoint dir (str).
 
@@ -570,34 +665,42 @@ def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inproc
     no extra install, no config. ``backend`` is accepted for back-compat and
     always routes to this native loop.
     """
+    from kore.policy.capabilities import (
+        FeatureConfigurationError,
+        apply_runtime_env,
+        emit_feature_manifest,
+        initialize_grpo_foundations,
+    )
+
+    if bool(getattr(config, "use_lora", False)):
+        raise FeatureConfigurationError(
+            "GRPO LoRA is unsupported; use_lora must be false"
+        )
+
+    strict = bool(getattr(config, "strict_feature_validation", False))
+    if strict:
+        import os as _os
+
+        runtime = {
+            "world_size": int(_os.environ.get("WORLD_SIZE", "1")),
+        }
+        feature_runtime = initialize_grpo_foundations(
+            config, list(tasks) if tasks is not None else [], runtime=runtime)
+        setattr(config, "_grpo_feature_runtime", feature_runtime)
+        _build_registered_scheduler(config, list(tasks) if tasks is not None else [])
+        rank = int(_os.environ.get("RANK", "0"))
+        if rank == 0:
+            emit_feature_manifest(feature_runtime.manifest, config.output_dir)
+            _write_grpo_foundations_state(config.output_dir, config)
+    elif hasattr(config, "validate"):
+        # Construction stays backward compatible; entering training does not.
+        config.validate()
+
+    # Only a valid config may mutate process feature bridges.  Rebuild them on
+    # every invocation so false clears stale KORE_* values from an earlier run.
+    apply_runtime_env(config)
     log.info("grpo backend: native in-process (transformers+PEFT on AMD)",
              backend=backend, model=getattr(config, "model_id", None))
-    # Bridge the reward mode to the agentic tool path (tools.ToolExecutor reads
-    # KORE_REWARD_MODE); the non-agentic _rollout reads config.reward_mode directly.
-    # This keeps both rollout paths on ONE reward setting and propagates into any
-    # accelerate-launched distributed subprocess (which inherits the environment).
-    import os as _os
-    _os.environ["KORE_REWARD_MODE"] = str(getattr(config, "reward_mode", "speedup"))
-    # Bridge the curriculum PHASE too, so the agentic tool path masks the speed term
-    # in the correctness phase exactly like the serial path (audit R2 grpo C1/C2).
-    _os.environ["KORE_REWARD_PHASE"] = str(getattr(config, "reward_phase", "all"))
-    # Paradigm-v3: bridge the frontier levers to the agentic tool path (ToolExecutor
-    # has no config handle -- it reads these from the env) and to any accelerate-
-    # launched subprocess (which inherits this environment). The GRPO template config
-    # is thus the single source of truth, so these activate WITHOUT depending on a
-    # supervisor/orchestrator restart. Anti-reward-hack Speed-of-Light gate:
-    if getattr(config, "roofline_gate", False):
-        _os.environ["KORE_ROOFLINE_GATE"] = "1"
-        _os.environ["KORE_ROOFLINE_TOL"] = str(getattr(config, "roofline_tol", 0.25))
-    # LIVE named-residual rho (per-turn rocprofv3 counters in the PBS potential):
-    if getattr(config, "physics_live_counters", False):
-        _os.environ["KORE_PHYSICS_LIVE_COUNTERS"] = "1"
-    # Self-referential open-ended minter grammar evolution (correct-by-construction):
-    if getattr(config, "coevolve_evolve_grammar", False):
-        _os.environ["KORE_MINTER_EVOLVE_GRAMMAR"] = "1"
-    # Self-extending transform action space in the agentic tool path:
-    if getattr(config, "transform_discover", False):
-        _os.environ["KORE_TRANSFORM_DISCOVER"] = "1"
     return _train_grpo_inprocess(config, tasks)
 
 
@@ -904,7 +1007,7 @@ def _truncate_prompt_ids(ids, config):
 
 
 def _save_grpo_checkpoint(model, tok, config, step):
-    """Fix 3 (save_steps): write a periodic checkpoint (never fatal on failure).
+    """Fix 3 (save_steps): write a periodic checkpoint.
 
     Keeps only the MOST RECENT periodic checkpoint (save_total_limit=1 semantics):
     a 14B model is ~56GB/ckpt, so a long GRPO run or the 2-phase curriculum would
@@ -919,12 +1022,16 @@ def _save_grpo_checkpoint(model, tok, config, step):
     try:
         model.save_pretrained(ckpt)
         tok.save_pretrained(ckpt)
+        _write_grpo_foundations_state(ckpt, config)
         log.info("grpo periodic checkpoint saved", step=step, path=ckpt)
         for old in glob.glob(os.path.join(out_dir, "checkpoint-*")):
             if os.path.isdir(old) and os.path.abspath(old) != os.path.abspath(ckpt):
                 shutil.rmtree(old, ignore_errors=True)
-    except Exception as e:  # noqa: BLE001 - a checkpoint failure must not kill training
+    except Exception as e:  # noqa: BLE001 - legacy warns; strict resume fails closed
         log.warn("grpo periodic checkpoint failed", step=step, error=repr(e))
+        if bool(getattr(config, "strict_feature_validation", False)) or bool(
+                getattr(config, "resume_state_required", False)):
+            raise
     return ckpt
 
 
@@ -1094,9 +1201,10 @@ def _train_grpo_fallback(config, tasks):
     When ``config.distributed`` full-FT is requested (``use_lora=False`` under an
     ``accelerate launch`` process group) this dispatches to
     :func:`_train_grpo_distributed`, which shards the policy's gradients +
-    optimizer state across all ranks (FSDP SHARD_GRAD_OP / ZeRO-2 by default) so a
-    14B/32B full-FT fits on 8x MI300. Every single-process / LoRA / CPU path below
-    is left byte-for-byte unchanged.
+    optimizer state across all ranks (FSDP SHARD_GRAD_OP / ZeRO-2 by default).
+    This is a topology description, not a 32B fit claim; measured resource
+    preflight remains mandatory. Single-process / CPU full-parameter runs use
+    the path below.
     """
     from kore.policy.configs import grpo_distributed_enabled
 
@@ -1117,7 +1225,7 @@ def _train_grpo_fallback(config, tasks):
     last_mean_r = None
     # Fix 4: full-FT GRPO launched distributed (distributed=True, use_lora=False)
     # must NOT use device_map="auto" - accelerate/FSDP owns placement (same as
-    # sft.py). LoRA / single-GPU / CPU runs keep the legacy device_map path.
+    # sft.py). Single-GPU / CPU full-parameter runs keep device_map="auto".
     use_fsdp = fsdp_enabled(config)
     log.info("grpo fallback: starting", model=config.model_id, total_steps=config.total_steps,
              agentic=bool(config.agentic), use_lora=bool(config.use_lora), n_tasks=len(tasks),
@@ -1126,9 +1234,9 @@ def _train_grpo_fallback(config, tasks):
              starpo_s=bool(config.starpo_s), ref_anchor_coef=config.ref_anchor_coef,
              distributed=bool(getattr(config, "distributed", False)), fsdp=bool(use_fsdp),
              bf16=bool(getattr(config, "bf16", True)), **gpu_mem_snapshot())
-    # Fix 1: install the TRAINED value model (or the logged heuristic fallback)
-    # BEFORE any rollout, so the value prefilter actually reranks with the model.
-    _activate_value_ranker(config)
+    # Optional modules are not called or imported when disabled.  This makes an
+    # off feature auditable, rather than relying on a callee to no-op.
+    _initialize_optional_features(config, build_distill_sink=False)
     tok = AutoTokenizer.from_pretrained(config.model_id)
     # SDPA (see the distributed path): flash_attention_2 hard-faults on GRPO's
     # padded generation/logp batches on ROCm; SDPA + reentrant checkpointing is safe.
@@ -1175,10 +1283,12 @@ def _train_grpo_fallback(config, tasks):
     max_attempts = getattr(config, "max_sampling_attempts", None) or (3 * target_groups if dyn else tasks_per_step)
     ppo_epochs = max(1, getattr(config, "ppo_epochs", 1))
     task_cursor = 0
+    registered_scheduler = _build_registered_scheduler(config, tasks)
 
     # ---- Open-ended verified co-evolution curriculum (optional, in-process) ---- #
     controller = None
-    distill_sink = _build_distill_sink(config)
+    distill_sink = _initialize_optional_features(
+        config, build_distill_sink=True, activate_value=False)
     if bool(getattr(config, "coevolve", False)) and tasks:
         from kore.openended.controller import CoevolutionController
         controller = CoevolutionController(
@@ -1205,7 +1315,11 @@ def _train_grpo_fallback(config, tasks):
         # internal profiling for it; the agentic path keeps the env unchanged.
         env = _make_rollout_env(task, config, serial=not config.agentic)
         G = config.num_trajectories
-        rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=seed) if config.rc_grpo else [None] * G
+        if config.rc_grpo:
+            _feature_invoked(config, "rc_grpo")
+            rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=seed)
+        else:
+            rtoks = [None] * G
         traj_scores: list[float] = []
         traj_rewards, traj_correct, traj_infra = [], [], []
         turn_inputs, turn_ref, turn_old, turn_ntok, turn_codes = [], [], [], [], []
@@ -1213,9 +1327,21 @@ def _train_grpo_fallback(config, tasks):
         traj_phis: list[list] = []
         for g in range(G):
             if config.agentic:
+                _feature_invoked(config, "agentic")
+                if getattr(config, "agentic_transform_tools", False):
+                    _feature_invoked(config, "agentic_transform_tools")
+                if getattr(config, "transform_discover", False):
+                    _feature_invoked(config, "transform_discover")
+                if getattr(config, "physics_live_counters", False):
+                    _feature_invoked(config, "physics_live_counters")
+                if getattr(config, "roofline_gate", False):
+                    _feature_invoked(config, "roofline_gate")
+                if getattr(config, "adversarial_coevolve", False):
+                    _feature_invoked(config, "adversarial_coevolve")
                 d = _rollout_agentic(model, tok, env, task, config, ref_model)
             else:
                 d = _rollout(model, tok, env, task, config, rtoks[g], ref_model)
+            _record_generated_tokens(config, sum(d.get("n_tokens", [])))
             traj_rewards.append(d["rewards"]); traj_correct.append(d["correct"])
             traj_infra.append(d["infra"]); turn_inputs.append(d["gen_inputs"])
             turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
@@ -1230,6 +1356,10 @@ def _train_grpo_fallback(config, tasks):
         # P0d + P0b: credit shaped incorrect-turn progress (not hard-zero) and densify
         # per-turn credit with the policy-invariant roofline potential (PBS). Both are
         # config-gated (defaults preserve legacy Kevin); the campaign turns them on.
+        if getattr(config, "credit_incorrect_turns", False):
+            _feature_invoked(config, "credit_incorrect_turns")
+        if float(getattr(config, "physics_shaping_weight", 0.0) or 0.0) > 0.0:
+            _feature_invoked(config, "physics_shaping")
         returns, index = build_kevin_samples(
             traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra,
             credit_incorrect=bool(getattr(config, "credit_incorrect_turns", False)),
@@ -1269,7 +1399,12 @@ def _train_grpo_fallback(config, tasks):
         # StarPO-S so a bad step no longer shrinks the update.
         def _roll(attempt):
             nonlocal task_cursor
-            if controller is not None:
+            _record_groups(config, attempted=1)
+            if registered_scheduler is not None:
+                tid = registered_scheduler.next_task_id()
+                task_obj = get_task(tid)
+            elif controller is not None:
+                _feature_invoked(config, "coevolve")
                 tid = controller.next_task_id(step, attempt)
                 task_obj = controller.resolve_task(tid)  # minted OR registered
             else:
@@ -1283,14 +1418,19 @@ def _train_grpo_fallback(config, tasks):
             if controller is not None:
                 controller.record(g["task"].task_id, g.get("solve_rate", 0.0),
                                   g.get("best_speedup"))
-            _distill_group(distill_sink, g["task"].task_id, g.get("best_speedup"),
-                           g.get("best_kernel_src"), config)
+            if distill_sink is not None:
+                _feature_invoked(config, "distillation")
+                _distill_group(distill_sink, g["task"].task_id, g.get("best_speedup"),
+                               g.get("best_kernel_src"), config)
             return g
 
+        if dyn:
+            _feature_invoked(config, "dynamic_sampling")
         groups, attempts = dynamic_sampling_refill(
             _roll, target_groups, min_std=config.starpo_min_std,
             max_attempts=max_attempts, dynamic=dyn,
             std_key=lambda g: group_reward_std(g["traj_scores"]))
+        _assert_feature_phase(config, "rollout")
         if not groups:
             print(f"[grpo] step {step}: no non-degenerate groups in {attempts} attempts; skip")
             log.info("grpo step: dynamic-sampling exhausted - skipping", step=step,
@@ -1310,13 +1450,14 @@ def _train_grpo_fallback(config, tasks):
         # Throttled, fail-safe, post-gradient: search the verified transform action
         # space from the step's best kernel and bank any faster verified kernel as an
         # off-policy distillation target (never touches the on-policy update).
-        _maybe_search_then_distill(groups, config, distill_sink, step)
+        _run_optional_search(groups, config, distill_sink, step)
 
         # ---- 1b. GTPO all-fail code-similarity shaping (item 4c) ---- #
         # For an all-fail group (no correct kernel -> Kevin returns all 0), replace
         # each sample's return with a graded partial reward = code shingle-cosine
         # similarity to the nearest correct kernel seen this step (or the seed).
         if config.gtpo_codesim:
+            _feature_invoked(config, "gtpo_codesim")
             step_refs = [k for g in groups for k in g["correct_kernels"]]
             for g in groups:
                 if g["any_correct"] or not g["samples"]:
@@ -1332,6 +1473,7 @@ def _train_grpo_fallback(config, tasks):
         # PG weight (:func:`anticollapse.scgrpo_weight_from_kl`). Guarded so a
         # failure degrades to weight 1.0 (plain PG).
         if config.sc_grpo:
+            _feature_invoked(config, "sc_grpo")
             for g in groups:
                 # partial-solve groups: at least one correct kernel to use as the
                 # demo AND at least one non-correct sample to pull toward it.
@@ -1355,6 +1497,7 @@ def _train_grpo_fallback(config, tasks):
 
         # ---- 2. StarPO-S selector: train on the highest-variance groups ---- #
         if config.starpo_s:
+            _feature_invoked(config, "starpo_s")
             keep = sorted(starpo_select_high_variance(
                 group_rewards, config.starpo_keep_frac, config.starpo_min_std))
             if not keep:
@@ -1366,6 +1509,7 @@ def _train_grpo_fallback(config, tasks):
                 continue
         else:
             keep = list(range(len(group_rewards)))
+        _record_groups(config, kept=len(keep))
         log.debug("starpo_keep", step=step, kept=len(keep), of=len(group_rewards),
                   keep_frac=config.starpo_keep_frac, indices=keep, attempts=attempts)
 
@@ -1383,6 +1527,8 @@ def _train_grpo_fallback(config, tasks):
         loss_value, n_terms, grad_norm = 0.0, 0, None
         for _epoch in range(ppo_epochs):
             opt.zero_grad()
+            if float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0:
+                _feature_invoked(config, "avspo")
             loss_value, n_terms = _accumulate_grpo_grads(
                 kept_groups, _logp_fn,
                 ref_anchor_coef=config.ref_anchor_coef,
@@ -1391,6 +1537,15 @@ def _train_grpo_fallback(config, tasks):
                 adv_eps=config.adv_eps)
             if n_terms == 0:
                 break
+            _record_optimizer_tokens(
+                config,
+                sum(
+                    max(int(_sample_field(sample, 4, 1) or 1), 1)
+                    for group in kept_groups
+                    for sample in group
+                    if _sample_field(sample, 1)
+                ),
+            )
             grad_norm = torch.nn.utils.clip_grad_norm_(trainable, config.max_grad_norm)
             opt.step()
         if n_terms == 0:
@@ -1400,6 +1555,7 @@ def _train_grpo_fallback(config, tasks):
             log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
             continue
         sched.step()  # Fix 3: advance the LR schedule once per real training step
+        _assert_feature_phase(config, "update")
         mean_r = sum(sum(g) / len(g) for g in group_rewards if g) / max(len(group_rewards), 1)
         last_mean_r = mean_r
         print(f"[grpo] step {step} kept={len(keep)}/{len(groups)} attempts={attempts} "
@@ -1442,6 +1598,7 @@ def _train_grpo_fallback(config, tasks):
     log.info("saving: full-FT weights", out=out)
     model.save_pretrained(out)
     tok.save_pretrained(out)
+    _write_grpo_foundations_state(out, config)
     log.metric("grpo_done", steps=config.total_steps, mean_reward_last=last_mean_r, out=out,
                **gpu_mem_snapshot())
     return out
@@ -1467,19 +1624,18 @@ _train_grpo_inprocess = _train_grpo_fallback
 #     per-step sample count. FSDP maps onto the recipe with zero contortion.
 #   * FSDP is torch-native -> guaranteed ROCm/gfx942 support (no compiled ops to
 #     build, unlike DeepSpeed's fused/CPU-Adam kernels).
-#   * SHARD_GRAD_OP shards the two dominant full-FT memory terms (gradients +
-#     optimizer state) across ranks so a 14B/32B full-FT fits on 8x MI300, while
-#     leaving PARAMS resident per rank (never resharded after forward) - see
-#     ``build_fsdp_plugin`` for why that is the enabler for co-located online RL.
+#   * SHARD_GRAD_OP shards gradients + optimizer state while leaving PARAMS
+#     resident per rank (never resharded after forward). This enables co-located
+#     online RL but does not establish fit for any model/hardware topology.
 # Generation: rather than generate ON the sharded policy (per-layer all-gathers
 # that interleave with ``generate``'s own collectives and deadlock on ragged
 # lengths), each step syncs the live policy weights into a PLAIN full-weight
 # per-rank replica (``summon_full_params`` + tensor copy, no forward) and rolls
 # out LOCALLY on that replica with ZERO FSDP collectives - so ``synced_gpus`` is
 # OFF and ragged decode can never deadlock. The frozen KL-anchor REFERENCE is
-# likewise a full per-rank replica (fits at 14B/32B; shard it for 70B). Cross-rank
-# rewards are all-gathered so the group-relative GRPO baseline is over the FULL
-# group (all trajectories/ranks).
+# likewise a full per-rank replica, a major memory term that must pass measured
+# preflight. Cross-rank rewards are all-gathered so the group-relative GRPO
+# baseline is over the FULL group (all trajectories/ranks).
 # --------------------------------------------------------------------------- #
 def merge_across_ranks(per_rank: list[list]) -> list:
     """Flatten a per-rank list-of-lists into one global list (rank-ordered)."""
@@ -1548,6 +1704,28 @@ def _all_gather_object(obj, accelerator=None) -> list:
     return [obj]
 
 
+def _broadcast_rank0_object(obj, accelerator=None, src: int = 0):
+    """Broadcast one rank-0 decision; never synthesize it on follower ranks."""
+
+    try:
+        import torch.distributed as dist
+    except Exception:  # noqa: BLE001 - torch-free import path
+        dist = None
+    if dist is not None and dist.is_available() and dist.is_initialized():
+        payload = [obj if dist.get_rank() == src else None]
+        dist.broadcast_object_list(payload, src=src)
+        return payload[0]
+    world = getattr(accelerator, "num_processes", 1) if accelerator is not None else 1
+    rank = getattr(accelerator, "process_index", 0) if accelerator is not None else 0
+    if world == 1:
+        if rank != src:
+            raise RuntimeError("single-process curriculum source rank is not present")
+        return obj
+    raise RuntimeError(
+        "distributed registered curriculum requires a live rank-0 broadcast group"
+    )
+
+
 def _rank_slice(n: int, rank: int, world: int) -> list[int]:
     """Indices of the ``n`` items this ``rank`` owns under a strided partition.
 
@@ -1588,11 +1766,10 @@ def build_fsdp_plugin(config):
     # LOCALLY: no per-decode all-gather, no summon_full_params, no "'weight' must be
     # 2-D", no post-reshard "embed on CPU" at the training forward, and ragged
     # per-rank trajectory counts can't deadlock. Grads + optimizer state are STILL
-    # sharded (ZeRO-2), so a 14B/32B full-FT fits on 8x MI300. (FULL_SHARD reshards
-    # params to a 1-D flat buffer between forwards, which breaks generate() and is
-    # why the online rollout could not run under ZeRO-3.) For 70B where even
-    # replicated bf16 params are too large per rank, set cpu_offload / use ZeRO-3 +
-    # a separate inference engine.
+    # sharded (ZeRO-2), reducing memory without proving topology fit. FULL_SHARD
+    # reshards params to a 1-D flat buffer between forwards, which breaks generate()
+    # and is why this co-located rollout cannot use ZeRO-3; larger topologies may
+    # require measured offload or a separate inference engine.
     # FSDP1 wants the sharding-strategy STRING; FSDP2 wants a bool (False = keep
     # params unsharded after forward). Both express ZeRO-2 (SHARD_GRAD_OP).
     reshard = False if version >= 2 else "SHARD_GRAD_OP"
@@ -1757,8 +1934,8 @@ def _summon_full_params_ctx(*models):
     un-shards the WHOLE tree on each rank: the ``embed_tokens``/``lm_head`` are
     wrapped in a nested FSDP unit here, so ``recurse=False`` would not reach them
     and the copy would see a flattened 1-D weight (``RuntimeError: 'weight' must be
-    2-D``). ``writeback=False`` since the rollout never mutates params. Non-FSDP
-    models (LoRA / single-process / DeepSpeed) get a no-op context.
+    2-D``). ``writeback=False`` since the rollout never mutates params. Unwrapped
+    single-process / DeepSpeed models get a no-op context.
     """
     import contextlib
 
@@ -1866,7 +2043,11 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
     env = _make_rollout_env(task, config, gpu=_bench_gpu, serial=not config.agentic)
     G = config.num_trajectories
     my = _rank_slice(G, rank, world)
-    rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=seed) if config.rc_grpo else [None] * G
+    if config.rc_grpo:
+        _feature_invoked(config, "rc_grpo")
+        rtoks = ac.sample_reward_tokens(G, config.rc_p_high, seed=seed)
+    else:
+        rtoks = [None] * G
 
     traj_rewards, traj_correct, traj_infra = [], [], []
     turn_inputs, turn_ref, turn_old, turn_ntok, turn_codes = [], [], [], [], []
@@ -1886,9 +2067,21 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
         # agentic turns don't desync FSDP; the caller's gather + padded backward absorb
         # the variable per-rank sample counts. Mirrors the single-process _one_group.
         if config.agentic:
+            _feature_invoked(config, "agentic")
+            if getattr(config, "agentic_transform_tools", False):
+                _feature_invoked(config, "agentic_transform_tools")
+            if getattr(config, "transform_discover", False):
+                _feature_invoked(config, "transform_discover")
+            if getattr(config, "physics_live_counters", False):
+                _feature_invoked(config, "physics_live_counters")
+            if getattr(config, "roofline_gate", False):
+                _feature_invoked(config, "roofline_gate")
+            if getattr(config, "adversarial_coevolve", False):
+                _feature_invoked(config, "adversarial_coevolve")
             d = _rollout_agentic(gen_model, tok, env, task, config, ref_model)
         else:
             d = _rollout(gen_model, tok, env, task, config, rtoks[g], ref_model)
+        _record_generated_tokens(config, sum(d.get("n_tokens", [])))
         traj_rewards.append(d["rewards"]); traj_correct.append(d["correct"])
         traj_infra.append(d["infra"]); turn_inputs.append(d["gen_inputs"])
         turn_ref.append(d["ref_logps"]); turn_old.append(d["old_logps"])
@@ -1900,6 +2093,10 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
             if config.kevin_best_kernel_scoring else (max(d["rewards"]) if d["rewards"] else 0.0))
     # P0d + P0b: same densified/policy-invariant credit as the single-process path,
     # so the two GRPO recipes stay identical (audit R2 grpo H3 divergence fix).
+    if getattr(config, "credit_incorrect_turns", False):
+        _feature_invoked(config, "credit_incorrect_turns")
+    if float(getattr(config, "physics_shaping_weight", 0.0) or 0.0) > 0.0:
+        _feature_invoked(config, "physics_shaping")
     returns, index = build_kevin_samples(
         traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra,
         credit_incorrect=bool(getattr(config, "credit_incorrect_turns", False)),
@@ -1932,9 +2129,9 @@ def _train_grpo_distributed(config, tasks):
     """Sharded FULL-PARAMETER multi-turn GRPO across an ``accelerate`` process group.
 
     The policy is sharded across all ranks (FSDP SHARD_GRAD_OP / ZeRO-2 by
-    default, DeepSpeed ZeRO-3 opt-in): gradients + optimizer state are split across
-    ranks so a 14B/32B full-FT fits on 8x MI300 (ZeRO-2 leaves params resident per
-    rank; ZeRO-3 shards them too). Per step:
+    default, DeepSpeed ZeRO-3 opt-in): gradients + optimizer state are split
+    across ranks (ZeRO-2 leaves params resident per rank; ZeRO-3 shards them too).
+    This does not establish 32B fit. Per step:
       1. the live policy weights are synced into a plain full-weight per-rank
          replica, and each rank rolls out its strided slice of every Kevin group's
          ``G`` trajectories LOCALLY on that replica (serial refinement OR agentic
@@ -1949,9 +2146,9 @@ def _train_grpo_distributed(config, tasks):
          ``accelerator.backward`` (activation memory O(1 sample)); one
          ``optimizer.step()`` per PPO epoch.
 
-    The final model is gathered to a plain checkpoint on the main process. Every
-    single-process / LoRA / CPU path is elsewhere; this function only runs under a
-    real distributed launch (``grpo_distributed_enabled``).
+    The final model is gathered to a plain checkpoint on the main process. The
+    single-process / CPU full-parameter path is elsewhere; this function only
+    runs under a real distributed launch (``grpo_distributed_enabled``).
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -1986,6 +2183,11 @@ def _train_grpo_distributed(config, tasks):
     # larger group is harmless; an unequal split is not).
     _G0 = int(config.num_trajectories)
     if world > 1 and _G0 % world != 0:
+        if bool(getattr(config, "strict_feature_validation", False)):
+            raise ValueError(
+                "strict distributed GRPO requires num_trajectories divisible "
+                f"by world_size (got {_G0}/{world})"
+            )
         _G = ((_G0 + world - 1) // world) * world
         config.num_trajectories = _G
         if is_main:
@@ -2006,7 +2208,7 @@ def _train_grpo_distributed(config, tasks):
                  "absorbed by the cross-rank gather + the max_micro-padded backward, so no "
                  "rank desyncs)", agentic=True, max_tool_turns=config.max_tool_turns)
 
-    _activate_value_ranker(config)
+    _initialize_optional_features(config, build_distill_sink=False)
     tok = AutoTokenizer.from_pretrained(config.model_id)
 
     # SDPA (not flash_attention_2) for the RL policy: GRPO does generation AND
@@ -2043,9 +2245,8 @@ def _train_grpo_distributed(config, tasks):
             # used for no-grad ref_logp forwards during the rollout; sharding it
             # would require its own summon (accelerator.prepare_model(eval) does not
             # reliably FSDP-wrap it, which left ref embed_tokens on CPU ->
-            # "index is on cuda:N, other tensors on cpu" during ref_logp). A full
-            # frozen 14B/32B fits per-rank on MI300 (bf16, no grads/optimizer). For
-            # 70B, shard the reference instead (summon it alongside the policy).
+            # "index is on cuda:N, other tensors on cpu" during ref_logp). This full
+            # per-rank reference is a preflighted memory cost, not a fit guarantee.
             ref_model = ref_model.to(accelerator.device).eval()
             for _p in ref_model.parameters():
                 _p.requires_grad_(False)
@@ -2077,13 +2278,15 @@ def _train_grpo_distributed(config, tasks):
     ppo_epochs = max(1, getattr(config, "ppo_epochs", 1))
     task_cursor = 0
     last_mean_r = None
+    registered_scheduler = _build_registered_scheduler(config, tasks)
 
     # ---- Open-ended verified co-evolution curriculum (optional, distributed) ---- #
     # Every rank builds the SAME controller (same seed + task list) and records the
     # SAME cross-rank-gathered outcomes, so task selection stays identical on all
     # ranks (a hard FSDP/ZeRO invariant: every rank must roll the same task).
     controller = None
-    distill_sink = _build_distill_sink(config) if rank == 0 else None  # rank-0 owns the file
+    distill_sink = _initialize_optional_features(
+        config, build_distill_sink=(rank == 0), activate_value=False)
     if bool(getattr(config, "coevolve", False)) and tasks:
         from kore.openended.controller import CoevolutionController
         controller = CoevolutionController(
@@ -2099,7 +2302,18 @@ def _train_grpo_distributed(config, tasks):
 
     def _roll(attempt):
         nonlocal task_cursor
-        if controller is not None:
+        if rank == 0:
+            _record_groups(config, attempted=1)
+        if registered_scheduler is not None:
+            tid = registered_scheduler.next_for_rank(
+                rank=rank,
+                world_size=world,
+                broadcast=lambda payload, src: _broadcast_rank0_object(
+                    payload, accelerator, src),
+            )
+            task = get_task(tid)
+        elif controller is not None:
+            _feature_invoked(config, "coevolve")
             tid = controller.next_task_id(step, attempt)  # deterministic -> identical on all ranks
             # Minting is seed-deterministic + the reference reconstruction is content-
             # deterministic, so every rank materializes the SAME minted task to its own
@@ -2145,6 +2359,7 @@ def _train_grpo_distributed(config, tasks):
             # Distillation is rank-0-only (owns the file); the gathered inputs are
             # identical on every rank so the chosen win is deterministic.
             if distill_sink is not None:
+                _feature_invoked(config, "distillation")
                 _distill_group(distill_sink, task.task_id, best_speedup, best_src, config)
         return {"task": task, "local": local, "full_scores": full_scores,
                 "per_rank_returns": all_returns,
@@ -2195,10 +2410,13 @@ def _train_grpo_distributed(config, tasks):
         if step == 0 and is_main:
             log.info("grpo(dist): policy->replica weight sync", synced=_n_sync, total=_n_tot)
         gen_replica.eval()
+        if dyn:
+            _feature_invoked(config, "dynamic_sampling")
         groups, attempts = dynamic_sampling_refill(
             _roll, target_groups, min_std=config.starpo_min_std,
             max_attempts=max_attempts, dynamic=dyn,
             std_key=lambda g: group_reward_std(g["full_scores"]))
+        _assert_feature_phase(config, "rollout")
         _inner.config.use_cache = False
         _inner.train()
         if _gc_on:
@@ -2223,10 +2441,11 @@ def _train_grpo_distributed(config, tasks):
         # collective timeout; other ranks simply wait at the next all-gather. Sound:
         # off-policy distillation target, never attributed to the on-policy update.
         if rank == 0:
-            _maybe_search_then_distill(groups, config, distill_sink, step)
+            _run_optional_search(groups, config, distill_sink, step)
 
         # GTPO all-fail code-sim shaping against the gathered correct kernels.
         if config.gtpo_codesim:
+            _feature_invoked(config, "gtpo_codesim")
             from kore.policy import anticollapse as ac
             step_refs = [k for g in groups for k in g["correct_kernels"]]
             for g in groups:
@@ -2242,6 +2461,7 @@ def _train_grpo_distributed(config, tasks):
         # StarPO-S: identical decision on every rank (uses gathered full scores).
         group_full_scores = [g["full_scores"] for g in groups]
         if config.starpo_s:
+            _feature_invoked(config, "starpo_s")
             keep = sorted(starpo_select_high_variance(
                 group_full_scores, config.starpo_keep_frac, config.starpo_min_std))
             if not keep:
@@ -2250,6 +2470,8 @@ def _train_grpo_distributed(config, tasks):
                 continue
         else:
             keep = list(range(len(groups)))
+        if rank == 0:
+            _record_groups(config, kept=len(keep))
 
         # Global (cross-rank) advantages per kept group -> this rank's slice.
         local_terms = []
@@ -2259,6 +2481,8 @@ def _train_grpo_distributed(config, tasks):
             g = groups[gi]
             # re-gather returns AFTER GTPO shaping so advantages see shaped returns.
             per_rank_returns = _all_gather_object(g["local"]["returns"], accelerator)
+            if float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0:
+                _feature_invoked(config, "avspo")
             per_rank_adv = distributed_group_advantages(
                 per_rank_returns, config.variance_floor, config.avspo_virtual_k, config.adv_eps)
             my_adv = per_rank_adv[rank] if rank < len(per_rank_adv) else []
@@ -2296,9 +2520,12 @@ def _train_grpo_distributed(config, tasks):
                 max_micro_steps=max_micro, ref_anchor_coef=config.ref_anchor_coef,
                 clip_ratio_low=config.clip_ratio_low, clip_ratio_high=config.clip_ratio_high,
                 tok=tok, device=accelerator.device)
+            if n_terms:
+                _record_optimizer_tokens(config, local_tokens)
             accelerator.clip_grad_norm_(model.parameters(), config.max_grad_norm)
             opt.step()
         sched.step()
+        _assert_feature_phase(config, "update")
 
         mean_r = sum(sum(s) / len(s) for s in group_full_scores if s) / max(len(group_full_scores), 1)
         last_mean_r = mean_r
@@ -2317,6 +2544,16 @@ def _train_grpo_distributed(config, tasks):
                          reason=_step_ctrl.stopped_reason, best=_step_ctrl.best)
             break
 
+    merged_budget = None
+    runtime = _feature_runtime(config)
+    if runtime is not None:
+        from kore.policy.budget import BudgetLedgerV1
+
+        budget_states = _all_gather_object(runtime.ledger.to_dict(), accelerator)
+        if is_main:
+            merged_budget = BudgetLedgerV1.merge(
+                BudgetLedgerV1.from_dict(state) for state in budget_states)
+
     # Gather the sharded weights into a plain checkpoint on the main process.
     accelerator.wait_for_everyone()
     out = config.output_dir
@@ -2326,6 +2563,7 @@ def _train_grpo_distributed(config, tasks):
         state_dict=accelerator.get_state_dict(model))
     if is_main:
         tok.save_pretrained(out)
+        _write_grpo_foundations_state(out, config, ledger=merged_budget)
         log.metric("grpo_done", steps=config.total_steps, mean_reward_last=last_mean_r,
                    out=out, backend=backend, world=world, **gpu_mem_snapshot())
     return out
@@ -2394,6 +2632,8 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
     snr_threshold = getattr(task, "snr_threshold", None)
     prefilter = bool(getattr(config, "value_prefilter", False))
     n_cand = max(1, getattr(config, "num_candidates_per_turn", 1)) if prefilter else 1
+    if prefilter:
+        _feature_invoked(config, "value_prefilter")
 
     turns: list[dict] = []
     out = {"rewards": [], "correct": [], "infra": [], "gen_inputs": [],
@@ -2440,6 +2680,8 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         for ci in bench_idx:
             seq, text, code = cands[ci]
             obs = env.step(code, full_validation=True, multi_shape=True)
+            if getattr(config, "roofline_gate", False):
+                _feature_invoked(config, "roofline_gate")
             rr = apply_reward_phase(
                 compute_kernel_reward(
                     obs, code, task,
@@ -2495,7 +2737,8 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         # rho when counters are threaded in). kevin_turn_returns reconstructs the
         # entering-state Phi(s_t) for policy-invariant PBS -- do NOT shift here.
         # Fail-safe: None on any physics gap = a shaping boundary.
-        out["phis"].append(_turn_phi(task, obs) if rr.correct else None)
+        use_phi = float(getattr(config, "physics_shaping_weight", 0.0) or 0.0) > 0.0
+        out["phis"].append(_turn_phi(task, obs) if rr.correct and use_phi else None)
         turns.append({"response": text, "feedback": build_turn_feedback(obs) + dense_fb})
     return out
 
@@ -2756,14 +2999,15 @@ def _task_prompt(task) -> str:
 # ``scripts/launch_distributed.sh grpo <config.json>`` drives FULL-PARAMETER GRPO
 # across the sharded process group. Mirrors the sft.py / dpo.py entry pattern:
 # pure-stdlib JSON parsing (NO torch at import time), heavy training only touched
-# when train_grpo actually runs. The JSON is a flat map of GRPOConfig fields with
-# an optional nested "lora" object.
+# when train_grpo actually runs. The JSON is a flat map of GRPOConfig fields; a
+# stale nested "lora" object is ignored only when ``use_lora`` remains false.
 # --------------------------------------------------------------------------- #
 def grpo_config_from_dict(d: dict):
     """Build a :class:`kore.policy.configs.GRPOConfig` from a plain dict.
 
-    A nested ``lora`` mapping is turned into a :class:`LoRAConfig`. Every other key
-    is a GRPOConfig field (``model_id``, ``distributed``, ``use_lora``,
+    A stale nested ``lora`` mapping is discarded because GRPO is full-parameter
+    only. Every other key is a GRPOConfig field (``model_id``, ``distributed``,
+    ``use_lora``,
     ``sharding_backend``, ``zero_stage``, ``cpu_offload``, ``ds_config``, the Kevin
     rollout/objective knobs, the anti-collapse ladder, ...), so the same JSON the
     campaign renders can drive ``accelerate launch``-ed full-param GRPO.
@@ -2777,7 +3021,12 @@ def grpo_config_from_dict(d: dict):
     d = dict(d)
     d.pop("tasks", None)          # handled by _main -> train_grpo(tasks=...)
     d.pop("lora", None)           # GRPO is full-FT only; ignore any stale LoRA block
-    return GRPOConfig(**d)
+    config = GRPOConfig(**d)
+    # Validation is deliberately explicit rather than __post_init__-based so old
+    # configs remain inspectable, while a launch JSON cannot enter training with
+    # unsupported LoRA or malformed budget/feature topology.
+    config.validate()
+    return config
 
 
 def _main(argv: Optional[list] = None) -> int:

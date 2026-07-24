@@ -14,6 +14,7 @@ The distributed launch configuration and the full-parameter recipes for each tra
 | `sft_14b_full.json` | SFT recipe |
 | `dpo_14b_full.json` | DPO recipe |
 | `grpo_14b_full.json` | GRPO recipe |
+| `grpo_32b_min_trustworthy.json` | Strict semantic GRPO canary profile; not a resource/launch claim |
 
 ## How a resolved config is written (`_launch_distributed`)
 
@@ -45,7 +46,7 @@ fsdp_config:
   fsdp_offload_params: false                      # 14B: keep on GPU (set true for 32B/70B)
 ```
 
-`grpo` uses `accelerate_fsdp_grpo.yaml`, identical except that it pins `SHARD_GRAD_OP` (ZeRO-2) through both `fsdp_sharding_strategy` and `fsdp_reshard_after_forward` so params stay replicated between forwards and in-loop generation runs locally on each rank (grads and optimizer state are still sharded, so a 14B full-FT still fits on 8× MI350X). Scaling is documented inline in both files: set `fsdp_offload_params: true` for 32B, add nodes (`num_machines>1`) and switch the wrap class to `LlamaDecoderLayer` for the 70B.
+`grpo` uses `accelerate_fsdp_grpo.yaml`, identical except that it pins `SHARD_GRAD_OP` (ZeRO-2) through both `fsdp_sharding_strategy` and `fsdp_reshard_after_forward` so params stay replicated between forwards and in-loop generation runs locally on each rank while gradients and optimizer state are sharded. Those settings describe mechanics, not capacity: every model/topology combination, especially 32B+, requires measured step/synchronization/save preflight.
 
 ---
 
@@ -85,6 +86,13 @@ fsdp_config:
 ```
 
 > The `zero_stage: 3` and `synced_gpus: true` fields are superseded at launch. Distributed GRPO runs ZeRO-2 (`SHARD_GRAD_OP`, set authoritatively in `accelerate_fsdp_grpo.yaml`) and rolls out against a full-weight local replica synced once per step, so `model.generate()` never triggers an FSDP all-gather. See [`kore/policy`](../kore/policy/README.md) for the FSDP notes.
+
+**`grpo_32b_min_trustworthy.json`** is a fail-closed feature and
+curriculum profile. It disables the six unaudited discovery levers and requires
+registered-task scheduling, feature-manifest equality, budget receipts, and
+first-phase canaries for provisional StarPO-S/dynamic-refill/AVSPO. It does not
+select a 32B memory topology and must not be launched based on this file alone;
+see [the profile contract](../docs/GRPO_MIN_TRUSTWORTHY.md).
 
 ### GRPO credit, search, and curriculum fields
 

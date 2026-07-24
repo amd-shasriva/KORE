@@ -25,12 +25,20 @@ set -euo pipefail
 
 # --- resolve repo root from this script's location (portable) ---------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ops_runtime.sh
+source "$SCRIPT_DIR/lib/ops_runtime.sh"
+kore_deprecated_guard \
+  "scripts/run_conductor_14b.sh" \
+  "use scripts/spur_supervise_datagen.py for production datagen and submit training through the site scheduler" \
+  "bash scripts/run_conductor_14b.sh [--dry-run]" \
+  "$@"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 # --- python: prefer the project venv, fall back to python3 ------------------
-PY="${KORE_PY:-$HOME/kore-venv/bin/python}"
-[ -x "$PY" ] || PY="$(command -v python3)"
+PY="$(kore_resolve_python "$REPO_ROOT")"
+RUNTIME="$(kore_private_runtime)"
+kore_require_commands od stat
 echo "[run_conductor] repo=$REPO_ROOT python=$PY"
 
 # Put the venv's bin on PATH so console scripts resolve to the venv - critically
@@ -43,7 +51,7 @@ export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 # Load gitignored secrets (AMD_LLM_API_KEY / AMD_NTID for the Claude teacher used
 # by the datagen + agentic stages). Exported so every stage subprocess inherits.
 if [ -f "$REPO_ROOT/.env.local" ]; then
-  set -a; . "$REPO_ROOT/.env.local"; set +a
+  kore_secure_source_env "$REPO_ROOT/.env.local"
   echo "[run_conductor] loaded .env.local (teacher creds)"
 fi
 
@@ -58,6 +66,7 @@ export KORE_COMPILE_BASELINE=1         # honest compiler-fused baseline
 export KORE_GENERAL_REPLAY_HF=1        # real SOTA replay (AMD kernels/reasoning/code)
 export KORE_BENCH_COLD=1               # cold-cache (L2-flushed) timing
 export TORCHINDUCTOR_CACHE_DIR="$REPO_ROOT/.inductor_cache"
+kore_export_rigor_env
 
 # --- ON-NODE-CALIBRATED gfx950 (MI350X) roofline peaks ----------------------
 # Measured on THIS node via `python -m kore.analysis.calibrate_peaks` (matches the
@@ -107,7 +116,10 @@ echo "[run_conductor] datagen/agentic workers=$DATAGEN_WORKERS (teacher-bound; o
 #   KORE_AGENTIC (live|synth|both) if you ever want the live rollouts.
 AGENTIC_MODE="${KORE_AGENTIC:-synth}"
 echo "[run_conductor] agentic mode=$AGENTIC_MODE (synth = CPU reconstruction, no 15-30h live rollouts)"
-exec "$PY" scripts/run_campaign.py \
+RUN_ID="${KORE_RUN_ID:-$(kore_new_run_id conductor-14b)}"
+mkdir -p runs/full/logs
+LOG="runs/full/logs/conductor_${RUN_ID}.log"
+COMMAND=("$PY" scripts/run_campaign.py \
   --model Qwen/Qwen3-14B \
   --full-ft --use-hf --teacher claude \
   --adaptive-steps \
@@ -120,4 +132,18 @@ exec "$PY" scripts/run_campaign.py \
   --dpo-out runs/full/dpo \
   --grpo-out runs/full/grpo \
   --soup-out runs/full/soup \
-  "$@"
+  "$@")
+set +e
+kore_owned_run "$PY" "$REPO_ROOT" "$RUNTIME" "$RUN_ID" "conductor-14b" "$LOG" \
+  "${COMMAND[@]}"
+rc=$?
+set -e
+if (( rc != 0 )); then
+  echo "[run_conductor] campaign failed rc=$rc run_id=$RUN_ID" >&2
+  exit "$rc"
+fi
+kore_verify "$PY" "$REPO_ROOT" campaign \
+  --repo "$REPO_ROOT" \
+  --data-root data/full14b \
+  --required-stages "$STAGES"
+echo "[run_conductor] strict completion verified run_id=$RUN_ID"

@@ -214,10 +214,11 @@ PYTHONPATH=. python scripts/run_campaign.py \
   --stages datagen,agentic,build,sft,dpo,grpo,soup,eval
 ```
 
-**Full 14B campaign (8× MI350X, FSDP, durable)** — see [below](#running-the-full-14b-campaign):
+**Production datagen (SPUR, resumable)** — see
+[`scripts/README.md`](scripts/README.md#production-datagen):
 
 ```bash
-bash scripts/tmux_campaign.sh
+python scripts/spur_supervise_datagen.py --repo "$PWD" --python "$VIRTUAL_ENV/bin/python"
 ```
 
 ---
@@ -264,18 +265,23 @@ Without a key, the launcher skips `datagen`/`agentic` (which need the teacher) a
 
 ---
 
-## Running the full 14B campaign
+## Production operations
 
-The **conductor launcher** ([`scripts/run_conductor_14b.sh`](scripts/run_conductor_14b.sh)) is path-portable (it resolves the repo root from its own location and uses the project venv) and loads `.env.local`. The **tmux wrapper** ([`scripts/tmux_campaign.sh`](scripts/tmux_campaign.sh)) runs it in a durable detached session that survives SSH drops.
+The active production datagen path is the SPUR supervisor, submitter, and array
+worker. Training should be submitted through the site's scheduler with an
+explicit allocation; `scripts/launch_distributed.sh` remains the active
+single-stage FSDP launcher inside that allocation.
 
 ```bash
-bash scripts/tmux_campaign.sh              # start (or report an existing run)
-tmux attach -t kore14b                     # watch live  (Ctrl-b then d to detach)
-tail -f runs/full/logs/campaign_*.log      # follow the log
-bash scripts/tmux_campaign.sh --status     # quick status without attaching
+python scripts/spur_supervise_datagen.py --repo "$PWD" --python "$VIRTUAL_ENV/bin/python"
+bash scripts/launch_distributed.sh sft configs/sft_14b_full.json --dry-run
 ```
 
-Full-parameter FSDP across 8 GPUs (no LoRA, no CPU offload, bf16), 16k sequence length, with verified correctness, compiled baseline, cold-cache timing, and real HF replay enabled. Datagen/agentic run at 64 teacher-bound workers. All levers are documented in [`scripts/README.md`](scripts/README.md) and [`configs/README.md`](configs/README.md).
+The old b05/SSH/dynamic-GPU/tmux/direct-14B wrappers are quarantined
+development compatibility tools. They refuse production execution unless
+`KORE_ALLOW_DEPRECATED_DEV=1` is explicitly set. Their classification and
+replacement are recorded in
+[`scripts/operations_registry.json`](scripts/operations_registry.json).
 
 ---
 
@@ -283,12 +289,14 @@ Full-parameter FSDP across 8 GPUs (no LoRA, no CPU offload, bf16), 16k sequence 
 
 The campaign writes `data/<root>/campaign_manifest.json` recording `done_stages` and real checkpoint paths. On restart, a stage is skipped only if it is in `done_stages` **and** its on-disk artifact exists (`_artifact_ok`). Datagen additionally resumes at **shard** granularity (`shard_done` skips any non-empty `{kind}/{task}.jsonl`).
 
-This makes the run robust to ephemeral nodes: files persist under your account, so if a reservation ends mid-run, re-reserve and re-launch and it continues where it stopped.
+This makes the run robust to ephemeral nodes. The scheduler should relaunch from
+the manifest and immutable shard state; wrapper-level completion additionally
+requires strict artifact verification.
 
 ```bash
-# after re-reserving the node:
-bash scripts/tmux_campaign.sh              # resumes from the manifest + shards
-# force a specific stage to re-run:
+# Inspect wiring without side effects:
+PYTHONPATH=. python scripts/run_campaign.py --dry-run
+# Force a specific stage only inside an allocated development job:
 PYTHONPATH=. python scripts/run_campaign.py --force --stages sft ...
 ```
 

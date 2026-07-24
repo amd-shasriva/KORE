@@ -53,6 +53,10 @@ def distinct_wins(path: Path) -> int:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise RuntimeError(f"invalid JSONL {path}:{line_no}: {exc}") from exc
+            if not isinstance(record, dict):
+                continue
+            if not str(record.get("final_source", "") or "").strip():
+                continue
             seen.add(_canonical_hash(record))
     return len(seen)
 

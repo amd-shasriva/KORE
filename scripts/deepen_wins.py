@@ -49,8 +49,20 @@ def _load_existing(path: Path):
         recs = read_jsonl(path, typed=False)
     except Exception:
         return [], set()
-    seen = {_src_hash(r.get("final_source", "")) for r in recs if isinstance(r, dict)}
-    return recs, seen
+    distinct = []
+    seen = set()
+    for record in recs:
+        if not isinstance(record, dict):
+            continue
+        source = str(record.get("final_source", "") or "").strip()
+        if not source:
+            continue
+        key = _src_hash(source)
+        if key in seen:
+            continue
+        seen.add(key)
+        distinct.append(record)
+    return distinct, seen
 
 
 def _checkpoint(path: Path, existing: list, added: list) -> None:
@@ -153,6 +165,7 @@ def main():
     a = ap.parse_args()
 
     import multiprocessing as mp
+    import queue
     from kore.tasks.registry import train_tasks
 
     gpu_ids = [int(x) for x in a.gpu_ids.split(",") if x != ""]
@@ -181,9 +194,25 @@ def main():
         p.start()
         procs.append(p)
 
-    done = total_added = finished = skipped = 0
+    done = total_added = finished = skipped = partials = errors = 0
+    worker_failures = 0
     while finished < n_workers:
-        item = result_q.get()
+        try:
+            item = result_q.get(timeout=30)
+        except queue.Empty:
+            failed = [p for p in procs if p.exitcode not in (None, 0)]
+            if not failed:
+                continue
+            worker_failures += len(failed)
+            print(
+                "[deepen] FATAL worker exit(s): "
+                + ", ".join(f"pid={p.pid} rc={p.exitcode}" for p in failed),
+                flush=True,
+            )
+            for p in procs:
+                if p.is_alive():
+                    p.terminate()
+            break
         if item is None:
             finished += 1
             continue
@@ -192,12 +221,29 @@ def main():
         total_added += (added or 0)
         if st == "skip":
             skipped += 1
+        elif st == "partial":
+            partials += 1
+        elif st == "error":
+            errors += 1
         if done % 25 == 0:
             print(f"[deepen] progress {done}/{len(tasks)} (+{total_added} wins, {skipped} already-at-target)", flush=True)
     for p in procs:
-        p.join()
-    print(f"[deepen] COMPLETE: {done} tasks, +{total_added} new wins, {skipped} skipped", flush=True)
+        p.join(timeout=10)
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=5)
+    print(
+        f"[deepen] COMPLETE: {done} tasks, +{total_added} new wins, "
+        f"{skipped} skipped, {partials} partial, {errors} errors, "
+        f"{worker_failures} worker failures",
+        flush=True,
+    )
+    if errors or worker_failures:
+        return 2
+    if partials:
+        return 3
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

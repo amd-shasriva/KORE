@@ -27,9 +27,9 @@ SHARD_DIR="${1:?arg1 must be the absolute shard directory}"
 DATA_ROOT="${2:-$REPO/data/b05factory}"
 TARGET="${3:-3}"
 MODE="${4:-run}"
-DEEP_WORKERS="${KORE_DEEP_WORKERS:-72}"
-DEEP_ONLY_WORKERS="${KORE_DEEP_ONLY_WORKERS:-88}"
-BASE_WORKERS="${KORE_BASE_WORKERS:-16}"
+DEEP_WORKERS="${KORE_DEEP_WORKERS:-48}"
+DEEP_ONLY_WORKERS="${KORE_DEEP_ONLY_WORKERS:-48}"
+BASE_WORKERS="${KORE_BASE_WORKERS:-32}"
 GENS="${KORE_WINS_GENS:-8}"
 ARRAY_ID="${SLURM_ARRAY_TASK_ID:?must be submitted as a Slurm array}"
 
@@ -46,6 +46,14 @@ set -a
 source "$REPO/.env.local"
 set +a
 
+# Fail closed: SPUR partial-GPU allocations mount unusable device subsets. Every
+# production child must see all eight MI355X devices before masks are remapped.
+VISIBLE_GPUS="$("$PY" -c 'import torch; print(torch.cuda.device_count())')"
+if [[ "$VISIBLE_GPUS" != "8" ]]; then
+    echo "[spur-worker] FATAL expected 8 GPUs, found $VISIBLE_GPUS" >&2
+    exit 2
+fi
+
 # SPUR's full-node GRES bind-mounts all eight render devices. Drop its physical
 # ROCR list before KORE's workers apply one logical HIP mask each; combining both
 # masks makes verifier children report hipErrorNoDevice.
@@ -61,8 +69,8 @@ export OPENBLAS_NUM_THREADS=2
 export OMP_NUM_THREADS=2
 export MKL_NUM_THREADS=2
 export NUMEXPR_NUM_THREADS=2
-export TORCHINDUCTOR_COMPILE_THREADS=4
-export MAX_JOBS=4
+export TORCHINDUCTOR_COMPILE_THREADS=2
+export MAX_JOBS=2
 
 # Node-local compile/temp state prevents NFS cache contention. Only atomic dataset
 # shards and logs go to shared /home, so preemption never loses completed tasks.
@@ -88,7 +96,9 @@ terminate_children() {
 trap terminate_children TERM INT
 
 echo "[spur-worker] START job=$SLURM_JOB_ID array=$ARRAY_ID host=$(hostname) shard=$IDX"
-echo "[spur-worker] deep_tasks=$([ -n "$DEEP_TASKS" ] && tr ',' '\n' <<<"$DEEP_TASKS" | wc -l || echo 0) base_tasks=$([ -n "$BASE_TASKS" ] && tr ',' '\n' <<<"$BASE_TASKS" | wc -l || echo 0)"
+DEEP_COUNT="$([ -n "$DEEP_TASKS" ] && awk -F, '{print NF}' <<<"$DEEP_TASKS" || echo 0)"
+BASE_COUNT="$([ -n "$BASE_TASKS" ] && awk -F, '{print NF}' <<<"$BASE_TASKS" || echo 0)"
+echo "[spur-worker] deep_tasks=$DEEP_COUNT base_tasks=$BASE_COUNT"
 echo "[spur-worker] shard_dir=$SHARD_DIR data_root=$DATA_ROOT target=$TARGET mode=$MODE"
 
 if [[ "$MODE" == "probe" ]]; then
@@ -97,11 +107,13 @@ if [[ "$MODE" == "probe" ]]; then
 fi
 
 if [[ -n "$BASE_TASKS" ]]; then
+    N_BASE="$BASE_WORKERS"
+    ((N_BASE > BASE_COUNT)) && N_BASE="$BASE_COUNT"
     KORE_RUNS_DIR="$LOCAL_ROOT/replay/base" "$PY" scripts/complete_base.py \
         --data-root "$DATA_ROOT" \
         --tasks "$BASE_TASKS" \
         --gpu-ids 0,1,2,3,4,5,6,7 \
-        --workers "$BASE_WORKERS" \
+        --workers "$N_BASE" \
         --n-repair 50 --n-parents 20 --k 6 \
         >"$BASE_LOG" 2>&1 &
     PIDS+=("$!")
@@ -114,6 +126,7 @@ if [[ -n "$DEEP_TASKS" ]]; then
     else
         N_DEEP="$DEEP_ONLY_WORKERS"
     fi
+    ((N_DEEP > DEEP_COUNT)) && N_DEEP="$DEEP_COUNT"
     KORE_RUNS_DIR="$LOCAL_ROOT/replay/deepen" "$PY" scripts/deepen_wins.py \
         --data-root "$DATA_ROOT" \
         --tasks "$DEEP_TASKS" \

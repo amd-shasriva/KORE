@@ -31,6 +31,8 @@ def test_distinct_wins_deduplicates_kernel_source(tmp_path):
         {"task_id": "x", "final_source": "same"},
         {"task_id": "x", "final_source": "same", "speedup": 2.0},
         {"task_id": "x", "final_source": "different"},
+        {"task_id": "x", "final_source": ""},
+        {"task_id": "x", "type": "win"},
     ]
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
 

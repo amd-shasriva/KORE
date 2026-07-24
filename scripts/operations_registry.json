@@ -277,6 +277,12 @@
       "classification": "destructive",
       "lifecycle": "active",
       "role": "dry-run-first JSONL shard migration CLI (writes gated behind --apply)"
+    },
+    {
+      "path": "scripts/spur_gpu_smoke.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "one-node gfx950 GPU smoke validating the merged verifier/reward + genb seeds + accelerator-gated tests"
     }
   ]
 }

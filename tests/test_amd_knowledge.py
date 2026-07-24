@@ -72,7 +72,13 @@ def test_ledger_note_passthrough():
 # Tier 2: bottleneck feedback mapping
 # --------------------------------------------------------------------------- #
 def test_bottleneck_feedback_maps_labels():
-    nomc = _bottleneck_feedback({"SQ_INSTS_VALU": 1000, "SQ_INSTS_VMEM": 10})
+    # "no matrix cores" is sound only when the MFMA counter was collected and is
+    # explicitly zero; absence is unavailable, not zero.
+    nomc = _bottleneck_feedback({
+        "SQ_INSTS_VALU": 1000,
+        "SQ_INSTS_VMEM": 10,
+        "SQ_INSTS_VALU_MFMA_MOPS_BF16": 0,
+    })
     assert "no-matrix-cores" in nomc and "tl.dot" in nomc
     mem = _bottleneck_feedback({"SQ_WAIT_INST_VMEM": 90, "SQ_WAIT_INST_ANY": 100})
     assert "memory-bound" in mem and "128-bit" in mem
@@ -85,7 +91,11 @@ def test_feedback_appends_bottleneck_only_when_correct_and_profiled():
                      dtype="bf16")
     rr = compute_reward(ok, "def k():\n    return 0", dtype="bf16")
     assert "HARDWARE COUNTERS" not in _feedback(ok, rr)
-    withc = _feedback(ok, rr, counters={"SQ_INSTS_VALU": 1000, "SQ_INSTS_VMEM": 10})
+    withc = _feedback(ok, rr, counters={
+        "SQ_INSTS_VALU": 1000,
+        "SQ_INSTS_VMEM": 10,
+        "SQ_INSTS_VALU_MFMA_MOPS_BF16": 0,
+    })
     assert "HARDWARE COUNTERS" in withc and "tl.dot" in withc
 
 

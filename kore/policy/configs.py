@@ -362,22 +362,25 @@ class GRPOConfig(DistributedMixin):
     # scales the residual credit on the correct tier.
     reward_mode: str = "speedup"
     physics_weight: float = 1.0
+    # One explicit, fingerprinted model is shared by online reward, integrity,
+    # P0, and reports. Calibration files must identify architecture, exact SKU,
+    # runtime stack, and calibrated units; legacy KORE_PEAK_* globals are rejected.
+    physics_sku: str = "mi350x"
+    physics_calibration_path: Optional[str] = None
+    physics_model_fingerprint: Optional[str] = None
 
     # --- Paradigm-v2 credit assignment (P0d + P0b) ---
     # credit_incorrect_turns: feed an INCORRECT turn's shaped progress reward (bounded
     # sub-threshold SNR + format signal, always < correctness_weight) into the Kevin
     # per-turn return instead of hard-zeroing it -- densifies the gradient in the
     # deceptive not-yet-correct band while keeping correctness lexicographically
-    # dominant. physics_shaping_weight: weight on the potential-based shaping
-    # F_t = gamma*Phi(s_{t+1}) - Phi(s_t) with Phi = roofline attainment
-    # (kore.reward.whitebox.phi_potential; online the PMC-free eta, since rollout
-    # sites call it without counters -- the named-residual rho is offline-only). By
-    # Ng-Harada-Russell this is only APPROXIMATELY policy-invariant here (the offset
-    # feeds GRPO's std-normalized group-relative advantage; a correct->incorrect
-    # boundary leaves a small bounded ~0.06 leak) -- an expected-gradient-neutral
-    # state-dependent baseline. The anti-hack spine is the correctness gate, not this.
+    # dominant. Physics shaping remains disabled unless a fingerprint-pinned P0
+    # artifact says that THIS family passed normalized, task-cluster-held-out,
+    # permutation-corrected tests under the exact same physical model.
     credit_incorrect_turns: bool = False
     physics_shaping_weight: float = 0.0
+    physics_shaping_evidence_path: Optional[str] = None
+    physics_shaping_evidence_fingerprint: Optional[str] = None
 
     # --- Paradigm-v2 test-time search (P1b AlphaKernel) ---
     # use_search: at inference, run value-guided best-first search over kernel
@@ -410,10 +413,8 @@ class GRPOConfig(DistributedMixin):
     # read from KORE_ROOFLINE_GATE in the agentic tool path (ToolExecutor has no config).
     roofline_gate: bool = False
     roofline_tol: float = 0.25
-    # physics_live_counters: thread per-turn rocprofv3 counters into the PBS potential so
-    # Phi is the R^2~0.98 named-residual rho (not the PMC-free eta). Serial path reuses
-    # the dense-profile counters (free); the agentic path reads KORE_PHYSICS_LIVE_COUNTERS
-    # and profiles the benched-correct kernel (extra rocprofv3 cost -> deliberate opt-in).
+    # physics_live_counters only controls counter collection. Counters cannot
+    # authorize shaping without the family evidence gate above.
     physics_live_counters: bool = False
     # transform_discover: merge SNR-gated discovered rewrites (kore.transform.discover)
     # into the search action space. Off -> curated library only.

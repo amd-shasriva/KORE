@@ -117,18 +117,16 @@ per-trajectory `(rewards, correct, infra, phis)` traces through the same
 - `credit_incorrect_turns` - an incorrect turn keeps its bounded shaped
   SNR-progress reward (below `correctness_weight`) instead of a hard zero, so the
   gradient is not flat across the not-yet-correct band; and
-- `physics_shaping_weight` - the roofline-attainment potential `Φ(s)`
-  (`kore.reward.whitebox.phi_potential`; online `Φ = η = T_min/T_measured`) is
-  added as a Ng-Harada-Russell potential-based-shaping term
-  `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` (`kore.reward.shaping`), an
-  expected-gradient-neutral state-dependent baseline that densifies per-turn
-  credit toward the roofline.
+- `physics_shaping_weight` - an evidence-gated potential term. It is forced to
+  zero unless the run pins a P0 evidence artifact and that artifact passes for
+  the task family under the same physical-model fingerprint.
 
 Both travel in the resolved GRPO JSON (`credit_incorrect_turns=true`,
-`physics_shaping_weight=0.15` in `configs/grpo_14b_full.json`), so switching
+`physics_shaping_weight=0` in `configs/grpo_14b_full.json`), so switching
 between the single-GPU LoRA bring-up and the sharded full-FT run does **not**
-change the credit assignment - only the sharding does. (The sharded path applies
-this credit per-rank on that rank's trajectory slice; the group-relative
+change the credit assignment - only the sharding does. No family currently
+passes the controlled P0 gate. (The sharded path applies any future authorized
+credit per-rank on that rank's trajectory slice; the group-relative
 advantage baseline is then computed over the all-gathered full group.)
 
 ### Example training config (`configs/sft_14b_full.json`, as actually shipped)

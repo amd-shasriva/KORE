@@ -421,11 +421,19 @@ def _dense_profile_weight(config) -> float:
     env-profiling-disable below all consult it.
     """
     candidates = [getattr(config, "profile_reward_weight", None)]
+    evidence_path = getattr(config, "physics_shaping_evidence_path", None)
+    evidence_fingerprint = getattr(config, "physics_shaping_evidence_fingerprint", None)
     try:
         from kore.config import CONFIG
         candidates.append(getattr(CONFIG, "profile_reward_weight", None))
+        evidence_path = evidence_path or getattr(CONFIG, "physics_shaping_evidence_path", None)
+        evidence_fingerprint = evidence_fingerprint or getattr(
+            CONFIG, "physics_shaping_evidence_fingerprint", None)
     except Exception:  # noqa: BLE001 - config import must never break a rollout
         pass
+    # Counter diagnostics are always available, but empirical shaping is not.
+    if not evidence_path or not evidence_fingerprint:
+        return 0.0
     for w in candidates:
         try:
             w = float(w)
@@ -439,6 +447,21 @@ def _dense_profile_weight(config) -> float:
     except (TypeError, ValueError):
         return 0.0
     return w if w > 0.0 else 0.0
+
+
+def _physics_shaping_weight(config) -> float:
+    """Nonzero only with a fingerprint-pinned family evidence artifact."""
+    try:
+        weight = float(getattr(config, "physics_shaping_weight", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(weight) or weight <= 0.0:
+        return 0.0
+    if not getattr(config, "physics_shaping_evidence_path", None):
+        return 0.0
+    if not getattr(config, "physics_shaping_evidence_fingerprint", None):
+        return 0.0
+    return weight
 
 
 def _make_rollout_env(task, config=None, gpu=None, serial=True):
@@ -505,9 +528,16 @@ def _dense_profile_bonus(env, task, code, obs, config):
         return 0.0, ""
     try:
         from kore.analysis.roofline import (
-            attained_fraction, bottleneck_from_counters, op_flop_bytes,
+            attained_fraction, bottleneck_from_counters, estimate_work,
         )
+        from kore.reward.physics import model_from_config
         from kore.reward.profile_reward import roofline_dense_score
+        from kore.reward.shaping import evidence_for_task
+
+        model = model_from_config(config)
+        evidence = evidence_for_task(task, config, model.fingerprint)
+        if evidence is None:
+            return 0.0, ""
 
         collect = getattr(env, "collect_counters", None)
         counters = collect(code) if callable(collect) else None
@@ -520,22 +550,20 @@ def _dense_profile_bonus(env, task, code, obs, config):
         if sh is None:
             shapes = getattr(task, "shapes", None) or []
             sh = shapes[0] if shapes else None
-        flops = byts = None
+        work = None
         dims = getattr(sh, "dims", None) if sh is not None else None
         if dims:
-            fb = op_flop_bytes(getattr(task, "operation", ""), dims,
-                               getattr(task, "dtype", "bf16"))
-            if fb:
-                flops, byts = fb
+            work = estimate_work(getattr(task, "operation", ""), dims,
+                                 getattr(task, "dtype", "bf16"))
 
         measured = getattr(obs, "wall_ms", None)
         if measured is None:
             wbs = getattr(obs, "wall_by_shape", None) or {}
             measured = max(wbs.values()) if wbs else None
 
-        score = roofline_dense_score(counters, flops=flops, bytes=byts,
-                                     measured_ms=measured,
-                                     dtype=getattr(task, "dtype", "bf16"))
+        score = roofline_dense_score(
+            counters, work=work, model=model, measured_ms=measured,
+            dtype=getattr(task, "dtype", "bf16"))
         dense = weight * max(0.0, min(1.0, score)) if score is not None else 0.0
 
         # Counter-driven diagnosis for the turn feedback (teach counter reading).
@@ -543,12 +571,16 @@ def _dense_profile_bonus(env, task, code, obs, config):
         if counters:
             label, evidence = bottleneck_from_counters(
                 counters, vgpr=counters.get("vgpr_count"),
-                lds=counters.get("lds_bytes"), num_warps=counters.get("num_warps"))
+                lds=counters.get("lds_bytes"), num_warps=counters.get("num_warps"),
+                model=model)
             parts.append(f"bottleneck={label} - {evidence}")
-        if flops and measured:
-            pct = attained_fraction(measured, flops, byts or 0.0,
-                                    getattr(task, "dtype", "bf16"))
-            parts.append(f"roofline attainment {pct:.1f}% of MI300X peak")
+        if work is not None and measured:
+            pct = attained_fraction(
+                measured, work.flops, work.bytes, work.dtype, model)
+            if pct is not None:
+                parts.append(
+                    f"roofline attainment {pct:.1f}% of {model.sku} "
+                    f"({model.fingerprint})")
         if dense > 0.0:
             parts.append(f"dense efficiency reward +{dense:.4f}")
         fb_txt = ("\nHARDWARE COUNTERS (rocprofv3): " + "; ".join(parts) +
@@ -590,8 +622,13 @@ def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inproc
         _os.environ["KORE_ROOFLINE_GATE"] = "1"
         _os.environ["KORE_ROOFLINE_TOL"] = str(getattr(config, "roofline_tol", 0.25))
     # LIVE named-residual rho (per-turn rocprofv3 counters in the PBS potential):
-    if getattr(config, "physics_live_counters", False):
+    if (
+        getattr(config, "physics_live_counters", False)
+        and _physics_shaping_weight(config) > 0.0
+    ):
         _os.environ["KORE_PHYSICS_LIVE_COUNTERS"] = "1"
+    else:
+        _os.environ.pop("KORE_PHYSICS_LIVE_COUNTERS", None)
     # Self-referential open-ended minter grammar evolution (correct-by-construction):
     if getattr(config, "coevolve_evolve_grammar", False):
         _os.environ["KORE_MINTER_EVOLVE_GRAMMAR"] = "1"
@@ -1234,7 +1271,7 @@ def _train_grpo_fallback(config, tasks):
             traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra,
             credit_incorrect=bool(getattr(config, "credit_incorrect_turns", False)),
             traj_phis=traj_phis,
-            phi_weight=float(getattr(config, "physics_shaping_weight", 0.0)))
+            phi_weight=_physics_shaping_weight(config))
         samples, codes = [], []
         for (ti, tu), ret in zip(index, returns):
             samples.append([ret, turn_inputs[ti][tu], turn_ref[ti][tu],
@@ -1904,7 +1941,7 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
         traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra,
         credit_incorrect=bool(getattr(config, "credit_incorrect_turns", False)),
         traj_phis=traj_phis,
-        phi_weight=float(getattr(config, "physics_shaping_weight", 0.0)))
+        phi_weight=_physics_shaping_weight(config))
     samples, codes = [], []
     for (ti, tu), ret in zip(index, returns):
         samples.append([ret, turn_inputs[ti][tu], turn_ref[ti][tu],
@@ -2385,13 +2422,14 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
 
     from kore.policy import anticollapse as ac
     from kore.policy.format import build_transcript, parse_response, build_turn_feedback
-    from kore.reward.physics import compute_kernel_reward
+    from kore.reward.physics import compute_kernel_reward, model_from_config
 
     prompt = _task_prompt(task)
     if reward_token:
         prompt = ac.prepend_reward_token(prompt, reward_token)
 
     snr_threshold = getattr(task, "snr_threshold", None)
+    physical_model = model_from_config(config)
     prefilter = bool(getattr(config, "value_prefilter", False))
     n_cand = max(1, getattr(config, "num_candidates_per_turn", 1)) if prefilter else 1
 
@@ -2447,7 +2485,8 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
                     dtype=task.dtype, snr_threshold=snr_threshold,
                     physics_weight=getattr(config, "physics_weight", 1.0),
                     roofline_gate=getattr(config, "roofline_gate", False),
-                    roofline_tol=getattr(config, "roofline_tol", 0.25)),
+                    roofline_tol=getattr(config, "roofline_tol", 0.25),
+                    model=physical_model, physics_config=config),
                 config)
             if best is None or (bool(rr.correct), rr.reward) > (bool(best[4].correct), best[4].reward):
                 best = (seq, text, code, obs, rr)
@@ -2495,7 +2534,7 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
         # rho when counters are threaded in). kevin_turn_returns reconstructs the
         # entering-state Phi(s_t) for policy-invariant PBS -- do NOT shift here.
         # Fail-safe: None on any physics gap = a shaping boundary.
-        out["phis"].append(_turn_phi(task, obs) if rr.correct else None)
+        out["phis"].append(_turn_phi(task, obs, config=config) if rr.correct else None)
         turns.append({"response": text, "feedback": build_turn_feedback(obs) + dense_fb})
     return out
 
@@ -2583,17 +2622,21 @@ def _rollout_agentic(model, tok, env, task, config, ref_model=None):
     return out
 
 
-def _turn_phi(task, obs, counters=None):
-    """Fail-safe roofline potential ``Phi(s) = rho`` (named-residual attainment when
-    ``counters`` are present, else the eta fallback) for potential-based shaping.
-
-    Returns None on any physics/roofline gap -- a PBS shaping boundary that
-    contributes no (fabricated) credit. Never raises, so it can be called inline in
-    the rollout without a correctness/robustness risk.
-    """
+def _turn_phi(task, obs, counters=None, config=None):
+    """Evidence-gated finite potential, or a shaping boundary."""
     try:
+        from kore.reward.physics import model_from_config
+        from kore.reward.shaping import evidence_for_task
         from kore.reward.whitebox import phi_potential
-        return phi_potential(task, obs, counters)
+
+        if config is None or _physics_shaping_weight(config) <= 0.0:
+            return None
+        model = model_from_config(config)
+        evidence = evidence_for_task(task, config, model.fingerprint)
+        if evidence is None:
+            return None
+        return phi_potential(
+            task, obs, counters, model=model, evidence=evidence)
     except Exception:  # noqa: BLE001 - physics is a bonus, never a hard dependency
         return None
 

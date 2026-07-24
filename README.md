@@ -2,7 +2,7 @@
 
 **Kernel-Optimization Reinforcement Learning for AMD GPUs.**
 
-KORE trains a language model to write fast, provably-correct ROCm/Triton GPU kernels for AMD Instinct MI350X silicon (gfx950 / CDNA4). Every kernel the model proposes is compiled, checked against an adversarial + metamorphic correctness oracle, and timed cold-cache against production vendor libraries (AITER / hipBLASLt). The training signal is a high-contrast, vendor-relative speedup that is only awarded once correctness is proven, and the hardware's physical performance limit — each operator's Speed-of-Light roofline — enters credit assignment as a shaping potential that densifies per-turn progress toward that limit.
+KORE trains a language model to write fast, provably-correct ROCm/Triton GPU kernels for AMD Instinct MI350X silicon (gfx950 / CDNA4). Every kernel the model proposes is compiled, checked against an adversarial + metamorphic correctness oracle, and timed cold-cache against production vendor libraries (AITER / hipBLASLt). The active training signal is a high-contrast, vendor-relative speedup awarded only after correctness. A fingerprinted roofline model is used conservatively for physical-integrity checks; empirical roofline/counter shaping is disabled because the controlled P0 reanalysis did not pass held-out validation.
 
 The result is a training pipeline in which correctness is non-negotiable and speed is physically meaningful: the reward cannot be farmed with a weak baseline, a timing hack, or a lucky pass on random inputs, and the model learns to optimize kernels the way an expert does — propose, measure on real hardware, and refine.
 
@@ -33,7 +33,7 @@ Kernel-generation systems typically reward relative speedup against a reference 
 
 - **Correctness is proven, not sampled.** Each kernel passes a four-pronged oracle — random, adversarial (deterministic edge regimes), metamorphic (algebraic self-consistency), and determinism — so a kernel that is wrong on any enumerated regime is rejected with certainty.
 - **Speed is measured against production baselines.** Timing is cold-cache (L2-flushed) against the vendor kernels a practitioner would actually use (AITER / hipBLASLt), compiled and warmed identically, so a reported speedup reflects a real win over the state of practice.
-- **Progress is anchored to physics.** Every operator has a roofline lower bound set by compute peak and memory bandwidth. KORE measures attainment against that bound and uses it to shape credit, giving the policy a dense, hardware-grounded gradient across the wide "correct-but-slow" region where raw speedup differences are flat.
+- **Physics is an integrity boundary.** Supported operators have a unit-checked roofline lower bound under an explicit SKU/model fingerprint. It can reject physically impossible timing; it does not shape reward without family-specific held-out evidence.
 
 KORE targets gfx950 / MI350X / CDNA4 end to end — the roofline peaks, PMC counter sets, vendor baselines, and compiler paths are all specific to CDNA4 — and holds out structurally distinct operator families to measure genuine cross-family generalization rather than in-distribution recall.
 
@@ -57,13 +57,12 @@ T_min = max( W_flops / P_peak ,  Q_bytes / B_peak )
 The removable runtime above the floor decomposes into *named* hardware inefficiencies read from rocprofv3 performance counters (`kore/reward/physics.py`, `kore/reward/whitebox.py`):
 
 ```
-T_measured = T_min + R                          R = removable residual
-named residual   N = (stall_frac + occupancy_deficit) · T_measured
-ρ = T_min / (T_min + N)                          counter-grounded attainment (rocprofv3 PMC)
-η = T_min / T_measured                           online potential;  η ≤ ρ ≤ 1
+T_measured = T_min + R
+normalized gap = R / T_measured
+η = T_min / T_measured                           diagnostic attainment
 ```
 
-The named residual `ρ` is the counter-grounded refinement of attainment and reconstructs the runtime residual with R² ≈ 0.98 on gfx950 (see [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md)); `η` is the PMC-free potential used online. Because the residual is dense within an operator family, KORE trains on the per-family signal rather than assuming a single residual latent transfers across families.
+The earlier raw counter regression had R²=.978, but a `T_candidate`-only model reached R²=.997 and denominator-preserving permutations reproduced the headline. Normalized held-task R² is negative, so neither eta nor the counter residual is an active potential. See [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md).
 
 ### Reward ladder
 
@@ -73,11 +72,11 @@ The reward is strictly lexicographic, so a faster wrong kernel can never outscor
 hack  <  compile_fail  <  incorrect  <  correct
 
 correct tier      : correctness + vendor-relative speedup + format
-cross-turn credit : + potential-based shaping  F = γ·Φ′ − Φ,  Φ = η
-incorrect turns   : bounded shaped progress toward the roofline (always < correctness)
+physics integrity : reject supported, physically impossible timing
+incorrect turns   : bounded SNR/format progress (always < correctness)
 ```
 
-The high-contrast vendor-relative speedup keeps intra-group advantages sharp where a pure attainment reward would be flat, while the shaping potential adds a dense per-turn signal toward the roofline. The correctness gate plus the bounded action space — not the shaping term — are what make the reward hack-resistant; a roofline Speed-of-Light ceiling additionally rejects physically impossible (super-roofline) timings.
+The high-contrast vendor-relative speedup supplies the optimization signal. The correctness gate and explicit runtime reward-tier checks preserve dominance; a conservative roofline ceiling can additionally reject supported, physically impossible timings.
 
 ### Correctness oracle
 
@@ -85,7 +84,7 @@ Four prongs run per candidate (`kore/verify/`): random (statistical coverage), *
 
 ### Credit assignment
 
-Multi-turn credit uses potential-based shaping (`F = γ·Φ′ − Φ`, Ng–Harada–Russell) with `Φ = η`, densifying per-turn progress toward the roofline while preserving the ordering of returns. Incorrect turns retain a bounded shaped-progress reward rather than a hard zero, so the policy still receives gradient on partial progress, always ranked below any correct kernel. The potential is wired identically through the single-process and distributed paths, so both assign the same credit.
+Multi-turn credit retains bounded incorrect-turn SNR/format progress below the correct tier. Physics potential shaping is zero on both single-process and distributed paths unless a fingerprinted P0 artifact passes for the task family; no current family does.
 
 ### Generalization
 
@@ -106,7 +105,7 @@ flowchart TB
   end
   subgraph sci["Physics & reward (kore/analysis, kore/reward)"]
     RF["rooflines: T_min, η"]
-    PH["physics: η potential (PBS shaping); ρ counter-grounded"]
+    PH["physics: fingerprinted integrity; shaping evidence gate"]
     RW["lexicographic reward ladder"]
   end
   subgraph verify["Correctness oracle (kore/verify, kore/verifier)"]
@@ -147,7 +146,7 @@ Each box is a Python subpackage under `kore/` with its own README:
 | `kore/tasks` | Kernel task registry, operators, shapes, train/held-out split, op-class generators | [→](kore/tasks/README.md) |
 | `kore/env` | `KoreEnv` verified compile/correctness/bench + replay cache | [→](kore/env/README.md) |
 | `kore/analysis` | Roofline `T_min`, physics validation harness, transfer analysis | [→](kore/analysis/README.md) |
-| `kore/reward` | Lexicographic ladder + physics residual reward + roofline shaping potential | [→](kore/reward/README.md) |
+| `kore/reward` | Lexicographic ladder + physics integrity + evidence-gated shaping | [→](kore/reward/README.md) |
 | `kore/verify` | Adversarial + metamorphic + determinism correctness oracle | [→](kore/verify/README.md) |
 | `kore/verifier` | rocprofv3 PMC counter sets + CSV/compiler parsers | [→](kore/verifier/README.md) |
 | `kore/data` | Teachers + datagen (repair/groups/wins/agentic) + dataset assembly | [→](kore/data/README.md) |
@@ -189,7 +188,7 @@ flowchart LR
 | `midtrain` | Continued pretraining on the ROCm/HIP/Triton corpus → SFT base | `kore/policy/midtrain.py` |
 | `sft` | Repair-weighted multi-capability SFT (full-parameter FSDP) | `kore/policy/sft.py` |
 | `dpo` | Iterative on-policy DPO + DAgger, IPO loss, refreshed reference | `kore/policy/dpo.py` |
-| `grpo` | Multi-turn agentic GRPO: vendor-relative speedup reward + roofline PBS shaping + incorrect-turn credit, value-model prefilter, StarPO-S and anti-collapse stack, co-evolution + off-policy search-then-distill, task minting, and ε-typed transform tools | `kore/policy/grpo.py` |
+| `grpo` | Multi-turn agentic GRPO: vendor-relative speedup + incorrect-turn credit, value-model prefilter, anti-collapse, co-evolution, search-then-distill, task minting, and ε-typed transforms | `kore/policy/grpo.py` |
 | `soup` | WiSE-FT interpolation α-sweep gated on retention | `kore/policy/soup.py` |
 | `eval` | Matched-budget bake-off + fast_p + retention + held-out generalization | `kore/eval` |
 
@@ -324,14 +323,14 @@ Consolidated catalog (see subpackage READMEs for specifics):
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `AMD_LLM_API_KEY` | – | Claude gateway subscription key (in `.env.local`) |
-| `KORE_REWARD_MODE` | `speedup` | `residual` selects the physics roofline reward |
+| `KORE_REWARD_MODE` | `speedup` | `residual` is accepted but falls back to speedup without passing family evidence |
 | `KORE_VERIFIED_CORRECTNESS` | off | enable the enumerated adversarial correctness battery |
 | `KORE_COMPILE_BASELINE` | off | grade vs. the compiler-fused baseline (anti speedup-inflation) |
 | `KORE_BENCH_COLD` | `1` | cold-cache (L2-flushed) timing |
 | `KORE_PROFILE_REWARD_WEIGHT` | `0` | enable the rocprofv3 PMC dense reward bonus |
 | `KORE_EVAL_FULL` / `KORE_EVAL_N` | – / `300` | pull real HF retention splits, capped per bench |
 | `KORE_GENERAL_REPLAY_HF` | off | use real HF datasets for anti-forgetting replay |
-| `KORE_PEAK_BF16` / `KORE_PEAK_FP8` / `KORE_PEAK_HBM_BW` | datasheet | override roofline peaks with calibrated values |
+| `KORE_PHYSICS_SKU` / `KORE_PHYSICS_CALIBRATION` | `mi350x` / – | explicit SKU and fingerprint-safe runtime calibration |
 | `KORE_DATAGEN_WORKERS` | `64` (conductor) | teacher-bound datagen concurrency |
 | `HIP_VISIBLE_DEVICES` | – | GPU pinning (ROCm: use HIP only, not ROCR) |
 
@@ -372,7 +371,7 @@ Tests are CPU-safe by design (roofline formulas, reward gating, family split, ca
 | `torch.cuda.is_available() == False` | a CUDA torch wheel got installed, or ROCR+HIP double-remap | reinstall ROCm torch (see [Installation](#installation)); use HIP-only pinning |
 | datagen stalls / empty shards | missing `AMD_LLM_API_KEY` | add it to `.env.local` |
 | every candidate `compiled=False` under load | `RLIMIT_NPROC` (per-UID) too low → OpenBLAS/numpy can't start threads in the driver | `_preexec` raises soft→hard + `_env` caps BLAS threads (see `kore/env`) |
-| GRPO η looks ~2× too optimistic | roofline using datasheet peaks | set on-node `KORE_PEAK_BF16` / `KORE_PEAK_HBM_BW` (the conductor launcher does this) |
+| physical model fingerprint mismatch | SKU/runtime calibration differs from config | regenerate a complete runtime-calibration artifact and pin its fingerprint |
 | retention gate "NOT enforced" | serving backend (vLLM/torch) unavailable | provision serving; the gate warns loudly rather than silently passing |
 | stage skipped unexpectedly on resume | in `done_stages` and artifact present | `--force --stages <stage>`, or delete the artifact/shard |
 | SFT uses base instead of midtrain | `midtrain_ckpt` null (stage incomplete) | check the manifest; re-run midtrain |

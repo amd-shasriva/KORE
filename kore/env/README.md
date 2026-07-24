@@ -85,9 +85,16 @@ When `profile_reward_weight > 0`, `_collect_profile` runs rocprofv3 with `--benc
 
 `collect_counters(source, shape=primary)` is the public rocprofv3 PMC entry point: it stages an isolated workdir, profiles the candidate, and returns aggregated `{counter: value}` (the gfx950 derived metrics `MemUnitStalled` / `OccupancyPercent`, plus captured `vgpr_count` / `lds_bytes` / `num_warps`) or `None` when the profiler is unavailable — fully fail-safe.
 
-These named counters feed the roofline shaping potential. `kore.reward.whitebox.phi_potential` turns them into `Φ = ρ = T_min/(T_min + N)`, the counter-grounded named-residual attainment (`N = stall + occupancy-deficit`), which GRPO adds as an approximately policy-invariant potential-based-shaping term (`physics_shaping_weight`; the invariance is approximate under GRPO's std-normalized group-relative advantage — see [`kore/reward`](../reward/README.md)). The online potential is the PMC-free attainment `η = T_min/T_measured`; `ρ` is its counter-grounded refinement, validated offline at R² ≈ 0.98 (`docs/P0_RESULTS.md`).
+These counters are diagnostic inputs. They do not become reward or potential
+terms unless a fingerprint-pinned P0 artifact contains a PASS for the task's
+operator family under the same physical model. The controlled reanalysis found
+no passing family, so `physics_shaping_weight=0`, live physics counter collection
+is off, and `phi_potential` returns `None` without explicit evidence. See
+[`kore/reward`](../reward/README.md) and `docs/P0_RESULTS.md`.
 
-Per-candidate PMC is expensive, so the two rollout paths differ in how they compute the potential. The agentic tool-use rollout (`agentic_transform_tools` / `config.agentic=true`) calls `phi_potential(task, obs)` without counters (`kore/agent/tools.py`), so `Φ = η`. The serial GRPO rollout can thread per-turn counters through `kore.policy.grpo._dense_profile_bonus` (gated on `--profile-reward` / `profile_reward_weight > 0`), a dense bonus term distinct from the shaping potential. In both paths the reward is `reward_mode="speedup"` (vendor-relative); only the dense shaping term varies between the counter-grounded `ρ` and the PMC-free `η`.
+Counter collection may still be enabled deliberately for observability. Raw
+quad-cycle waits are never divided by instruction counts, and MOPS are not
+treated as instructions.
 
 ---
 

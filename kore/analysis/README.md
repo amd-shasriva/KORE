@@ -1,90 +1,86 @@
-# `kore/analysis` — roofline physics & the P0 study
+# `kore/analysis` — physical model and P0 validation
 
-Offline diagnostics that establish and stress-test the physical premise behind KORE's reward. Nothing here trains a policy; these modules **measure** and **falsify**. This is the code behind the [`Kore-prelim-analysis`](../../../Kore-prelim-analysis/) study and [`docs/P0_RESULTS.md`](../../docs/P0_RESULTS.md).
+`roofline.py` is the authoritative implementation. It provides validated
+`HardwareSpec`, `PhysicalModel`, `WorkEstimate`, counter units, model
+fingerprints, roofline evaluation, and integrity diagnostics. It never detects a
+GPU or selects mutable peaks at import time.
 
-> **The roofline `T_min` is a live reward input.** [`kore.reward.whitebox`](../reward/README.md) reuses `rooflines.roofline` for `T_min` and feeds attainment into GRPO as a potential-based shaping signal. The online potential is `η = T_min/T_measured` (`physics_shaping_weight = 0.15`). Its counter-grounded refinement `ρ = T_min/(T_min + N)` — the named-residual signal validated at R² ≈ 0.98 by check (b) below — is computed by `whitebox.physics_signal_from_counters` and engages when per-candidate rocprofv3 PMC counters are threaded into `phi_potential`. Because rocprofv3 is too slow to run per candidate online, live rollouts use `η`; `ρ` is validated offline by `p0_sol`. See [`kore/reward`](../reward/README.md).
+`rooflines.py` is a deprecated compatibility facade. Its operator results and
+FLOP/byte estimates delegate to `roofline.py`; it does not carry independent
+physics.
 
----
+## Availability rules
 
-## Files
-
-| File | Purpose |
-| --- | --- |
-| `rooflines.py` | The roofline `T_min` / `η` model: FLOPs & bytes per operator, hardware peaks |
-| `p0_sol.py` | The P0 falsification harness (checks a/b/c) + `KernelMeasure` + bootstrap CIs |
-| `residual_transfer.py` | The leave-one-family-out residual-transfer experiment |
-| `calibrate_peaks.py` | On-device STREAM + matmul peak calibration → `KORE_PEAK_*` |
-| `plots.py` | The five publication figures from a P0 report JSON |
-
----
-
-## Roofline model
-
-```
-T_min = max( W_flops / P_peak ,  Q_bytes / B_peak )
-η     = T_min / T_measured        ∈ (0, 1]
-```
-
-`flops_bytes(operation, dims, dtype)` returns `(W, Q)` — exact for GEMM/batched-GEMM/norms/activations, first-order for attention/MoE, with a safe memory-bound fallback for generic elementwise ops. `roofline(...)` returns a `Roofline` with `arithmetic_intensity`, `t_compute_ms`, `t_mem_ms`, `t_min_ms`, and `bound ∈ {compute, memory}`. Peaks default to gfx950/gfx942 datasheets and are overridable via `KORE_PEAK_BF16` / `KORE_PEAK_FP8` / `KORE_PEAK_HBM_BW`.
-
----
-
-## The P0 falsification harness
-
-```mermaid
-flowchart TD
-  T[tasks + trajectory kernels] --> M[measure_kernel]
-  M --> RF[roofline T_min]
-  M --> PMC[rocprofv3 PMC]
-  RF & PMC --> KM[KernelMeasure pool]
-  KM --> A["check (a): Spearman η vs vendor speedup"]
-  KM --> B["check (b): OLS residual ~ stall·T + occdef·T"]
-  KM --> C["check (c): dominant residual falls in the deceptive valley"]
-  A & B & C --> D{GO / PARTIAL / FALLBACK / PIVOT}
-```
-
-| Check | Question | Pass |
-| --- | --- | --- |
-| **(a)** | does `η` predict speedup vs. the production vendor? | Spearman ρ ≥ 0.5 |
-| **(b)** | does the residual decompose into named stall + occupancy-deficit? | OLS R² ≥ 0.7 |
-| **(c)** | along an improving trajectory, does the dominant residual fall while wall-clock is flat? | frac ≥ 0.6 |
-
-**Result (gfx950, AITER baselines, calibrated peaks, 1000× bootstrap):** (a) ρ = 0.529, (b) **R² = 0.978**, (c) frac = 0.525 → verdict **PARTIAL**. The named gradient is real; the monotone-in-valley signal is thin before RL, which is what the policy learns to improve rather than something a random kernel variant exhibits.
-
-> **Wrong peaks cause a false PIVOT.** If check (a) fails, recalibrate with `calibrate_peaks.py` and set `KORE_PEAK_*` before concluding the roofline is not predictive.
-
----
-
-## The transfer experiment
-
-`residual_transfer.py` asks whether the residual decomposition **transfers across operator families** or is operator-specific:
-
-- **Test A (LOFO):** fit the named-term → residual map on all families but one, predict the held-out family. Raw (`residual_ms ~ stall·T + occdef·T`) and normalized (`(1-η) ~ stall + occdef`, size-confound removed, marked PRIMARY).
-- **Test B:** coefficient stability across folds.
-- **Test C:** family decodability from the residual latent (nearest-centroid LOO).
-
-**Result:** pooled in-sample R² = 0.978 (raw), but **median out-of-family R² = 0.107 (raw) / negative (normalized)**, and families are separable in residual space. The residual decomposition is therefore operator-specific rather than a universal cross-family latent. KORE trains on the dense per-family signal accordingly, applying diagnosis-conditioned control within each family instead of assuming a single residual latent transfers across families. See [`docs/P0_RESULTS.md`](../../docs/P0_RESULTS.md).
+Callers select an exact SKU and optionally a
+`kore.runtime-calibration.v1` file:
 
 ```python
-@dataclass
-class KernelMeasure:
-    task_id: str; correct: bool
-    cand_ms: Optional[float]; vendor_ms: Optional[float]; t_min_ms: float
-    eta: Optional[float]; speedup: Optional[float]; residual_ms: Optional[float]
-    stall_frac: Optional[float]; occupancy: Optional[float]; counters: dict
+from kore.analysis.roofline import (
+    estimate_work, evaluate_roofline, make_physical_model,
+)
+
+model = make_physical_model(
+    "mi350x",
+    calibration=None,  # explicit vendor-datasheet model
+    expected_fingerprint="sha256:...",
+)
+work = estimate_work("gemm", {"M": 4096, "N": 4096, "K": 4096}, "bf16")
+result = evaluate_roofline(work, model) if work else None
 ```
 
----
+Unknown dtypes, unsupported hardware paths, and operations without defensible
+mandatory work return `None`. There is no generic operation fallback. Attention,
+MoE, top-k, backward operations, unknown fusions, and low-precision formats with
+unmodeled scale traffic are currently unavailable.
 
-## Reproduce (CPU-safe subset)
+A calibration must identify architecture, exact SKU, calibration id, runtime
+stack, HBM byte/s, and calibrated FLOP/s by dtype. Legacy `KORE_PEAK_*`
+environment overrides are not accepted because they cannot be fingerprinted or
+reproduced.
+
+## Integrity versus shaping
+
+The roofline has two distinct uses:
+
+- Integrity rejection/pruning uses vendor upper bounds (or a higher measured
+  bound), producing the smallest conservative runtime floor. The HBM component
+  requires explicit cold-cache provenance; mandatory compute does not.
+- Empirical reward shaping requires a matching, fingerprinted P0 evidence
+  artifact and a family-specific held-out PASS. Diagnostics alone never enable
+  shaping.
+
+The stored P0 study passes neither the normalized held-task test nor any family
+gate, so the current GRPO configuration is integrity-only. See
+`docs/P0_RESULTS.md`.
+
+## Leakage-controlled P0
+
+`p0_sol.py` preregisters:
+
+1. eta versus vendor speedup after a `T_candidate`-only baseline and a
+   denominator-preserving numerator permutation;
+2. normalized residual prediction on held-out task clusters, raw and normalized
+   simple baselines, within-task feature permutations, leave-family-out scores,
+   and task-cluster bootstrap intervals;
+3. collection-order trajectory tests, avoiding outcome-based eta sorting;
+4. Benjamini–Hochberg correction over primary and family hypotheses.
+
+`residual_transfer.py` is now a report-only compatibility wrapper around the
+canonical `p0_sol.reanalyze_report`; it has no duplicate OLS implementation.
+
+CPU-only reproduction:
 
 ```bash
-# dry-run roofline table (no GPU), mining η from the replay cache:
-python -m kore.analysis.p0_sol --dry-run --tasks gemm_bf16,rmsnorm_aiter
-# the transfer experiment over an existing P0 report:
-python -m kore.analysis.residual_transfer --report data/p0_study_final.json --out data/residual_transfer.json
+python -m kore.analysis.p0_sol \
+  --reanalyze data/p0_study_final.json \
+  --permutations 1000 --bootstrap 1000 \
+  --out runs/p0_study_final_controlled.json
+
+python -m kore.analysis.residual_transfer \
+  --report data/p0_study_final.json \
+  --permutations 1000 --bootstrap 1000
 ```
 
-The bridge to the live reward: `physics_from_measure(KernelMeasure) → PhysicsSignal → compute_residual_reward`, the same math the training reward uses (see [`kore/reward`](../reward/README.md)). Online, `kore.reward.whitebox` reuses `rooflines.roofline` for `T_min` to feed GRPO's potential-based shaping, so the roofline `T_min` model is a live reward input, not only an offline diagnostic. The named-term (`stall + occupancy-deficit`) decomposition engages online only when per-candidate PMC counters are threaded in; the live potential is `η`, and the `ρ` decomposition is validated offline here.
-
-See also: [`tasks`](../tasks/README.md), [`verifier`](../verifier/README.md) (PMC), [`eval/generalization`](../eval/README.md).
+The existing measurement report is legacy-unfingerprinted and cannot authorize
+shaping even if a statistic were to pass. A new GPU study must use an exact SKU
+and fingerprint-safe runtime calibration.

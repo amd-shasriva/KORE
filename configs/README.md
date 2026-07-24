@@ -70,11 +70,13 @@ fsdp_config:
   "coevolve": true, "coevolve_include_vendor": true,          // open-ended curriculum (SELECT)
   "coevolve_distill_path": "data/full14b/coevolve_wins.jsonl",
   "reward_phase": "all", "reward_mode": "speedup", "physics_weight": 1.0,
-  "credit_incorrect_turns": true, "physics_shaping_weight": 0.15,
+  "physics_sku": "mi350x", "physics_model_fingerprint": "sha256:54296...",
+  "credit_incorrect_turns": true, "physics_shaping_weight": 0.0,
+  "physics_shaping_evidence_path": null, "physics_shaping_evidence_fingerprint": null,
   "agentic_transform_tools": true,
   "use_search": true, "search_budget": 32, "search_every": 50,
   "search_bnb": true, "search_k_expand": 6, "search_max_depth": 6, "search_value_prior": true,
-  "roofline_gate": true, "roofline_tol": 0.25, "physics_live_counters": true,
+  "roofline_gate": true, "roofline_tol": 0.25, "physics_live_counters": false,
   "transform_discover": true,
   "coevolve_mint": true, "coevolve_mint_batch": 6,
   "coevolve_evolve_grammar": true, "coevolve_regret_vs_opus": true,
@@ -92,9 +94,9 @@ These fields configure GRPO's credit assignment, verified transform action space
 
 | Field | `grpo_14b_full.json` | Description |
 | --- | --- | --- |
-| `reward_mode` | `"speedup"` | Terminal / within-turn reward tier for a *correct* kernel. `"speedup"` awards the high-contrast vendor-relative speedup; `"residual"` awards the compressed physics-residual credit. Operators with no roofline model fall back to speedup under either setting, and the anti-hack and correctness gating are identical. Consumed in `kore/policy/grpo.py`. |
+| `reward_mode` | `"speedup"` | Terminal / within-turn reward tier for a *correct* kernel. `"residual"` is evidence-gated and falls back to verified speedup unless the task family passes held-out P0 validation under the exact model fingerprint. |
 | `credit_incorrect_turns` | `true` | Feed an incorrect turn's bounded shaped-progress reward (sub-threshold SNR + format signal, always `< correctness_weight`) into the per-turn return instead of zeroing it, densifying the gradient in the not-yet-correct band while keeping correctness lexicographically dominant. Consumed in `build_kevin_samples`. |
-| `physics_shaping_weight` | `0.15` | Weight on potential-based shaping `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` with `Φ =` roofline attainment (`kore.reward.whitebox.phi_potential`), adding dense per-turn credit toward the roofline; `0.0` disables it. By Ng–Harada–Russell this is approximately policy-invariant. In the agentic rollout (`agentic: true`) `Φ` is the PMC-free `η = T_min/T_measured`; with rocprofv3 counters threaded in it becomes the counter-grounded `ρ`. Consumed in `build_kevin_samples`. |
+| `physics_shaping_weight` | `0.0` | Empirical physics shaping is disabled. A nonzero value is effective only with a pinned evidence artifact whose per-family normalized task-cluster CV, bootstrap CI, permutation test, and adjusted p-value all pass under the same physical-model fingerprint. |
 | `agentic_transform_tools` | `true` | Expose the ε-typed transform calculus (`kore.transform`: real Triton rewrites, each exact `≡` or approximate `≈_ε` with an error budget and side conditions) to the agent as `list_transforms` / `apply_transform` tools — a verified, in-contract optimization action space alongside free-form editing. CPU-only source rewrites; the env still verifies the result. Consumed in `kore/agent/tools.py`. |
 | `use_search` | `true` | Run AlphaKernel value-guided best-first search over the verified transform action space (`kore.search.propose.search_from_kernel`) as a throttled, off-policy search-then-distill hook (`_maybe_search_then_distill`). It runs after the on-policy gradient sample is built, banks faster verified kernels as distillation targets (`coevolve_distill_path`), and is never attributed to the on-policy update. |
 | `search_budget` | `32` | Verifier-call cap per search invocation. |

@@ -1,188 +1,177 @@
-"""White-box, counter-grounded physics reward (P0 flagship).
-
-The live campaign's residual reward degrades to the PMC-free ``eta = T_min/T_meas``
-because :func:`kore.reward.physics.physics_signal_from_obs` never populates
-``stall_frac``/``occupancy`` -- so the *named* residual ``rho_phys`` (the signal
-with the R^2~=0.98 backing in ``docs/P0_RESULTS.md``) is dormant online. HONEST
-STATUS: in the flagship (``reward_mode=speedup``) the base reward is vendor speedup;
-physics enters ONLY as the PMC-free ``eta`` potential-based-shaping term (weight
-``physics_shaping_weight``), NOT as ``0.3 + eta`` (that is the residual-mode reward
-formula). This module provides the machinery to close the ``rho`` gap once per-turn
-counters are threaded, WITHOUT touching the datagen pipeline or the reward ABI:
-
-  * :func:`physics_signal_from_counters` -- build a :class:`PhysicsSignal` with the
-    named-residual terms populated from rocprofv3 counters, so
-    :func:`kore.reward.physics.residual_descent_frac` uses ``rho = T_min/(T_min+N)``
-    instead of the flat ``eta`` fallback.
-  * :func:`whitebox_attainment` -- the ``(rho, pmc_used)`` credit for a kernel.
-  * :func:`whitebox_structural_score` -- a [0,1] score derived from *what the
-    silicon actually did* (issue efficiency + roofline attainment + baseline-
-    relative traffic). NOTE (honest): this score is NOT hack-proof by its own
-    structure -- it consumes ``measured_ms`` and roofline ATTAINMENT, so a fast
-    "do-less" / memset kernel can INFLATE it (attainment clamps to 1.0, issue
-    efficiency runs high). Its hack-resistance comes from the correctness / SNR /
-    determinism GATE that fences it to the CORRECT tier, not from the formula. It is
-    used in tests / behind ``profile_reward_weight`` and is not on the live gradient.
-  * :func:`phi_potential` -- the scalar potential ``Phi(s)`` (``rho`` with counters,
-    else ``eta``) used by the potential-based cross-turn shaping in
-    :mod:`kore.reward.shaping` (Ng et al.). The invariance is APPROXIMATE under
-    GRPO's std-normalized group-relative advantage -- see the honest caveat there.
-
-Everything here is PURE and CPU-testable given a counter dict; the single GPU touch
-(``KoreEnv.collect_counters``) is performed by the caller and injected as ``counters``.
-Robust to the two PMC vocabularies in-tree: derived metrics (``OccupancyPercent`` /
-``MemUnitStalled``, the ``p0_sol`` set) are preferred, with a raw-counter
-(``SQ_*`` via :mod:`kore.reward.profile_reward`) fallback.
-"""
+"""Counter extraction and evidence-gated white-box potentials."""
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Mapping, Optional
 
-from kore.reward import profile_reward as _pr
+from kore.analysis.roofline import (
+    CounterUnit,
+    PhysicalModel,
+    WorkEstimate,
+    counter_value,
+    derived_percent,
+    est_occupancy,
+    make_physical_model,
+)
+from kore.reward import profile_reward as _profile
 from kore.reward.physics import (
     PhysicsSignal,
     physics_signal_from_obs,
     residual_descent_frac,
 )
+from kore.reward.shaping import FamilyShapingEvidence
 
 
-def _clamp01(x: Optional[float]) -> Optional[float]:
-    if x is None:
-        return None
-    return 0.0 if x < 0.0 else (1.0 if x > 1.0 else float(x))
-
-
-def _lookup(counters: dict, *names: str) -> Optional[float]:
-    """Case-insensitive exact lookup of the first present counter name."""
-    if not counters:
-        return None
-    up = {str(k).upper(): v for k, v in counters.items()}
-    for n in names:
-        v = up.get(n.upper())
-        if v is not None:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return None
+def _first(
+    counters: Mapping[str, object], unit: CounterUnit, *names: str
+) -> Optional[float]:
+    for name in names:
+        value = counter_value(counters or {}, name, unit)
+        if value is not None:
+            return value
     return None
 
 
-def stall_frac_from_counters(counters: dict) -> Optional[float]:
-    """Normalized memory-stall fraction in ``[0, 1]`` (lower is better).
+def stall_frac_from_counters(counters: Mapping[str, object]) -> Optional[float]:
+    """Derived memory-stall percentage, or unavailable.
 
-    Prefers the gfx950 DERIVED metric ``MemUnitStalled`` (a percentage, as used by
-    the offline ``p0_sol`` decomposition that carries the R^2~=0.98 evidence), and
-    falls back to the RAW-counter estimate ``SQ_WAIT_INST_ANY / (issued + wait)``
-    from :func:`kore.reward.profile_reward.stall_fraction`. None when neither is
-    computable.
+    Raw wait quad-cycles are not divided by instruction counts.
     """
-    derived = _lookup(counters, "MemUnitStalled", "MemUnitStalled_pct", "MEM_UNIT_STALLED")
+    return derived_percent(
+        counters or {}, "MemUnitStalled", "MemUnitStalled_pct", "MEM_UNIT_STALLED"
+    )
+
+
+def occupancy_from_counters(
+    counters: Mapping[str, object], model: Optional[PhysicalModel] = None
+) -> Optional[float]:
+    derived = derived_percent(
+        counters or {}, "OccupancyPercent", "Occupancy", "OCCUPANCY_PERCENT"
+    )
     if derived is not None:
-        # derived metrics are percentages in [0, 100]
-        return _clamp01(derived / 100.0)
-    return _clamp01(_pr.stall_fraction(counters or {}))
-
-
-def occupancy_from_counters(counters: dict) -> Optional[float]:
-    """Normalized achieved occupancy in ``[0, 1]`` (higher is better).
-
-    Prefers the DERIVED ``OccupancyPercent``; else estimates resource-limited
-    occupancy from the captured VGPR/LDS/wavefront resource fields via
-    :func:`kore.verifier.pmc.est_occupancy` (fully fail-safe -> None on any gap).
-    """
-    derived = _lookup(counters, "OccupancyPercent", "Occupancy", "OCCUPANCY_PERCENT")
-    if derived is not None:
-        return _clamp01(derived / 100.0)
-    vgpr = _lookup(counters, "vgpr_count", "VGPR", "vgpr")
-    lds = _lookup(counters, "lds_bytes", "LDS", "lds")
-    warps = _lookup(counters, "num_warps", "WARPS", "num_warps_per_wg")
-    if vgpr is None:
+        return derived
+    vgpr = _first(counters or {}, CounterUnit.COUNT, "vgpr_count", "VGPR")
+    if vgpr is None or model is None:
         return None
-    try:  # pmc.est_occupancy is the resource-limited waves/SIMD model (CDNA4 defaults)
-        from kore.verifier.pmc import est_occupancy
+    lds = _first(counters or {}, CounterUnit.BYTES, "lds_bytes", "LDS_BYTES")
+    warps = _first(counters or {}, CounterUnit.COUNT, "num_warps", "WARPS")
+    try:
+        return est_occupancy(
+            int(vgpr),
+            int(lds) if lds is not None else None,
+            int(warps) if warps is not None else None,
+            model=model,
+        ).occupancy
+    except (TypeError, ValueError):
+        return None
 
-        occ = est_occupancy(int(vgpr), int(lds or 0), int(warps or 4))
-        # est_occupancy returns an Occupancy record whose ``.occupancy`` field is the
-        # achieved waves/SIMD as a fraction of the arch max, already in [0, 1]. (The
-        # record itself is not float()-able -- reading the field is the robust path.)
-        frac = getattr(occ, "occupancy", None) if occ is not None else None
-        if frac is None:
+
+def physics_signal_from_counters(
+    task,
+    obs,
+    counters: Optional[Mapping[str, object]],
+    arch: Optional[str] = None,
+    *,
+    model: Optional[PhysicalModel] = None,
+) -> Optional[PhysicsSignal]:
+    if model is None:
+        if arch not in {"gfx950", "gfx942"}:
             return None
-        return _clamp01(float(frac))
-    except Exception:  # noqa: BLE001 - resource model unavailable -> no occupancy term
-        return None
-
-
-def physics_signal_from_counters(task, obs, counters: Optional[dict],
-                                 arch: Optional[str] = None) -> Optional[PhysicsSignal]:
-    """A worst-shape :class:`PhysicsSignal` with the NAMED-residual terms populated.
-
-    Reuses :func:`kore.reward.physics.physics_signal_from_obs` for the roofline
-    ``T_min`` + worst-shape measured wall (its worst-shape discipline is preserved),
-    then attaches ``stall_frac``/``occupancy`` from ``counters`` so
-    :func:`residual_descent_frac` takes the ``rho = T_min/(T_min+N)`` path. When no
-    counters are available it returns the eta-based signal unchanged (graceful
-    degrade, identical to today). Returns None iff the op is not roofline-modelable.
-    """
-    base = physics_signal_from_obs(task, obs, arch)
-    if base is None:
-        return None
-    if not counters:
+        model = make_physical_model("mi350x" if arch == "gfx950" else "mi300x")
+    base = physics_signal_from_obs(task, obs, model)
+    if base is None or not counters:
         return base
-    sf = stall_frac_from_counters(counters)
-    occ = occupancy_from_counters(counters)
-    if sf is None and occ is None:
-        return base  # counters present but unusable -> eta fallback (flagged upstream)
-    return PhysicsSignal(t_min_ms=base.t_min_ms, measured_ms=base.measured_ms,
-                         stall_frac=sf, occupancy=occ)
+    stall = stall_frac_from_counters(counters)
+    occupancy = occupancy_from_counters(counters, model)
+    if stall is None or occupancy is None:
+        # Both validated features are required by the preregistered model.
+        return base
+    return PhysicsSignal(
+        t_min_ms=base.t_min_ms,
+        measured_ms=base.measured_ms,
+        model_fingerprint=base.model_fingerprint,
+        family=base.family,
+        stall_frac=stall,
+        occupancy=occupancy,
+    )
 
 
-def whitebox_attainment(task, obs, counters: Optional[dict] = None,
-                        arch: Optional[str] = None) -> tuple[Optional[float], bool]:
-    """``(rho, pmc_used)`` roofline-attainment credit in ``(0, 1]`` for a kernel.
-
-    ``pmc_used=True`` means the NAMED residual (stall+occupancy) was used; ``False``
-    is the eta fallback. ``(None, False)`` when the op is not modelable / untimed.
-    """
-    sig = physics_signal_from_counters(task, obs, counters, arch)
-    if sig is None:
+def whitebox_attainment(
+    task,
+    obs,
+    counters: Optional[Mapping[str, object]] = None,
+    arch: Optional[str] = None,
+    *,
+    model: Optional[PhysicalModel] = None,
+    evidence: Optional[FamilyShapingEvidence] = None,
+) -> tuple[Optional[float], bool]:
+    """Diagnostic eta, upgraded only by matching passing evidence."""
+    signal = physics_signal_from_counters(
+        task, obs, counters, arch, model=model
+    )
+    if signal is None:
         return None, False
-    return residual_descent_frac(sig)
+    return residual_descent_frac(signal, evidence=evidence)
 
 
-def whitebox_structural_score(counters: dict, *, flops: Optional[float] = None,
-                              bytes: Optional[float] = None,
-                              measured_ms: Optional[float] = None,
-                              dtype: str = "bf16",
-                              ref: Optional[dict] = None) -> Optional[float]:
-    """Hack-RESISTANT structural performance score in ``[0, 1]``.
+def whitebox_structural_score(
+    counters: Mapping[str, object],
+    *,
+    work: Optional[WorkEstimate] = None,
+    model: Optional[PhysicalModel] = None,
+    flops: Optional[float] = None,
+    bytes: Optional[float] = None,
+    measured_ms: Optional[float] = None,
+    dtype: str = "bf16",
+    ref: Optional[Mapping[str, object]] = None,
+) -> Optional[float]:
+    """Bounded diagnostic score; not a reward authorization."""
+    return _profile.roofline_dense_score(
+        counters or {},
+        ref,
+        work=work,
+        model=model,
+        flops=flops,
+        bytes=bytes,
+        measured_ms=measured_ms,
+        dtype=dtype,
+    )
 
-    Delegates to :func:`kore.reward.profile_reward.roofline_dense_score`, which
-    blends (roofline attainment, issue efficiency, baseline-relative traffic) --
-    all bounded and RELATIVE, and all derived from what the hardware executed. A
-    kernel that cheats the wall-clock (memset the output, reuse a cached result, do
-    less work) issues ~no useful instructions and attains ~0% of the roofline, so
-    it scores ~0 here *by construction* -- unlike a wall-clock reward, this surface
-    cannot be gamed by measurement tricks. Returns None when no counter is usable.
+
+def phi_potential(
+    task,
+    obs,
+    counters: Optional[Mapping[str, object]] = None,
+    arch: Optional[str] = None,
+    *,
+    model: Optional[PhysicalModel] = None,
+    evidence: Optional[FamilyShapingEvidence] = None,
+) -> Optional[float]:
+    """Finite ``Phi`` only when family-held-out evidence passes.
+
+    Timing-only eta and unvalidated counter heuristics remain diagnostics and do
+    not become a GRPO potential.
     """
-    return _pr.roofline_dense_score(counters or {}, ref, flops=flops, bytes=bytes,
-                                    measured_ms=measured_ms, dtype=dtype)
+    if evidence is None or not evidence.passes():
+        return None
+    value, used = whitebox_attainment(
+        task,
+        obs,
+        counters,
+        arch,
+        model=model,
+        evidence=evidence,
+    )
+    if not used or value is None or not 0.0 <= value <= 1.0:
+        return None
+    return value
 
 
-def phi_potential(task, obs, counters: Optional[dict] = None,
-                  arch: Optional[str] = None) -> Optional[float]:
-    """The scalar potential ``Phi(s)`` (``rho`` with counters, else ``eta``) for PBS.
-
-    Using the named-residual attainment as the potential means the shaping reward
-    ``F = gamma*Phi(s') - Phi(s)`` (see :mod:`kore.reward.shaping`) densifies the
-    gradient in the flat correct-but-slow valley while (by Ng-Harada-Russell) being
-    APPROXIMATELY expected-gradient-neutral -- see the honest caveat in
-    :mod:`kore.reward.shaping` (invariance is approximate under GRPO's std-normalized
-    group-relative advantage; the correctness gate, not this term, is the anti-hack
-    spine). Returns None when no potential is defined
-    (op not modelable / kernel not correct-and-timed), which the shaper treats as a
-    zero-contribution boundary.
-    """
-    rho, _pmc = whitebox_attainment(task, obs, counters, arch)
-    return rho
+__all__ = [
+    "occupancy_from_counters",
+    "phi_potential",
+    "physics_signal_from_counters",
+    "stall_frac_from_counters",
+    "whitebox_attainment",
+    "whitebox_structural_score",
+]

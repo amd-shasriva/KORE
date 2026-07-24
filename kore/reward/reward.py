@@ -23,6 +23,14 @@ from kore.obs import get_logger
 _LOG = get_logger("reward")
 
 
+def _finite(value) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
 def _log_decision(rr: "RewardResult") -> None:
     """Emit the reward *decision* as a structured event (JSONL always).
 
@@ -64,6 +72,12 @@ class Observation:
     # P5: baseline-relative hardware-counter efficiency in [0,1] (rocprofv3), or
     # None when profiling is off/unavailable. Consumed as a bounded dense bonus.
     profile_efficiency: Optional[float] = None
+    # Physics-integrity HBM bounds require an explicit cold-cache provenance bit.
+    # Without it, only the mandatory compute floor may reject a measurement.
+    cold_cache_verified: bool = False
+    # Counter/physics shaping is empirical and requires family-held-out evidence.
+    profile_evidence_passed: bool = False
+    profile_evidence_fingerprint: Optional[str] = None
 
 
 # Patterns that indicate the "kernel" is cheating rather than computing.
@@ -228,17 +242,15 @@ def roofline_ceiling_violation(measured_ms: Optional[float], t_min_ms: Optional[
     """
     if measured_ms is None or t_min_ms is None:
         return False
-    try:
-        m = float(measured_ms)
-        t = float(t_min_ms)
-    except (TypeError, ValueError):
+    if not _finite(tol) or not 0.0 <= float(tol) < 1.0:
+        raise ValueError("roofline tolerance must be finite and in [0, 1)")
+    if not _finite(measured_ms) or not _finite(t_min_ms):
         return False
-    # NaN-safe: every comparison with NaN is False, so a NaN measured/T_min never fires.
+    m = float(measured_ms)
+    t = float(t_min_ms)
     if not (m > 0.0) or not (t > 0.0):
         return False
-    if tol < 0.0:
-        tol = 0.0
-    return m < t * (1.0 - tol)
+    return m < t * (1.0 - float(tol))
 
 
 def _ceiling_measured_ms(obs: "Observation") -> Optional[float]:
@@ -248,10 +260,14 @@ def _ceiling_measured_ms(obs: "Observation") -> Optional[float]:
     the value most likely to breach the speed-of-light floor; falls back to the scalar
     ``wall_ms``. Returns None when no positive timing exists (gate then fail-opens).
     """
-    vals = [v for v in (obs.wall_by_shape or {}).values() if v and v > 0]
+    vals = [
+        float(v)
+        for v in (obs.wall_by_shape or {}).values()
+        if _finite(v) and float(v) > 0.0
+    ]
     if vals:
         return min(vals)
-    return obs.wall_ms if (obs.wall_ms and obs.wall_ms > 0) else None
+    return float(obs.wall_ms) if (_finite(obs.wall_ms) and float(obs.wall_ms) > 0.0) else None
 
 
 def _shape_ratios(obs: Observation) -> list[float]:
@@ -260,8 +276,8 @@ def _shape_ratios(obs: Observation) -> list[float]:
     if obs.baseline_by_shape and obs.wall_by_shape:
         for k, cand in obs.wall_by_shape.items():
             base = obs.baseline_by_shape.get(k)
-            if base and cand and cand > 0:
-                out.append(base / cand)
+            if _finite(base) and _finite(cand) and float(base) > 0.0 and float(cand) > 0.0:
+                out.append(float(base) / float(cand))
     return out
 
 
@@ -273,8 +289,13 @@ def _worst_speedup(obs: Observation) -> Optional[float]:
     ratios = _shape_ratios(obs)
     if ratios:
         return min(ratios)
-    if obs.baseline_ms and obs.wall_ms and obs.wall_ms > 0:
-        return obs.baseline_ms / obs.wall_ms
+    if (
+        _finite(obs.baseline_ms)
+        and _finite(obs.wall_ms)
+        and float(obs.baseline_ms) > 0.0
+        and float(obs.wall_ms) > 0.0
+    ):
+        return float(obs.baseline_ms) / float(obs.wall_ms)
     return None
 
 
@@ -299,8 +320,13 @@ def _aggregate_speedup(obs: Observation, cfg) -> Optional[float]:
     """
     ratios = _shape_ratios(obs)
     if not ratios:
-        if obs.baseline_ms and obs.wall_ms and obs.wall_ms > 0:
-            return obs.baseline_ms / obs.wall_ms
+        if (
+            _finite(obs.baseline_ms)
+            and _finite(obs.wall_ms)
+            and float(obs.baseline_ms) > 0.0
+            and float(obs.wall_ms) > 0.0
+        ):
+            return float(obs.baseline_ms) / float(obs.wall_ms)
         return None
     mode = (getattr(cfg, "speed_aggregation", "worst") or "worst").lower()
     n = len(ratios)
@@ -322,10 +348,10 @@ def _worst_snr(obs: Observation) -> Optional[float]:
     sub-threshold credit reflects the same "hardest shape" the gate cares about.
     """
     if obs.snr_by_shape:
-        vals = [v for v in obs.snr_by_shape.values() if v is not None]
+        vals = [float(v) for v in obs.snr_by_shape.values() if _finite(v)]
         if vals:
             return min(vals)
-    return obs.snr_db
+    return float(obs.snr_db) if _finite(obs.snr_db) else None
 
 
 def _subthreshold_credit(obs: Observation, dtype: str, cfg,
@@ -385,6 +411,15 @@ class RewardResult:
     flags: list[str] = field(default_factory=list)
     detail: str = ""
 
+    def __post_init__(self) -> None:
+        if not _finite(self.reward):
+            raise ValueError(f"reward must be finite, got {self.reward!r}")
+        self.reward = float(self.reward)
+        if self.speedup is not None:
+            if not _finite(self.speedup) or float(self.speedup) <= 0.0:
+                raise ValueError(f"speedup must be finite and positive, got {self.speedup!r}")
+            self.speedup = float(self.speedup)
+
 
 def _speedup_term(su_scored: float, su_raw: float, obs: Observation, cfg,
                   flags: list[str]) -> float:
@@ -403,6 +438,8 @@ def _speedup_term(su_scored: float, su_raw: float, obs: Observation, cfg,
     threshold met, awarded ONLY when the speedup is statistically trustworthy
     (cv <= cv_threshold_pct) and not an excessive-speedup measurement outlier.
     """
+    if not _finite(su_scored) or not _finite(su_raw) or su_scored < 0.0 or su_raw <= 0.0:
+        raise ValueError("speedups must be finite and non-negative/positive")
     w = float(getattr(cfg, "speedup_weight", 1.0) or 0.0)
     if getattr(cfg, "speedup_log", False) and su_scored > 1.0:
         term = w * (1.0 + math.log(su_scored))
@@ -429,9 +466,87 @@ def _speedup_term(su_scored: float, su_raw: float, obs: Observation, cfg,
 
 def _all_shapes_pass(obs: Observation, dtype: str, cfg, snr_threshold: Optional[float] = None) -> bool:
     thr = snr_threshold if snr_threshold is not None else cfg.snr_threshold_for(dtype)
+    if not _finite(thr) or float(thr) <= 0.0:
+        raise ValueError("SNR threshold must be finite and positive")
     if obs.snr_by_shape:
-        return all(v is not None and v >= thr for v in obs.snr_by_shape.values())
-    return obs.snr_db is not None and obs.snr_db >= thr
+        return all(_finite(v) and float(v) >= float(thr) for v in obs.snr_by_shape.values())
+    return _finite(obs.snr_db) and float(obs.snr_db) >= float(thr)
+
+
+def validate_reward_config(cfg) -> None:
+    """Enforce the reward ladder with runtime checks (never ``assert``).
+
+    This is called by every reward entry point, so ``python -O`` cannot remove a
+    security boundary and ad-hoc config objects cannot bypass validation.
+    """
+    names = (
+        "reward_hack",
+        "reward_compile_fail",
+        "reward_incorrect",
+        "correctness_weight",
+        "eps_shape",
+        "format_weight",
+        "speedup_weight",
+        "excessive_speedup_flag",
+        "cv_threshold_pct",
+        "noise_floor_pct",
+        "profile_reward_weight",
+    )
+    values = {}
+    for name in names:
+        value = getattr(cfg, name, 0.0)
+        if not _finite(value):
+            raise ValueError(f"{name} must be finite")
+        values[name] = float(value)
+    if values["eps_shape"] < 0.0 or values["format_weight"] < 0.0:
+        raise ValueError("shaping magnitudes must be non-negative")
+    if values["speedup_weight"] < 0.0 or values["profile_reward_weight"] < 0.0:
+        raise ValueError("reward weights must be non-negative")
+    if values["excessive_speedup_flag"] <= 0.0:
+        raise ValueError("excessive_speedup_flag must be positive")
+    if values["noise_floor_pct"] < 0.0 or values["cv_threshold_pct"] < 0.0:
+        raise ValueError("timing thresholds must be non-negative")
+    mode = str(getattr(cfg, "speed_aggregation", "worst") or "worst").lower()
+    if mode not in {"worst", "mean", "cvar"}:
+        raise ValueError(f"speed_aggregation must be worst|mean|cvar, got {mode!r}")
+    alpha = getattr(cfg, "cvar_alpha", 0.5)
+    if not _finite(alpha) or not 0.0 < float(alpha) <= 1.0:
+        raise ValueError("cvar_alpha must be finite and in (0, 1]")
+
+    # Include adverse format terms in every boundary calculation.
+    hack = values["reward_hack"]
+    compile_fail = values["reward_compile_fail"]
+    incorrect_floor = values["reward_incorrect"] - values["format_weight"]
+    incorrect_ceiling = (
+        values["reward_incorrect"] + values["eps_shape"] + values["format_weight"]
+    )
+    correct_floor = values["correctness_weight"] - values["format_weight"]
+    if not hack < compile_fail < incorrect_floor:
+        raise ValueError(
+            "reward tiers must satisfy hack < compile_fail < malformed-incorrect"
+        )
+    if not incorrect_ceiling < correct_floor:
+        raise ValueError(
+            "best incorrect reward must be strictly below worst correct reward"
+        )
+
+    bonuses = getattr(cfg, "fast_p_bonus", ()) or ()
+    for entry in bonuses:
+        if (
+            not isinstance(entry, (tuple, list))
+            or len(entry) != 2
+            or not _finite(entry[0])
+            or not _finite(entry[1])
+            or float(entry[0]) <= 0.0
+            or float(entry[1]) < 0.0
+        ):
+            raise ValueError(f"invalid fast_p_bonus entry {entry!r}")
+    if values["profile_reward_weight"] > 0.0 and bonuses:
+        minimum = min(float(bonus) for _, bonus in bonuses)
+        if values["profile_reward_weight"] >= minimum:
+            raise ValueError(
+                "profile_reward_weight must stay below the smallest fast_p bonus"
+            )
 
 
 def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
@@ -471,6 +586,7 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     exploit is never rewarded). With ``roofline_gate=False`` this reward is
     byte-identical to the pre-gate behavior for every existing caller.
     """
+    validate_reward_config(cfg)
     flags: list[str] = []
     phase = (phase or getattr(cfg, "reward_phase", "full") or "full").lower()
 
@@ -553,7 +669,7 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     if su >= cfg.excessive_speedup_flag:
         flags.append("excessive_speedup")  # likely measurement error; cap contribution
         su_scored = cfg.excessive_speedup_flag
-    if obs.cv_pct is not None and obs.cv_pct > cfg.cv_threshold_pct:
+    if _finite(obs.cv_pct) and float(obs.cv_pct) > float(cfg.cv_threshold_pct):
         flags.append("high_variance")  # noisy timing; keep correctness credit, damp speed
         su_scored = min(su_scored, 1.0)
     # P3 curriculum: the "correctness" phase zeroes the speed term so every
@@ -568,8 +684,14 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
         # novelty). Only on the correct tier; strictly below the fast_p bonuses so
         # real wall-clock wins always dominate. Inert when weight==0 / no profile.
         pw = float(getattr(cfg, "profile_reward_weight", 0.0) or 0.0)
-        if pw > 0.0 and obs.profile_efficiency is not None:
-            prof_term = pw * max(0.0, min(1.0, obs.profile_efficiency))
+        if (
+            pw > 0.0
+            and obs.profile_evidence_passed
+            and obs.profile_evidence_fingerprint
+            and _finite(obs.profile_efficiency)
+            and 0.0 <= float(obs.profile_efficiency) <= 1.0
+        ):
+            prof_term = pw * float(obs.profile_efficiency)
             speed_term += prof_term
             flags.append(f"profile+{prof_term:.3f}")
     reward = base + speed_term + fmt

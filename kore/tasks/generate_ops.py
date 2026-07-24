@@ -20,6 +20,7 @@ import argparse
 from pathlib import Path
 
 from kore.tasks import _genops
+from kore.tasks.shape_policy import shape_policy_yaml_lines
 
 TASKS_DIR = Path(__file__).resolve().parent
 
@@ -109,6 +110,10 @@ def _yaml(op: str, family: str, dtype: str, snr: float) -> str:
         f"op_family: {family}",
         f"baseline_tier: {FAMILY_TIER[family]}",
         "generated: true",
+    ]
+    lines += shape_policy_yaml_lines(
+        op, shp, source=f"generator:{family}")
+    lines += [
         "shapes:",
         f"  minimal: {_shape_str(shp['minimal'])}",
         f"  primary: {_shape_str(shp['primary'])}",

@@ -32,6 +32,7 @@ torch imported lazily (registry discovery never needs a GPU/torch).
 from __future__ import annotations
 
 from kore.tasks._genops import DTYPES, _parse_shape
+from kore.tasks.breadth._seed_linalg import TRITON_LINALG_BLOCK
 
 # op -> family metadata; each op has a bespoke oracle/baseline/seed (below).
 OPS: tuple[str, ...] = (
@@ -648,14 +649,14 @@ def fused_lion(param, grad, exp_avg, lr, beta1, beta2, wd):
 _FUSED_MUON_SEED = '''"""GENERATED breadth fused_muon seed ({dtype}). One Muon step on a 2D param, UPDATING
 param + momentum_buffer IN PLACE. Triton elementwise kernels do the (nesterov)
 momentum accumulation and the final scaled update; the {ns_steps}-iter Newton-Schulz
-orthogonalization (the quintic X = a*X + (b*A + c*A@A)@X) runs as torch matmuls in
-fp32 - FUSING those matmuls into Triton is the optimization target."""
+orthogonalization uses naive Triton GEMM/normalization/axpby primitives throughout."""
 from __future__ import annotations
 import torch, triton, triton.language as tl
 
 _NS_A, _NS_B, _NS_C = {ns_a}, {ns_b}, {ns_c}
 _NS_STEPS = {ns_steps}
 
+{linalg_block}
 
 @triton.jit
 def _muon_momentum_kernel(g_ptr, buf_ptr, geff_ptr, numel, momentum, BLOCK: tl.constexpr):
@@ -682,18 +683,20 @@ def _muon_update_kernel(p_ptr, o_ptr, numel, alpha, BLOCK: tl.constexpr):
 
 
 def _newton_schulz5(gm):
-    x = gm.float()
+    x = gm
     transposed = False
     if x.shape[-2] > x.shape[-1]:
-        x = x.mT
+        x = x.mT.contiguous()
         transposed = True
-    x = x / (x.norm() + 1e-7)
+    x = _seed_normalize(x, 1e-7)
     for _ in range(_NS_STEPS):
-        a = x @ x.mT
-        b = _NS_B * a + _NS_C * (a @ a)
-        x = _NS_A * x + b @ x
+        a = _seed_mm(x, x, trans_b=True)
+        aa = _seed_mm(a, a)
+        b = _seed_axpby(a, aa, _NS_B, _NS_C)
+        bx = _seed_mm(b, x)
+        x = _seed_axpby(x, bx, _NS_A, 1.0)
     if transposed:
-        x = x.mT
+        x = x.mT.contiguous()
     return x
 
 
@@ -774,7 +777,8 @@ def seed_source(op: str, dtype: str) -> str:
         return _FUSED_LION_SEED.format(dtype=dtype, tldt=tldt)
     if op == "fused_muon":
         return _FUSED_MUON_SEED.format(dtype=dtype, tldt=tldt, ns_steps=NS_STEPS,
-                                       ns_a=NS_COEFFS[0], ns_b=NS_COEFFS[1], ns_c=NS_COEFFS[2])
+                                       ns_a=NS_COEFFS[0], ns_b=NS_COEFFS[1],
+                                       ns_c=NS_COEFFS[2], linalg_block=TRITON_LINALG_BLOCK)
     if op == "grad_clip_global_norm":
         return _GRAD_CLIP_SEED.format(dtype=dtype, tldt=tldt, clip_eps=CLIP_EPS)
     raise ValueError(f"unknown breadth op {op!r}")

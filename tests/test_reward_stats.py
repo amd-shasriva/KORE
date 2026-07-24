@@ -494,7 +494,13 @@ def test_all_task_seeds_stay_clean_and_rewardable():
 
     tasks = all_tasks()
     assert len(tasks) >= 100   # wide suite: 15 hand-authored + generated operators
+    failures = []
     for t in tasks:
-        assert scan_for_hacks(t.seed_source) is None, f"{t.task_id}: seed wrongly flagged"
+        reason = scan_for_hacks(t.seed_source)
+        if reason is not None:
+            failures.append(f"{t.task_id}: {reason}")
+            continue
         rr = compute_reward(_obs_correct(2.0), t.seed_source, dtype=t.dtype)
-        assert rr.correct is True and rr.tier == "correct_timed"
+        if rr.correct is not True or rr.tier != "correct_timed":
+            failures.append(f"{t.task_id}: clean seed is not rewardable ({rr.tier})")
+    assert not failures, "task seed contract failures:\n" + "\n".join(failures)

@@ -86,7 +86,11 @@ def test_driver_writes_typed_roundtrip_and_respects_caps(tmp_path):
     assert summary["gold_wins"] == 3            # per_task_cap bounds a single task
     assert summary["tasks_covered"] == 1
 
-    back = read_jsonl(dr / "wins" / "_gold_from_groups.jsonl", typed=True)
+    back = read_jsonl(
+        dr / "wins" / "_gold_from_groups.jsonl",
+        typed=True,
+        mode="production_strict",
+    )
     assert back and all(isinstance(r, WinRecord) for r in back)
     # Determinism.
     assert mint_gold_wins(dr, cap=100, per_task_cap=3, seed=0) == summary

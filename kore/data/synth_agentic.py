@@ -44,7 +44,11 @@ from typing import Any, Iterator, Optional
 
 from kore.agent.format import arch_desc, build_agent_system_prompt, render_reflection, render_tool_result
 from kore.agent.schema import AgenticTrajectoryRecord
-from kore.data.schemas import read_jsonl, write_jsonl
+from kore.data.schemas import (
+    read_jsonl,
+    stamp_production_record,
+    write_jsonl,
+)
 from kore.obs import get_logger
 
 log = get_logger("data.synth_agentic")
@@ -399,7 +403,8 @@ def _iter_records(d: Path) -> Iterator[dict]:
                 continue
         except OSError:
             continue
-        for rec in read_jsonl(p, typed=False):
+        for rec in read_jsonl(
+            p, typed=False, mode="generic_training_row"):
             if isinstance(rec, dict):
                 yield rec
 
@@ -464,7 +469,15 @@ def synthesize_agentic(
     for kind, recs in built.items():
         summary[kind] = len(recs)
         if write and recs:
-            write_jsonl(agdir / f"{prefix}_{kind}.jsonl", [r.to_dict() for r in recs])
+            rows = [
+                stamp_production_record(
+                    record,
+                    provenance_id="synth_agentic_v1",
+                    evaluation_id=f"synth_agentic:{kind}:{index}",
+                )
+                for index, record in enumerate(recs)
+            ]
+            write_jsonl(agdir / f"{prefix}_{kind}.jsonl", rows)
     summary["total"] = sum(len(v) for v in built.values())
     summary["heldout_skipped"] = n_heldout_skipped
     log.event("agentic_synth_done", cap=cap, arch=str(arch), **summary)

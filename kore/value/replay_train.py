@@ -134,7 +134,7 @@ def load_groups_from_dir(groups_dir: str, cap: Optional[int] = None) -> list[lis
                    if not os.path.basename(p).startswith("_"))
     for p in paths:
         try:
-            recs = read_jsonl(p, typed=True)
+            recs = read_jsonl(p, typed=True, mode="production_strict")
         except Exception:  # noqa: BLE001 - a malformed shard never aborts training
             continue
         for rec in recs:

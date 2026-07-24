@@ -31,7 +31,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, format_assistant_turn
-from kore.data.schemas import WinRecord, read_jsonl, write_jsonl
+from kore.data.schemas import (
+    WinRecord,
+    read_jsonl,
+    stamp_production_record,
+    write_jsonl,
+)
 from kore.obs import get_logger
 
 log = get_logger("data.gold_wins")
@@ -182,7 +187,8 @@ def mint_gold_wins(
                     continue
             except OSError:
                 continue
-            for g in read_jsonl(p, typed=False):
+            for g in read_jsonl(
+                p, typed=False, mode="generic_training_row"):
                 if isinstance(g, dict):
                     groups.append(g)
     rng.shuffle(groups)
@@ -206,7 +212,15 @@ def mint_gold_wins(
 
     if write and out:
         (data_root / "wins").mkdir(parents=True, exist_ok=True)
-        write_jsonl(data_root / "wins" / out_name, [w.to_dict() for w in out])
+        rows = [
+            stamp_production_record(
+                win,
+                provenance_id="gold_wins_v1",
+                evaluation_id=f"gold_win:{win.task_id}:{index}",
+            )
+            for index, win in enumerate(out)
+        ]
+        write_jsonl(data_root / "wins" / out_name, rows)
 
     summary = {
         "gold_wins": len(out),

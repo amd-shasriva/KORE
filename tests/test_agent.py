@@ -521,7 +521,8 @@ def test_agentic_record_roundtrip(tmp_path):
 
     path = tmp_path / "agentic.jsonl"
     write_jsonl(path, [rec])
-    raw = read_jsonl(path, typed=False)
+    raw = read_jsonl(
+        path, typed=False, mode="generic_training_row")
     assert raw[0]["task_id"] == ep.task_id and raw[0]["type"] == "agentic"
 
 

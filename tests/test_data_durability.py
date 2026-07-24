@@ -21,6 +21,9 @@ from kore.data.schemas import (
     read_jsonl,
     read_jsonl_legacy,
     record_from_dict,
+    stamp_legacy_record_unknown,
+    stamp_production_record,
+    stamp_source_only_record,
     validate_record_dict,
     write_jsonl,
 )
@@ -96,7 +99,7 @@ def test_typed_roundtrip_all_four_record_types(tmp_path):
 
     write_jsonl(path, records)
 
-    loaded = read_jsonl(path)
+    loaded = read_jsonl(path, mode="generic_training_row")
     assert loaded == records
     assert [type(record) for record in loaded] == [
         RepairRecord,
@@ -104,7 +107,7 @@ def test_typed_roundtrip_all_four_record_types(tmp_path):
         WinRecord,
         AgenticTrajectoryRecord,
     ]
-    raw = read_jsonl(path, typed=False)
+    raw = read_jsonl(path, typed=False, mode="generic_training_row")
     assert {record["schema_version"] for record in raw} == {RECORD_SCHEMA_VERSION}
 
 
@@ -189,7 +192,7 @@ def test_strict_reader_fails_closed_and_legacy_reader_is_explicit(tmp_path):
     path.write_text(json.dumps(legacy) + "\n{broken\n", encoding="utf-8")
 
     with pytest.raises(JsonlValidationError, match="schema_version"):
-        read_jsonl(path)
+        read_jsonl(path, mode="production_strict")
 
     recovered = read_jsonl_legacy(path)
     assert recovered == [_repair()]
@@ -255,7 +258,8 @@ def test_concurrent_generic_writers_never_publish_interleaved_jsonl(tmp_path):
         process.join(timeout=10)
         assert process.exitcode == 0
 
-    records = read_jsonl(path, typed=False)
+    records = read_jsonl(
+        path, typed=False, mode="generic_training_row")
     assert len(records) == 200
     assert {record["writer"] for record in records} in ({"left"}, {"right"})
     assert {record["index"] for record in records} == set(range(200))
@@ -267,3 +271,43 @@ def test_record_validation_does_not_mutate_input():
     before = copy.deepcopy(record)
     validate_record_dict(record)
     assert record == before
+
+
+def test_reader_mode_is_mandatory_and_production_is_stric(tmp_path):
+    path = tmp_path / "records.jsonl"
+    write_jsonl(path, [_repair()])
+    with pytest.raises(TypeError, match="mode"):
+        read_jsonl(path)
+    assert read_jsonl(path, mode="generic_training_row") == [_repair()]
+    with pytest.raises(JsonlValidationError, match="production lane"):
+        read_jsonl(path, mode="production_strict")
+
+
+def test_policy_training_requires_transcript_and_contract_provenance(tmp_path):
+    empty = _win()
+    empty.trajectory = []
+    stamped = stamp_production_record(
+        empty, provenance_id="contract", evaluation_id="evaluation")
+    with pytest.raises(RecordValidationError, match="must not be empty"):
+        validate_record_dict(stamped, production=True)
+
+    source_only = stamp_source_only_record(
+        empty,
+        provenance_id="champion-source",
+        evaluation_id="external-eval-1",
+        source_status="verified_external",
+    )
+    validate_record_dict(source_only, production=True)
+
+
+def test_legacy_migration_marks_semantics_unknown_and_stays_quarantined():
+    legacy = _group().to_dict()
+    legacy.pop("schema_version")
+    migrated = stamp_legacy_record_unknown(legacy)
+    assert migrated["candidate_outcome_schema"] == {
+        "name": "candidate_outcome_legacy_v1",
+        "version": 1,
+        "semantic_validity": "unknown",
+    }
+    with pytest.raises(RecordValidationError, match="production lane"):
+        validate_record_dict(migrated, production=True)

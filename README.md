@@ -361,6 +361,7 @@ Tests are CPU-safe by design (roofline formulas, reward gating, family split, ca
 | [`docs/DATASET_SPEC.md`](docs/DATASET_SPEC.md) | Corpus design + datagen record schemas |
 | [`docs/KORE_BENCH_BLUEPRINT.md`](docs/KORE_BENCH_BLUEPRINT.md) | Task taxonomy + benchmark release plan |
 | [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md) | Roofline validation, physics reward, cross-family transfer |
+| [`kore/sandbox/README.md`](kore/sandbox/README.md) | Candidate execution boundary, external broker, and host isolation requirements |
 
 ---
 
@@ -371,7 +372,7 @@ Tests are CPU-safe by design (roofline formulas, reward gating, family split, ca
 | NCCL "Duplicate GPU detected" | stale `HIP_VISIBLE_DEVICES` pins all FSDP ranks to one GPU | launchers `unset` device masks; don't export GPU pins before `--full-ft` |
 | `torch.cuda.is_available() == False` | a CUDA torch wheel got installed, or ROCR+HIP double-remap | reinstall ROCm torch (see [Installation](#installation)); use HIP-only pinning |
 | datagen stalls / empty shards | missing `AMD_LLM_API_KEY` | add it to `.env.local` |
-| every candidate `compiled=False` under load | `RLIMIT_NPROC` (per-UID) too low → OpenBLAS/numpy can't start threads in the driver | `_preexec` raises soft→hard + `_env` caps BLAS threads (see `kore/env`) |
+| every candidate `compiled=False` under load | host per-UID process limit too low → OpenBLAS/numpy cannot start driver threads | do not use `RLIMIT_NPROC` as a per-candidate limit; use broker cgroup `pids.max`; the child env caps BLAS threads |
 | GRPO η looks ~2× too optimistic | roofline using datasheet peaks | set on-node `KORE_PEAK_BF16` / `KORE_PEAK_HBM_BW` (the conductor launcher does this) |
 | retention gate "NOT enforced" | serving backend (vLLM/torch) unavailable | provision serving; the gate warns loudly rather than silently passing |
 | stage skipped unexpectedly on resume | in `done_stages` and artifact present | `--force --stages <stage>`, or delete the artifact/shard |

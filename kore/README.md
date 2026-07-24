@@ -14,6 +14,7 @@ The within-turn terminal reward is the high-contrast, vendor-relative **speedup*
 flowchart TB
   tasks["tasks/<br/>kernel registry + shapes + split"]
   env["env/<br/>KoreEnv verify + bench + replay"]
+  sandbox["sandbox/<br/>execution policy + broker contract"]
   analysis["analysis/<br/>roofline T_min + P0 harness"]
   reward["reward/<br/>lexicographic ladder + roofline shaping potential"]
   verify["verify/<br/>adversarial + metamorphic oracle"]
@@ -28,6 +29,7 @@ flowchart TB
   eval["eval/<br/>bake-off + retention + generalization"]
 
   tasks --> env
+  sandbox --> env
   env --> reward
   analysis --> reward
   verifier --> env
@@ -56,7 +58,8 @@ Arrows show the primary "consumed-by" direction. `analysis` and `reward` share t
 | Package | One-line purpose | README |
 | --- | --- | --- |
 | [`tasks`](tasks/README.md) | Kernel task registry: reference oracle, vendor baseline, shapes, deterministic train/held-out split, op-class generators | [→](tasks/README.md) |
-| [`env`](env/README.md) | `KoreEnv`: sandboxed compile → correctness → cold-cache bench → optional PMC, with a JSONL replay cache | [→](env/README.md) |
+| [`env`](env/README.md) | `KoreEnv`: compile → correctness → cold-cache bench → optional PMC, with a JSONL replay cache | [→](env/README.md) |
+| [`sandbox`](sandbox/README.md) | Repository execution boundary: trusted-only subprocess compatibility plus fail-closed external-broker/attestation contracts | [→](sandbox/README.md) |
 | [`analysis`](analysis/README.md) | Roofline `T_min` / `η` model, the P0 falsification harness, and the cross-family transfer analysis | [→](analysis/README.md) |
 | [`reward`](reward/README.md) | The lexicographic anti-hack reward ladder, the physics residual-descent reward, and the roofline **shaping potential** (online `η`; `whitebox.phi_potential`, `shaping.py`) | [→](reward/README.md) |
 | [`verify`](verify/README.md) | Four-prong equivalence oracle (random + adversarial + metamorphic + determinism) | [→](verify/README.md) |

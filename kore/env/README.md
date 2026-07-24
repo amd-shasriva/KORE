@@ -1,6 +1,6 @@
 # `kore/env` — the verified GPU environment
 
-`KoreEnv` is where a candidate kernel meets real silicon. It compiles the kernel, checks correctness on every shape against the fp32 oracle, benchmarks it cold-cache against the production baseline with variance control, optionally collects rocprofv3 counters, and caches the result. It is hardened against verdict forgery, mode-sniffing, stateful-timing hacks, and filesystem escape, and it separates **infra** failures (timeout / OOM / HIP flake) from **kernel** failures.
+`KoreEnv` is where a candidate kernel meets real silicon. It compiles the kernel, checks correctness on every shape against the fp32 oracle, benchmarks it cold-cache against the production baseline with variance control, optionally collects rocprofv3 counters, and caches the result. It is hardened against several reward-forgery paths and separates **infra** failures (timeout / OOM / HIP flake) from **kernel** failures. Its default subprocess backend is explicitly **trusted-code-only**, not a hostile-code sandbox; production/untrusted execution requires the external boundary in [`kore/sandbox`](../sandbox/README.md).
 
 ---
 
@@ -51,10 +51,14 @@ The returned `Observation` (defined in [`kore/reward`](../reward/README.md)) car
 | Mode sniffing (behave differently when benched) | randomized warmup/iters per bench run |
 | Stateful timing | post-timing correctness poison → whole eval flagged as hack |
 | One-easy-shape win | `wall_ms = max` over shapes, `snr_db = min` over shapes |
-| Filesystem escape | staged in a temp workdir; reference/driver copied read-only (chmod 444) |
-| Runaway process | `timeout` + process-group `killpg` in `_exec` (no `RLIMIT_AS` — ROCm needs a huge VA space) |
+| Accidental source mutation | staged in a private temp workdir; reference/driver copied read-only (chmod 444) |
+| Runaway trusted process | bounded output + timeout + process-group cleanup (no `RLIMIT_AS` — ROCm needs a huge VA space) |
 
-> **Concurrency and `RLIMIT_NPROC`.** `RLIMIT_NPROC` is **per-UID**: it counts every process and thread the user owns, not just the child, so a low per-subprocess soft cap throttles the *whole user*. Under concurrent datagen — dozens of workers spawning thousands of torch/OpenBLAS threads — a low cap makes OpenBLAS `blas_thread_init` fail and `import numpy` die inside the driver, which marks **every** candidate `compiled=False`. `_preexec` therefore raises the soft limit to the hard cap, and `_env` caps `OPENBLAS/OMP/MKL/NUMEXPR_NUM_THREADS=4` so the driver spawns a bounded thread pool instead of one BLAS thread per core (×96) per subprocess. Runaway containment is the `timeout` + `killpg` in `_exec`, not a per-child nproc cap.
+> **Isolation boundary.** Read-only staging, an allowlisted environment, rlimits, and a process group do not isolate code running under the same UID. They do not block filesystem or network access and cannot enforce GPU memory/fault separation. The local controller is labeled `trusted-code-only`. Untrusted or production policy fails closed unless an approved external broker and signed-verdict verifier are configured.
+
+> **Concurrency and `RLIMIT_NPROC`.** `RLIMIT_NPROC` is **per-UID**: it counts every process and thread the user owns, not just the child, so a low per-subprocess soft cap throttles the *whole user*. The trusted backend therefore does not claim to enforce `max_processes` locally; the production broker must use cgroup v2 `pids.max`. The candidate environment caps `OPENBLAS/OMP/MKL/NUMEXPR_NUM_THREADS=4` to reduce accidental thread explosions.
+
+Candidate children receive no inherited API keys, proxy controls, Slurm/SSH state, `LD_PRELOAD`, user site, or ambient `PYTHONPATH`. `HOME`, `TMPDIR`, and compiler caches are private to the evaluation. This intentionally removes the old cross-evaluation shared compile cache from the candidate trust boundary.
 
 **Infra vs. kernel classification** (`_classify`): timeouts, OOM, and HIP flakes are `infra_error=True`; they are **never cached** and **never scored as incorrect**, so a transient node problem cannot poison the replay cache or penalize a good kernel.
 
@@ -99,5 +103,6 @@ Per-candidate PMC is expensive, so the two rollout paths differ in how they comp
 | `min_variance_runs` / `max_variance_runs` / `cv_threshold_pct` | early-stop benching when CV is low enough |
 | `warmup_iters` / `bench_iters` | base warmup/measure counts (randomized per run) |
 | `profile_reward_weight` | trigger PMC collection + dense shaping |
+| `sandbox` | `SandboxConfig`; trusted compatibility or fail-closed external broker |
 
 See also: [`tasks`](../tasks/README.md), [`reward`](../reward/README.md), [`verifier`](../verifier/README.md).

@@ -7,10 +7,11 @@ that returns a reward :class:`Observation`. Hardening (see audits):
   and could print fake ``SNR:``/``median_ms:`` lines. We parse the *last* match
   (the driver prints its verdict after calling the candidate) AND the anti-hack
   scanner rejects any candidate that prints a verdict literal.
-* **Isolation.** Each eval runs in a throwaway workdir; the copied task sources
-  (incl. reference.py oracle) are made read-only so a kernel can't corrupt them.
-  The subprocess runs in its own session with a process limit; on timeout the
-  whole process group is killed (no leaked grandchildren / GPU holders).
+* **Execution boundary.** Each eval gets a private workdir/environment, bounded
+  output, and process-group cleanup. The default backend is explicitly
+  ``trusted-code-only``: these controls do not isolate hostile same-UID code.
+  Production/untrusted policy requires an approved external broker and signed
+  verdict; it never falls back to this subprocess path.
 * **Infra vs kernel.** Timeouts, OOM-kills, segfaults, and missing-dependency
   imports are classified as ``infra_error`` - never cached, never fed to the
   policy as a kernel-correctness signal.
@@ -26,15 +27,14 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import platform
 import re
-import resource
 import shutil
-import signal
-import subprocess
 import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from importlib import metadata
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +45,17 @@ from kore.reward.reward import Observation, scan_for_hacks
 from kore.reward.reward import _worst_speedup
 from kore.reward.stats import cv_pct as _cv_pct
 from kore.reward.stats import median as _median
+from kore.sandbox.config import SandboxConfig
+from kore.sandbox.controller import IsolationController, create_isolation_controller
+from kore.sandbox.environment import build_candidate_environment
+from kore.sandbox.errors import PolicyViolation, SandboxError
+from kore.sandbox.models import (
+    ExecutionKind,
+    ExecutionStatus,
+    SandboxRequest,
+    SandboxResponse,
+)
+from kore.sandbox.signing import VerdictSignatureVerifier
 from kore.tasks.base import Shape, Task
 
 _LOG = get_logger("env")
@@ -91,33 +102,15 @@ def _last(pattern: re.Pattern, text: str):
     return ms[-1] if ms else None
 
 
-def _preexec():  # pragma: no cover - runs in child only
-    # NB: session is created via Popen(start_new_session=True); do NOT setsid
-    # again here (would EPERM).
-    #
-    # Do NOT *lower* RLIMIT_NPROC. It is PER-UID (it counts EVERY process/thread the
-    # user owns, not just this child), so a small per-subprocess soft cap throttles
-    # the entire user. Under concurrent datagen (32 workers spawn thousands of
-    # torch/OpenBLAS threads) an old 512 cap made OpenBLAS `blas_thread_init` fail
-    # and `import numpy` die inside the driver, so EVERY eval falsely reported
-    # compiled=False -> 100% silent datagen failure on a busy node. Raise the soft
-    # limit to the hard cap; runaway containment is the timeout + killpg in _exec
-    # and the system hard limit, not a per-child nproc cap.
-    try:
-        _soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-        resource.setrlimit(resource.RLIMIT_NPROC, (hard, hard))
-    except (ValueError, OSError):
-        pass
-    # Deliberately NOT setting RLIMIT_AS - ROCm/HIP reserve huge virtual address
-    # space and an AS cap breaks legitimate GPU kernels.
-
-
 class KoreEnv:
     """Task-bound verified environment. One per task; call ``step`` per candidate."""
 
     def __init__(self, task: Task, config=CONFIG, use_replay: bool = True,
                  correctness_timeout: int = 300, bench_timeout: int = 300,
-                 gpu: Optional[str] = None):
+                 gpu: Optional[str] = None,
+                 isolation_controller: Optional[IsolationController] = None,
+                 sandbox_config: Optional[SandboxConfig] = None,
+                 verdict_verifier: Optional[VerdictSignatureVerifier] = None):
         self.task = task
         self.cfg = config
         self.correctness_timeout = correctness_timeout
@@ -128,6 +121,25 @@ class KoreEnv:
         # all ranks default to GPU 0, contend/OOM there, one stalls, and the
         # cross-rank all_gather deadlocks. None => inherit/legacy default "0".
         self._gpu = gpu
+        self.sandbox_config = (
+            sandbox_config
+            or getattr(config, "sandbox", None)
+            or SandboxConfig()
+        )
+        self.isolation_policy = self.sandbox_config.policy()
+        self.isolation_controller = (
+            isolation_controller
+            or create_isolation_controller(
+                self.sandbox_config,
+                verifier=verdict_verifier,
+            )
+        )
+        if self.isolation_controller.policy != self.isolation_policy:
+            raise PolicyViolation("isolation controller policy does not match KoreEnv policy")
+        self._last_execution_status: Optional[ExecutionStatus] = None
+        self._active_source: Optional[str] = None
+        self._active_task: Optional[Task] = None
+        self._task_descriptor_cache: dict[str, dict] = {}
         self._cache_obj = ReplayCache(self.cfg.runs_dir / f"replay_{task.task_id}.jsonl") \
             if use_replay else None
 
@@ -135,6 +147,12 @@ class KoreEnv:
     def _snr_threshold(self) -> float:
         t = getattr(self.task, "snr_threshold", None)
         return float(t) if t else self.cfg.snr_threshold_for(self.task.dtype)
+
+    @property
+    def last_execution_status(self) -> Optional[ExecutionStatus]:
+        """Typed status from the most recent sandbox-controlled subprocess."""
+
+        return self._last_execution_status
 
     # ------------------------------------------------------------------ #
     def step(self, source: str, full_validation: bool = True,
@@ -164,6 +182,20 @@ class KoreEnv:
         _ev("INFO", "eval_start", task=task.task_id, n_shapes=n_shapes,
             source_sha=source_sha, do_bench=do_bench)
 
+        source_bytes = len(source.encode("utf-8"))
+        if source_bytes > self.isolation_policy.budget.max_source_bytes:
+            self._last_execution_status = ExecutionStatus.POLICY_VIOLATION
+            return Observation(
+                compiled=False,
+                dtype=task.dtype,
+                validation_passed=False,
+                infra_error=True,
+                error_text=(
+                    f"sandbox policy: candidate source is {source_bytes} bytes; "
+                    f"limit is {self.isolation_policy.budget.max_source_bytes}"
+                ),
+            )
+
         hack = scan_for_hacks(source)
         if hack:
             _ev("WARN", "eval_hack", task=task.task_id, reason=hack, source_sha=source_sha)
@@ -180,9 +212,12 @@ class KoreEnv:
 
         shapes = shapes or task.shapes or [Shape("default", {})]
         workdir = Path(tempfile.mkdtemp(prefix=f"kore_{task.task_id}_"))
+        previous_source, previous_task = self._active_source, self._active_task
+        self._active_source, self._active_task = source, task
         try:
             obs = self._run(task, source, shapes, workdir, do_bench)
         finally:
+            self._active_source, self._active_task = previous_source, previous_task
             shutil.rmtree(workdir, ignore_errors=True)
 
         # Only cache DETERMINISTIC terminal verdicts - never transient infra errors.
@@ -200,83 +235,146 @@ class KoreEnv:
             infra_error=obs.infra_error, cached=cached)
 
     # ------------------------------------------------------------------ #
-    def _env(self) -> dict:
-        env = os.environ.copy()
-        # Repo root (the parent of the kore/ package). Prepended to PYTHONPATH so the
-        # compile/bench driver subprocess can ``import kore.*`` (e.g. _genops.driver_main).
-        project_root = str(Path(__file__).resolve().parents[2])
-        env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
-        if self._gpu is not None:
-            # ABSOLUTE physical GPU id for the compile/bench subprocess. Set BOTH
-            # HIP_ and CUDA_VISIBLE_DEVICES to it (and drop any inherited list) so the
-            # subprocess sees exactly this one physical GPU as its device 0 - no
-            # double-remap from a restricted parent visible-device list.
-            env.pop("ROCR_VISIBLE_DEVICES", None)
-            # str(): subprocess env values MUST be strings - an int gpu id (e.g.
-            # KoreEnv(gpu=5)) would make subprocess.Popen raise inside os.fsencode.
-            env["HIP_VISIBLE_DEVICES"] = str(self._gpu)
-            env["CUDA_VISIBLE_DEVICES"] = str(self._gpu)
-        else:
-            env["HIP_VISIBLE_DEVICES"] = env.get("HIP_VISIBLE_DEVICES", "0")
-        # Prefer the TASK's declared arch over the global default so the driver
-        # subprocess compiles/benches + selects the fp8 encoding for the arch the
-        # task actually targets (a gfx950 task must not be built as gfx942/FNUZ).
-        env["GPU_TARGET"] = getattr(self.task, "gpu_target", None) or self.cfg.gpu_target
-        env["HOME"] = str(Path(env.get("TMPDIR", "/tmp")))
-        # Shared, persistent Triton/inductor compile caches (audit R2 perf M3). Pinned
-        # to a STABLE dir -- NOT the per-eval HOME/TMPDIR above -- so the FIRST worker to
-        # compile a given kernel warms the cache for ALL 64 workers and every future
-        # eval + restart, turning the cold-compile bulk of the ~35s/eval into a one-time
-        # cost. Triton/inductor handle concurrent cache access (atomic writes + locks).
-        # Overridable via KORE_COMPILE_CACHE_DIR. setdefault so an explicit parent env
-        # wins. Compiled code is deterministic, so caching never changes measured timing.
-        _cache_root = env.get("KORE_COMPILE_CACHE_DIR") or "/tmp/kore_compile_cache"
-        env.setdefault("TRITON_CACHE_DIR", os.path.join(_cache_root, "triton"))
-        env.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.join(_cache_root, "inductor"))
-        # Cap CPU BLAS/OMP threads in the driver. By default OpenBLAS spawns one
-        # thread PER CORE (96 here); across 32 concurrent datagen workers that is a
-        # thread explosion that both wastes CPU and pushes the per-UID thread count
-        # sky-high. The driver's numpy use is tiny (output comparison) and the real
-        # work is on the GPU, so a few threads is plenty. Defense-in-depth alongside
-        # the RLIMIT_NPROC fix in _preexec.
-        for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
-                   "NUMEXPR_NUM_THREADS"):
-            env.setdefault(_v, "4")
-        # Cap the per-driver torch-inductor compile-worker pool (audit R2 perf): each
-        # eval is its own driver subprocess, and inductor's default pool is
-        # ~min(32, cores/2) workers PER driver -- with many concurrent reverify/datagen
-        # workers that is a thread explosion that oversubscribes the box (400+ procs on
-        # 384 cores) and SLOWS every eval via CPU contention. A small fixed pool keeps
-        # total processes ~= worker_count x few, so cores feed compiles instead of
-        # thrashing on context switches. Overridable via the env.
-        env.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "4")
-        env.setdefault("MAX_JOBS", "4")   # ninja/C++ ext build parallelism per driver
-        return env
+    def _env(self, private_root: Optional[Path] = None) -> dict:
+        """Fresh allowlisted environment for a candidate-bearing subprocess."""
+
+        root = private_root or (
+            Path(tempfile.gettempdir()) / f"kore_env_{os.getpid()}_{id(self):x}"
+        )
+        task = self._active_task or self.task
+        return build_candidate_environment(
+            base_environment=os.environ,
+            private_root=Path(root),
+            project_root=Path(__file__).resolve().parents[2],
+            gpu_target=(
+                getattr(task, "gpu_target", None)
+                or getattr(self.cfg, "gpu_target", "gfx950")
+            ),
+            gpu=(str(self._gpu) if self._gpu is not None else None),
+            rocm_path=getattr(self.cfg, "rocm_path", None),
+        )
 
     def _exec(self, cmd, workdir, env, timeout):
-        """Run cmd in its own session; kill the whole group on timeout.
-        Returns (returncode, combined_output, timed_out)."""
-        p = subprocess.Popen(cmd, cwd=str(workdir), env=env, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True, start_new_session=True,
-                             preexec_fn=_preexec)
+        """Execute through the configured isolation controller."""
+
+        task = self._active_task or self.task
+        source = self._active_source
+        if source is None:
+            try:
+                source = (Path(workdir) / "kernel.py").read_text()
+            except OSError:
+                source = ""
         try:
-            out, err = p.communicate(timeout=timeout)
-            return p.returncode, (out or "") + "\n" + (err or ""), False
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                out, err = p.communicate(timeout=10)
-            except Exception:
-                out, err = "", ""
-            return -9, (out or "") + "\n" + (err or ""), True
+            request = SandboxRequest.create(
+                task_id=task.task_id,
+                task_descriptor=self._task_descriptor(task),
+                source=source,
+                policy=self.isolation_policy,
+                toolchain_descriptor={
+                    "python_implementation": platform.python_implementation(),
+                    "python_version": platform.python_version(),
+                    "python_executable": Path(sys.executable).name,
+                    "rocm_path": str(getattr(self.cfg, "rocm_path", "")),
+                    "packages": {
+                        name: _distribution_version(name)
+                        for name in ("kore", "torch", "triton")
+                    },
+                },
+                runtime_descriptor={
+                    "system": platform.system(),
+                    "kernel_release": platform.release(),
+                    "machine": platform.machine(),
+                    "gpu_target": (
+                        getattr(task, "gpu_target", None)
+                        or getattr(self.cfg, "gpu_target", "gfx950")
+                    ),
+                    "gpu": str(self._gpu) if self._gpu is not None else "inherited-or-0",
+                    "backend": self.isolation_controller.backend_label,
+                },
+                execution_kind=ExecutionKind.LEGACY_PYTHON,
+                argv=tuple(str(part) for part in cmd),
+                working_directory=str(workdir),
+                environment=env,
+                timeout_seconds=min(
+                    float(timeout),
+                    self.isolation_policy.budget.wall_time_seconds,
+                ),
+            )
+        except (SandboxError, TypeError, ValueError) as exc:
+            self._last_execution_status = ExecutionStatus.POLICY_VIOLATION
+            return 126, f"sandbox policy: {exc}", False
+
+        try:
+            response = self.isolation_controller.execute(request)
+        except Exception as exc:  # noqa: BLE001 - isolation failures must fail closed
+            self._last_execution_status = ExecutionStatus.INFRA_ERROR
+            return 125, f"sandbox controller failure: {exc}", False
+        if not isinstance(response, SandboxResponse):
+            self._last_execution_status = ExecutionStatus.INVALID_VERDICT
+            return 125, "sandbox controller returned an invalid response", False
+        self._last_execution_status = response.status
+        out = response.stdout or ""
+        err = response.stderr or ""
+        if response.verdict.message:
+            err = f"{err}\n[sandbox:{response.status.value}] {response.verdict.message}"
+        returncode = response.verdict.exit_code
+        if returncode is None:
+            if response.status is ExecutionStatus.OK:
+                returncode = 0
+            elif response.status is ExecutionStatus.TIMEOUT:
+                returncode = -9
+            elif response.status is ExecutionStatus.POLICY_VIOLATION:
+                returncode = 126
+            else:
+                returncode = 125
+        return returncode, out + "\n" + err, response.status is ExecutionStatus.TIMEOUT
+
+    def _task_descriptor(self, task: Task) -> dict:
+        cache_key = str(getattr(task, "task_id", "unknown"))
+        cached = self._task_descriptor_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        files: dict[str, str] = {}
+        task_dir = getattr(task, "dir", None)
+        if task_dir is not None:
+            for path in sorted(Path(task_dir).glob("*.py")):
+                try:
+                    files[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    files[path.name] = "unreadable"
+        descriptor = {
+            "task_id": cache_key,
+            "dtype": str(getattr(task, "dtype", "")),
+            "gpu_target": str(getattr(task, "gpu_target", "")),
+            "shapes": [
+                {
+                    "name": str(getattr(shape, "name", "")),
+                    "dims": dict(getattr(shape, "dims", {})),
+                }
+                for shape in (getattr(task, "shapes", None) or [])
+            ],
+            "python_files": files,
+        }
+        self._task_descriptor_cache[cache_key] = descriptor
+        return descriptor
 
     def _classify(self, out: str, returncode: int, timed_out: bool):
         """-> ('ok'|'compile'|'infra', message)."""
+        status = self._last_execution_status
         if timed_out:
             return "infra", "timeout"
+        if status in {
+            ExecutionStatus.INFRA_ERROR,
+            ExecutionStatus.POLICY_VIOLATION,
+            ExecutionStatus.GPU_FAULT,
+            ExecutionStatus.GPU_QUARANTINED,
+            ExecutionStatus.BROKER_UNAVAILABLE,
+            ExecutionStatus.UNSUPPORTED_ISOLATION,
+            ExecutionStatus.INVALID_VERDICT,
+        }:
+            return "infra", f"{status.value}: {_tail(out)}"
+        if status is ExecutionStatus.CANDIDATE_ERROR:
+            return "compile", _tail(out)
         if _INFRA_ERR.search(out):
             return "infra", _tail(out)
         if returncode < 0 or returncode == 137:  # signal / OOM-kill
@@ -289,16 +387,30 @@ class KoreEnv:
 
     def _run(self, task: Task, source: str, shapes: list[Shape], workdir: Path,
              do_bench: bool) -> Observation:
-        # stage isolated sources; make the oracle/driver READ-ONLY so a kernel
-        # cannot corrupt reference.py for future evals.
-        for p in task.dir.glob("*.py"):
+        # Stage private sources; make the oracle/driver read-only against
+        # accidental mutation. This is not a same-UID filesystem security boundary.
+        task_sources = list(task.dir.glob("*.py"))
+        task_bytes = sum(p.stat().st_size for p in task_sources)
+        if task_bytes > self.isolation_policy.budget.max_task_bytes:
+            self._last_execution_status = ExecutionStatus.POLICY_VIOLATION
+            return Observation(
+                compiled=False,
+                dtype=task.dtype,
+                validation_passed=False,
+                infra_error=True,
+                error_text=(
+                    f"sandbox policy: task sources are {task_bytes} bytes; "
+                    f"limit is {self.isolation_policy.budget.max_task_bytes}"
+                ),
+            )
+        for p in task_sources:
             dst = workdir / p.name
             shutil.copy(p, dst)
             os.chmod(dst, 0o444)
         (workdir / "kernel.py").write_text(source)
         os.chmod(workdir / "kernel.py", 0o444)
         driver = workdir / "driver.py"
-        env = self._env()
+        env = self._env(workdir / ".sandbox")
 
         snr_by_shape: dict[str, float] = {}
         compiled = True
@@ -445,7 +557,7 @@ class KoreEnv:
     def collect_counters(self, source: str, shape: Optional["Shape"] = None) -> Optional[dict]:
         """PUBLIC: rocprofv3 PMC counters for a kernel (Pillar 4 grounded reasoning).
 
-        Stages an isolated workdir (like ``evaluate``), profiles the CANDIDATE on one
+        Stages a private workdir (like ``evaluate``), profiles the CANDIDATE on one
         shape (``primary`` by default), and returns aggregated ``{counter: value}`` or
         ``None`` if the profiler is unavailable / fails. Fully fail-safe (never raises)
         so grounded-reasoning datagen degrades gracefully to the templated path.
@@ -462,18 +574,27 @@ class KoreEnv:
                 passes = [COUNTER_SETS["full"]]
         except Exception:  # noqa: BLE001
             return None
+        if len(source.encode("utf-8")) > self.isolation_policy.budget.max_source_bytes:
+            self._last_execution_status = ExecutionStatus.POLICY_VIOLATION
+            return None
         sh = shape or self.task.shape("primary") or self.task.shape("minimal") or (
             self.task.shapes[0] if self.task.shapes else Shape("default", {}))
         workdir = Path(tempfile.mkdtemp(prefix=f"pmc_{self.task.task_id}_"))
+        previous_source, previous_task = self._active_source, self._active_task
+        self._active_source, self._active_task = source, self.task
         try:
-            for p in self.task.dir.glob("*.py"):
+            task_sources = list(self.task.dir.glob("*.py"))
+            if sum(p.stat().st_size for p in task_sources) > self.isolation_policy.budget.max_task_bytes:
+                self._last_execution_status = ExecutionStatus.POLICY_VIOLATION
+                return None
+            for p in task_sources:
                 dst = workdir / p.name
                 shutil.copy(p, dst)
                 os.chmod(dst, 0o444)
             (workdir / "kernel.py").write_text(source)
             os.chmod(workdir / "kernel.py", 0o444)
             driver = workdir / "driver.py"
-            env = self._env()
+            env = self._env(workdir / ".sandbox")
             agg: dict = {}
             # The grounding set spans SQ+GRBM+TCC and cannot be one --pmc pass, so run
             # one rocprofv3 invocation per pass and merge the disjoint counter dicts.
@@ -507,6 +628,7 @@ class KoreEnv:
         except Exception:  # noqa: BLE001
             return None
         finally:
+            self._active_source, self._active_task = previous_source, previous_task
             shutil.rmtree(workdir, ignore_errors=True)
 
     def _collect_profile(self, driver: Path, sh: Shape, workdir: Path,
@@ -754,3 +876,10 @@ def _determinism_stable(snr1: Optional[float], snr2: Optional[float],
 def _tail(s: str, n: int = 800) -> str:
     s = s.strip()
     return s[-n:] if len(s) > n else s
+
+
+def _distribution_version(name: str) -> str:
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return "not-installed"

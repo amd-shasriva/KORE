@@ -15,6 +15,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kore.sandbox.config import SandboxConfig
+
 KORE_ROOT = Path(__file__).resolve().parent.parent          # repo root (the kore/ package's parent)
 WORKSPACE_ROOT = KORE_ROOT.parent                            # umbrella workspace (repo root's parent)
 REPOS_DIR = WORKSPACE_ROOT / "repos"
@@ -29,6 +31,10 @@ class KoreConfig:
 
     gpu_target: str = field(default_factory=lambda: os.environ.get("GPU_TARGET", "gfx950"))  # KORE target = MI350X/CDNA4
     rocm_path: str = field(default_factory=lambda: os.environ.get("ROCM_PATH", "/opt/rocm"))
+    # Candidate execution boundary. Defaults to the compatibility subprocess,
+    # which is explicitly trusted-code-only; untrusted/production settings fail
+    # closed unless an approved external broker and verdict verifier are supplied.
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig.from_env)
 
     # correctness gate
     snr_threshold_fp32: float = 30.0

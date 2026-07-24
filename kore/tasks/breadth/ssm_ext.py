@@ -1261,12 +1261,11 @@ def {op}(u, delta, A, B_, C, D_):
 
 _SEED_CONV_SSD = '''"""GENERATED breadth {op} seed ({dtype}). Mamba conv+SSM: causal depthwise conv
 (+SiLU) then a scalar-decay SSD scan. x[B,L,D], conv_w[D,K], a[B,L], B_/C[B,L,N] ->
-y[B,L,D]. The conv+SiLU input projection is done in torch; one program per (b,d)
-then keeps an fp32 state h[N] and scans over L: h=sigmoid(a)*h + xc*B_; y=sum_n C*h.
-The policy fuses the conv into the scan kernel + chunks it. {tldt} store."""
+y[B,L,D]. A Triton causal-convolution kernel materializes the SiLU projection; one
+scan program per (b,d) then keeps an fp32 state h[N] over L. The policy fuses the
+two honest Triton stages and chunks the recurrence. {tldt} store."""
 from __future__ import annotations
 import torch, triton, triton.language as tl
-import torch.nn.functional as F
 
 
 @triton.jit
@@ -1293,10 +1292,7 @@ def _{op}_kernel(xc_ptr, a_ptr, B_ptr, C_ptr, y_ptr, L, D, N,
 def {op}(x, conv_w, a, B_, C):
     B, L, D = x.shape
     N = B_.shape[-1]
-    K = conv_w.shape[1]
-    xt = x.transpose(1, 2).contiguous()
-    xc = F.conv1d(F.pad(xt, (K - 1, 0)), conv_w[:, None, :], None, groups=D)
-    xc = F.silu(xc).transpose(1, 2).contiguous()
+    xc = _causal_conv_silu(x, conv_w)
     a = a.contiguous(); B_ = B_.contiguous(); C = C.contiguous()
     y = torch.empty_like(xc)
     NB = triton.next_power_of_2(N)
@@ -1309,12 +1305,11 @@ def {op}(x, conv_w, a, B_, C):
 
 _SEED_CONV_SELECTIVE = '''"""GENERATED breadth {op} seed ({dtype}). Mamba conv+SSM: causal depthwise conv
 (+SiLU) then the Mamba-1 selective scan. u[B,L,D], conv_w[D,K], delta[B,L,D],
-A[D,N], B_/C[B,L,N] -> y[B,L,D]. The conv+SiLU projection is done in torch; one
-program per (b,d) then scans over L: dt=softplus(delta); h=exp(dt*A)*h+(dt*B_)*uc;
-y=sum_n C*h. The policy fuses the conv into the scan + chunks it. {tldt} store."""
+A[D,N], B_/C[B,L,N] -> y[B,L,D]. A Triton causal-convolution kernel materializes
+the SiLU projection; one scan program per (b,d) then computes the selective
+recurrence. The policy fuses the two honest Triton stages and chunks it. {tldt} store."""
 from __future__ import annotations
 import torch, triton, triton.language as tl
-import torch.nn.functional as F
 
 
 @triton.jit
@@ -1343,10 +1338,7 @@ def _{op}_kernel(uc_ptr, delta_ptr, A_ptr, B_ptr, C_ptr, y_ptr, L, D, N,
 def {op}(u, conv_w, delta, A, B_, C):
     B, L, D = u.shape
     N = A.shape[1]
-    K = conv_w.shape[1]
-    ut = u.transpose(1, 2).contiguous()
-    uc = F.conv1d(F.pad(ut, (K - 1, 0)), conv_w[:, None, :], None, groups=D)
-    uc = F.silu(uc).transpose(1, 2).contiguous()
+    uc = _causal_conv_silu(u, conv_w)
     delta = delta.contiguous(); A = A.contiguous(); B_ = B_.contiguous(); C = C.contiguous()
     y = torch.empty_like(uc)
     NB = triton.next_power_of_2(N)
@@ -1355,6 +1347,46 @@ def {op}(u, conv_w, delta, A, B_, C):
         uc.stride(0), uc.stride(1), uc.stride(2), A.stride(0), A.stride(1),
         B_.stride(0), B_.stride(1), B_.stride(2), NB=NB, num_warps=1)
     return y
+'''
+
+_SEED_CAUSAL_CONV_SILU = '''
+
+@triton.jit
+def _causal_conv_silu_kernel(x_ptr, w_ptr, out_ptr, L, D,
+                             sx_b, sx_l, sx_d, sw_d, sw_k,
+                             K: tl.constexpr, BLOCK_D: tl.constexpr):
+    bl = tl.program_id(0)
+    b = bl // L
+    pos = bl % L
+    d = tl.program_id(1) * BLOCK_D + tl.arange(0, BLOCK_D)
+    dmask = d < D
+    acc = tl.zeros([BLOCK_D], dtype=tl.float32)
+    for k in range(0, K):
+        src_pos = pos - (K - 1) + k
+        valid = dmask & (src_pos >= 0)
+        xv = tl.load(x_ptr + b * sx_b + src_pos * sx_l + d * sx_d,
+                     mask=valid, other=0.0).to(tl.float32)
+        wv = tl.load(w_ptr + d * sw_d + k * sw_k,
+                     mask=dmask, other=0.0).to(tl.float32)
+        acc += xv * wv
+    acc = acc * tl.sigmoid(acc)
+    tl.store(out_ptr + b * sx_b + pos * sx_l + d * sx_d,
+             acc.to(out_ptr.dtype.element_ty), mask=dmask)
+
+
+def _causal_conv_silu(x, conv_w):
+    B, L, D = x.shape
+    K = conv_w.shape[1]
+    x = x.contiguous()
+    conv_w = conv_w.contiguous()
+    out = torch.empty_like(x)
+    BLOCK_D = 256
+    _causal_conv_silu_kernel[(B * L, triton.cdiv(D, BLOCK_D))](
+        x, conv_w, out, L, D,
+        x.stride(0), x.stride(1), x.stride(2),
+        conv_w.stride(0), conv_w.stride(1),
+        K=K, BLOCK_D=BLOCK_D)
+    return out
 '''
 
 
@@ -1805,9 +1837,11 @@ def seed_source(op: str, dtype: str) -> str:
     if fam == "selective":
         return _SEED_SELECTIVE.format(op=op, dtype=dtype, tldt=tldt)
     if fam == "conv_ssd":
-        return _SEED_CONV_SSD.format(op=op, dtype=dtype, tldt=tldt)
+        return (_SEED_CONV_SSD + _SEED_CAUSAL_CONV_SILU).format(
+            op=op, dtype=dtype, tldt=tldt)
     if fam == "conv_selective":
-        return _SEED_CONV_SELECTIVE.format(op=op, dtype=dtype, tldt=tldt)
+        return (_SEED_CONV_SELECTIVE + _SEED_CAUSAL_CONV_SILU).format(
+            op=op, dtype=dtype, tldt=tldt)
     if fam == "scan_lse":
         return _SEED_LOGCUMSUMEXP.format(dtype=dtype, tldt=tldt)
     if fam == "scan_cummax":

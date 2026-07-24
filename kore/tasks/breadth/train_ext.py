@@ -38,6 +38,7 @@ never collide with ``train_ops``.
 from __future__ import annotations
 
 from kore.tasks._genops import DTYPES, _parse_shape
+from kore.tasks.breadth._seed_linalg import TRITON_LINALG_BLOCK
 
 # --------------------------------------------------------------------------- #
 # Task math constants (shared by the fp32 oracle AND the generated seeds)
@@ -1027,11 +1028,10 @@ def make_reference(op: str, dtype: str) -> dict:
 
 # --------------------------------------------------------------------------- #
 # Naive compiling+correct Triton starter seeds (the policy optimizes these).
-# Elementwise optimizers / grad-utils are REAL per-element/per-row Triton; the
-# reduction/matmul frontier ops (Muon NS, Adafactor factoring, quant de/requant,
-# LAMB/LARS/NovoGrad trust ratios, the loss backwards) do the reduction in torch
-# and the bulk elementwise pass in Triton - FUSING the torch part into Triton is
-# precisely the optimization target.
+# Elementwise optimizers / grad-utils and every loss-backward are direct Triton.
+# Muon and Adafactor use deliberately naive Triton GEMM/reduction stages rather
+# than framework matmul; quant-state and trust-ratio families retain host tensor
+# bookkeeping around genuine Triton update kernels.
 # --------------------------------------------------------------------------- #
 def _elem_seed(op, tldt, doc, entry_sig, tensors, kscalars, host, body, ret, numel_src="param"):
     kptr = ", ".join(b + "_ptr" for b, _, _ in tensors)
@@ -1061,45 +1061,353 @@ def _elem_seed(op, tldt, doc, entry_sig, tensors, kscalars, host, body, ret, num
             + "    return %s\n" % ret)
 
 
-def _loss_seed(op, tldt, first, other, fwd):
-    """Loss+backward seed: fp32 forward + autograd dinput, then a Triton pass
-    materializes the [., .] gradient (fuse the whole loss+bwd into Triton)."""
-    doc = ("GENERATED breadth %s seed. Naive: fp32 forward + autograd input-gradient, "
-           "then a Triton elementwise pass materializes the gradient (the FUSED "
-           "loss+backward Triton kernel is the optimization target)." % op)
-    return ('"""%s"""\n' % doc
-            + "from __future__ import annotations\n"
-            + "import torch, triton, triton.language as tl\n"
-            + "import torch.nn.functional as F\n\n\n"
-            + "@triton.jit\n"
-            + "def _%s_copy_kernel(src_ptr, dst_ptr, numel, BLOCK: tl.constexpr):\n" % op
-            + "    pid = tl.program_id(0)\n"
-            + "    offs = pid * BLOCK + tl.arange(0, BLOCK)\n"
-            + "    mask = offs < numel\n"
-            + "    v = tl.load(src_ptr + offs, mask=mask).to(tl.float32)\n"
-            + "    tl.store(dst_ptr + offs, v.to(%s), mask=mask)\n\n\n" % tldt
-            + "def %s(%s, %s):\n" % (op, first, other)
-            + "    x = %s.float().detach().requires_grad_(True)\n" % first
-            + "    %s\n" % fwd
-            + "    (g,) = torch.autograd.grad(loss, x)\n"
-            + "    grad = torch.empty_like(%s)\n" % first
-            + "    numel = grad.numel()\n"
-            + "    BLOCK = 1024\n"
-            + "    grid = (triton.cdiv(numel, BLOCK),)\n"
-            + "    _%s_copy_kernel[grid](g.contiguous(), grad, numel, BLOCK=BLOCK, num_warps=4)\n" % op
-            + "    return loss.detach().to(%s.dtype), grad\n" % first)
+def _loss_seed(op, tldt, first, other):
+    """Emit an honest Triton loss+backward seed for every training loss family."""
+    row_kinds = {
+        "tr_cross_entropy_bwd": 0,
+        "tr_softcap_ce_bwd": 1,
+        "tr_zloss_ce_bwd": 2,
+        "tr_focal_ce_bwd": 3,
+        "tr_ls_ce_bwd": 4,
+        "tr_poly1_ce_bwd": 5,
+        "tr_kl_distill_bwd": 6,
+        "tr_reverse_kl_distill_bwd": 7,
+        "tr_js_distill_bwd": 8,
+        "tr_temp_distill_bwd": 9,
+    }
+    if op in row_kinds:
+        kind = row_kinds[op]
+        distill = kind >= 6
+        return f'''"""GENERATED breadth {op} seed. Triton computes the fp32 row
+loss and analytic input gradient directly; a second Triton kernel reduces row
+losses to the scalar mean. No framework loss, autograd, or oracle delegation."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _loss_rows_kernel(x_ptr, other_ptr, rows_ptr, grad_ptr, M, V,
+                      KIND: tl.constexpr, DISTILL: tl.constexpr,
+                      BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    base = row * V
+    max_s = -float("inf")
+    max_t = -float("inf")
+    raw_sum = 0.0
+    for start in range(0, V, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < V
+        x = tl.load(x_ptr + base + offs, mask=mask,
+                    other=-float("inf")).to(tl.float32)
+        raw_sum += tl.sum(tl.where(mask, x, 0.0), axis=0)
+        if KIND == 1:
+            th = 2.0 * tl.sigmoid(2.0 * x / {SOFTCAP!r}) - 1.0
+            sx = {SOFTCAP!r} * th
+        elif KIND == 9:
+            sx = x / {DISTILL_T!r}
+        else:
+            sx = x
+        max_s = tl.maximum(max_s, tl.max(sx, axis=0))
+        if DISTILL:
+            te = tl.load(other_ptr + base + offs, mask=mask,
+                         other=-float("inf")).to(tl.float32)
+            if KIND == 9:
+                te = te / {DISTILL_T!r}
+            max_t = tl.maximum(max_t, tl.max(te, axis=0))
+
+    sum_s = 0.0
+    sum_t = 0.0
+    for start in range(0, V, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < V
+        x = tl.load(x_ptr + base + offs, mask=mask,
+                    other=-float("inf")).to(tl.float32)
+        if KIND == 1:
+            th = 2.0 * tl.sigmoid(2.0 * x / {SOFTCAP!r}) - 1.0
+            sx = {SOFTCAP!r} * th
+        elif KIND == 9:
+            sx = x / {DISTILL_T!r}
+        else:
+            sx = x
+        sum_s += tl.sum(tl.where(mask, tl.exp(sx - max_s), 0.0), axis=0)
+        if DISTILL:
+            te = tl.load(other_ptr + base + offs, mask=mask,
+                         other=-float("inf")).to(tl.float32)
+            if KIND == 9:
+                te = te / {DISTILL_T!r}
+            sum_t += tl.sum(tl.where(mask, tl.exp(te - max_t), 0.0), axis=0)
+    lse_s = max_s + tl.log(sum_s)
+    lse_t = max_t + tl.log(sum_t)
+
+    row_value = 0.0
+    aux = 0.0
+    target = 0
+    if DISTILL:
+        for start in range(0, V, BLOCK):
+            offs = start + tl.arange(0, BLOCK)
+            mask = offs < V
+            x = tl.load(x_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+            te = tl.load(other_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+            if KIND == 9:
+                x = x / {DISTILL_T!r}
+                te = te / {DISTILL_T!r}
+            log_ps = x - lse_s
+            log_pt = te - lse_t
+            ps = tl.exp(log_ps)
+            pt = tl.exp(log_pt)
+            if KIND == 6 or KIND == 9:
+                term = pt * (log_pt - log_ps)
+            elif KIND == 7:
+                term = ps * (log_ps - log_pt)
+            else:
+                mid = 0.5 * (ps + pt)
+                log_mid = tl.log(mid)
+                cv = log_ps - log_mid
+                term = 0.5 * ps * cv + 0.5 * pt * (log_pt - log_mid)
+                aux += tl.sum(tl.where(mask, ps * cv, 0.0), axis=0)
+            row_value += tl.sum(tl.where(mask, term, 0.0), axis=0)
+        if KIND == 9:
+            row_value = ({DISTILL_T!r} * {DISTILL_T!r}) * row_value
+    else:
+        target = tl.load(other_ptr + row).to(tl.int64)
+        xt = tl.load(x_ptr + base + target).to(tl.float32)
+        if KIND == 1:
+            target_th = 2.0 * tl.sigmoid(2.0 * xt / {SOFTCAP!r}) - 1.0
+            sxt = {SOFTCAP!r} * target_th
+        else:
+            sxt = xt
+        pt = tl.exp(sxt - lse_s)
+        ce = lse_s - sxt
+        if KIND == 2:
+            row_value = ce + {ZLOSS_LAMBDA!r} * lse_s * lse_s
+        elif KIND == 3:
+            row_value = (1.0 - pt) * (1.0 - pt) * (-tl.log(pt))
+        elif KIND == 4:
+            row_value = (1.0 - {LS_EPS!r}) * ce + {LS_EPS!r} * (lse_s - raw_sum / V)
+        elif KIND == 5:
+            row_value = ce + {POLY1_EPS!r} * (1.0 - pt)
+        else:
+            row_value = ce
+    tl.store(rows_ptr + row, row_value)
+
+    for start in range(0, V, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < V
+        x = tl.load(x_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+        if DISTILL:
+            te = tl.load(other_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+            if KIND == 9:
+                xs = x / {DISTILL_T!r}
+                ts = te / {DISTILL_T!r}
+            else:
+                xs = x
+                ts = te
+            log_ps = xs - lse_s
+            log_pt = ts - lse_t
+            ps = tl.exp(log_ps)
+            pt = tl.exp(log_pt)
+            if KIND == 6:
+                grad = (ps - pt) / M
+            elif KIND == 7:
+                grad = ps * ((log_ps - log_pt) - row_value) / M
+            elif KIND == 8:
+                cv = log_ps - tl.log(0.5 * (ps + pt))
+                grad = 0.5 * ps * (cv - aux) / M
+            else:
+                grad = {DISTILL_T!r} * (ps - pt) / M
+        else:
+            if KIND == 1:
+                th = 2.0 * tl.sigmoid(2.0 * x / {SOFTCAP!r}) - 1.0
+                sx = {SOFTCAP!r} * th
+            else:
+                sx = x
+            ps = tl.exp(sx - lse_s)
+            onehot = offs == target
+            if KIND == 1:
+                grad = (ps - onehot) * (1.0 - th * th) / M
+            elif KIND == 2:
+                grad = ((ps - onehot)
+                        + 2.0 * {ZLOSS_LAMBDA!r} * lse_s * ps) / M
+            elif KIND == 3:
+                pt = tl.exp((tl.load(x_ptr + base + target).to(tl.float32)) - lse_s)
+                dldpt = (2.0 * (1.0 - pt) * tl.log(pt)
+                         - (1.0 - pt) * (1.0 - pt) / pt)
+                grad = dldpt * (pt * (onehot - ps)) / M
+            elif KIND == 4:
+                grad = (ps - (1.0 - {LS_EPS!r}) * onehot - {LS_EPS!r} / V) / M
+            elif KIND == 5:
+                pt = tl.exp((tl.load(x_ptr + base + target).to(tl.float32)) - lse_s)
+                grad = (1.0 + {POLY1_EPS!r} * pt) * (ps - onehot) / M
+            else:
+                grad = (ps - onehot) / M
+        tl.store(grad_ptr + base + offs, grad.to({tldt}), mask=mask)
+
+
+@triton.jit
+def _mean_rows_kernel(rows_ptr, loss_ptr, M, BLOCK: tl.constexpr):
+    acc = 0.0
+    for start in range(0, M, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < M
+        vals = tl.load(rows_ptr + offs, mask=mask, other=0.0)
+        acc += tl.sum(vals, axis=0)
+    tl.store(loss_ptr, (acc / M).to(loss_ptr.dtype.element_ty))
+
+
+def {op}({first}, {other}):
+    x = {first}.contiguous()
+    aux = {other}.contiguous()
+    M, V = x.shape
+    rows = torch.empty((M,), device=x.device, dtype=torch.float32)
+    grad = torch.empty_like(x)
+    loss = torch.empty((), device=x.device, dtype=x.dtype)
+    _loss_rows_kernel[(M,)](
+        x, aux, rows, grad, M, V, KIND={kind}, DISTILL={distill!r},
+        BLOCK=1024, num_warps=8)
+    _mean_rows_kernel[(1,)](rows, loss, M, BLOCK=1024, num_warps=8)
+    return loss, grad
+'''
+
+    elem_kinds = {
+        "tr_bce_logits_bwd": 0,
+        "tr_huber_bwd": 1,
+        "tr_smooth_l1_bwd": 2,
+    }
+    if op in elem_kinds:
+        kind = elem_kinds[op]
+        return f'''"""GENERATED breadth {op} seed. Triton computes both the
+elementwise loss contribution and analytic gradient; a Triton reduction returns
+the mean loss. No framework loss or autograd delegation."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _elem_loss_kernel(x_ptr, y_ptr, part_ptr, grad_ptr, numel,
+                      KIND: tl.constexpr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+    y = tl.load(y_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+    d = x - y
+    ad = tl.abs(d)
+    if KIND == 0:
+        loss = tl.maximum(x, 0.0) - x * y + tl.log(1.0 + tl.exp(-tl.abs(x)))
+        grad = (tl.sigmoid(x) - y) / numel
+    elif KIND == 1:
+        loss = tl.where(ad <= {HUBER_DELTA!r}, 0.5 * d * d,
+                        {HUBER_DELTA!r} * (ad - 0.5 * {HUBER_DELTA!r}))
+        grad = tl.where(ad <= {HUBER_DELTA!r}, d,
+                        {HUBER_DELTA!r} * tl.where(d >= 0.0, 1.0, -1.0)) / numel
+    else:
+        loss = tl.where(ad < {SMOOTHL1_BETA!r},
+                        0.5 * d * d / {SMOOTHL1_BETA!r},
+                        ad - 0.5 * {SMOOTHL1_BETA!r})
+        grad = tl.where(ad < {SMOOTHL1_BETA!r}, d / {SMOOTHL1_BETA!r},
+                        tl.where(d >= 0.0, 1.0, -1.0)) / numel
+    tl.store(part_ptr + pid, tl.sum(tl.where(mask, loss, 0.0), axis=0))
+    tl.store(grad_ptr + offs, grad.to({tldt}), mask=mask)
+
+
+@triton.jit
+def _finish_loss_kernel(part_ptr, loss_ptr, n_parts, numel, BLOCK: tl.constexpr):
+    acc = 0.0
+    for start in range(0, n_parts, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < n_parts
+        acc += tl.sum(tl.load(part_ptr + offs, mask=mask, other=0.0), axis=0)
+    tl.store(loss_ptr, (acc / numel).to(loss_ptr.dtype.element_ty))
+
+
+def {op}({first}, {other}):
+    x = {first}.contiguous()
+    y = {other}.contiguous()
+    numel = x.numel()
+    BLOCK = 1024
+    n_parts = triton.cdiv(numel, BLOCK)
+    parts = torch.empty((n_parts,), device=x.device, dtype=torch.float32)
+    grad = torch.empty_like(x)
+    loss = torch.empty((), device=x.device, dtype=x.dtype)
+    _elem_loss_kernel[(n_parts,)](
+        x, y, parts, grad, numel, KIND={kind}, BLOCK=BLOCK, num_warps=4)
+    _finish_loss_kernel[(1,)](
+        parts, loss, n_parts, numel, BLOCK=1024, num_warps=8)
+    return loss, grad
+'''
+
+    if op == "tr_cosine_embed_bwd":
+        return f'''"""GENERATED breadth {op} seed. One Triton program per row
+computes the cosine loss and its analytic gradient; a Triton reduction returns
+the mean. No framework loss or autograd delegation."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _cosine_rows_kernel(a_ptr, b_ptr, rows_ptr, grad_ptr, M, N,
+                        BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    base = row * N
+    aa = 0.0
+    bb = 0.0
+    ab = 0.0
+    for start in range(0, N, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < N
+        a = tl.load(a_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+        b = tl.load(b_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+        aa += tl.sum(a * a, axis=0)
+        bb += tl.sum(b * b, axis=0)
+        ab += tl.sum(a * b, axis=0)
+    n1 = tl.sqrt(aa)
+    n2 = tl.sqrt(bb)
+    cosv = ab / (n1 * n2)
+    tl.store(rows_ptr + row, 1.0 - cosv)
+    for start in range(0, N, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < N
+        a = tl.load(a_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+        b = tl.load(b_ptr + base + offs, mask=mask, other=0.0).to(tl.float32)
+        grad = -(b / (n1 * n2) - cosv * a / aa) / M
+        tl.store(grad_ptr + base + offs, grad.to({tldt}), mask=mask)
+
+
+@triton.jit
+def _mean_rows_kernel(rows_ptr, loss_ptr, M, BLOCK: tl.constexpr):
+    acc = 0.0
+    for start in range(0, M, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < M
+        acc += tl.sum(tl.load(rows_ptr + offs, mask=mask, other=0.0), axis=0)
+    tl.store(loss_ptr, (acc / M).to(loss_ptr.dtype.element_ty))
+
+
+def {op}({first}, {other}):
+    a = {first}.contiguous()
+    b = {other}.contiguous()
+    M, N = a.shape
+    rows = torch.empty((M,), device=a.device, dtype=torch.float32)
+    grad = torch.empty_like(a)
+    loss = torch.empty((), device=a.device, dtype=a.dtype)
+    _cosine_rows_kernel[(M,)](a, b, rows, grad, M, N, BLOCK=1024, num_warps=8)
+    _mean_rows_kernel[(1,)](rows, loss, M, BLOCK=1024, num_warps=8)
+    return loss, grad
+'''
+    raise ValueError(f"no Triton loss seed for {op!r}")
 
 
 def _muon_seed(op, tldt, ns_steps):
     doc = ("GENERATED breadth %s seed. (Nesterov) momentum + aspect-scaled decoupled "
-           "update in Triton elementwise kernels; the %d-iter Newton-Schulz "
-           "orthogonalization runs as fp32 torch matmuls (FUSE them into Triton). "
+           "update plus %d-iter Newton-Schulz orthogonalization implemented with "
+           "naive Triton GEMM/normalization/axpby kernels. "
            "Returns (param, momentum_buffer)." % (op, ns_steps))
     a, b, c = NS_COEFFS
     return ('"""%s"""\n' % doc
             + "from __future__ import annotations\n"
             + "import torch, triton, triton.language as tl\n\n"
             + "_A, _B, _C, _STEPS, _EPS = %r, %r, %r, %d, %r\n\n\n" % (a, b, c, ns_steps, MUON_EPS)
+            + TRITON_LINALG_BLOCK + "\n\n"
             + "@triton.jit\n"
             + "def _%s_mom_kernel(g_ptr, buf_ptr, out_ptr, numel, momentum, BLOCK: tl.constexpr):\n" % op
             + "    pid = tl.program_id(0)\n"
@@ -1122,13 +1430,15 @@ def _muon_seed(op, tldt, ns_steps):
             + "    tl.store(p_ptr + offs, p.to(%s), mask=mask)\n\n\n" % tldt
             + "def _ns(x):\n"
             + "    t = x.shape[-2] > x.shape[-1]\n"
-            + "    if t:\n        x = x.mT\n"
-            + "    x = x / x.norm().clamp(min=_EPS)\n"
+            + "    if t:\n        x = x.mT.contiguous()\n"
+            + "    x = _seed_normalize(x, _EPS)\n"
             + "    for _ in range(_STEPS):\n"
-            + "        A = x @ x.mT\n"
-            + "        B = _B * A + _C * (A @ A)\n"
-            + "        x = _A * x + B @ x\n"
-            + "    if t:\n        x = x.mT\n"
+            + "        A = _seed_mm(x, x, trans_b=True)\n"
+            + "        A2 = _seed_mm(A, A)\n"
+            + "        B = _seed_axpby(A, A2, _B, _C)\n"
+            + "        BX = _seed_mm(B, x)\n"
+            + "        x = _seed_axpby(x, BX, _A, 1.0)\n"
+            + "    if t:\n        x = x.mT.contiguous()\n"
             + "    return x\n\n\n"
             + "def %s(param, grad, momentum_buffer, lr, weight_decay, momentum, eps, "
               "ns_a, ns_b, ns_c, ns_steps):\n" % op
@@ -1146,40 +1456,113 @@ def _muon_seed(op, tldt, ns_steps):
 
 
 def _adafactor_seed(op, tldt):
-    doc = ("GENERATED breadth %s seed. Factored (row/col) second-moment estimate + "
-           "update-clipping in torch; the final decoupled-decay scaled update runs in "
-           "a Triton elementwise kernel. Returns (param, row_var, col_var)." % op)
-    return ('"""%s"""\n' % doc
-            + "from __future__ import annotations\n"
-            + "import torch, triton, triton.language as tl\n\n\n"
-            + "@triton.jit\n"
-            + "def _%s_kernel(p_ptr, u_ptr, numel, decay, coef, BLOCK: tl.constexpr):\n" % op
-            + "    pid = tl.program_id(0)\n"
-            + "    offs = pid * BLOCK + tl.arange(0, BLOCK)\n"
-            + "    mask = offs < numel\n"
-            + "    p = tl.load(p_ptr + offs, mask=mask).to(tl.float32)\n"
-            + "    u = tl.load(u_ptr + offs, mask=mask).to(tl.float32)\n"
-            + "    p = p * decay - coef * u\n"
-            + "    tl.store(p_ptr + offs, p.to(%s), mask=mask)\n\n\n" % tldt
-            + "def %s(param, grad, row_var, col_var, lr, beta2_decay, eps1, eps2, d, "
-              "weight_decay, step):\n" % op
-            + "    sf = float(step)\n"
-            + "    omb2 = sf ** beta2_decay\n"
-            + "    rho_t = min(lr, 1.0 / (sf ** 0.5))\n"
-            + "    g = grad.float()\n"
-            + "    alpha = max(eps2, param.float().norm().item() / (param.numel() ** 0.5)) * rho_t\n"
-            + "    rv = row_var.float() + omb2 * ((g * g).mean(dim=-1, keepdim=True) - row_var.float())\n"
-            + "    cv = col_var.float() + omb2 * ((g * g).mean(dim=-2, keepdim=True) - col_var.float())\n"
-            + "    var = (rv @ cv) / rv.mean(dim=-2, keepdim=True).clamp(min=eps1)\n"
-            + "    upd = var.clamp(min=eps1 * eps1).rsqrt() * g\n"
-            + "    denom = max(1.0, upd.norm().item() / ((upd.numel() ** 0.5) * d))\n"
-            + "    row_var.copy_(rv.to(row_var.dtype)); col_var.copy_(cv.to(col_var.dtype))\n"
-            + "    numel = param.numel()\n"
-            + "    BLOCK = 1024\n"
-            + "    grid = (triton.cdiv(numel, BLOCK),)\n"
-            + "    _%s_kernel[grid](param, upd.contiguous(), numel, 1.0 - lr * weight_decay, "
-              "alpha / denom, BLOCK=BLOCK, num_warps=4)\n" % op
-            + "    return param, row_var, col_var\n")
+    return f'''"""GENERATED breadth {op} seed. Triton computes the factored
+row/column second moments, update RMS clipping, and parameter write directly.
+Returns the in-place (param, row_var, col_var) state."""
+from __future__ import annotations
+import torch, triton, triton.language as tl
+
+
+@triton.jit
+def _adafactor_row_kernel(g_ptr, row_ptr, row_fp_ptr, M, N, omb2,
+                          BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    acc = 0.0
+    for start in range(0, N, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < N
+        g = tl.load(g_ptr + row * N + offs, mask=mask, other=0.0).to(tl.float32)
+        acc += tl.sum(g * g, axis=0)
+    old = tl.load(row_ptr + row).to(tl.float32)
+    new = old + omb2 * (acc / N - old)
+    tl.store(row_fp_ptr + row, new)
+    tl.store(row_ptr + row, new.to(row_ptr.dtype.element_ty))
+
+
+@triton.jit
+def _adafactor_col_kernel(g_ptr, col_ptr, col_fp_ptr, M, N, omb2,
+                          BLOCK: tl.constexpr):
+    col = tl.program_id(0)
+    acc = 0.0
+    for start in range(0, M, BLOCK):
+        rows = start + tl.arange(0, BLOCK)
+        mask = rows < M
+        g = tl.load(g_ptr + rows * N + col, mask=mask, other=0.0).to(tl.float32)
+        acc += tl.sum(g * g, axis=0)
+    old = tl.load(col_ptr + col).to(tl.float32)
+    new = old + omb2 * (acc / M - old)
+    tl.store(col_fp_ptr + col, new)
+    tl.store(col_ptr + col, new.to(col_ptr.dtype.element_ty))
+
+
+@triton.jit
+def _adafactor_update_kernel(p_ptr, g_ptr, row_ptr, col_ptr, M, N,
+                             lr, rho_t, eps1, eps2, d, weight_decay,
+                             BLOCK: tl.constexpr):
+    numel = M * N
+    p2 = 0.0
+    row_sum = 0.0
+    for start in range(0, numel, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < numel
+        p = tl.load(p_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        p2 += tl.sum(p * p, axis=0)
+    for start in range(0, M, BLOCK):
+        rows = start + tl.arange(0, BLOCK)
+        mask = rows < M
+        rv = tl.load(row_ptr + rows, mask=mask, other=0.0).to(tl.float32)
+        row_sum += tl.sum(rv, axis=0)
+    row_mean = tl.maximum(row_sum / M, eps1)
+
+    u2 = 0.0
+    for start in range(0, numel, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < numel
+        rows = offs // N
+        cols = offs % N
+        rv = tl.load(row_ptr + rows, mask=mask, other=0.0).to(tl.float32)
+        cv = tl.load(col_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        g = tl.load(g_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        var = tl.maximum(rv * cv / row_mean, eps1 * eps1)
+        upd = g / tl.sqrt(var)
+        u2 += tl.sum(tl.where(mask, upd * upd, 0.0), axis=0)
+
+    param_rms = tl.sqrt(p2 / numel)
+    alpha = tl.maximum(eps2, param_rms) * rho_t
+    denom = tl.maximum(1.0, tl.sqrt(u2 / numel) / d)
+    coef = alpha / denom
+    decay = 1.0 - lr * weight_decay
+    for start in range(0, numel, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < numel
+        rows = offs // N
+        cols = offs % N
+        p = tl.load(p_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        g = tl.load(g_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        rv = tl.load(row_ptr + rows, mask=mask, other=0.0).to(tl.float32)
+        cv = tl.load(col_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        upd = g / tl.sqrt(tl.maximum(rv * cv / row_mean, eps1 * eps1))
+        tl.store(p_ptr + offs, (p * decay - coef * upd).to({tldt}), mask=mask)
+
+
+def {op}(param, grad, row_var, col_var, lr, beta2_decay, eps1, eps2, d,
+         weight_decay, step):
+    M, N = param.shape
+    grad = grad.contiguous()
+    sf = float(step)
+    omb2 = sf ** beta2_decay
+    rho_t = min(lr, 1.0 / (sf ** 0.5))
+    row_fp = torch.empty((M,), device=param.device, dtype=torch.float32)
+    col_fp = torch.empty((N,), device=param.device, dtype=torch.float32)
+    _adafactor_row_kernel[(M,)](
+        grad, row_var, row_fp, M, N, omb2, BLOCK=1024, num_warps=8)
+    _adafactor_col_kernel[(N,)](
+        grad, col_var, col_fp, M, N, omb2, BLOCK=1024, num_warps=8)
+    _adafactor_update_kernel[(1,)](
+        param, grad, row_fp, col_fp, M, N, lr, rho_t, eps1, eps2, d,
+        weight_decay, BLOCK=1024, num_warps=8)
+    return param, row_var, col_var
+'''
 
 
 def _quant_seed(op, tldt, kind, dec):
@@ -1533,51 +1916,25 @@ def seed_source(op: str, dtype: str) -> str:
                            host, "upd = upd", stores, "param, exp_avg, exp_avg_sq")
 
     # ---------------- fused loss + backward (14) -----------------------------
-    _FWD = {
-        "tr_cross_entropy_bwd": ("logits", "targets", "loss = F.cross_entropy(x, targets.long())"),
-        "tr_softcap_ce_bwd": ("logits", "targets",
-                              "loss = F.cross_entropy(%r * torch.tanh(x / %r), targets.long())"
-                              % (SOFTCAP, SOFTCAP)),
-        "tr_zloss_ce_bwd": ("logits", "targets",
-                            "loss = F.cross_entropy(x, targets.long()) + %r * "
-                            "(torch.logsumexp(x, -1) ** 2).mean()" % ZLOSS_LAMBDA),
-        "tr_focal_ce_bwd": ("logits", "targets",
-                            "p = torch.softmax(x, -1); pt = p.gather(1, targets.long()[:, None])"
-                            ".squeeze(1); loss = (((1.0 - pt) ** %r) * (-torch.log(pt))).mean()"
-                            % FOCAL_GAMMA),
-        "tr_ls_ce_bwd": ("logits", "targets",
-                         "loss = F.cross_entropy(x, targets.long(), label_smoothing=%r)" % LS_EPS),
-        "tr_poly1_ce_bwd": ("logits", "targets",
-                            "pt = torch.softmax(x, -1).gather(1, targets.long()[:, None]).squeeze(1); "
-                            "loss = (F.cross_entropy(x, targets.long(), reduction='none') + %r * "
-                            "(1.0 - pt)).mean()" % POLY1_EPS),
-        "tr_kl_distill_bwd": ("student", "teacher",
-                              "pt = torch.softmax(teacher.float(), -1); "
-                              "loss = (pt * (torch.log(pt) - F.log_softmax(x, -1))).sum(1).mean()"),
-        "tr_reverse_kl_distill_bwd": ("student", "teacher",
-                                      "ps = torch.softmax(x, -1); pt = torch.softmax(teacher.float(), -1); "
-                                      "loss = (ps * (torch.log(ps) - torch.log(pt))).sum(1).mean()"),
-        "tr_js_distill_bwd": ("student", "teacher",
-                              "ps = torch.softmax(x, -1); pt = torch.softmax(teacher.float(), -1); "
-                              "mid = 0.5 * (ps + pt); loss = (0.5 * (ps * (torch.log(ps) - "
-                              "torch.log(mid))).sum(1) + 0.5 * (pt * (torch.log(pt) - "
-                              "torch.log(mid))).sum(1)).mean()"),
-        "tr_temp_distill_bwd": ("student", "teacher",
-                                "T = %r; ptT = torch.softmax(teacher.float() / T, -1); "
-                                "loss = (T * T) * (ptT * (torch.log(ptT) - "
-                                "F.log_softmax(x / T, -1))).sum(1).mean()" % DISTILL_T),
-        "tr_bce_logits_bwd": ("inp", "target",
-                              "loss = F.binary_cross_entropy_with_logits(x, target.float())"),
-        "tr_huber_bwd": ("inp", "target", "loss = F.huber_loss(x, target.float(), delta=%r)" % HUBER_DELTA),
-        "tr_smooth_l1_bwd": ("inp", "target",
-                             "loss = F.smooth_l1_loss(x, target.float(), beta=%r)" % SMOOTHL1_BETA),
-        "tr_cosine_embed_bwd": ("x1", "x2",
-                                "loss = F.cosine_embedding_loss(x, x2.float(), "
-                                "torch.ones(x.shape[0], device=x.device))"),
+    _LOSS_ARGS = {
+        "tr_cross_entropy_bwd": ("logits", "targets"),
+        "tr_softcap_ce_bwd": ("logits", "targets"),
+        "tr_zloss_ce_bwd": ("logits", "targets"),
+        "tr_focal_ce_bwd": ("logits", "targets"),
+        "tr_ls_ce_bwd": ("logits", "targets"),
+        "tr_poly1_ce_bwd": ("logits", "targets"),
+        "tr_kl_distill_bwd": ("student", "teacher"),
+        "tr_reverse_kl_distill_bwd": ("student", "teacher"),
+        "tr_js_distill_bwd": ("student", "teacher"),
+        "tr_temp_distill_bwd": ("student", "teacher"),
+        "tr_bce_logits_bwd": ("inp", "target"),
+        "tr_huber_bwd": ("inp", "target"),
+        "tr_smooth_l1_bwd": ("inp", "target"),
+        "tr_cosine_embed_bwd": ("x1", "x2"),
     }
-    if op in _FWD:
-        first, other, fwd = _FWD[op]
-        return _loss_seed(op, tldt, first, other, fwd)
+    if op in _LOSS_ARGS:
+        first, other = _LOSS_ARGS[op]
+        return _loss_seed(op, tldt, first, other)
 
     # ---------------- gradient utilities -------------------------------------
     if op == "tr_ema_update":

@@ -65,15 +65,38 @@ def _grouped_mm(x, w, expert_ids):
     return out
 
 
-def _swiglu(gu):
-    """Gated activation on a fused gate/up projection [., 2I] -> [., I] (fp32)."""
+@triton.jit
+def _gated_act_kernel(gu_ptr, out_ptr, I, sgm, sgi, som, soi,
+                      GELU: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < I
+    gate = tl.load(gu_ptr + row * sgm + offs * sgi,
+                   mask=mask, other=0.0).to(tl.float32)
+    up = tl.load(gu_ptr + row * sgm + (I + offs) * sgi,
+                 mask=mask, other=0.0).to(tl.float32)
+    if GELU:
+        z = 0.7978845608028654 * (gate + 0.044715 * gate * gate * gate)
+        act = 0.5 * gate * (1.0 + (2.0 * tl.sigmoid(2.0 * z) - 1.0))
+    else:
+        act = gate * tl.sigmoid(gate)
+    tl.store(out_ptr + row * som + offs * soi,
+             (act * up).to(out_ptr.dtype.element_ty), mask=mask)
+
+
+def _swiglu(gu, gelu):
+    """Triton gated activation on [M, 2I] -> [M, I]."""
+    M = gu.shape[0]
     I = gu.shape[1] // 2
-    gate = gu[:, :I].float()
-    up = gu[:, I:].float()
-    return (gate * torch.sigmoid(gate)) * up
+    out = torch.empty((M, I), device=gu.device, dtype=gu.dtype)
+    BLOCK = 256
+    _gated_act_kernel[(M, triton.cdiv(I, BLOCK))](
+        gu, out, I, gu.stride(0), gu.stride(1), out.stride(0), out.stride(1),
+        GELU=gelu, BLOCK=BLOCK)
+    return out
 
 def moe_shared_expert_mlp(hidden, ws1, ws2, routed):
     gu = _mm_nt(hidden, ws1)
-    h = _swiglu(gu).to(hidden.dtype)
+    h = _swiglu(gu, False).to(hidden.dtype)
     y = _mm_nt(h, ws2)
     return (routed.float() + y.float()).to(hidden.dtype)

@@ -859,6 +859,34 @@ def _grouped_mm(x, w, expert_ids):
     return out
 '''
 
+_ACT_BLOCK = '''
+
+@triton.jit
+def _activation_kernel(y_ptr, n_elements,
+                       GELU: tl.constexpr, RELU: tl.constexpr, SILU: tl.constexpr,
+                       BLOCK: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    x = tl.load(y_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+    if GELU:
+        z = 0.7978845608028654 * (x + 0.044715 * x * x * x)
+        x = 0.5 * x * (1.0 + (2.0 * tl.sigmoid(2.0 * z) - 1.0))
+    elif RELU:
+        x = tl.maximum(x, 0.0)
+    elif SILU:
+        x = x * tl.sigmoid(x)
+    tl.store(y_ptr + offs, x, mask=mask)
+
+
+def _activate(y, kind):
+    n_elements = y.numel()
+    BLOCK = 1024
+    _activation_kernel[(triton.cdiv(n_elements, BLOCK),)](
+        y, n_elements, GELU=kind == "gelu", RELU=kind == "relu",
+        SILU=kind == "silu", BLOCK=BLOCK)
+    return y
+'''
+
 
 def _seed_A(cfg) -> str:
     aq = cfg["aq"]
@@ -929,11 +957,11 @@ def _seed_entry(cfg, op) -> str:
         L.append("    y = y + bias.float().reshape(1, -1)")
     act = _act_of(cfg["ep"])
     if act == "gelu":
-        L.append('    y = torch.nn.functional.gelu(y, approximate="tanh")')
+        L.append('    y = _activate(y, "gelu")')
     elif act == "relu":
-        L.append("    y = torch.nn.functional.relu(y)")
+        L.append('    y = _activate(y, "relu")')
     elif act == "silu":
-        L.append("    y = torch.nn.functional.silu(y)")
+        L.append('    y = _activate(y, "silu")')
     if cfg["ep"] == "residual":
         L.append("    y = y + res.float()")
     if cfg["ep"] == "requant":
@@ -955,7 +983,8 @@ def seed_source(op: str, dtype: str) -> str:
                "import torch\n"
                "import triton\n"
                "import triton.language as tl\n")
-    return doc + imports + _QHELP + _GEMM_BLOCK + "\n\n" + _seed_entry(cfg, op)
+    act_block = _ACT_BLOCK if _act_of(cfg["ep"]) != "none" else ""
+    return doc + imports + _QHELP + _GEMM_BLOCK + act_block + "\n\n" + _seed_entry(cfg, op)
 
 
 def op_names() -> list[str]:

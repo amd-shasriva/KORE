@@ -5,7 +5,7 @@ Materializes the self-contained breadth authoring engines under
 sparse, losses + fused optimizers) into ``genb_<op>_<dtype>/`` task dirs, each with
 
     task.yaml            + thin reference shim (-> breadth.<module>.make_reference)
-    seed_triton.py       (the module's naive-but-correct Triton seed)
+    seed_triton.py       (the module's scanner-clean Triton candidate seed)
     driver.py            + thin driver shim (-> _genops.driver_main)
 
 Idempotent; the ``genb_`` prefix avoids collision with ``gen_``/``genv_``. Registry
@@ -24,11 +24,13 @@ the 32B run), never on a node whose in-flight run must keep a frozen task set.
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib
 import pkgutil
 from pathlib import Path
 
 import kore.tasks.breadth as _breadth_pkg
+from kore.reward.reward import scan_for_hacks
 from kore.tasks._genops import DTYPES
 
 TASKS_DIR = Path(__file__).resolve().parent
@@ -37,7 +39,8 @@ TASKS_DIR = Path(__file__).resolve().parent
 def _discover_modules() -> tuple:
     """Auto-discover every conformant breadth authoring engine under
     ``kore/tasks/breadth/`` (any module exposing OPS + make_reference +
-    seed_source). New op-family modules are picked up with zero edits here; the
+    seed_source). Candidate source is admitted only after AST, entrypoint, and
+    anti-hack checks. New op-family modules are picked up with zero edits here; the
     ``tests`` subpkg and private ``_*`` modules are skipped. Deterministic order."""
     mods = []
     for m in sorted(pkgutil.iter_modules(_breadth_pkg.__path__), key=lambda x: x.name):
@@ -123,8 +126,39 @@ def _yaml(mod, op: str, dtype: str, snr: float) -> str:
     return "\n".join(lines) + "\n"
 
 
-def generate(dry: bool = False) -> list[str]:
+def _validated_seed_source(mod, op: str, dtype: str) -> str:
+    """Return an admitted seed or reject the engine output before materialization.
+
+    A breadth seed is executable candidate source, not an oracle/baseline alias:
+    it must parse, define the task entry point at module scope, and pass the same
+    anti-hack scanner used by the environment. Keeping this gate in the generator
+    makes invalid engine templates impossible to fan out into generated tasks.
+    """
+    source = mod.seed_source(op, dtype)
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError(f"breadth op {op}/{dtype}: seed_source must return source text")
+    try:
+        tree = ast.parse(source, filename=f"<genb_{op}_{dtype}/seed_triton.py>")
+    except SyntaxError as exc:
+        raise ValueError(f"breadth op {op}/{dtype}: seed is not valid Python") from exc
+    entries = {
+        node.name for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    if op not in entries:
+        raise ValueError(
+            f"breadth op {op}/{dtype}: seed does not define top-level entry {op!r}")
+    reason = scan_for_hacks(source)
+    if reason is not None:
+        raise ValueError(f"breadth op {op}/{dtype}: seed rejected by scanner: {reason}")
+    return source
+
+
+def generate(dry: bool = False, output_dir: Path | None = None) -> list[str]:
     written: list[str] = []
+    root = TASKS_DIR if output_dir is None else Path(output_dir)
+    if not dry:
+        root.mkdir(parents=True, exist_ok=True)
     opmap = _op_module_map()
     for op, (modname, mod) in sorted(opmap.items()):
         for dtype in _dtypes_for(mod, op):
@@ -135,12 +169,13 @@ def generate(dry: bool = False) -> list[str]:
             written.append(tid)
             if dry:
                 continue
-            d = TASKS_DIR / tid
+            source = _validated_seed_source(mod, op, dtype)
+            d = root / tid
             d.mkdir(exist_ok=True)
             (d / "task.yaml").write_text(_yaml(mod, op, dtype, snr))
             (d / "reference.py").write_text(
                 _REF_SHIM.format(op=op, dtype=dtype, mod=modname))
-            (d / "seed_triton.py").write_text(mod.seed_source(op, dtype))
+            (d / "seed_triton.py").write_text(source)
             (d / "driver.py").write_text(_DRIVER_SHIM.format(op=op, dtype=dtype))
     return written
 
@@ -149,8 +184,10 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--list", action="store_true",
                    help="dry-run: list task ids that would be generated")
+    p.add_argument("--output-dir", type=Path, default=None,
+                   help="materialize under this directory instead of kore/tasks")
     a = p.parse_args(argv)
-    written = generate(dry=a.list)
+    written = generate(dry=a.list, output_dir=a.output_dir)
     print(f"{'would generate' if a.list else 'generated'} {len(written)} breadth tasks:")
     for t in written:
         print(f"  {t}")

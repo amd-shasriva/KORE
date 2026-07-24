@@ -5,10 +5,14 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from scripts.spur_partition import (
     WorkItem,
     balanced_partition,
     distinct_wins,
+    jsonl_record_count,
+    shard_present,
     work_item,
 )
 
@@ -29,7 +33,7 @@ def test_distinct_wins_deduplicates_kernel_source(tmp_path):
     path = tmp_path / "wins.jsonl"
     records = [
         {"task_id": "x", "final_source": "same"},
-        {"task_id": "x", "final_source": "same", "speedup": 2.0},
+        {"task_id": "x", "final_source": " same ", "speedup": 2.0},
         {"task_id": "x", "final_source": "different"},
         {"task_id": "x", "final_source": ""},
         {"task_id": "x", "type": "win"},
@@ -37,6 +41,27 @@ def test_distinct_wins_deduplicates_kernel_source(tmp_path):
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
 
     assert distinct_wins(path) == 2
+
+
+def test_jsonl_validation_fails_closed_on_non_object_record(tmp_path):
+    path = tmp_path / "repair.jsonl"
+    path.write_text("[]\n")
+
+    with pytest.raises(RuntimeError, match="expected object"):
+        jsonl_record_count(path)
+
+
+def test_shard_present_requires_valid_record_and_no_marker(tmp_path):
+    path = tmp_path / "repair" / "task.jsonl"
+    path.parent.mkdir()
+    path.write_text("\n")
+    assert not shard_present(tmp_path, "repair", "task")
+
+    path.write_text("{}\n")
+    assert shard_present(tmp_path, "repair", "task")
+
+    path.with_suffix(".jsonl.inprogress").write_text("{}\n")
+    assert not shard_present(tmp_path, "repair", "task")
 
 
 def test_balanced_partition_is_disjoint_complete_and_cost_balanced():

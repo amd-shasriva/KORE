@@ -11,7 +11,7 @@ from kore.data.schemas import (
     WinRecord,
     read_jsonl,
 )
-from scripts.complete_base import complete_one
+from scripts.complete_base import _shard_done, complete_one
 from scripts.deepen_wins import _load_existing, deepen_one
 
 
@@ -85,6 +85,23 @@ def test_deepen_existing_count_matches_distinct_partition_count(tmp_path):
 
     assert [record["final_source"] for record in existing] == ["same", "different"]
     assert len(seen) == 2
+
+
+def test_deepen_fails_closed_on_malformed_existing_shard(tmp_path):
+    path = tmp_path / "wins.jsonl"
+    path.write_text("{broken\n")
+
+    with pytest.raises(Exception, match="Expecting property name"):
+        _load_existing(path)
+
+
+def test_base_rejects_malformed_nonempty_shard(tmp_path):
+    path = tmp_path / "repair" / "task.jsonl"
+    path.parent.mkdir()
+    path.write_text("{broken\n")
+
+    with pytest.raises(Exception, match="Expecting property name"):
+        _shard_done(tmp_path, "task", "repair")
 
 
 def test_base_resumes_from_each_checkpointed_record(tmp_path, monkeypatch):

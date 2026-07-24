@@ -30,22 +30,50 @@ fi
 if ((WAVE_NODES > SHARDS)); then
     WAVE_NODES="$SHARDS"
 fi
+if ! [[ "$TARGET" =~ ^[1-9][0-9]*$ ]]; then
+    echo "KORE_WINS_TARGET must be a positive integer" >&2
+    exit 2
+fi
 
 cd "$REPO"
 [[ -x "$PY" ]] || { echo "missing venv python: $PY" >&2; exit 2; }
 [[ -s .env.local ]] || { echo "missing .env.local" >&2; exit 2; }
 mkdir -p runs/spur_shards
+for cmd in flock git sbatch squeue; do
+    command -v "$cmd" >/dev/null || { echo "missing required command: $cmd" >&2; exit 2; }
+done
+
+# Serialize the scheduler check and submission. This closes the race where two
+# supervisors both observe an empty queue before either one's sbatch is visible.
+exec 9>runs/.spur_submit.lock
+if ! flock -n 9; then
+    echo "another SPUR submission is currently being prepared" >&2
+    exit 3
+fi
+
+# A manifest must describe exactly the committed source deployed to compute
+# nodes. Generated data may be dirty, but orchestration code may not be.
+SOURCE_STATUS="$(git status --porcelain --untracked-files=all -- kore scripts tests)"
+if [[ -n "$SOURCE_STATUS" ]]; then
+    echo "uncommitted source/test changes detected; refusing deployment" >&2
+    printf '%s\n' "$SOURCE_STATUS" >&2
+    exit 3
+fi
 
 # SPUR ignores Slurm's array throttle suffix (e.g. %4), so overlapping campaigns
 # would launch every child and race on task shards. Refuse while any factory job
 # owned by this user is active; submit only an explicit wave below.
-if squeue -u "$USER" 2>/dev/null | awk \
-    'NR > 1 && $3 ~ /^kore-fac/ && ($5 == "R" || $5 == "PD") {found=1} END {exit !found}'; then
+if ! QUEUE_OUTPUT="$(squeue -u "${USER:?USER is not set}")"; then
+    echo "unable to query SPUR scheduler; refusing to submit" >&2
+    exit 4
+fi
+if awk 'NR > 1 && $3 ~ /^kore-fac/ {found=1} END {exit !found}' \
+        <<<"$QUEUE_OUTPUT"; then
     echo "active kore-factory jobs detected; refusing overlapping submission" >&2
     exit 3
 fi
 
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SHARD_DIR="$REPO/runs/spur_shards/$RUN_ID"
 
 PYTHONPATH=. "$PY" scripts/spur_partition.py \

@@ -218,7 +218,8 @@ def grpo_soup_interp(base, kore, alpha):
 
 
 def test_soup_sweep_respects_retention_gate():
-    from kore.policy.soup import soup_sweep
+    import pytest
+    from kore.policy.soup import SoupPromotionError, soup_sweep
 
     import torch
 
@@ -231,11 +232,13 @@ def test_soup_sweep_respects_retention_gate():
         a = float(sd["w"][0].item())  # equals alpha
         return {"fastp": 0.10 + a, "mmlu": 0.60 - 0.2 * a}
 
-    res = soup_sweep(base, kore, [0.0, 0.5, 1.0], eval_fn, kernel_key="fastp",
-                     general_keys=["mmlu"], base_scores=base_scores, epsilon=0.005)
-    # alpha=0 keeps mmlu; alpha>=0.5 regresses mmlu by >0.005 -> only 0.0 passes
-    assert res["best_alpha"] == 0.0
-    assert res["gate_satisfied"] is True
+    with pytest.raises(SoupPromotionError) as exc:
+        soup_sweep(base, kore, [0.0, 0.5, 1.0], eval_fn, kernel_key="fastp",
+                   general_keys=["mmlu"], base_scores=base_scores, epsilon=0.005)
+    # alpha=0 is safety-only; it can never be silently promoted as the "best" soup.
+    assert exc.value.sweep[0]["alpha"] == 0.0
+    assert exc.value.sweep[0]["passed"] is True
+    assert all(not row["passed"] for row in exc.value.sweep if row["alpha"] > 0)
 
 
 def test_soup_sweep_order_independent_with_snapshot():
@@ -270,7 +273,7 @@ def test_soup_sweep_order_independent_with_snapshot():
     def eval_fn(sd):
         scratch.load_state_dict(sd)  # in-place mutate scratch (the original bug channel)
         a = float(sd["w"][0].item())
-        return {"fastp": 0.10 + a, "mmlu": 0.60 - 0.2 * a}
+        return {"fastp": 0.10 + a, "mmlu": 0.60 - 0.004 * a}
 
     r1 = soup_sweep(base_sd, kore_sd, [0.0, 0.5, 1.0], eval_fn, kernel_key="fastp",
                     general_keys=["mmlu"], base_scores=base_scores, epsilon=0.005)
@@ -280,11 +283,91 @@ def test_soup_sweep_order_independent_with_snapshot():
     # reversing the alpha order yields the SAME best_alpha (order-independent).
     r2 = soup_sweep(base_sd, kore_sd, [1.0, 0.5, 0.0], eval_fn, kernel_key="fastp",
                     general_keys=["mmlu"], base_scores=base_scores, epsilon=0.005)
-    assert r1["best_alpha"] == r2["best_alpha"] == 0.0
+    assert r1["best_alpha"] == r2["best_alpha"] == 1.0
     # every alpha is interpolated from the pristine endpoints -> matching kernel scores.
     k_by_alpha_1 = {r["alpha"]: round(r["kernel"], 6) for r in r1["sweep"]}
     k_by_alpha_2 = {r["alpha"]: round(r["kernel"], 6) for r in r2["sweep"]}
     assert k_by_alpha_1 == k_by_alpha_2
+
+
+def test_soup_injects_alpha_zero_and_requires_compatible_state_dicts():
+    import pytest
+    import torch
+
+    from kore.policy.soup import SoupError, soup_sweep, validate_state_dict_compatibility
+
+    base = {"w": torch.zeros(2), "counter": torch.tensor([1], dtype=torch.int64)}
+    kore = {"w": torch.ones(2), "counter": torch.tensor([9], dtype=torch.int64)}
+
+    def evaluate(sd):
+        alpha = float(sd["w"][0])
+        return {"fastp": 0.1 + alpha, "mmlu": 0.6}
+
+    result = soup_sweep(
+        base, kore, [0.5], evaluate, kernel_key="fastp",
+        general_keys=["mmlu"], base_scores={"mmlu": 0.6},
+    )
+    assert [row["alpha"] for row in result["sweep"]] == [0.0, 0.5]
+    assert result["best_alpha"] == 0.5
+
+    with pytest.raises(SoupError, match="key mismatch"):
+        validate_state_dict_compatibility(base, {"w": torch.ones(2)})
+    with pytest.raises(SoupError, match="shape mismatch"):
+        validate_state_dict_compatibility(base, {
+            "w": torch.ones(3), "counter": torch.tensor([9], dtype=torch.int64),
+        })
+
+
+def test_soup_alpha_zero_is_literal_base_and_nonfinite_metrics_abort():
+    import pytest
+    import torch
+
+    from kore.policy.soup import (
+        SoupPromotionError,
+        interpolate_state_dicts,
+        soup_sweep,
+    )
+
+    base = {"w": torch.zeros(1), "counter": torch.tensor([1], dtype=torch.int64)}
+    kore = {"w": torch.ones(1), "counter": torch.tensor([9], dtype=torch.int64)}
+    safety = interpolate_state_dicts(base, kore, 0.0)
+    assert torch.equal(safety["w"], base["w"])
+    assert torch.equal(safety["counter"], base["counter"])
+
+    def evaluate(sd):
+        alpha = float(sd["w"][0])
+        return {"fastp": float("nan") if alpha > 0 else 0.1, "mmlu": 0.6}
+
+    with pytest.raises(SoupPromotionError, match="non-finite"):
+        soup_sweep(
+            base, kore, [0.5], evaluate, kernel_key="fastp",
+            general_keys=["mmlu"], base_scores={"mmlu": 0.6},
+        )
+
+
+def test_soup_rejects_model_architecture_mismatch_before_weights():
+    import pytest
+
+    from kore.policy.soup import SoupError, _validate_model_architecture
+
+    class Config:
+        def __init__(self, hidden_size):
+            self.hidden_size = hidden_size
+
+        def to_dict(self):
+            return {
+                "model_type": "qwen3",
+                "architectures": ["Qwen3ForCausalLM"],
+                "hidden_size": self.hidden_size,
+                "num_hidden_layers": 2,
+            }
+
+    class Model:
+        def __init__(self, hidden_size):
+            self.config = Config(hidden_size)
+
+    with pytest.raises(SoupError, match="architecture mismatch"):
+        _validate_model_architecture(Model(4), Model(8))
 
 
 # --------------------------------------------------------------------------- #

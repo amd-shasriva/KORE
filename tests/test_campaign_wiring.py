@@ -60,19 +60,42 @@ def test_selected_heldout_task_routes_to_eval_not_train():
 
 
 def test_manifest_threads_train_and_eval_ids(tmp_path):
+    lineage = {
+        "compatibility_digest": "sha256:test",
+        "model": {"requested_id": "Qwen/Qwen3-14B", "content_digest": "sha256:model"},
+        "tokenizer": {"content_digest": "sha256:tokenizer"},
+        "source": {"content_digest": "sha256:source"},
+        "stage_config": {"digest": "sha256:config"},
+        "tasks": {
+            "registry_digest": "sha256:registry",
+            "split_digest": "sha256:split",
+            "train": ["rmsnorm_aiter", "gemm_bf16"],
+            "eval": ["flash_attn_decode_bf16"],
+        },
+        "verifier_gate_contract": {"digest": "sha256:gates"},
+        "hardware_runtime": {"compatibility_digest": "sha256:runtime"},
+    }
     ctx = {
         "data_root": tmp_path, "dry": False, "base": "Qwen/Qwen3-14B",
         "midtrain_ckpt": None, "sft_ckpt": "sft", "dpo_ckpt": None,
         "grpo_ckpt": None, "final": None, "done_stages": {"build"},
         "train_task_ids": ["rmsnorm_aiter", "gemm_bf16"],
         "eval_task_ids": ["flash_attn_decode_bf16"],
+        "lineage": lineage, "artifacts": {},
     }
     rc._save_manifest(ctx)
+
+    persisted = json.loads((tmp_path / "campaign_manifest.json").read_text())
+    assert persisted["schema"] == {"name": "kore.campaign", "version": 1}
+    assert persisted["lineage"]["tasks"]["train"] == ["rmsnorm_aiter", "gemm_bf16"]
+    assert persisted["lineage"]["tasks"]["eval"] == ["flash_attn_decode_bf16"]
 
     ctx2 = {
         "data_root": tmp_path, "midtrain_ckpt": None, "sft_ckpt": None,
         "dpo_ckpt": None, "grpo_ckpt": None, "final": None,
-        "done_stages": set(), "eval_task_ids": None, "train_task_ids": None,
+        "done_stages": set(), "eval_task_ids": ["flash_attn_decode_bf16"],
+        "train_task_ids": ["rmsnorm_aiter", "gemm_bf16"],
+        "lineage": lineage, "artifacts": {},
     }
     rc._load_manifest_into_ctx(ctx2)
     assert ctx2["train_task_ids"] == ["rmsnorm_aiter", "gemm_bf16"]

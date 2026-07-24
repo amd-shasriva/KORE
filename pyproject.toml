@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "kore"
 version = "0.1.0"
 description = "KORE: multi-turn verifiable-reward RL for AMD ROCm kernel generation"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "pyyaml>=6.0",
@@ -22,14 +23,65 @@ train = [
 ]
 value = ["xgboost>=2.0", "scikit-learn>=1.3", "numpy>=1.26"]
 teacher = ["anthropic>=0.39", "openai>=1.40"]
-dev = ["pytest>=8.0"]
+test = [
+    "pytest>=9.0,<10",
+    "numpy>=2.2,<2.3",
+    "torch>=2.10,<2.11",
+    "datasets>=3.6,<3.7",
+    "accelerate>=1.14,<1.15",
+    "scikit-learn>=1.7,<1.8",
+]
+dev = ["pytest>=9.0,<10", "build>=1.5,<2"]
 
 [project.scripts]
 kore = "kore.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["kore*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+kore = [
+    "tasks/*/task.yaml",
+    "tasks/*/reference.py",
+    "tasks/*/driver.py",
+    "tasks/*/seed*.py",
+    "eval/data/*.jsonl",
+    "data/replay_samples/*.jsonl",
+    "data/knowledge/*.md",
+    "openended/tests/*.json",
+    "tasks/_drafts/*.json",
+    "tasks/_drafts/*/*.md",
+    "*.md",
+    "*/*.md",
+]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-q"
+testpaths = ["tests", "kore"]
+python_files = ["test_*.py"]
+norecursedirs = [
+    ".git",
+    ".venv",
+    "build",
+    "dist",
+    "gen_*",
+    "genb_*",
+    "genv_*",
+]
+addopts = [
+    "-q",
+    "--strict-markers",
+    "--import-mode=importlib",
+    "-m",
+    "not gpu and not model and not network and not dependency and not release",
+]
+markers = [
+    "cpu: deterministic tests that run without an accelerator or external service",
+    "gpu: opt-in tests that require a supported AMD GPU and ROCm",
+    "model: opt-in tests that load or train model artifacts",
+    "network: opt-in tests that call an external network service",
+    "dependency: opt-in tests for dependencies outside the test extra",
+    "packaging: source distribution, wheel, and installed-artifact contracts",
+    "release: release-blocking checks intentionally excluded from the default suite",
+    "shell: shell syntax and side-effect-free entrypoint help checks",
+]

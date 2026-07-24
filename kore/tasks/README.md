@@ -1,22 +1,21 @@
 # `kore/tasks` — kernel task registry
 
-Every RL "environment instance" is a **kernel-optimization task**: a Triton kernel to make fast, an fp32 **reference oracle** for correctness, a **production vendor baseline** to beat (AITER / hipBLASLt / framework), a set of evaluation **shapes**, and a driver contract the verifier speaks. Tasks are discovered from `<task_id>/task.yaml` directories.
+Every RL "environment instance" is a **kernel-optimization task**: a Triton kernel to make fast, an fp32 **reference oracle** for correctness, a **production vendor baseline** to beat (AITER / hipBLASLt / framework), a set of evaluation **shapes**, and a driver contract the verifier speaks. Tasks are discovered from `<task_id>/task.yaml` directories. Hand-authored, `gen_*`, `genv_*`, and `genb_*` task assets are all checked in and ship in release artifacts.
 
-The registry holds **282 tasks** (280 train, 2 held-out):
-
-| Group | Prefix | Count | Baseline |
-| --- | --- | --- | --- |
-| Hand-authored | — | 55 | per-task (`reference.py`) |
-| Generated | `gen_*` | 201 | torch / framework |
-| Vendor-baselined | `genv_*` | 26 | real AITER / hipBLASLt |
-
-`registry.all_tasks()` is the source of truth; re-derive the live count with:
+`registry.all_tasks()` is the source of truth. Derive the live totals and group
+breakdown directly from the generated registry:
 
 ```bash
-PYTHONPATH=. python -c "from kore.tasks import registry; print(len(registry.all_tasks()))"
-```
+python - <<'PY'
+from collections import Counter
+from kore.tasks import registry
 
-A further **16 op-class generator engines** under `kore/tasks/breadth/` materialize **1,052** additional verified `genb_*` task variants on demand (opt-in; not part of the 282 above until generated — see [Breadth op-class generators](#breadth-op-class-generators)).
+tasks = registry.all_tasks()
+group = lambda t: next((p for p in ("genb_", "genv_", "gen_") if t.task_id.startswith(p)), "hand")
+print("registry:", len(tasks), Counter(group(task) for task in tasks))
+print("split:", {"train": len(registry.train_tasks()), "heldout": len(registry.heldout_tasks())})
+PY
+```
 
 The registry also defines the **authoritative train / held-out split** by operator family and architecture, so generalization can never be leaked.
 
@@ -35,7 +34,7 @@ The registry also defines the **authoritative train / held-out split** by operat
 | `vendor_ops.py` | Vendor-baselined op templates vs. real AITER kernels |
 | `generate_vendor_ops.py` | Writes `genv_<op>_<dtype>/` tasks |
 | `generate_breadth.py` | Writes `genb_<op>_<dtype>/` tasks from the `breadth/` engines |
-| `breadth/` | 16 op-class authoring engines (+ CPU tests) for the `genb_*` expansion |
+| `breadth/` | Auto-discovered op-class authoring engines (+ CPU tests) for the `genb_*` expansion |
 | `aiter_ref.py`, `aiter_ref_attn.py` | Shared AITER / hipBLASLt / framework baseline wrappers |
 | `<task_id>/` | Per-task dir: `task.yaml`, `reference.py`, `seed_triton.py`, `driver.py` |
 
@@ -116,7 +115,7 @@ flowchart LR
   GO[generate_ops.py] --> GEN["gen_*/ dirs"]
   GVO[generate_vendor_ops.py] --> GENV["genv_*/ dirs"]
   GB[generate_breadth.py] --> GENB["genb_*/ dirs"]
-  HAND[55 hand-authored tasks] --> REG
+  HAND[hand-authored tasks] --> REG
   GEN --> REG[registry discovery]
   GENV --> REG
   GENB --> REG
@@ -124,24 +123,24 @@ flowchart LR
   REG --> HOLD[heldout_tasks]
 ```
 
-- `_genops.py` defines 67 operators across the `unary`, `binary`, `reduce`, `fusion` (multi-kernel headroom), and `gemm_fusion` (hipBLASLt + epilogue headroom) families.
-- `generate_ops.py` emits `gen_<op>_<dtype>/` tasks with a torch/framework baseline, expanding each operator across `bf16`/`fp16`/`fp32` (67 × 3 = 201 tasks).
-- `generate_vendor_ops.py` emits the 26 `genv_<op>_<dtype>/` tasks (14 vendor ops × their dtype sweeps) graded against real AITER kernels with LLM-realistic shape tables.
+- `_genops.py` defines operators across the `unary`, `binary`, `reduce`, `fusion` (multi-kernel headroom), and `gemm_fusion` (hipBLASLt + epilogue headroom) families.
+- `generate_ops.py` emits `gen_<op>_<dtype>/` tasks with a torch/framework baseline, expanding supported operators across `bf16`/`fp16`/`fp32`.
+- `generate_vendor_ops.py` emits `genv_<op>_<dtype>/` tasks graded against real AITER kernels with LLM-realistic shape tables.
 
 ---
 
 ## Breadth op-class generators
 
-`kore/tasks/breadth/` holds **16 op-class authoring engines** — attention, MoE, GEMM, norm, quant, reduction, convolution, scan/SSM, sequence, sort/sparse, sampling, and training-op families. Each engine exposes the shared ABI (`OPS`, `SHAPES`, `make_reference`, `seed_source`) and ships CPU-side tests under `breadth/tests/`.
+`kore/tasks/breadth/` holds auto-discovered op-class authoring engines for attention, MoE, GEMM, norm, quant, reduction, convolution, scan/SSM, sequence, sort/sparse, sampling, and training-op families. Each engine exposes the shared ABI (`OPS`, `SHAPES`, `make_reference`, `seed_source`) and ships CPU-side tests under `breadth/tests/`.
 
-`generate_breadth.py` auto-discovers every conformant engine and writes `genb_<op>_<dtype>/` dirs, each with a `task.yaml`, a naive-but-correct Triton seed, and thin `reference.py`/`driver.py` shims. Together the engines materialize **1,052** verified task variants:
+`generate_breadth.py` auto-discovers every conformant engine and writes `genb_<op>_<dtype>/` dirs, each with a `task.yaml`, a naive-but-correct Triton seed, and thin `reference.py`/`driver.py` shims. Ask the generator for the current breadth instead of copying a count into documentation:
 
 ```bash
 python -m kore.tasks.generate_breadth --list   # dry-run: list the genb_* ids
 python -m kore.tasks.generate_breadth          # write the dirs into this checkout
 ```
 
-Generation is opt-in and idempotent. Registry discovery globs `*/task.yaml`, so freshly written `genb_*` dirs are picked up with no code edits, and since none are named `mla`/`paged` they all land in TRAIN. Only run it on a node whose task suite you intend to widen — never on a node whose in-flight run must keep a frozen task set.
+Generation is idempotent and its current outputs are checked in. Registry discovery globs `*/task.yaml`, so regenerated `genb_*` dirs are picked up with no code edits. Only run it on a node whose task suite you intend to update — never on a node whose in-flight run must keep a frozen task set.
 
 ---
 

@@ -12,19 +12,24 @@
 #SBATCH --time=08:00:00
 #SBATCH --requeue
 #SBATCH --exclusive
-#SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/spur-%A_%a.out
-#SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/spur-%A_%a.err
+# SPUR expands %j (child job id), but not Slurm's %A/%a array placeholders.
+#SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/spur-%j.out
+#SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/spur-%j.err
 
 set -euo pipefail
 
 REPO="${KORE_REPO:-/home/shasriva/Kore-RL/KORE}"
 PY="${KORE_PY:-/home/shasriva/kore-venv/bin/python}"
-DATA_ROOT="${KORE_DATA_ROOT:-$REPO/data/b05factory}"
-SHARD_DIR="${KORE_SHARD_DIR:?KORE_SHARD_DIR must point to a partition run}"
+# SPUR's custom sbatch does not reliably propagate arbitrary --export KEY=VALUE
+# entries into array children. Positional args are part of the job specification
+# and survive array expansion/requeue.
+SHARD_DIR="${1:?arg1 must be the absolute shard directory}"
+DATA_ROOT="${2:-$REPO/data/b05factory}"
+TARGET="${3:-3}"
+MODE="${4:-run}"
 DEEP_WORKERS="${KORE_DEEP_WORKERS:-72}"
 DEEP_ONLY_WORKERS="${KORE_DEEP_ONLY_WORKERS:-88}"
 BASE_WORKERS="${KORE_BASE_WORKERS:-16}"
-TARGET="${KORE_WINS_TARGET:-3}"
 GENS="${KORE_WINS_GENS:-8}"
 ARRAY_ID="${SLURM_ARRAY_TASK_ID:?must be submitted as a Slurm array}"
 
@@ -66,8 +71,8 @@ export TMPDIR="$LOCAL_ROOT/tmp"
 export KORE_COMPILE_CACHE_DIR="$LOCAL_ROOT/compile-cache"
 mkdir -p "$TMPDIR" "$KORE_COMPILE_CACHE_DIR"
 
-DEEP_LOG="runs/spur-${SLURM_ARRAY_JOB_ID}_${ARRAY_ID}-deep.log"
-BASE_LOG="runs/spur-${SLURM_ARRAY_JOB_ID}_${ARRAY_ID}-base.log"
+DEEP_LOG="runs/spur-${SLURM_JOB_ID}_${ARRAY_ID}-deep.log"
+BASE_LOG="runs/spur-${SLURM_JOB_ID}_${ARRAY_ID}-base.log"
 PIDS=()
 NAMES=()
 
@@ -84,6 +89,12 @@ trap terminate_children TERM INT
 
 echo "[spur-worker] START job=$SLURM_JOB_ID array=$ARRAY_ID host=$(hostname) shard=$IDX"
 echo "[spur-worker] deep_tasks=$([ -n "$DEEP_TASKS" ] && tr ',' '\n' <<<"$DEEP_TASKS" | wc -l || echo 0) base_tasks=$([ -n "$BASE_TASKS" ] && tr ',' '\n' <<<"$BASE_TASKS" | wc -l || echo 0)"
+echo "[spur-worker] shard_dir=$SHARD_DIR data_root=$DATA_ROOT target=$TARGET mode=$MODE"
+
+if [[ "$MODE" == "probe" ]]; then
+    echo "[spur-worker] PROBE_OK"
+    exit 0
+fi
 
 if [[ -n "$BASE_TASKS" ]]; then
     KORE_RUNS_DIR="$LOCAL_ROOT/replay/base" "$PY" scripts/complete_base.py \

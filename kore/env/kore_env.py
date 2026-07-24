@@ -36,7 +36,7 @@ import time
 from contextlib import contextmanager
 from importlib import metadata
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from kore.config import CONFIG
 from kore.env.evaluation_contract import (
@@ -115,7 +115,8 @@ class KoreEnv:
                  gpu: Optional[str] = None,
                  isolation_controller: Optional[IsolationController] = None,
                  sandbox_config: Optional[SandboxConfig] = None,
-                 verdict_verifier: Optional[VerdictSignatureVerifier] = None):
+                 verdict_verifier: Optional[VerdictSignatureVerifier] = None,
+                 runtime_identity: Optional[Mapping[str, Any]] = None):
         self.task = task
         self.cfg = config
         self.correctness_timeout = correctness_timeout
@@ -145,6 +146,13 @@ class KoreEnv:
         self._active_source: Optional[str] = None
         self._active_task: Optional[Task] = None
         self._task_descriptor_cache: dict[str, dict] = {}
+        # A preflight-produced, validated identity for the selected physical GPU.
+        # Without it replay fails closed (evaluation still runs normally).
+        self._runtime_identity = (
+            runtime_identity
+            if runtime_identity is not None
+            else getattr(config, "runtime_identity", None)
+        )
         self._cache_obj = ReplayCache(self.cfg.runs_dir / f"replay_{task.task_id}.jsonl") \
             if use_replay else None
 
@@ -222,6 +230,8 @@ class KoreEnv:
             snr_threshold=self._snr_threshold_for(task),
             correctness_timeout=self.correctness_timeout,
             bench_timeout=self.bench_timeout,
+            gpu_selection=self._gpu_selection(task),
+            runtime_identity=self._runtime_identity,
         )
         replay_ready = contract_is_cacheable(contract)
         if self.use_replay and self._cache_obj is not None and replay_ready:
@@ -256,6 +266,8 @@ class KoreEnv:
                 snr_threshold=self._snr_threshold_for(task),
                 correctness_timeout=self.correctness_timeout,
                 bench_timeout=self.bench_timeout,
+                gpu_selection=self._gpu_selection(task),
+                runtime_identity=self._runtime_identity,
             )
             if final_contract == contract and contract_is_cacheable(final_contract):
                 self._cache_obj.put(task.task_id, source, obs, context=contract)
@@ -270,6 +282,46 @@ class KoreEnv:
             infra_error=obs.infra_error, cached=cached)
 
     # ------------------------------------------------------------------ #
+    def _gpu_selection(self, task: Optional[Task] = None) -> dict[str, Any]:
+        """Exact visibility mapping used by the evaluator subprocess.
+
+        This is pure environment bookkeeping: it never imports torch/HIP or
+        initializes a GPU in the parent process.
+        """
+        active_task = task or self.task
+        target = str(
+            getattr(active_task, "gpu_target", None) or self.cfg.gpu_target
+        )
+        names = (
+            "ROCR_VISIBLE_DEVICES",
+            "HIP_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+        )
+        parent = {name: os.environ.get(name) for name in names}
+        child = dict(parent)
+        if self._gpu is not None:
+            selected = str(self._gpu)
+            child["ROCR_VISIBLE_DEVICES"] = None
+            child["HIP_VISIBLE_DEVICES"] = selected
+            child["CUDA_VISIBLE_DEVICES"] = selected
+            mode = "explicit-physical"
+        else:
+            child["HIP_VISIBLE_DEVICES"] = (
+                parent["HIP_VISIBLE_DEVICES"]
+                if parent["HIP_VISIBLE_DEVICES"] is not None
+                else "0"
+            )
+            selected = str(child["HIP_VISIBLE_DEVICES"]).split(",")[0].strip()
+            mode = "inherited"
+        return {
+            "state": "selected",
+            "mode": mode,
+            "selected_gpu": selected,
+            "parent_visibility": parent,
+            "child_visibility": child,
+            "effective_gpu_target": target,
+        }
+
     def _env(
         self,
         private_root: Optional[Path] = None,
@@ -281,15 +333,18 @@ class KoreEnv:
             Path(tempfile.gettempdir()) / f"kore_env_{os.getpid()}_{id(self):x}"
         )
         active_task = task or self._active_task or self.task
+        selection = self._gpu_selection(active_task)
+        selected_gpu = (
+            str(selection["child_visibility"]["HIP_VISIBLE_DEVICES"])
+            if self._gpu is not None
+            else None
+        )
         return build_candidate_environment(
             base_environment=os.environ,
             private_root=Path(root),
             project_root=Path(__file__).resolve().parents[2],
-            gpu_target=(
-                getattr(active_task, "gpu_target", None)
-                or getattr(self.cfg, "gpu_target", "gfx950")
-            ),
-            gpu=(str(self._gpu) if self._gpu is not None else None),
+            gpu_target=str(selection["effective_gpu_target"]),
+            gpu=selected_gpu,
             rocm_path=getattr(self.cfg, "rocm_path", None),
         )
 

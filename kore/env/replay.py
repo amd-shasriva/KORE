@@ -55,6 +55,12 @@ _OBS_NUMBER_FIELDS = (
 )
 
 
+def _is_finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return not isinstance(value, float) or math.isfinite(value)
+
+
 def _obs_from_dict(rec: Mapping[str, Any]) -> Observation:
     """Decode a current Observation, rejecting unsafe/malformed cache payloads."""
     if not isinstance(rec, Mapping):
@@ -74,17 +80,14 @@ def _obs_from_dict(rec: Mapping[str, Any]) -> Observation:
         for key, value in mapping.items():
             if not isinstance(key, str):
                 raise TypeError(f"observation field {name} must have string keys")
-            if (isinstance(value, bool) or not isinstance(value, (int, float))
-                    or (isinstance(value, float) and math.isnan(value))):
-                raise TypeError(f"observation field {name} must contain numbers")
+            if not _is_finite_number(value):
+                raise TypeError(
+                    f"observation field {name} must contain finite numbers")
     for name in _OBS_NUMBER_FIELDS:
         value = values.get(name)
-        if value is not None and (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or (isinstance(value, float) and math.isnan(value))
-        ):
-            raise TypeError(f"observation field {name} must be numeric or null")
+        if value is not None and not _is_finite_number(value):
+            raise TypeError(
+                f"observation field {name} must be finite numeric or null")
     if "dtype" in values and not isinstance(values["dtype"], str):
         raise TypeError("observation field dtype must be a string")
     for name in ("error_text", "hack_reason"):
@@ -363,6 +366,7 @@ class ReplayCache:
                     sort_keys=True,
                     separators=(",", ":"),
                     ensure_ascii=False,
+                    allow_nan=False,
                 )
                 + "\n"
             ).encode("utf-8")

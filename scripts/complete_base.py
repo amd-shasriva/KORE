@@ -7,7 +7,9 @@ with a live deepening without any shard collision.
 Resume contract (matches run_campaign's datagen semantics):
   * A shard that already exists NON-EMPTY is skipped (zero teacher calls).
   * A missing OR 0-byte shard is (re)generated. Delete a shard to force regen.
-  * Atomic tmp+rename write so a crash never truncates a shard.
+  * Every accepted repair/group record is checkpointed immediately with atomic
+    tmp+rename. An ``.inprogress`` marker lets a preempted burst job continue
+    filling the target rather than treating its partial shard as complete.
 
 Same GPU-pinned spawn-worker pattern as deepen_wins / parallel_datagen (HIP pinned
 BEFORE torch import), one teacher stream per worker.
@@ -20,6 +22,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict, is_dataclass
+import json
 import os
 from pathlib import Path
 
@@ -31,6 +35,61 @@ def _shard_done(data_root, task_id: str, kind: str) -> bool:
     return p.exists() and p.stat().st_size > 0
 
 
+def _marker(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".inprogress")
+
+
+def _record_dict(record):
+    if isinstance(record, dict):
+        return record
+    if hasattr(record, "to_dict"):
+        return record.to_dict()
+    if is_dataclass(record):
+        return asdict(record)
+    raise TypeError(f"unsupported record type: {type(record).__name__}")
+
+
+def _record_key(record) -> str:
+    return json.dumps(
+        _record_dict(record), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+
+
+def _load_records(path: Path) -> list:
+    from kore.data.schemas import read_jsonl
+
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    return read_jsonl(path, typed=False)
+
+
+def _checkpoint(path: Path, records: list) -> None:
+    from kore.data.schemas import write_jsonl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".jsonl.tmp")
+    write_jsonl(tmp, records)
+    os.replace(tmp, path)
+
+
+def _checkpoint_collector(path: Path, existing: list):
+    """Return (callback, state); callback atomically persists each unique record."""
+    records = list(existing)
+    seen = {_record_key(record) for record in records}
+    state = {"records": records, "added": 0}
+
+    def collect(record):
+        key = _record_key(record)
+        if key in seen:
+            return
+        seen.add(key)
+        records.append(record)
+        state["added"] += 1
+        _checkpoint(path, records)
+
+    return collect, state
+
+
 def complete_one(task_id: str, data_root, n_repair: int, n_parents: int, k: int, teacher):
     """(Re)generate any missing/empty repair+groups shard for ONE task.
 
@@ -38,11 +97,14 @@ def complete_one(task_id: str, data_root, n_repair: int, n_parents: int, k: int,
     """
     from kore.data.gen_groups import generate_groups
     from kore.data.gen_repair import generate_repairs
-    from kore.data.schemas import write_jsonl
     from kore.env.kore_env import KoreEnv
     from kore.tasks.registry import get_task
 
-    todo = [kind for kind in KINDS if not _shard_done(data_root, task_id, kind)]
+    todo = []
+    for kind in KINDS:
+        path = Path(data_root) / kind / f"{task_id}.jsonl"
+        if not _shard_done(data_root, task_id, kind) or _marker(path).exists():
+            todo.append(kind)
     if not todo:
         return ("skip", {})
 
@@ -50,17 +112,37 @@ def complete_one(task_id: str, data_root, n_repair: int, n_parents: int, k: int,
     env = KoreEnv(task)
     counts: dict[str, int] = {}
     for kind in todo:
-        if kind == "repair":
-            recs = generate_repairs(task, teacher, env, n=n_repair)
-        else:
-            recs = generate_groups(task, teacher, env, n_parents=n_parents, k=k)
         out = Path(data_root) / kind / f"{task_id}.jsonl"
+        existing = _load_records(out)
+        target = n_repair if kind == "repair" else n_parents
+        remaining = max(0, target - len(existing))
+        if remaining == 0:
+            _marker(out).unlink(missing_ok=True)
+            counts[kind] = 0
+            continue
+
         out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_suffix(".jsonl.tmp")
-        write_jsonl(tmp, recs)
-        os.replace(tmp, out)
-        counts[kind] = len(recs)
-    return ("done", counts)
+        _marker(out).write_text(
+            json.dumps({"target": target, "existing": len(existing)}) + "\n"
+        )
+        collect, state = _checkpoint_collector(out, existing)
+        if kind == "repair":
+            recs = generate_repairs(
+                task, teacher, env, n=remaining, seed=len(existing), on_record=collect
+            )
+        else:
+            recs = generate_groups(
+                task, teacher, env, n_parents=remaining, k=k,
+                seed=len(existing), on_record=collect,
+            )
+        # Defense-in-depth for alternate/custom generators that return records but
+        # do not invoke the optional callback.
+        for record in recs:
+            collect(record)
+        _marker(out).unlink(missing_ok=True)
+        counts[kind] = state["added"]
+    status = "done" if all(_shard_done(data_root, task_id, k) for k in KINDS) else "partial"
+    return (status, counts)
 
 
 def _worker(payload: dict):

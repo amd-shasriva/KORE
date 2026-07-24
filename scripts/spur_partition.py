@@ -59,7 +59,8 @@ def distinct_wins(path: Path) -> int:
 
 def shard_present(data_root: Path, kind: str, task_id: str) -> bool:
     path = data_root / kind / f"{task_id}.jsonl"
-    return path.exists() and path.stat().st_size > 0
+    marker = path.with_suffix(path.suffix + ".inprogress")
+    return path.exists() and path.stat().st_size > 0 and not marker.exists()
 
 
 def work_item(data_root: Path, task_id: str, target: int) -> WorkItem | None:

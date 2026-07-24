@@ -24,7 +24,9 @@ def main() -> int:
 
     def has(kind: str, t: str) -> bool:
         f = f"{root}/{kind}/{t}.jsonl"
-        return os.path.exists(f) and os.path.getsize(f) > 0
+        marker = f + ".inprogress"
+        return os.path.exists(f) and os.path.getsize(f) > 0 \
+            and not os.path.exists(marker)
 
     tasks = [t.task_id for t in train_tasks() if t.task_id.startswith("genb_")]
     wh = collections.Counter()

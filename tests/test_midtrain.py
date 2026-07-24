@@ -16,7 +16,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from kore.data.midtrain_corpus import (
-    CHARS_PER_TOKEN,
     build_midtrain_corpus,
     chunk_text,
     discover_repo_roots,
@@ -32,6 +31,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]  # <repo>/kore
 def _make_config(max_seq_length: int = 64, general_replay_frac: float = 0.15) -> MidTrainConfig:
     return MidTrainConfig(max_seq_length=max_seq_length,
                           general_replay_frac=general_replay_frac)
+
+
+def _dev_build(*args, **kwargs):
+    """Explicitly labeled offline build (exact UTF-8 byte tokenizer + smoke refs)."""
+    kwargs.setdefault("development_mode", True)
+    return build_midtrain_corpus(*args, **kwargs)
 
 
 _TRITON_SRC = '''\
@@ -187,14 +192,13 @@ def test_chunk_text_respects_budget_and_hard_splits():
 def test_corpus_wellformed_and_deterministic(tmp_path):
     repo_root, task_root = _make_tmp_sources(tmp_path)
     cfg = _make_config(max_seq_length=64)
-    budget = cfg.max_seq_length * CHARS_PER_TOKEN
 
     out1 = tmp_path / "c1.jsonl"
     out2 = tmp_path / "c2.jsonl"
-    rep1 = build_midtrain_corpus(out1, cfg, seed=0, source_roots=[repo_root],
-                                 task_root=task_root)
-    rep2 = build_midtrain_corpus(out2, cfg, seed=0, source_roots=[repo_root],
-                                 task_root=task_root)
+    rep1 = _dev_build(out1, cfg, seed=0, source_roots=[repo_root],
+                      task_root=task_root)
+    rep2 = _dev_build(out2, cfg, seed=0, source_roots=[repo_root],
+                      task_root=task_root)
 
     # Deterministic: byte-identical output for the same inputs/seed.
     assert out1.read_bytes() == out2.read_bytes()
@@ -206,7 +210,12 @@ def test_corpus_wellformed_and_deterministic(tmp_path):
     for r in rows:
         assert isinstance(r.get("text"), str) and r["text"].strip()
         assert r.get("source")
-        assert len(r["text"]) <= budget  # chunked to the token/char budget
+        # Development uses a real byte tokenizer, not a chars/token estimate.
+        assert len(r["text"].encode("utf-8")) <= cfg.max_seq_length
+        meta = r["source_metadata"]
+        for key in ("repository_url", "commit", "path", "license", "row_id",
+                    "content_hash", "root_content_hash", "lineage_id"):
+            assert meta.get(key), (key, meta)
 
     assert rep1["total"] == len(rows)
     # Every kernel-domain source produced at least one chunk.
@@ -222,12 +231,19 @@ def test_corpus_dedup_collapses_identical_files(tmp_path, monkeypatch):
     repo_root, task_root = _make_tmp_sources(tmp_path)
     cfg = _make_config(max_seq_length=256)  # big budget: 1 chunk per triton file
     out = tmp_path / "c.jsonl"
-    rep = build_midtrain_corpus(out, cfg, seed=0, source_roots=[repo_root],
-                                task_root=task_root)
+    rep = _dev_build(out, cfg, seed=0, source_roots=[repo_root],
+                     task_root=task_root)
     # The duplicate triton file body must be dropped by content dedup.
     assert rep["n_dropped_dup"] >= 1
-    texts = [json.loads(ln)["text"] for ln in out.read_text().splitlines() if ln.strip()]
-    assert len(texts) == len(set(texts)), "no duplicate chunk texts should remain"
+    rows = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
+    by_channel = {}
+    for row in rows:
+        key = (row["source"], row["text"])
+        by_channel[key] = by_channel.get(key, 0) + 1
+    assert max(by_channel.values(), default=0) == 1
+    # Cross-channel copies are intentional: dedup must not erase weighted pairs.
+    assert rep["counts"]["pytorch_triton_pairs"] > 0
+    assert rep["counts"]["triton"] > 0
 
 
 def test_corpus_source_weighting_oversamples_high_signal(tmp_path, monkeypatch):
@@ -237,14 +253,14 @@ def test_corpus_source_weighting_oversamples_high_signal(tmp_path, monkeypatch):
 
     monkeypatch.setenv("KORE_MIDTRAIN_WEIGHTING", "0")
     off = tmp_path / "off.jsonl"
-    rep_off = build_midtrain_corpus(off, cfg, seed=0, source_roots=[repo_root],
-                                    task_root=task_root)
+    rep_off = _dev_build(off, cfg, seed=0, source_roots=[repo_root],
+                         task_root=task_root)
     assert rep_off["n_weighted_added"] == 0
 
     monkeypatch.setenv("KORE_MIDTRAIN_WEIGHTING", "1")
     on = tmp_path / "on.jsonl"
-    rep_on = build_midtrain_corpus(on, cfg, seed=0, source_roots=[repo_root],
-                                   task_root=task_root)
+    rep_on = _dev_build(on, cfg, seed=0, source_roots=[repo_root],
+                        task_root=task_root)
     # High-signal channels (torch->Triton pairs @2x, kore_tasks @1.5x) are
     # oversampled; a neutral channel (triton @1.0x) is unchanged.
     assert rep_on["n_weighted_added"] > 0
@@ -252,7 +268,7 @@ def test_corpus_source_weighting_oversamples_high_signal(tmp_path, monkeypatch):
     assert rep_on["counts"]["triton"] == rep_off["counts"]["triton"]
     # Determinism holds with weighting on.
     on2 = tmp_path / "on2.jsonl"
-    build_midtrain_corpus(on2, cfg, seed=0, source_roots=[repo_root], task_root=task_root)
+    _dev_build(on2, cfg, seed=0, source_roots=[repo_root], task_root=task_root)
     assert on.read_bytes() == on2.read_bytes()
 
 
@@ -272,7 +288,7 @@ def test_corpus_docs_pathfilter_excludes_unrelated_md(tmp_path):
     repo_root, task_root = _make_tmp_sources(tmp_path)
     cfg = _make_config(max_seq_length=512)
     out = tmp_path / "c.jsonl"
-    build_midtrain_corpus(out, cfg, seed=0, source_roots=[repo_root], task_root=task_root)
+    _dev_build(out, cfg, seed=0, source_roots=[repo_root], task_root=task_root)
     doc_texts = [json.loads(ln)["text"] for ln in out.read_text().splitlines()
                  if ln.strip() and json.loads(ln)["source"] == "docs"]
     joined = "\n".join(doc_texts)
@@ -286,8 +302,8 @@ def test_amd_asm_and_rst_docs_are_collected(tmp_path):
     repo_root, task_root = _make_tmp_sources(tmp_path)
     cfg = _make_config(max_seq_length=512)
     out = tmp_path / "c.jsonl"
-    rep = build_midtrain_corpus(out, cfg, seed=0, source_roots=[repo_root],
-                                task_root=task_root)
+    rep = _dev_build(out, cfg, seed=0, source_roots=[repo_root],
+                     task_root=task_root)
     rows = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
 
     def _txt(src):
@@ -308,7 +324,7 @@ def test_external_repo_text_not_arch_normalized_but_kore_authored_is(tmp_path):
     repo_root, task_root = _make_tmp_sources(tmp_path)
     cfg = _make_config(max_seq_length=512)
     out = tmp_path / "c.jsonl"
-    build_midtrain_corpus(out, cfg, seed=0, source_roots=[repo_root], task_root=task_root)
+    _dev_build(out, cfg, seed=0, source_roots=[repo_root], task_root=task_root)
     rows = [json.loads(ln) for ln in out.read_text().splitlines() if ln.strip()]
 
     def _txt(src):
@@ -338,17 +354,17 @@ def test_corpus_scale_env_scales_caps_and_env_overrides_win(tmp_path, monkeypatc
     cfg = _make_config(max_seq_length=256)
 
     monkeypatch.setenv("KORE_MIDTRAIN_SCALE", "2.0")
-    rep = build_midtrain_corpus(tmp_path / "s.jsonl", cfg, seed=0,
-                                source_roots=[repo_root], task_root=task_root,
-                                max_files_per_source=10, scan_budget=100)
+    rep = _dev_build(tmp_path / "s.jsonl", cfg, seed=0,
+                     source_roots=[repo_root], task_root=task_root,
+                     max_files_per_source=10, scan_budget=100)
     assert rep["corpus_scale"] == 2.0
     assert rep["max_files_per_source"] == 20  # 10 base * 2.0 scale
 
     # An explicit absolute cap overrides the scale dial.
     monkeypatch.setenv("KORE_MIDTRAIN_MAX_FILES", "7")
-    rep2 = build_midtrain_corpus(tmp_path / "s2.jsonl", cfg, seed=0,
-                                 source_roots=[repo_root], task_root=task_root,
-                                 max_files_per_source=10, scan_budget=100)
+    rep2 = _dev_build(tmp_path / "s2.jsonl", cfg, seed=0,
+                      source_roots=[repo_root], task_root=task_root,
+                      max_files_per_source=10, scan_budget=100)
     assert rep2["max_files_per_source"] == 7
 
 
@@ -367,7 +383,7 @@ def test_eval_benchmark_decontam_drops_train_on_test(tmp_path):
     which would inflate the gate) is dropped while real kernels survive."""
     from kore.data.decontam import decontaminate_corpus, eval_benchmark_texts
 
-    texts = eval_benchmark_texts()
+    texts = eval_benchmark_texts(development_mode=True)
     assert len(texts) >= 10  # smoke benches loaded (MMLU/HumanEval/LCB/IFEval/BFCL/MT)
     longest = max(texts, key=lambda t: len(t.split()))
     kernel = (
@@ -396,8 +412,8 @@ def test_general_replay_fraction_is_about_15pct(tmp_path):
     repo_root, task_root = _make_tmp_sources(tmp_path)
     cfg = _make_config(max_seq_length=64, general_replay_frac=0.15)
     out = tmp_path / "c.jsonl"
-    rep = build_midtrain_corpus(out, cfg, seed=0, source_roots=[repo_root],
-                                task_root=task_root, use_hf=False)
+    rep = _dev_build(out, cfg, seed=0, source_roots=[repo_root],
+                     task_root=task_root, use_hf=False)
     assert rep["counts"].get("general_replay", 0) > 0
     # ~15% of the FINAL total, with rounding/dedup tolerance.
     assert 0.08 <= rep["general_frac"] <= 0.22, rep["general_frac"]
@@ -407,8 +423,8 @@ def test_general_replay_zero_when_frac_zero(tmp_path):
     repo_root, task_root = _make_tmp_sources(tmp_path)
     cfg = _make_config(max_seq_length=64, general_replay_frac=0.0)
     out = tmp_path / "c.jsonl"
-    rep = build_midtrain_corpus(out, cfg, seed=0, source_roots=[repo_root],
-                                task_root=task_root)
+    rep = _dev_build(out, cfg, seed=0, source_roots=[repo_root],
+                     task_root=task_root)
     assert rep["counts"].get("general_replay", 0) == 0
     assert rep["general_frac"] == 0.0
 
@@ -424,8 +440,8 @@ def test_corpus_from_real_repos_if_present(tmp_path):
     cfg = _make_config(max_seq_length=1024)
     out = tmp_path / "real.jsonl"
     # Small caps keep this fast even against the full repo tree.
-    rep = build_midtrain_corpus(out, cfg, seed=0, max_files_per_source=8,
-                                scan_budget=400)
+    rep = _dev_build(out, cfg, seed=0, max_files_per_source=8,
+                     scan_budget=400)
     assert rep["total"] > 0
     # The KORE task kernels always exist, so that source is non-empty.
     assert rep["counts"].get("kore_tasks", 0) > 0

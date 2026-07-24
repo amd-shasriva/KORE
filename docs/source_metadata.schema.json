@@ -1,0 +1,281 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kore.invalid/schemas/source_metadata.schema.json",
+  "title": "KORE source metadata catalog",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "sources",
+    "datasets"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sourceRoot"
+      }
+    },
+    "datasets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/datasetSource"
+      }
+    },
+    "holdouts": {
+      "$ref": "#/$defs/holdoutPolicy"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "immutableRevision": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "enum": [
+          "main",
+          "master",
+          "HEAD",
+          "head",
+          "latest"
+        ]
+      }
+    },
+    "sourceRoot": {
+      "type": "object",
+      "required": [
+        "local_path",
+        "repository_url",
+        "commit",
+        "license",
+        "lineage_id",
+        "verified"
+      ],
+      "properties": {
+        "local_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "$ref": "#/$defs/immutableRevision"
+        },
+        "license": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lineage_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "verified": {
+          "const": true
+        },
+        "holdout": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "datasetSource": {
+      "type": "object",
+      "required": [
+        "dataset_id",
+        "revision",
+        "license",
+        "verified"
+      ],
+      "properties": {
+        "dataset_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "$ref": "#/$defs/immutableRevision"
+        },
+        "license": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verified": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "holdoutPolicy": {
+      "type": "object",
+      "properties": {
+        "families": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "task_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "source_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "lineage_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "training_cutoff": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rowMetadata": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "repository_url",
+        "commit",
+        "path",
+        "license",
+        "row_id",
+        "content_hash",
+        "root_content_hash",
+        "source_id",
+        "lineage_id",
+        "verified",
+        "derivation"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "repository_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dataset_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "license": {
+          "type": "string",
+          "minLength": 1
+        },
+        "row_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_row_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "root_content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "parent_content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "parent_content_hashes": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lineage_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "family": {
+          "type": "string"
+        },
+        "source_timestamp": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "development_mode": {
+          "type": "boolean"
+        },
+        "derivation": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "origins": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "sampling_weight": {
+          "type": "number",
+          "minimum": 1
+        },
+        "sampling_replica": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

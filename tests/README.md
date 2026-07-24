@@ -1,11 +1,23 @@
 # `tests/` — the test suite
 
-CPU-safe `pytest` tests (67 files) covering the science, reward, data, RL math, and campaign wiring. Tests import `kore.*` and avoid GPU work by design — roofline formulas, reward gating, family split, pure RL math, and orchestration wiring are all exercised without a device — so the suite runs on any machine. (Re-count with `ls tests/*.py | wc -l` as the suite grows.)
+The default `pytest` command discovers both this top-level suite and every
+package-local `kore/**/tests/test_*.py` module. It exercises science, reward,
+data, RL math, breadth generators, and campaign wiring on CPU; use collection
+itself as the live inventory rather than maintaining a count in prose.
 
 ```bash
-PYTHONPATH=. python -m pytest -q                                   # whole suite
-PYTHONPATH=. python -m pytest tests/test_campaign_wiring.py -q     # one file
+pip install -e ".[test]"                              # CPU test environment
+python -m pytest                                      # default CPU suite
+python -m pytest --collect-only -q                    # live module/item inventory
+python -m pytest tests                                # top-level CI split
+python -m pytest kore                                 # package-local CI split
+python -m pytest tests/test_campaign_wiring.py        # one file
 ```
+
+The registered opt-in groups are `gpu`, `model`, `network`, and `dependency`.
+Run one with `python -m pytest -m <group>` only after provisioning its resource.
+`release` is separate and release-blocking; it validates licensing plus
+regenerated/package artifacts and is intentionally excluded from the default.
 
 ---
 
@@ -25,4 +37,4 @@ PYTHONPATH=. python -m pytest tests/test_campaign_wiring.py -q     # one file
 | Eval / gates | `test_eval.py`, `test_generalization.py`, `test_retention.py`, `test_champion.py`, `test_korebench.py`, `test_vs_opus.py` |
 | Infra | `test_campaign_wiring.py`, `test_obs.py`, `test_contract.py` |
 
-`test_campaign_wiring.py` and `test_distributed.py` are the fastest confidence check that the orchestration and FSDP configuration are coherent. Tests that need real datasets or permissions skip in a bare environment, which is expected.
+`test_campaign_wiring.py` and `test_distributed.py` are the fastest confidence check that the orchestration and FSDP configuration are coherent. Resource-specific tests belong to an explicit marker group; the default remains CPU-only.

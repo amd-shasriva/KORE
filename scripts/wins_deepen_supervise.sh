@@ -12,75 +12,133 @@
 #   4. one-way DISJOINT merge of each node's deepened half -> canonical b05-2.
 # The deepener itself (scripts/deepen_wins.py) is additive + resume-safe: existing
 # wins are never lost or regenerated, tasks already at target cost zero teacher calls.
-set -u
-REPO=/home/shasriva/Kore-RL/KORE; cd "$REPO" || exit 1
-VENV=/home/shasriva/kore-venv/bin/python
-PEER=cv350-tnndh2-b05-2.tnn.dcgpu
-DR=data/b05factory
-TARGET="${WINS_TARGET:-3}"; GENS="${WINS_GENS:-8}"; WORKERS="${WINS_WORKERS:-48}"
-set -a; [ -f .env.local ] && . .env.local; set +a
-unset HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES
-export KORE_VERIFIED_CORRECTNESS=1 KORE_COMPILE_BASELINE=1 KORE_BENCH_COLD=1 KORE_SHAPE_AUGMENT=1 PYTHONPATH=.
+set -euo pipefail
 
-log(){ echo "[wins_deepen] $* $(date)"; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ops_runtime.sh
+source "$SCRIPT_DIR/lib/ops_runtime.sh"
+kore_deprecated_guard \
+  "scripts/wins_deepen_supervise.sh" \
+  "use scripts/spur_supervise_datagen.py; the b05 SSH deepening topology is retired" \
+  "bash scripts/wins_deepen_supervise.sh [--dry-run]" \
+  "$@"
 
-# 1) wait for split datagen on BOTH nodes ([d]atagen bracket-trick: never self-match).
-log "waiting for split datagen to finish on both nodes"
-while true; do
-  # argv-EXACT match (only the real 'bash scripts/datagen_half.sh' loop). pgrep -f
-  # would ALSO match the tmux server whose argv embeds the launch command -> a ghost
-  # that never dies and deadlocks this wait. awk on argv[0]/argv[1] avoids that.
-  l=$(ps -eo cmd --no-headers | awk '$1=="bash" && $2=="scripts/datagen_half.sh"' | wc -l)
-  p=$(ssh -o BatchMode=yes "$PEER" "ps -eo cmd --no-headers | awk '\$1==\"bash\" && \$2==\"scripts/datagen_half.sh\"' | wc -l" 2>/dev/null | tail -1); p=${p:-1}
-  log "datagen running? local=$l peer=$p"
-  { [ "$l" = "0" ] && [ "$p" = "0" ]; } && break
-  sleep 180
-done
-log "split datagen COMPLETE on both nodes"
-
-# 2) consolidate: make BOTH nodes hold every task's repair/groups/wins shard before the
-#    disjoint deepen split. No merge loop is assumed. The datagen halves are DISJOINT, so
-#    a two-way rsync is lossless: push b05-1's half_A -> b05-2, then pull b05-2's union
-#    -> b05-1. --ignore-existing => never clobber a shard a node already holds.
-log "consolidating base dataset across both nodes (bidirectional, disjoint-safe)"
-rsync -a --ignore-existing --timeout=900 "$REPO/$DR/" "$PEER":"$REPO/$DR/" 2>/dev/null && log "push b05-1->b05-2 OK" || log "push WARN"
-rsync -a --ignore-existing --timeout=900 "$PEER":"$REPO/$DR/" "$REPO/$DR/" 2>/dev/null && log "pull b05-2->b05-1 OK" || log "pull WARN"
-
-# 3) disjoint split of genb_ TRAIN tasks (held-out already excluded by train_tasks).
-PYTHONPATH=. "$VENV" - <<'PY'
-from kore.tasks.registry import train_tasks
-ts=sorted(t.task_id for t in train_tasks() if t.task_id.startswith("genb_"))
-A=ts[0::2]; B=ts[1::2]
-open("/tmp/deepen_A.txt","w").write(",".join(A))
-open("/tmp/deepen_B.txt","w").write(",".join(B))
-print("deepen split: A(b05-1)=%d  B(b05-2)=%d"%(len(A),len(B)))
-PY
-# files-from list for the disjoint one-way merge (b05-1 owns only its A wins shards)
-: > /tmp/deepen_A_wins.txt
-for t in $(tr ',' ' ' < /tmp/deepen_A.txt); do echo "$DR/wins/$t.jsonl" >> /tmp/deepen_A_wins.txt; done
-log "split: A(b05-1)=$(tr ',' '\n' </tmp/deepen_A.txt|grep -c .)  B(b05-2)=$(tr ',' '\n' </tmp/deepen_B.txt|grep -c .)"
-
-# 4) deploy deepener + B-list to peer; launch peer deepener on its free GPUs.
-scp -o BatchMode=yes scripts/deepen_wins.py "$PEER":"$REPO/scripts/deepen_wins.py" >/dev/null 2>&1
-scp -o BatchMode=yes /tmp/deepen_B.txt "$PEER":/tmp/deepen_B.txt >/dev/null 2>&1
-# User holds the full box (coordinated with owner), so deepen on ALL 8 GPUs on b05-2 too.
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+PY="$(kore_resolve_python "$REPO")"
+RUNTIME="$(kore_private_runtime)"
+PEER="${WINS_PEER:-cv350-tnndh2-b05-2.tnn.dcgpu}"
+DR="${KORE_DATA_ROOT:-data/b05factory}"
+TARGET="${WINS_TARGET:-3}"
+GENS="${WINS_GENS:-8}"
+WORKERS="${WINS_WORKERS:-48}"
+MAX_WAIT_CYCLES="${WINS_MAX_WAIT_CYCLES:-120}"
+WAIT_SECONDS="${WINS_WAIT_SECONDS:-120}"
+LOCAL_GPUS="${WINS_LOCAL_GPUS:-0,1,2,3,4,5,6,7}"
 PEER_GPUS="${WINS_PEER_GPUS:-0,1,2,3,4,5,6,7}"
-log "launching b05-2 deepener (deepen_B) on GPUs=$PEER_GPUS in tmux (robust, survives ssh teardown)"
-ssh -o BatchMode=yes "$PEER" "tmux kill-session -t deepenB 2>/dev/null; tmux new-session -d -s deepenB 'cd $REPO && env PYTHONPATH=. $VENV scripts/deepen_wins.py --data-root $DR --tasks \"\$(cat /tmp/deepen_B.txt)\" --gpu-ids $PEER_GPUS --workers $WORKERS --target $TARGET --gens $GENS > runs/deepen_B_b05-2.log 2>&1'; sleep 3; tmux ls 2>&1 | grep -q deepenB && echo peer_deepen_STARTED" 2>/dev/null | grep -qi STARTED && log "b05-2 deepener STARTED in tmux deepenB" || log "WARN: b05-2 deepener may not have started - check runs/deepen_B_b05-2.log"
-# Guard: give the peer deepener a moment to spin up so the completion-wait below never
-# reads a premature pgrep=0 during its torch-import startup.
-sleep 45
+RUN_ID="${KORE_RUN_ID:-$(kore_new_run_id wins-deepen)}"
+STATE_DIR="$RUNTIME/runs/$RUN_ID/wins-deepen"
+SESSION_PEER="deepenB-${RUN_ID: -8}"
+LOG="runs/wins_deepen_${RUN_ID}.log"
+mkdir -m 0700 -p -- "$STATE_DIR"
+cd "$REPO"
+export PATH="$(dirname "$PY"):$PATH"
+export PYTHONPATH="$REPO:${PYTHONPATH:-}"
+export KORE_RUN_ID="$RUN_ID"
+kore_require_commands ssh rsync tmux od stat
+kore_secure_source_env "$REPO/.env.local"
+unset HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES
+kore_export_rigor_env
+for value in "$TARGET" "$GENS" "$WORKERS" "$MAX_WAIT_CYCLES" "$WAIT_SECONDS"; do
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ERROR: deepening settings must be positive integers" >&2
+    exit 2
+  }
+done
 
-# 5) run b05-1 deepener (deepen_A) in the foreground on all 8 GPUs.
-log "running b05-1 deepener (deepen_A) on 8 GPUs"
-"$VENV" scripts/deepen_wins.py --data-root "$DR" --tasks "$(cat /tmp/deepen_A.txt)" \
-  --gpu-ids 0,1,2,3,4,5,6,7 --workers "$WORKERS" --target "$TARGET" --gens "$GENS"
-log "b05-1 deepener done; waiting for b05-2 deepener"
-while [ "$(ssh -o BatchMode=yes "$PEER" "ps -eo cmd --no-headers | awk '\$2==\"scripts/deepen_wins.py\"' | wc -l" 2>/dev/null | tail -1)" != "0" ]; do sleep 120; done
-log "b05-2 deepener done"
+log() { echo "[wins_deepen] $* $(date)" | tee -a "$LOG"; }
 
-# 6) one-way DISJOINT merge: b05-1's deepened A shards -> b05-2 (b05-2 keeps its own
-#    deepened B). Disjoint task sets => no shard written twice => nothing lost.
-log "merging b05-1 deepened A-wins -> canonical b05-2"
-rsync -a --timeout=900 --files-from=/tmp/deepen_A_wins.txt "$REPO/" "$PEER":"$REPO/" 2>/dev/null && log "merge OK" || log "merge WARN"
-log "ALL DONE (canonical full+deepened dataset on b05-2:$DR)"
+# Do not infer readiness from process-list substrings. The base dataset itself is
+# authoritative, and an incomplete input is a hard failure.
+BASE_CLEANUP="$STATE_DIR/base-incomplete.txt"
+if ! "$PY" scripts/_kf_verify.py "$DR" 1 \
+    --cleanup-out "$BASE_CLEANUP" --require-complete; then
+  log "INCOMPLETE: base datagen verifier failed; refusing deepening"
+  exit 4
+fi
+
+log "consolidating verified base dataset across the configured peer"
+rsync -a --ignore-existing --timeout=900 "$REPO/$DR/" "$PEER:$REPO/$DR/"
+rsync -a --ignore-existing --timeout=900 "$PEER:$REPO/$DR/" "$REPO/$DR/"
+
+PYTHONPATH="$REPO" "$PY" - "$STATE_DIR" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+from kore.ops.runtime import task_set_identity
+from kore.tasks.registry import train_tasks
+
+root = Path(sys.argv[1])
+tasks = sorted(t.task_id for t in train_tasks() if t.task_id.startswith("genb_"))
+identity = task_set_identity(tasks)
+a, b = identity.task_ids[0::2], identity.task_ids[1::2]
+for name, values in (("deepen_A.txt", a), ("deepen_B.txt", b)):
+    path = root / name
+    path.write_text(",".join(values))
+    path.chmod(0o600)
+(root / "task-set.json").write_text(json.dumps({
+    "schema": 1,
+    "count": identity.count,
+    "sha256": identity.sha256,
+    "task_ids": list(identity.task_ids),
+}, sort_keys=True) + "\n")
+(root / "task-set.json").chmod(0o600)
+print(f"deepen split: A={len(a)} B={len(b)} count={identity.count} sha256={identity.sha256}")
+PY
+
+ssh "$PEER" "mkdir -p '$STATE_DIR' && chmod 0700 '$STATE_DIR'"
+rsync -a "$STATE_DIR/deepen_B.txt" "$PEER:$STATE_DIR/"
+ssh "$PEER" \
+  "KORE_ALLOW_DEPRECATED_DEV=1 KORE_RUN_ID='$RUN_ID' KORE_GPU_IDS='$PEER_GPUS' bash '$REPO/scripts/_kf_worker.sh' deepen '$STATE_DIR/deepen_B.txt' '$WORKERS' '$SESSION_PEER'"
+
+log "running local owned deepener"
+set +e
+kore_owned_run "$PY" "$REPO" "$RUNTIME" "$RUN_ID" "deepen-A" "$LOG" \
+  env PYTHONPATH="$REPO" "$PY" scripts/deepen_wins.py \
+    --data-root "$DR" --tasks "$(cat "$STATE_DIR/deepen_A.txt")" \
+    --gpu-ids "$LOCAL_GPUS" --workers "$WORKERS" --target "$TARGET" --gens "$GENS"
+local_rc=$?
+set -e
+if (( local_rc != 0 )); then
+  log "FAILED: local deepener rc=$local_rc"
+  exit "$local_rc"
+fi
+kore_verify "$PY" "$REPO" task-shards \
+  --data-root "$DR" --tasks-file "$STATE_DIR/deepen_A.txt" \
+  --target-wins "$TARGET" --kinds wins
+
+peer_done=0
+for cycle in $(seq 1 "$MAX_WAIT_CYCLES"); do
+  if ! ssh "$PEER" "tmux has-session -t '$SESSION_PEER'" 2>/dev/null; then
+    peer_done=1
+    break
+  fi
+  log "peer deepener active cycle=$cycle"
+  sleep "$WAIT_SECONDS"
+done
+if (( peer_done != 1 )); then
+  log "GIVEUP: peer session remained active through bounded wait"
+  exit 6
+fi
+ssh "$PEER" \
+  "cd '$REPO' && PYTHONPATH='$REPO' '$PY' -m kore.ops verify task-shards --data-root '$DR' --tasks-file '$STATE_DIR/deepen_B.txt' --target-wins '$TARGET' --kinds wins"
+
+# Each half has one writer. Pull B's newer shards, then push A's newer shards.
+rsync -a --update --timeout=900 "$PEER:$REPO/$DR/wins/" "$REPO/$DR/wins/"
+rsync -a --update --timeout=900 "$REPO/$DR/wins/" "$PEER:$REPO/$DR/wins/"
+FINAL_CLEANUP="$STATE_DIR/final-incomplete.txt"
+"$PY" scripts/_kf_verify.py "$DR" "$TARGET" \
+  --cleanup-out "$FINAL_CLEANUP" --require-complete
+ssh "$PEER" \
+  "cd '$REPO' && PYTHONPATH='$REPO' '$PY' scripts/_kf_verify.py '$DR' '$TARGET' --cleanup-out '$STATE_DIR/peer-final-incomplete.txt' --require-complete"
+log "VERIFIED COMPLETE on both configured nodes run_id=$RUN_ID"

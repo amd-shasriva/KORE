@@ -15,18 +15,25 @@
 # campaign manifest resumes stages. Safe to re-run after an interruption.
 set -euo pipefail
 
-# Repo root = parent of this script's dir (robust to the mount path).
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ops_runtime.sh
+source "$SCRIPT_DIR/lib/ops_runtime.sh"
+kore_deprecated_guard \
+  "scripts/run_v2_reuse_14b.sh" \
+  "use scripts/spur_supervise_datagen.py for production data generation and submit training through the site scheduler" \
+  "GPU_IDS=5,6,7 bash scripts/run_v2_reuse_14b.sh [--dry-run]" \
+  "$@"
+
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
-# Use the KORE venv for python/accelerate/torchrun (bare `python` may be the system
-# one without torch). Override with KORE_VENV=/path/to/venv if different.
-KORE_VENV="${KORE_VENV:-/home/shasriva/kore-venv}"
-if [ -x "$KORE_VENV/bin/python" ]; then
-  export PATH="$KORE_VENV/bin:$PATH"
-fi
-echo "[run_v2_reuse_14b] python=$(command -v python)"
+PY="$(kore_resolve_python "$REPO_ROOT")"
+export PATH="$(dirname "$PY"):$PATH"
+RUNTIME="$(kore_private_runtime)"
+kore_require_commands od stat
+kore_secure_source_env "$REPO_ROOT/.env.local"
+echo "[run_v2_reuse_14b] python=$PY"
 
 # Clear any stale device pin from the calling shell; per-stage pinning is done via
 # --gpu-ids (datagen/reverify re-pin per worker; FSDP training pins via GPU_IDS).
@@ -40,6 +47,7 @@ export KORE_BENCH_COLD=1               # cold-cache (L2-flushed) timing
 export KORE_DECONTAM=1                 # eval decontamination
 export KORE_CURATE=1                   # curation + balancing
 export TORCHINDUCTOR_CACHE_DIR="$REPO_ROOT/.inductor_cache"
+kore_export_rigor_env
 
 # Throughput: reverify is compile/CPU-bound with ~idle GPUs (each eval spends most of
 # its time importing torch + JIT-compiling, ~2% GPU). This box has 384 cores + 3TB RAM,
@@ -64,7 +72,10 @@ DGW="${KORE_DATAGEN_WORKERS:-15}"
 GPUS="${GPU_IDS:-}"   # empty -> campaign auto-detects FREE GPUs via rocm-smi
 echo "[run_v2_reuse_14b] repo=$REPO_ROOT  gpu-ids='${GPUS:-auto-free}'  ground=${GROUND_REASONING:-1}  datagen-workers=$DGW"
 
-python scripts/run_campaign.py \
+RUN_ID="${KORE_RUN_ID:-$(kore_new_run_id v2-reuse-14b)}"
+mkdir -p runs/full/logs
+LOG="runs/full/logs/v2_reuse_${RUN_ID}.log"
+COMMAND=("$PY" scripts/run_campaign.py \
   --model Qwen/Qwen3-14B \
   --full-ft --use-hf --teacher claude \
   --adaptive-steps \
@@ -77,5 +88,22 @@ python scripts/run_campaign.py \
   --sft-out runs/full/sft \
   --dpo-out runs/full/dpo \
   --grpo-out runs/full/grpo \
-  --soup-out runs/full/soup
-echo "[run_v2_reuse_14b] campaign process exited with code $?"
+  --soup-out runs/full/soup)
+if [[ -n "$GROUND_FLAG" ]]; then
+  COMMAND+=("$GROUND_FLAG")
+fi
+
+set +e
+kore_owned_run "$PY" "$REPO_ROOT" "$RUNTIME" "$RUN_ID" "v2-reuse-14b" "$LOG" \
+  "${COMMAND[@]}"
+rc=$?
+set -e
+if (( rc != 0 )); then
+  echo "[run_v2_reuse_14b] campaign failed rc=$rc (run_id=$RUN_ID)" >&2
+  exit "$rc"
+fi
+kore_verify "$PY" "$REPO_ROOT" campaign \
+  --repo "$REPO_ROOT" \
+  --data-root data/full14b \
+  --required-stages reverify,datagen,build,midtrain,sft,dpo,grpo,soup,eval
+echo "[run_v2_reuse_14b] strict completion verified (run_id=$RUN_ID)"

@@ -563,8 +563,8 @@ Sections 1-4 above are a **build spec** for growing the taxonomy toward 200-400 
   comparison.
 
 What's still aspirational (not yet built): the `author.py` semi-automatic task generator (§3), the
-`coverage_report.py` completeness checker (§4.1), and growing the registry from its current 282
-tasks (§5.1) toward the 200-400-task taxonomy in §1. Tests: `kore/eval/tests/test_eval_frontier.py`
+`coverage_report.py` completeness checker (§4.1), and growing the current registry task set
+(§5.1) toward the 200-400-task taxonomy in §1. Tests: `kore/eval/tests/test_eval_frontier.py`
 and `tests/test_korebench.py`.
 
 ---
@@ -573,10 +573,10 @@ and `tests/test_korebench.py`.
 
 ### 5.1 First ~50 tasks (highest value = Amdahl weight × headroom × already-have-baseline)
 
-The registry has grown past this blueprint's original snapshot - `kore/tasks/registry.py` holds
-**282 tasks today** (55 hand-authored + 201 `gen_*` + 26 `genv_*` vendor-baselined; see
-[`kore/tasks/README.md`](../kore/tasks/README.md) for the live count), and many of the "first ~50"
-below already exist with a real vendor binding (marked `(have)`). Re-derive what's actually
+The registry has grown past this blueprint's original snapshot. Derive its current digest and
+count from `kore.tasks.registry` (see
+[`kore/tasks/README.md`](../kore/tasks/README.md)); many of the "first ~50" below already exist
+with a real vendor binding (marked `(have)`). Re-derive what's actually
 missing from `registry.all_tasks()` rather than this list before starting new authoring work.
 Order:
 

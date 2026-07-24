@@ -22,6 +22,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
+import tempfile
+
+from kore.ops.runtime import SecurityError, deprecated_entrypoint
 
 # capability benchmarks with real (non-stub) scorers; mtbench uses the length/overlap
 # stub judge here, so it is advisory (not a hard gate) - matches run_campaign.
@@ -50,7 +54,20 @@ def main(argv=None) -> int:
     ap.add_argument("--manifest", default="data/full14b/campaign_manifest.json")
     ap.add_argument("--mark-done", action="store_true",
                     help="on PASS, add 'sft' to the manifest done_stages")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the deprecated gate plan without loading a model")
     a = ap.parse_args(argv)
+    if not deprecated_entrypoint(
+        "scripts/run_sft_gate.py",
+        "run retention evaluation in a scheduler allocation and record its result "
+        "through the supported campaign entrypoint",
+        dry_run=a.dry_run,
+    ):
+        print(
+            f"[gate] DRY-RUN base={a.base} candidate={a.candidate} "
+            f"manifest={a.manifest} mark_done={a.mark_done}"
+        )
+        return 0
 
     # Pin GPUs via the ENVIRONMENT *before* importing anything that initialises
     # torch/HIP (the kore.eval.* imports below pull torch in transitively). Setting
@@ -94,12 +111,27 @@ def main(argv=None) -> int:
     print("[gate] RESULT: PASS", flush=True)
     if a.mark_done:
         mp = Path(a.manifest)
+        info = mp.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise SecurityError(f"refusing non-regular campaign manifest: {mp}")
+        if info.st_uid != os.getuid():
+            raise SecurityError(f"campaign manifest owner mismatch: {mp}")
         m = json.loads(mp.read_text())
         ds = set(m.get("done_stages", []))
         ds.add("sft")
         m["done_stages"] = sorted(ds)
         m["sft_ckpt"] = a.candidate
-        mp.write_text(json.dumps(m, indent=2))
+        fd, raw_tmp = tempfile.mkstemp(prefix=f".{mp.name}.", dir=mp.parent)
+        tmp = Path(raw_tmp)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                handle.write(json.dumps(m, indent=2) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, mp)
+        finally:
+            tmp.unlink(missing_ok=True)
         print(f"[gate] marked sft done in manifest -> {m['done_stages']} "
               f"(a later run_campaign resume proceeds to DPO)", flush=True)
     return 0

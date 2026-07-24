@@ -2,7 +2,8 @@
 
 Every RL "environment instance" is a **kernel-optimization task**: a Triton kernel to make fast, an fp32 **reference oracle** for correctness, a **production vendor baseline** to beat (AITER / hipBLASLt / framework), a set of evaluation **shapes**, and a driver contract the verifier speaks. Tasks are discovered from `<task_id>/task.yaml` directories.
 
-The registry holds **282 tasks** (280 train, 2 held-out):
+The registry task count is derived from the checked-in task set; do not copy a
+historical total into supervisors or completion gates:
 
 | Group | Prefix | Count | Baseline |
 | --- | --- | --- | --- |
@@ -16,7 +17,7 @@ The registry holds **282 tasks** (280 train, 2 held-out):
 PYTHONPATH=. python -c "from kore.tasks import registry; print(len(registry.all_tasks()))"
 ```
 
-A further **16 op-class generator engines** under `kore/tasks/breadth/` materialize **1,052** additional verified `genb_*` task variants on demand (opt-in; not part of the 282 above until generated — see [Breadth op-class generators](#breadth-op-class-generators)).
+A further **16 op-class generator engines** under `kore/tasks/breadth/` materialize **1,052** additional verified `genb_*` task variants on demand (opt-in; not part of the checked-in registry total until generated — see [Breadth op-class generators](#breadth-op-class-generators)).
 
 The registry also defines the **authoritative train / held-out split** by operator family and architecture, so generalization can never be leaked.
 

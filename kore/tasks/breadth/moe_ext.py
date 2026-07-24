@@ -936,12 +936,35 @@ def _grouped_mm(x, w, expert_ids):
 
 _SWIGLU_BLOCK = '''
 
-def _swiglu(gu):
-    """Gated activation on a fused gate/up projection [., 2I] -> [., I] (fp32)."""
+@triton.jit
+def _gated_act_kernel(gu_ptr, out_ptr, I, sgm, sgi, som, soi,
+                      GELU: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < I
+    gate = tl.load(gu_ptr + row * sgm + offs * sgi,
+                   mask=mask, other=0.0).to(tl.float32)
+    up = tl.load(gu_ptr + row * sgm + (I + offs) * sgi,
+                 mask=mask, other=0.0).to(tl.float32)
+    if GELU:
+        z = 0.7978845608028654 * (gate + 0.044715 * gate * gate * gate)
+        act = 0.5 * gate * (1.0 + (2.0 * tl.sigmoid(2.0 * z) - 1.0))
+    else:
+        act = gate * tl.sigmoid(gate)
+    tl.store(out_ptr + row * som + offs * soi,
+             (act * up).to(out_ptr.dtype.element_ty), mask=mask)
+
+
+def _swiglu(gu, gelu):
+    """Triton gated activation on [M, 2I] -> [M, I]."""
+    M = gu.shape[0]
     I = gu.shape[1] // 2
-    gate = gu[:, :I].float()
-    up = gu[:, I:].float()
-    return {expr}
+    out = torch.empty((M, I), device=gu.device, dtype=gu.dtype)
+    BLOCK = 256
+    _gated_act_kernel[(M, triton.cdiv(I, BLOCK))](
+        gu, out, I, gu.stride(0), gu.stride(1), out.stride(0), out.stride(1),
+        GELU=gelu, BLOCK=BLOCK)
+    return out
 '''
 
 _FUSED_RUN_BLOCK = '''
@@ -961,7 +984,7 @@ def _fused_run(hidden, w1, w2, tw, ti):
             continue
         idx = tok.nonzero(as_tuple=True)[0]
         gu = _mm_nt(hidden.index_select(0, idx).contiguous(), w1[e].contiguous())
-        h = _swiglu(gu).to(hidden.dtype)
+        h = _swiglu(gu, {gelu}).to(hidden.dtype)
         ye = _mm_nt(h, w2[e].contiguous()).float()
         we = (twf * mask.float()).sum(dim=1)[idx]
         out.index_add_(0, idx, ye * we[:, None])
@@ -991,16 +1014,202 @@ def _scatter(tw, ti, M, E):
     return out
 '''
 
+_ROUTE_BLOCK = '''
+
+@triton.jit
+def _route_topk_kernel(gate_ptr, dense_ptr, tw_ptr, ti_ptr, E, sgm, sge,
+                       TOPK: tl.constexpr, SOFTMAX: tl.constexpr,
+                       SIGMOID: tl.constexpr, TOPK_SOFTMAX: tl.constexpr,
+                       RENORM: tl.constexpr, EB: tl.constexpr):
+    row = tl.program_id(0)
+    e = tl.arange(0, EB)
+    mask = e < E
+    raw = tl.load(gate_ptr + row * sgm + e * sge,
+                  mask=mask, other=-float("inf")).to(tl.float32)
+    row_max = tl.max(raw, axis=0)
+    if SOFTMAX:
+        ex = tl.exp(raw - row_max)
+        scores = ex / tl.sum(tl.where(mask, ex, 0.0), axis=0)
+    elif SIGMOID:
+        scores = tl.sigmoid(raw)
+    else:
+        scores = raw
+    candidates = tl.where(mask, scores, -float("inf"))
+    tl.store(dense_ptr + row * E + e, 0.0, mask=mask)
+    total = 0.0
+    for j in range(0, TOPK):
+        pick = tl.argmax(candidates, axis=0)
+        picked = tl.max(candidates, axis=0)
+        if TOPK_SOFTMAX:
+            value = tl.exp(picked - row_max)
+        else:
+            value = picked
+        total += value
+        tl.store(dense_ptr + row * E + pick, value)
+        tl.store(tw_ptr + row * TOPK + j, value)
+        tl.store(ti_ptr + row * TOPK + j, pick)
+        candidates = tl.where(e == pick, -float("inf"), candidates)
+    if RENORM or TOPK_SOFTMAX:
+        vals = tl.load(dense_ptr + row * E + e, mask=mask, other=0.0)
+        vals = tl.where(vals != 0.0, vals / total, 0.0)
+        tl.store(dense_ptr + row * E + e, vals, mask=mask)
+        for j in range(0, TOPK):
+            value = tl.load(tw_ptr + row * TOPK + j)
+            tl.store(tw_ptr + row * TOPK + j, value / total)
+
+
+def _route_topk(gate, topk, mode, renorm):
+    gate = gate.contiguous()
+    M, E = gate.shape
+    dense = torch.zeros((M, E), device=gate.device, dtype=torch.float32)
+    tw = torch.empty((M, topk), device=gate.device, dtype=torch.float32)
+    ti = torch.empty((M, topk), device=gate.device, dtype=torch.int32)
+    EB = triton.next_power_of_2(E)
+    _route_topk_kernel[(M,)](
+        gate, dense, tw, ti, E, gate.stride(0), gate.stride(1),
+        TOPK=topk, SOFTMAX=mode == "softmax", SIGMOID=mode == "sigmoid",
+        TOPK_SOFTMAX=mode == "topk_softmax", RENORM=renorm, EB=EB)
+    return dense, tw, ti
+'''
+
+_GROUP_ROUTE_BLOCK = '''
+
+@triton.jit
+def _group_score_kernel(gate_ptr, bias_ptr, score_ptr, E, n_groups, group_size,
+                        sgm, sge, BIASED: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    group = tl.program_id(1)
+    k = tl.arange(0, BLOCK)
+    mask = k < group_size
+    e = group * group_size + k
+    raw = tl.load(gate_ptr + row * sgm + e * sge,
+                  mask=mask, other=-float("inf")).to(tl.float32)
+    if BIASED:
+        bias = tl.load(bias_ptr + e, mask=mask, other=0.0).to(tl.float32)
+        scores = tl.sigmoid(raw) + bias
+        first_idx = tl.argmax(scores, axis=0)
+        first = tl.max(scores, axis=0)
+        second = tl.max(tl.where(k == first_idx, -float("inf"), scores), axis=0)
+        group_score = first + tl.where(group_size > 1, second, 0.0)
+    else:
+        group_score = tl.max(raw, axis=0)
+    tl.store(score_ptr + row * n_groups + group, group_score)
+
+
+@triton.jit
+def _route_grouped_kernel(gate_ptr, bias_ptr, group_ptr, dense_ptr,
+                          E, n_groups, group_size, sgm, sge,
+                          TOPK: tl.constexpr, TOPK_GROUP: tl.constexpr,
+                          BIASED: tl.constexpr, RENORM: tl.constexpr,
+                          EB: tl.constexpr, GB: tl.constexpr):
+    row = tl.program_id(0)
+    e = tl.arange(0, EB)
+    emask = e < E
+    raw = tl.load(gate_ptr + row * sgm + e * sge,
+                  mask=emask, other=-float("inf")).to(tl.float32)
+    if BIASED:
+        bias = tl.load(bias_ptr + e, mask=emask, other=0.0).to(tl.float32)
+        weights = tl.sigmoid(raw)
+        select_scores = weights + bias
+    else:
+        row_max = tl.max(raw, axis=0)
+        ex = tl.exp(raw - row_max)
+        weights = ex / tl.sum(tl.where(emask, ex, 0.0), axis=0)
+        select_scores = weights
+
+    groups = e // group_size
+    goffs = tl.arange(0, GB)
+    gmask = goffs < n_groups
+    group_scores = tl.load(group_ptr + row * n_groups + goffs,
+                           mask=gmask, other=-float("inf"))
+    allowed = e < 0
+    for j in range(0, TOPK_GROUP):
+        picked_group = tl.argmax(group_scores, axis=0)
+        allowed = allowed | (groups == picked_group)
+        group_scores = tl.where(goffs == picked_group, -float("inf"), group_scores)
+
+    candidates = tl.where(emask & allowed, select_scores, -float("inf"))
+    tl.store(dense_ptr + row * E + e, 0.0, mask=emask)
+    total = 0.0
+    for j in range(0, TOPK):
+        pick = tl.argmax(candidates, axis=0)
+        value = tl.sum(tl.where(e == pick, weights, 0.0), axis=0)
+        total += value
+        tl.store(dense_ptr + row * E + pick, value)
+        candidates = tl.where(e == pick, -float("inf"), candidates)
+    if RENORM:
+        vals = tl.load(dense_ptr + row * E + e, mask=emask, other=0.0)
+        tl.store(dense_ptr + row * E + e,
+                 tl.where(vals != 0.0, vals / tl.maximum(total, 1.0e-12), 0.0),
+                 mask=emask)
+
+
+def _route_grouped(gate, bias, topk, n_groups, topk_group, biased, renorm):
+    gate = gate.contiguous()
+    if biased:
+        bias = bias.contiguous()
+    M, E = gate.shape
+    group_size = E // n_groups
+    group_scores = torch.empty((M, n_groups), device=gate.device, dtype=torch.float32)
+    dense = torch.zeros((M, E), device=gate.device, dtype=torch.float32)
+    BLOCK = triton.next_power_of_2(group_size)
+    _group_score_kernel[(M, n_groups)](
+        gate, bias if biased else gate, group_scores, E, n_groups, group_size,
+        gate.stride(0), gate.stride(1), BIASED=biased, BLOCK=BLOCK)
+    _route_grouped_kernel[(M,)](
+        gate, bias if biased else gate, group_scores, dense,
+        E, n_groups, group_size, gate.stride(0), gate.stride(1),
+        TOPK=topk, TOPK_GROUP=topk_group, BIASED=biased, RENORM=renorm,
+        EB=triton.next_power_of_2(E), GB=triton.next_power_of_2(n_groups))
+    return dense
+'''
+
 _EC_BLOCK = '''
 
 @triton.jit
-def _ec_scatter_kernel(tv_ptr, ti_ptr, out_ptr, cap, stv, sti, sor, soc, CB: tl.constexpr):
-    e = tl.program_id(0)
-    c = tl.arange(0, CB)
-    cm = c < cap
-    toks = tl.load(ti_ptr + e * sti + c, mask=cm, other=0).to(tl.int64)
-    vals = tl.load(tv_ptr + e * stv + c, mask=cm, other=0.0).to(tl.float32)
-    tl.store(out_ptr + toks * sor + e * soc, vals, mask=cm)
+def _row_softmax_kernel(gate_ptr, work_ptr, E, sgm, sge, EB: tl.constexpr):
+    row = tl.program_id(0)
+    e = tl.arange(0, EB)
+    mask = e < E
+    raw = tl.load(gate_ptr + row * sgm + e * sge,
+                  mask=mask, other=-float("inf")).to(tl.float32)
+    row_max = tl.max(raw, axis=0)
+    ex = tl.exp(raw - row_max)
+    probs = ex / tl.sum(tl.where(mask, ex, 0.0), axis=0)
+    tl.store(work_ptr + row * E + e, probs, mask=mask)
+
+
+@triton.jit
+def _expert_choice_kernel(work_ptr, out_ptr, M, E, cap, BLOCK: tl.constexpr):
+    expert = tl.program_id(0)
+    for c in range(0, cap):
+        best = -float("inf")
+        best_token = 0
+        for start in range(0, M, BLOCK):
+            tok = start + tl.arange(0, BLOCK)
+            mask = tok < M
+            values = tl.load(work_ptr + tok * E + expert,
+                             mask=mask, other=-float("inf"))
+            block_best = tl.max(values, axis=0)
+            block_idx = tl.argmax(values, axis=0) + start
+            take = block_best > best
+            best = tl.where(take, block_best, best)
+            best_token = tl.where(take, block_idx, best_token)
+        tl.store(out_ptr + best_token * E + expert, best)
+        tl.store(work_ptr + best_token * E + expert, -float("inf"))
+
+
+def _expert_choice(gate, cap):
+    gate = gate.contiguous()
+    M, E = gate.shape
+    cap = min(int(cap), M)
+    work = torch.empty((M, E), device=gate.device, dtype=torch.float32)
+    out = torch.zeros((M, E), device=gate.device, dtype=torch.float32)
+    _row_softmax_kernel[(M,)](
+        gate, work, E, gate.stride(0), gate.stride(1),
+        EB=triton.next_power_of_2(E))
+    _expert_choice_kernel[(E,)](work, out, M, E, cap, BLOCK=256)
+    return out
 '''
 
 _GATHER_BLOCK = '''
@@ -1086,11 +1295,8 @@ _DESC = {
     "moe_block": "end-to-end MoE block from router logits (route -> MLP -> combine)",
 }
 
-# per-op gated-activation expression for the _swiglu helper (gate,up are fp32).
-_ACT_EXPR = {
-    "silu": "(gate * torch.sigmoid(gate)) * up",
-    "gelu": 'torch.nn.functional.gelu(gate, approximate="tanh") * up',
-}
+# Compile-time activation selector used by the Triton gated-activation kernel.
+_ACT_IS_GELU = {"silu": "False", "gelu": "True"}
 
 
 def seed_source(op: str, dtype: str) -> str:
@@ -1102,72 +1308,34 @@ def seed_source(op: str, dtype: str) -> str:
     router = spec.get("router", "softmax")
     renorm = spec.get("renorm", True)
     header = _SEED_HEADER.format(op=op, dtype=dtype, desc=_DESC.get(kind, "MoE op"))
-    swiglu = _SWIGLU_BLOCK.format(expr=_ACT_EXPR[act])
-    score = ("torch.softmax(gate.float(), dim=-1)" if router == "softmax"
-             else "torch.sigmoid(gate.float())")
+    swiglu = _SWIGLU_BLOCK
+    fused_run = _FUSED_RUN_BLOCK.format(gelu=_ACT_IS_GELU[act])
 
     # ------------------------------------------------------------- ROUTERS ----
     if kind in ("route_softmax", "route_sigmoid"):
-        sfn = ("torch.softmax(gate.float(), dim=-1)" if kind == "route_softmax"
-               else "torch.sigmoid(gate.float())")
-        rn = "\n    tw = tw / tw.sum(dim=-1, keepdim=True)" if renorm else ""
+        mode = "softmax" if kind == "route_softmax" else "sigmoid"
         entry = (f"def {op}(gate, topk):\n"
-                 f"    M, E = gate.shape\n"
-                 f"    sc = {sfn}\n"
-                 f"    tw, ti = torch.topk(sc, topk, dim=-1){rn}\n"
-                 f"    return _scatter(tw, ti, M, E)\n")
-        return header + _SCATTER_BLOCK + "\n" + entry
+                 f"    dense, _, _ = _route_topk(gate, topk, {mode!r}, {renorm!r})\n"
+                 f"    return dense\n")
+        return header + _ROUTE_BLOCK + "\n" + entry
     if kind == "route_topk_then_softmax":
         entry = (f"def {op}(gate, topk):\n"
-                 f"    M, E = gate.shape\n"
-                 f"    tv, ti = torch.topk(gate.float(), topk, dim=-1)\n"
-                 f"    w = torch.softmax(tv, dim=-1)\n"
-                 f"    return _scatter(w, ti, M, E)\n")
-        return header + _SCATTER_BLOCK + "\n" + entry
+                 f"    dense, _, _ = _route_topk(gate, topk, 'topk_softmax', True)\n"
+                 f"    return dense\n")
+        return header + _ROUTE_BLOCK + "\n" + entry
     if kind == "route_grouped":
         entry = (f"def {op}(gate, topk, n_groups, topk_group):\n"
-                 f"    M, E = gate.shape\n"
-                 f"    grp = E // n_groups\n"
-                 f"    sm = torch.softmax(gate.float(), dim=-1)\n"
-                 f"    gscore = sm.view(M, n_groups, grp).max(dim=-1).values\n"
-                 f"    keep = gscore.topk(topk_group, dim=-1).indices\n"
-                 f"    gmask = torch.zeros((M, n_groups), device=gate.device, dtype=torch.bool)\n"
-                 f"    gmask.scatter_(1, keep, True)\n"
-                 f"    emask = gmask.view(M, n_groups, 1).expand(M, n_groups, grp).reshape(M, E)\n"
-                 f'    masked = torch.where(emask, sm, torch.full_like(sm, float("-inf")))\n'
-                 f"    tw, ti = masked.topk(topk, dim=-1)\n"
-                 f"    tw = tw / tw.sum(dim=-1, keepdim=True)\n"
-                 f"    return _scatter(tw, ti, M, E)\n")
-        return header + _SCATTER_BLOCK + "\n" + entry
+                 f"    return _route_grouped(gate, gate, topk, n_groups, topk_group,\n"
+                 f"                          False, {renorm!r})\n")
+        return header + _GROUP_ROUTE_BLOCK + "\n" + entry
     if kind == "route_biased_grouped":
         entry = (f"def {op}(gate, bias, topk, n_groups, topk_group):\n"
-                 f"    M, E = gate.shape\n"
-                 f"    grp = E // n_groups\n"
-                 f"    scores = torch.sigmoid(gate.float())\n"
-                 f"    sb = scores + bias.float().view(1, E)\n"
-                 f"    top2 = sb.view(M, n_groups, grp).topk(min(2, grp), dim=-1).values.sum(dim=-1)\n"
-                 f"    keep = top2.topk(topk_group, dim=-1).indices\n"
-                 f"    gmask = torch.zeros((M, n_groups), device=gate.device, dtype=torch.bool)\n"
-                 f"    gmask.scatter_(1, keep, True)\n"
-                 f"    emask = gmask.view(M, n_groups, 1).expand(M, n_groups, grp).reshape(M, E)\n"
-                 f'    masked = torch.where(emask, sb, torch.full_like(sb, float("-inf")))\n'
-                 f"    ti = masked.topk(topk, dim=-1).indices\n"
-                 f"    tw = torch.gather(scores, 1, ti)\n"
-                 f"    tw = tw / tw.sum(dim=-1, keepdim=True).clamp(min=1e-12)\n"
-                 f"    return _scatter(tw, ti, M, E)\n")
-        return header + _SCATTER_BLOCK + "\n" + entry
+                 f"    return _route_grouped(gate, bias, topk, n_groups, topk_group,\n"
+                 f"                          True, {renorm!r})\n")
+        return header + _GROUP_ROUTE_BLOCK + "\n" + entry
     if kind == "route_expert_choice":
         entry = (f"def {op}(gate, cap):\n"
-                 f"    M, E = gate.shape\n"
-                 f"    cap = min(int(cap), M)\n"
-                 f"    sm = torch.softmax(gate.float(), dim=-1)\n"
-                 f"    tv, ti = torch.topk(sm.t().contiguous(), cap, dim=-1)\n"
-                 f"    out = torch.zeros((M, E), device=gate.device, dtype=torch.float32)\n"
-                 f"    tv = tv.contiguous().float()\n"
-                 f"    ti = ti.contiguous().to(torch.int32)\n"
-                 f"    _ec_scatter_kernel[(E,)](tv, ti, out, cap, tv.stride(0), ti.stride(0),\n"
-                 f"                             out.stride(0), out.stride(1), CB=triton.next_power_of_2(cap))\n"
-                 f"    return out\n")
+                 f"    return _expert_choice(gate, cap)\n")
         return header + _EC_BLOCK + "\n" + entry
 
     # ------------------------------------------------ PERMUTE / GATHER --------
@@ -1259,12 +1427,12 @@ def seed_source(op: str, dtype: str) -> str:
     if kind in ("grouped_swiglu", "grouped_geglu"):
         entry = (f"def {op}(hidden, w13, expert_ids):\n"
                  f"    gu = _grouped_mm(hidden, w13, expert_ids)\n"
-                 f"    return _swiglu(gu).to(hidden.dtype)\n")
+                 f"    return _swiglu(gu, {_ACT_IS_GELU[act]}).to(hidden.dtype)\n")
         return header + _MM_BLOCK + swiglu + "\n" + entry
     if kind == "grouped_mlp":
         entry = (f"def {op}(hidden, w13, w2, expert_ids):\n"
                  f"    gu = _grouped_mm(hidden, w13, expert_ids)\n"
-                 f"    h = _swiglu(gu).to(hidden.dtype)\n"
+                 f"    h = _swiglu(gu, {_ACT_IS_GELU[act]}).to(hidden.dtype)\n"
                  f"    return _grouped_mm(h, w2, expert_ids)\n")
         return header + _MM_BLOCK + swiglu + "\n" + entry
     if kind == "grouped_mlp_fp8":
@@ -1273,7 +1441,7 @@ def seed_source(op: str, dtype: str) -> str:
                  f"    w13 = (w13q.float() * w13s.float()).to(torch.bfloat16)\n"
                  f"    w2 = (w2q.float() * w2s.float()).to(torch.bfloat16)\n"
                  f"    gu = _grouped_mm(x, w13, expert_ids)\n"
-                 f"    h = _swiglu(gu).to(torch.bfloat16)\n"
+                 f"    h = _swiglu(gu, {_ACT_IS_GELU[act]}).to(torch.bfloat16)\n"
                  f"    return _grouped_mm(h, w2, expert_ids)\n")
         return header + _MM_BLOCK + swiglu + "\n" + entry
 
@@ -1302,7 +1470,7 @@ def seed_source(op: str, dtype: str) -> str:
     if kind == "shared_expert":
         entry = (f"def {op}(hidden, ws1, ws2, routed):\n"
                  f"    gu = _mm_nt(hidden, ws1)\n"
-                 f"    h = _swiglu(gu).to(hidden.dtype)\n"
+                 f"    h = _swiglu(gu, {_ACT_IS_GELU[act]}).to(hidden.dtype)\n"
                  f"    y = _mm_nt(h, ws2)\n"
                  f"    return (routed.float() + y.float()).to(hidden.dtype)\n")
         return header + _MM_BLOCK + swiglu + "\n" + entry
@@ -1311,14 +1479,13 @@ def seed_source(op: str, dtype: str) -> str:
     if kind == "fused_moe":
         entry = (f"def {op}(hidden, w1, w2, tw, ti):\n"
                  f"    return _fused_run(hidden, w1, w2, tw, ti)\n")
-        return header + _MM_BLOCK + swiglu + _FUSED_RUN_BLOCK + "\n" + entry
+        return header + _MM_BLOCK + swiglu + fused_run + "\n" + entry
     if kind == "moe_block":
+        mode = "softmax" if router == "softmax" else "sigmoid"
         entry = (f"def {op}(hidden, gate, w1, w2, topk):\n"
-                 f"    sc = {score}\n"
-                 f"    tw, ti = torch.topk(sc, topk, dim=-1)\n"
-                 f"    tw = tw / tw.sum(dim=-1, keepdim=True)\n"
-                 f"    return _fused_run(hidden, w1, w2, tw, ti.to(torch.int32))\n")
-        return header + _MM_BLOCK + swiglu + _FUSED_RUN_BLOCK + "\n" + entry
+                 f"    _, tw, ti = _route_topk(gate, topk, {mode!r}, True)\n"
+                 f"    return _fused_run(hidden, w1, w2, tw, ti)\n")
+        return header + _ROUTE_BLOCK + _MM_BLOCK + swiglu + fused_run + "\n" + entry
 
     raise ValueError(f"no seed template for kind {kind!r}")
 

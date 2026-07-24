@@ -121,11 +121,37 @@ def _grouped_mm(x, w, expert_ids):
     return out
 
 
+@triton.jit
+def _activation_kernel(y_ptr, n_elements,
+                       GELU: tl.constexpr, RELU: tl.constexpr, SILU: tl.constexpr,
+                       BLOCK: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    x = tl.load(y_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+    if GELU:
+        z = 0.7978845608028654 * (x + 0.044715 * x * x * x)
+        x = 0.5 * x * (1.0 + (2.0 * tl.sigmoid(2.0 * z) - 1.0))
+    elif RELU:
+        x = tl.maximum(x, 0.0)
+    elif SILU:
+        x = x * tl.sigmoid(x)
+    tl.store(y_ptr + offs, x, mask=mask)
+
+
+def _activate(y, kind):
+    n_elements = y.numel()
+    BLOCK = 1024
+    _activation_kernel[(triton.cdiv(n_elements, BLOCK),)](
+        y, n_elements, GELU=kind == "gelu", RELU=kind == "relu",
+        SILU=kind == "silu", BLOCK=BLOCK)
+    return y
+
+
 def gemm_bf16_bias_relu(a, w, bias):
     a = a
     w = w
     c = _mm_nt(a, w)
     y = c.float()
     y = y + bias.float().reshape(1, -1)
-    y = torch.nn.functional.relu(y)
+    y = _activate(y, "relu")
     return y.to(a.dtype)

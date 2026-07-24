@@ -49,7 +49,7 @@ A task directory contains:
 | --- | --- |
 | `task.yaml` | metadata + shapes (`minimal` / `primary` / `validation[]`), `snr_threshold`, `comparison_baseline` |
 | `reference.py` | `parse_shape`, `get_inputs`, `ref_fn` (fp32 oracle), `baseline_fn` (production bar) |
-| `seed_triton.py` | a compiling Triton starter the policy edits |
+| `seed_triton.py` | an admitted candidate implementation the policy edits; it must define the task entrypoint, pass `scan_for_hacks`, and compute through Triton rather than delegate to the oracle/framework/vendor op |
 | `driver.py` | prints `SNR:`, `allclose:`, `median_ms:` — hand-authored or a shim to `_genops.driver_main` |
 
 ```python
@@ -134,14 +134,16 @@ flowchart LR
 
 `kore/tasks/breadth/` holds **16 op-class authoring engines** — attention, MoE, GEMM, norm, quant, reduction, convolution, scan/SSM, sequence, sort/sparse, sampling, and training-op families. Each engine exposes the shared ABI (`OPS`, `SHAPES`, `make_reference`, `seed_source`) and ships CPU-side tests under `breadth/tests/`.
 
-`generate_breadth.py` auto-discovers every conformant engine and writes `genb_<op>_<dtype>/` dirs, each with a `task.yaml`, a naive-but-correct Triton seed, and thin `reference.py`/`driver.py` shims. Together the engines materialize **1,052** verified task variants:
+`generate_breadth.py` auto-discovers every conformant engine and writes `genb_<op>_<dtype>/` dirs, each with a `task.yaml`, a naive Triton candidate, and thin `reference.py`/`driver.py` shims. Before writing, the generator parses every candidate, requires a top-level function matching `operation`, and runs the environment's unchanged `scan_for_hacks`; one invalid engine seed aborts generation instead of fanning out bad artifacts. Together the engines materialize **1,052** task variants:
 
 ```bash
 python -m kore.tasks.generate_breadth --list   # dry-run: list the genb_* ids
 python -m kore.tasks.generate_breadth          # write the dirs into this checkout
 ```
 
-Generation is opt-in and idempotent. Registry discovery globs `*/task.yaml`, so freshly written `genb_*` dirs are picked up with no code edits, and since none are named `mla`/`paged` they all land in TRAIN. Only run it on a node whose task suite you intend to widen — never on a node whose in-flight run must keep a frozen task set.
+Generation is opt-in and idempotent. A declared `seed_kernel_name` is an admission claim: the file is candidate code, never a torch/reference/vendor alias used to impersonate a Triton seed. If a future family cannot supply a legitimate generic candidate, it must add an explicit bootstrap/no-seed contract before materialization rather than emit delegated source or relax the scanner. Static admission does not prove device compilation or numerical correctness; run `scripts/verify_breadth.py` on gfx950 for that GPU proof.
+
+Registry discovery globs `*/task.yaml`, so freshly written `genb_*` dirs are picked up with no code edits, and since none are named `mla`/`paged` they all land in TRAIN. Only run generation on a node whose task suite you intend to widen — never on a node whose in-flight run must keep a frozen task set.
 
 ---
 

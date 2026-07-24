@@ -1,14 +1,10 @@
-"""GENERATED breadth fused_muon seed (fp16). One Muon step on a 2D param, UPDATING
-param + momentum_buffer IN PLACE. Triton elementwise kernels do the (nesterov)
-momentum accumulation and the final scaled update; the 5-iter Newton-Schulz
-orthogonalization uses naive Triton GEMM/normalization/axpby primitives throughout."""
-from __future__ import annotations
-import torch, triton, triton.language as tl
+"""Self-contained Triton source snippets shared by breadth seed generators.
 
-_NS_A, _NS_B, _NS_C = 3.4445, -4.775, 2.0315
-_NS_STEPS = 5
+These strings are embedded into generated ``seed_triton.py`` files. They provide
+honest starter linear algebra without dispatching through torch/vendor matmul.
+"""
 
-
+TRITON_LINALG_BLOCK = r'''
 
 @triton.jit
 def _seed_mm_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
@@ -95,59 +91,4 @@ def _seed_normalize(x, eps):
     _seed_normalize_kernel[(1,)](
         x, out, norm, x.numel(), eps, BLOCK=1024, num_warps=8)
     return out
-
-
-@triton.jit
-def _muon_momentum_kernel(g_ptr, buf_ptr, geff_ptr, numel, momentum, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < numel
-    g = tl.load(g_ptr + offs, mask=mask).to(tl.float32)
-    buf = tl.load(buf_ptr + offs, mask=mask).to(tl.float32)
-    buf = momentum * buf + (1.0 - momentum) * g
-    geff = (1.0 - momentum) * g + momentum * buf
-    tl.store(buf_ptr + offs, buf.to(tl.float16), mask=mask)
-    tl.store(geff_ptr + offs, geff, mask=mask)
-
-
-@triton.jit
-def _muon_update_kernel(p_ptr, o_ptr, numel, alpha, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < numel
-    p = tl.load(p_ptr + offs, mask=mask).to(tl.float32)
-    o = tl.load(o_ptr + offs, mask=mask).to(tl.float32)
-    p = p - alpha * o
-    tl.store(p_ptr + offs, p.to(tl.float16), mask=mask)
-
-
-def _newton_schulz5(gm):
-    x = gm
-    transposed = False
-    if x.shape[-2] > x.shape[-1]:
-        x = x.mT.contiguous()
-        transposed = True
-    x = _seed_normalize(x, 1e-7)
-    for _ in range(_NS_STEPS):
-        a = _seed_mm(x, x, trans_b=True)
-        aa = _seed_mm(a, a)
-        b = _seed_axpby(a, aa, _NS_B, _NS_C)
-        bx = _seed_mm(b, x)
-        x = _seed_axpby(x, bx, _NS_A, 1.0)
-    if transposed:
-        x = x.mT.contiguous()
-    return x
-
-
-def fused_muon(param, grad, momentum_buffer, lr, momentum):
-    M, N = param.shape
-    numel = param.numel()
-    geff = torch.empty((M, N), device=param.device, dtype=torch.float32)
-    BLOCK = 1024
-    grid = (triton.cdiv(numel, BLOCK),)
-    _muon_momentum_kernel[grid](grad, momentum_buffer, geff, numel, momentum,
-                                BLOCK=BLOCK, num_warps=4)
-    o = _newton_schulz5(geff).contiguous()
-    scale = max(1.0, M / N) ** 0.5
-    _muon_update_kernel[grid](param, o, numel, lr * scale, BLOCK=BLOCK, num_warps=4)
-    return param, momentum_buffer
+'''

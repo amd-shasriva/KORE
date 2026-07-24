@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import json
+import math
 import multiprocessing
+import os
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from kore.env.kore_env import KoreEnv
-from kore.env.replay import LEGACY_MIGRATION_POLICY, ReplayCache
+from kore.env.replay import (
+    LEGACY_MIGRATION_POLICY,
+    ReplayCache,
+    kernel_hash,
+    source_key,
+)
+from kore.env import evaluation_contract as contract_module
 from kore.reward.reward import Observation
 from kore.tasks.base import Shape, Task
 
@@ -25,6 +35,10 @@ _CONTRACT_ENV = (
     "KORE_FP8_ENCODING",
     "KORE_NO_BENCH_BOTH",
     "KORE_TIMING_LOCK",
+    "KORE_PREFLIGHT_RUNTIME_IDENTITY",
+    "ROCR_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "CUDA_VISIBLE_DEVICES",
 )
 
 
@@ -38,6 +52,7 @@ def _config(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         runs_dir=tmp_path / "runs",
         gpu_target="gfx950",
+        rocm_path=str(tmp_path / "missing-rocm"),
         shape_augment=False,
         shape_augment_max=6,
         snr_threshold_for=lambda _dtype: 25.0,
@@ -56,9 +71,29 @@ def _config(tmp_path: Path) -> SimpleNamespace:
     )
 
 
+def _runtime_identity(
+    gpu: str = "0",
+    *,
+    hardware_id: str = "test-gpu-0",
+    revision: str = "runtime-a",
+    gpu_target: str = "gfx950",
+) -> dict:
+    return {
+        "identity_version": 1,
+        "validated": True,
+        "stable": True,
+        "hardware": {
+            "id": hardware_id,
+            "gpu_target": gpu_target,
+            "selected_gpu": str(gpu),
+        },
+        "runtime": {"preflight_revision": revision},
+    }
+
+
 def _task(tmp_path: Path) -> Task:
     task_dir = tmp_path / "task"
-    task_dir.mkdir()
+    task_dir.mkdir(parents=True)
     (task_dir / "task.yaml").write_text(
         "task_id: replay_test\n"
         "dtype: bf16\n"
@@ -117,7 +152,13 @@ class _Runner:
 def _env(tmp_path: Path) -> tuple[KoreEnv, Task, SimpleNamespace, _Runner]:
     task = _task(tmp_path)
     config = _config(tmp_path)
-    env = KoreEnv(task, config=config, use_replay=True)
+    env = KoreEnv(
+        task,
+        config=config,
+        use_replay=True,
+        gpu="0",
+        runtime_identity=_runtime_identity(),
+    )
     runner = _Runner()
     env._run = runner
     return env, task, config, runner
@@ -184,6 +225,7 @@ def test_architecture_change_invalidates(tmp_path):
     env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
 
     task.gpu_target = "gfx942"
+    env._runtime_identity = _runtime_identity(gpu_target="gfx942")
     env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
     env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
 
@@ -358,3 +400,313 @@ def test_process_concurrent_appends_are_live_readable_and_durable(tmp_path):
 
     reopened = ReplayCache(path)
     assert len(reopened) == workers * per_worker
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+@pytest.mark.parametrize(
+    "field",
+    ["snr_db", "wall_ms", "baseline_ms", "cv_pct", "profile_efficiency"],
+)
+def test_all_nonfinite_observation_scalars_are_rejected(tmp_path, field, value):
+    cache = ReplayCache(tmp_path / "replay.jsonl")
+    obs = Observation(compiled=True, validation_passed=False)
+    setattr(obs, field, value)
+
+    cache.put("task", "source", obs)
+
+    assert len(cache) == 0
+    assert cache.get("task", "source") is None
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+@pytest.mark.parametrize(
+    "field",
+    ["snr_by_shape", "wall_by_shape", "baseline_by_shape"],
+)
+def test_all_nonfinite_observation_map_values_are_rejected(tmp_path, field, value):
+    cache = ReplayCache(tmp_path / "replay.jsonl")
+    obs = Observation(compiled=True, validation_passed=False)
+    setattr(obs, field, {"primary": value})
+
+    cache.put("task", "source", obs)
+
+    assert len(cache) == 0
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_nonfinite_nested_context_is_rejected(tmp_path, value):
+    cache = ReplayCache(tmp_path / "replay.jsonl")
+    context = {"outer": {"inner": [value]}}
+
+    with pytest.raises(TypeError):
+        source_key("task", "source", context)
+    with pytest.raises(TypeError):
+        cache.put("task", "source", Observation(compiled=False), context)
+    with pytest.raises(TypeError):
+        cache.get("task", "source", context)
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_nonfinite_config_cannot_form_an_evaluation_contract(tmp_path, value):
+    env, task, config, _runner = _env(tmp_path)
+    config.cv_threshold_pct = value
+
+    with pytest.raises(ValueError):
+        contract_module.build_evaluation_contract(
+            task=task,
+            shapes=[task.shapes[0]],
+            do_bench=True,
+            config=config,
+            snr_threshold=task.snr_threshold,
+            correctness_timeout=env.correctness_timeout,
+            bench_timeout=env.bench_timeout,
+            gpu_selection=env._gpu_selection(task),
+            runtime_identity=env._runtime_identity,
+        )
+
+
+def test_nonfinite_current_schema_record_is_ignored(tmp_path):
+    path = tmp_path / "replay.jsonl"
+    context = {"contract_version": 1}
+    source = "source"
+    record = {
+        "schema_version": 2,
+        "key": source_key("task", source, context),
+        "task_id": "task",
+        "source_sha256": kernel_hash(source),
+        "context": context,
+        "obs": {"compiled": True, "snr_db": math.inf},
+    }
+    path.write_text(json.dumps(record) + "\n")
+
+    cache = ReplayCache(path)
+
+    assert cache.get("task", source, context) is None
+    assert cache.ignored_records["malformed"] == 1
+
+
+def test_physical_gpu_and_visibility_mapping_changes_invalidate(tmp_path):
+    task = _task(tmp_path)
+    config = _config(tmp_path)
+    runner = _Runner()
+    env0 = KoreEnv(
+        task,
+        config=config,
+        gpu="0",
+        runtime_identity=_runtime_identity("0", hardware_id="gpu-serial-0"),
+    )
+    env1 = KoreEnv(
+        task,
+        config=config,
+        gpu="1",
+        runtime_identity=_runtime_identity("1", hardware_id="gpu-serial-1"),
+    )
+    env0._run = runner
+    env1._run = runner
+    shapes = [task.shapes[0]]
+
+    env0.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env1.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env1.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 2
+    selection = env1._gpu_selection(task)
+    assert selection["selected_gpu"] == "1"
+    assert selection["child_visibility"] == {
+        "ROCR_VISIBLE_DEVICES": None,
+        "HIP_VISIBLE_DEVICES": "1",
+        "CUDA_VISIBLE_DEVICES": "1",
+    }
+
+
+def test_preflight_runtime_identity_change_invalidates(tmp_path):
+    task = _task(tmp_path)
+    config = _config(tmp_path)
+    runner = _Runner()
+    env_a = KoreEnv(
+        task,
+        config=config,
+        gpu="0",
+        runtime_identity=_runtime_identity(revision="runtime-a"),
+    )
+    env_b = KoreEnv(
+        task,
+        config=config,
+        gpu="0",
+        runtime_identity=_runtime_identity(revision="runtime-b"),
+    )
+    env_a._run = runner
+    env_b._run = runner
+    shapes = [task.shapes[0]]
+
+    env_a.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env_b.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env_b.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 2
+
+
+def test_software_version_change_invalidates(tmp_path, monkeypatch):
+    env, task, _config_obj, runner = _env(tmp_path)
+    version = {"torch": "2.7.0"}
+
+    def packages():
+        return {
+            "torch": {
+                "state": "present",
+                "distribution": "torch",
+                "version": version["torch"],
+            },
+            "triton": {"state": "not-installed"},
+            "aiter": {"state": "not-installed"},
+        }, True
+
+    monkeypatch.setattr(contract_module, "_package_versions", packages)
+    shapes = [task.shapes[0]]
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    version["torch"] = "2.8.0"
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 2
+
+
+def test_unknown_production_identity_disables_replay(tmp_path):
+    task = _task(tmp_path)
+    config = _config(tmp_path)
+    env = KoreEnv(task, config=config, gpu="0", runtime_identity=None)
+    runner = _Runner()
+    env._run = runner
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 2
+    assert len(env._cache_obj) == 0
+
+
+@pytest.mark.parametrize("failure", ["unstable", "nonfinite"])
+def test_unstable_or_nonfinite_preflight_identity_disables_replay(tmp_path, failure):
+    task = _task(tmp_path)
+    config = _config(tmp_path)
+    identity = _runtime_identity()
+    if failure == "unstable":
+        identity["stable"] = False
+    else:
+        identity["runtime"]["threshold"] = math.inf
+    env = KoreEnv(task, config=config, gpu="0", runtime_identity=identity)
+    runner = _Runner()
+    env._run = runner
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 2
+    assert len(env._cache_obj) == 0
+
+
+def test_core_evaluator_code_change_invalidates(tmp_path, monkeypatch):
+    core = tmp_path / "core.py"
+    core.write_text("SEMANTICS = 1\n")
+    monkeypatch.setattr(
+        contract_module,
+        "_CORE_CODE_PATHS",
+        (("test/core.py", core),),
+    )
+    contract_module._clear_fingerprint_caches()
+    env, task, _config_obj, runner = _env(tmp_path / "env")
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    core.write_text("SEMANTICS = 2\n")
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text("SEMANTICS = 3\n")
+    os.replace(replacement, core)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 3
+
+
+def test_core_fingerprint_cache_revalidates_mtime_and_replacement(tmp_path):
+    core = tmp_path / "core.py"
+    core.write_text("SEMANTICS = 1\n")
+    paths = (("core.py", core),)
+    contract_module._clear_fingerprint_caches()
+
+    first = contract_module._fingerprint_code_paths(paths)
+    first_cache_entries = len(contract_module._CODE_SET_CACHE)
+    stat = core.stat()
+    os.utime(core, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    touched = contract_module._fingerprint_code_paths(paths)
+    replacement = tmp_path / "new-core.py"
+    replacement.write_text("SEMANTICS = 2\n")
+    os.replace(replacement, core)
+    replaced = contract_module._fingerprint_code_paths(paths)
+
+    assert touched["sha256"] == first["sha256"]
+    assert len(contract_module._CODE_SET_CACHE) > first_cache_entries
+    assert replaced["sha256"] != first["sha256"]
+
+
+def test_contract_records_toolchain_core_and_validated_hardware_without_imports(tmp_path):
+    env, task, config, _runner = _env(tmp_path)
+    initially_unloaded = {
+        name for name in ("torch", "triton", "aiter") if name not in sys.modules
+    }
+
+    contract = contract_module.build_evaluation_contract(
+        task=task,
+        shapes=[task.shapes[0]],
+        do_bench=True,
+        config=config,
+        snr_threshold=task.snr_threshold,
+        correctness_timeout=env.correctness_timeout,
+        bench_timeout=env.bench_timeout,
+        gpu_selection=env._gpu_selection(task),
+        runtime_identity=env._runtime_identity,
+    )
+
+    runtime = contract["runtime"]
+    assert contract_module.contract_is_cacheable(contract)
+    assert runtime["effective_gpu_target"] == "gfx950"
+    assert runtime["preflight_identity"]["state"] == "validated"
+    assert runtime["core_code"]["state"] == "stable"
+    assert len(runtime["core_code"]["sha256"]) == 64
+    assert set(runtime["toolchain"]["packages"]) == {"torch", "triton", "aiter"}
+    assert set(runtime["toolchain"]["compilers"]) == {"cc", "cxx", "hipcc"}
+    assert all(name not in sys.modules for name in initially_unloaded)
+
+
+def test_warm_contract_build_cpu_overhead_is_bounded(tmp_path):
+    env, task, config, _runner = _env(tmp_path)
+    kwargs = {
+        "task": task,
+        "shapes": [task.shapes[0]],
+        "do_bench": True,
+        "config": config,
+        "snr_threshold": task.snr_threshold,
+        "correctness_timeout": env.correctness_timeout,
+        "bench_timeout": env.bench_timeout,
+        "gpu_selection": env._gpu_selection(task),
+        "runtime_identity": env._runtime_identity,
+    }
+    contract_module.build_evaluation_contract(**kwargs)  # warm hashes/version probes
+
+    iterations = 50
+    started = time.perf_counter()
+    contracts = [
+        contract_module.build_evaluation_contract(**kwargs)
+        for _ in range(iterations)
+    ]
+    elapsed = time.perf_counter() - started
+
+    assert all(contract_module.contract_is_cacheable(c) for c in contracts)
+    assert elapsed / iterations < 0.025, (
+        f"warm contract build averaged {elapsed / iterations:.6f}s"
+    )

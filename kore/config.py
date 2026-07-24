@@ -63,10 +63,19 @@ class KoreConfig:
     bench_iters: int = 30
     min_variance_runs: int = 3
     max_variance_runs: int = 5
-    cv_threshold_pct: float = 3.0
-    baseline_cv_threshold_pct: float = 3.0
-    paired_ratio_cv_threshold_pct: float = 3.0
-    paired_ci_threshold_pct: float = 3.0
+    # Timing-admission CV gates. Default 3.0% (vendor-grade) unchanged; a single
+    # env knob KORE_CV_THRESHOLD_PCT relaxes ALL of them together so datagen can
+    # admit correct, genuinely-faster wins on NOISY shared/burst nodes (which
+    # routinely measure 5-9% CV) instead of dropping them. Keep 3.0 for
+    # publication/eval; raise (e.g. 6-7) only for burst datagen throughput.
+    cv_threshold_pct: float = field(
+        default_factory=lambda: float(os.environ.get("KORE_CV_THRESHOLD_PCT", "3.0")))
+    baseline_cv_threshold_pct: float = field(
+        default_factory=lambda: float(os.environ.get("KORE_CV_THRESHOLD_PCT", "3.0")))
+    paired_ratio_cv_threshold_pct: float = field(
+        default_factory=lambda: float(os.environ.get("KORE_CV_THRESHOLD_PCT", "3.0")))
+    paired_ci_threshold_pct: float = field(
+        default_factory=lambda: float(os.environ.get("KORE_CV_THRESHOLD_PCT", "3.0")))
     paired_confidence_z: float = 1.96
     noise_floor_pct: float = 2.0
 

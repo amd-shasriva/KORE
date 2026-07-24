@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,15 +22,24 @@ from kore.policy.model_spec import (
     validate_pinned_revision,
 )
 from kore.policy.resources import (
+    ABSENT,
     MEASURE,
+    NOT_APPLICABLE,
     FilesystemCapacity,
     GPUDevice,
     InsufficientResourcesError,
+    MeasurementProvenance,
     MeasuredPeakProfile,
+    PhaseEvidence,
+    RankPeakReport,
     ResourcePreflightError,
     ResourceSnapshot,
     UnresolvedProductionFieldError,
+    WorkloadSpec,
+    atomic_write_json,
+    collect_amd_gpu_devices,
     compute_analytical_lower_bounds,
+    required_measurement_phases,
     run_resource_preflight,
 )
 
@@ -208,6 +218,8 @@ def test_exact_parameter_count_and_deterministic_profile_hash(tiny_checkpoint):
     assert canonical_profile_hash({"b": 2, "a": 1}) == canonical_profile_hash(
         {"a": 1, "b": 2}
     )
+    with pytest.raises(ModelSpecError, match="cannot authorize a remote"):
+        first.validate_for_load(first.model_id)
 
 
 def test_config_tokenizer_generation_and_shard_changes_fingerprint(
@@ -264,17 +276,37 @@ def _resources(
     return ResourceSnapshot(
         gpus=(
             GPUDevice(
-                index=0,
-                name="fixture-gpu",
+                drm_card="card3",
+                render_node="renderD129",
+                pci_bdf="0000:01:00.0",
+                hip_reported_pci_bdf="0000:01:00.0",
                 uuid="gpu-0",
-                pci_bus_id="0000:01:00.0",
+                hip_reported_uuid="gpu-0",
+                physical_card=0,
+                hip_ordinal=0,
+                slurm_gres_id=NOT_APPLICABLE,
+                slurm_allocated=NOT_APPLICABLE,
+                name="fixture-gpu",
                 numa_node=0,
                 total_hbm_bytes=20_000,
                 free_hbm_bytes=free_hbm,
+                visible=True,
             ),
         ),
         gpu_topology=topology or {"gpu-0": {"gpu-0": "self"}},
-        visible_devices="all",
+        visible_device_policy={
+            "authority": "unmasked",
+            "raw": NOT_APPLICABLE,
+            "hip_ordinals": [0],
+        },
+        slurm_allocation={
+            "mode": "none",
+            "job_id": NOT_APPLICABLE,
+            "step_id": NOT_APPLICABLE,
+            "gres": NOT_APPLICABLE,
+            "physical_cards": [],
+            "hip_ordinals": [],
+        },
         host_ram_total_bytes=100_000,
         host_ram_available_bytes=80_000,
         filesystems=(
@@ -292,8 +324,96 @@ def _resources(
             "accelerate": "1.8",
             "trl": "0.19",
             "peft": "0.15",
+            "datasets": ABSENT,
         },
+        code_fingerprint="c" * 40,
         source="fixture",
+    )
+
+
+def _workload(spec, resources, **overrides) -> WorkloadSpec:
+    values = dict(
+        stage="dpo",
+        global_batch_size=8,
+        microbatch_size=1,
+        gradient_accumulation_steps=8,
+        sequence_lengths={"max_length": 128, "prompt": 64, "completion": 64},
+        precision="bf16",
+        sharding="fsdp-full-shard",
+        offload="none",
+        backend="transformers",
+        world_size=1,
+        topology_hash=resources.topology_hash,
+        optimizer="adamw",
+        optimizer_initialized=True,
+        model_copies=1,
+        reference_copies=1,
+        rollout_copies=0,
+        resolved_config={
+            "stage": "dpo",
+            "batch": 8,
+            "microbatch": 1,
+            "max_length": 128,
+            "precision": "bf16",
+            "sharding": "fsdp-full-shard",
+            "offload": "none",
+            "backend": "transformers",
+        },
+        code_fingerprint=resources.code_fingerprint,
+        dependency_profile_hash=resources.dependency_profile_hash,
+        model_profile_hash=spec.profile_hash,
+        required_dependencies=("torch", "transformers", "accelerate", "trl"),
+    )
+    values.update(overrides)
+    return WorkloadSpec(**values)
+
+
+def _phase(name: str, *, bdf: str = "0000:01:00.0") -> PhaseEvidence:
+    artifact = hashlib.sha256(name.encode()).hexdigest()
+    return PhaseEvidence(
+        phase=name,
+        rank_reports=(
+            RankPeakReport(
+                rank=0,
+                hip_ordinal=0,
+                pci_bdf=bdf,
+                run_peak_hbm_bytes=(9_000, 9_010, 9_005),
+            ),
+        ),
+        host_peak_runs_bytes=(2_000, 2_010, 2_005),
+        filesystem_peak_runs_bytes={
+            "model": (100, 101, 100),
+            "scratch": (200, 201, 200),
+        },
+        safety_margin_fraction=0.10,
+        max_peak_variance_fraction=0.05,
+        optimizer_initialized=True,
+        provenance=MeasurementProvenance(
+            command=("python", "measure.py", "--phase", name),
+            tool="rocprofv3",
+            tool_version="7.0",
+            hostname="fixture-host",
+            started_at_utc="2026-07-23T00:00:00Z",
+            artifact_sha256=artifact,
+            exit_code=0,
+        ),
+    )
+
+
+def _measured(
+    workload: WorkloadSpec,
+    resources: ResourceSnapshot,
+    *,
+    omit: tuple[str, ...] = (),
+) -> MeasuredPeakProfile:
+    return MeasuredPeakProfile(
+        workload=workload,
+        environment_hash=resources.environment_hash,
+        phases=tuple(
+            _phase(name)
+            for name in required_measurement_phases(workload.stage)
+            if name not in omit
+        ),
     )
 
 
@@ -327,17 +447,22 @@ def test_unresolved_measure_values_rejected(tiny_checkpoint):
         run_resource_preflight(spec, _resources(free_hbm=MEASURE))
 
     resources = _resources()
-    measured = MeasuredPeakProfile(
-        model_profile_hash=spec.profile_hash,
-        environment_hash=resources.environment_hash,
-        workload="fixture",
-        gpu_peak_hbm_bytes=(MEASURE,),
-        host_peak_ram_bytes=100,
-        filesystem_peak_bytes={"model": 0, "scratch": 100},
-        source="fixture",
+    workload = _workload(spec, resources)
+    measured = _measured(workload, resources)
+    broken_phase = replace(
+        measured.phases[0],
+        provenance=replace(measured.phases[0].provenance, tool=MEASURE),
+    )
+    measured = replace(
+        measured, phases=(broken_phase,) + measured.phases[1:]
     )
     with pytest.raises(UnresolvedProductionFieldError, match="MEASURE"):
-        run_resource_preflight(spec, resources, measured)
+        run_resource_preflight(
+            spec,
+            resources,
+            measured,
+            expected_workload=workload,
+        )
 
 
 def test_analytical_only_never_asserts_fit(tiny_checkpoint):
@@ -358,31 +483,265 @@ def test_measured_profile_ingestion_and_hashes_are_deterministic(tiny_checkpoint
         root, revision=REVISION, expected=profile
     )
     resources = _resources()
-    first = MeasuredPeakProfile(
-        model_profile_hash=spec.profile_hash,
-        environment_hash=resources.environment_hash,
-        workload="dpo-smoke-v1",
-        gpu_peak_hbm_bytes=(1_000,),
-        host_peak_ram_bytes=2_000,
-        filesystem_peak_bytes={"model": 100, "scratch": 200},
-        source="rocprof-fixture",
+    workload = _workload(spec, resources)
+    first = _measured(workload, resources)
+    reversed_phase = replace(
+        first.phases[0],
+        filesystem_peak_runs_bytes={
+            "scratch": (200, 201, 200),
+            "model": (100, 101, 100),
+        },
     )
-    second = MeasuredPeakProfile(
-        model_profile_hash=spec.profile_hash,
-        environment_hash=resources.environment_hash,
-        workload="dpo-smoke-v1",
-        gpu_peak_hbm_bytes=(1_000,),
-        host_peak_ram_bytes=2_000,
-        filesystem_peak_bytes={"scratch": 200, "model": 100},
-        source="rocprof-fixture",
+    second = replace(
+        first, phases=(reversed_phase,) + first.phases[1:]
     )
     assert first.profile_hash == second.profile_hash
+    assert (
+        MeasuredPeakProfile.from_dict(first.to_dict()).profile_hash
+        == first.profile_hash
+    )
+    assert (
+        ResourceSnapshot.from_dict(resources.to_dict()).profile_hash
+        == resources.profile_hash
+    )
     report = run_resource_preflight(
         spec,
         resources,
         first,
+        expected_workload=workload,
         require_measured=True,
         headroom_fraction=0.0,
     )
     assert report.production_ready is True
     assert report.status == "measured_pass"
+
+
+def test_bdf_ordinal_and_slurm_mapping_mismatches_fail(tiny_checkpoint):
+    resources = _resources()
+    mismatched_gpu = replace(
+        resources.gpus[0],
+        hip_reported_pci_bdf="0000:02:00.0",
+    )
+    with pytest.raises(ResourcePreflightError, match="BDF"):
+        replace(resources, gpus=(mismatched_gpu,)).validate_resolved()
+
+    slurm_gpu = replace(
+        resources.gpus[0],
+        slurm_allocated=True,
+        slurm_gres_id="gpu:1@physical:1",
+    )
+    wrong_slurm = replace(
+        resources,
+        gpus=(slurm_gpu,),
+        slurm_allocation={
+            "mode": "slurm",
+            "job_id": "42",
+            "step_id": "0",
+            "gres": "gpu:1",
+            "physical_cards": [1],
+            "hip_ordinals": [0],
+        },
+    )
+    with pytest.raises(ResourcePreflightError, match="physical-card"):
+        wrong_slurm.validate_resolved()
+
+
+def test_inventory_joins_drm_render_bdf_and_hip_without_discovery_index(tmp_path):
+    drm = tmp_path / "drm"
+    pci = tmp_path / "pci" / "0000:0a:00.0"
+    drm.mkdir()
+    pci.mkdir(parents=True)
+    for name, value in {
+        "vendor": "0x1002",
+        "mem_info_vram_total": "20000",
+        "mem_info_vram_used": "5000",
+        "product_name": "fixture-gpu",
+        "unique_id": "abc123",
+        "numa_node": "1",
+    }.items():
+        (pci / name).write_text(value)
+    (drm / "card7").mkdir()
+    (drm / "renderD130").mkdir()
+    (drm / "card7" / "device").symlink_to(pci, target_is_directory=True)
+    (drm / "renderD130" / "device").symlink_to(pci, target_is_directory=True)
+    inventory = (
+        {
+            "hip_ordinal": 3,
+            "pci_bdf": "0000:0a:00.0",
+            "uuid": "abc123",
+            "physical_card": 11,
+        },
+    )
+    devices = collect_amd_gpu_devices(
+        drm,
+        hip_inventory=inventory,
+        environ={"HIP_VISIBLE_DEVICES": "3"},
+    )
+    assert len(devices) == 1
+    gpu = devices[0]
+    assert gpu.drm_card == "card7"
+    assert gpu.render_node == "renderD130"
+    assert gpu.hip_ordinal == 3
+    assert gpu.physical_card == 11
+
+
+def test_workload_mismatch_and_omitted_phases_fail_closed(tiny_checkpoint):
+    root, profile, _ = tiny_checkpoint
+    spec = ModelSpec.from_local_checkpoint(
+        root, revision=REVISION, expected=profile
+    )
+    resources = _resources()
+    measured_workload = _workload(spec, resources)
+    measured = _measured(measured_workload, resources)
+    expected = replace(
+        measured_workload,
+        microbatch_size=2,
+        resolved_config={
+            **measured_workload.resolved_config,
+            "microbatch": 2,
+        },
+    )
+    with pytest.raises(
+        UnresolvedProductionFieldError, match="workload/config fingerprint"
+    ):
+        run_resource_preflight(
+            spec,
+            resources,
+            measured,
+            expected_workload=expected,
+            require_measured=True,
+        )
+
+    incomplete = _measured(
+        measured_workload,
+        resources,
+        omit=("synchronization", "checkpoint_save"),
+    )
+    with pytest.raises(
+        UnresolvedProductionFieldError, match="required separate phases"
+    ):
+        run_resource_preflight(
+            spec,
+            resources,
+            incomplete,
+            expected_workload=measured_workload,
+            require_measured=True,
+        )
+
+
+def test_stale_software_code_and_required_absent_dependency_fail(tiny_checkpoint):
+    root, profile, _ = tiny_checkpoint
+    spec = ModelSpec.from_local_checkpoint(
+        root, revision=REVISION, expected=profile
+    )
+    resources = _resources()
+    workload = _workload(spec, resources)
+    measured = _measured(workload, resources)
+
+    stale_code = replace(resources, code_fingerprint="d" * 40)
+    with pytest.raises(UnresolvedProductionFieldError, match="code fingerprint"):
+        run_resource_preflight(
+            spec,
+            stale_code,
+            measured,
+            expected_workload=workload,
+            require_measured=True,
+        )
+
+    stale_software = replace(
+        resources,
+        software_versions={**resources.software_versions, "torch": "9.9"},
+    )
+    with pytest.raises(
+        UnresolvedProductionFieldError, match="dependency/software fingerprint"
+    ):
+        run_resource_preflight(
+            spec,
+            stale_software,
+            measured,
+            expected_workload=workload,
+            require_measured=True,
+        )
+
+    # datasets is known-absent but optional for this workload, so the base
+    # profile still passes. Declaring it required turns that known fact into a
+    # production failure without misclassifying it as an unknown MEASURE value.
+    required_absent = replace(
+        workload,
+        required_dependencies=workload.required_dependencies + ("datasets",),
+    )
+    absent_measured = _measured(required_absent, resources)
+    with pytest.raises(UnresolvedProductionFieldError, match="explicitly ABSENT"):
+        run_resource_preflight(
+            spec,
+            resources,
+            absent_measured,
+            expected_workload=required_absent,
+            require_measured=True,
+        )
+
+
+def test_measurement_provenance_repeats_and_variance_are_validated(
+    tiny_checkpoint,
+):
+    with pytest.raises(ResourcePreflightError, match="free-form"):
+        MeasuredPeakProfile.from_dict(
+            {
+                "workload": "dpo batch eight",
+                "environment_hash": "a" * 64,
+                "phases": [],
+            }
+        )
+    with pytest.raises(ResourcePreflightError, match="argv list"):
+        MeasurementProvenance.from_dict(
+            {
+                "command": "python measure.py",
+                "tool": "rocprofv3",
+            }
+        )
+
+    root, profile, _ = tiny_checkpoint
+    spec = ModelSpec.from_local_checkpoint(
+        root, revision=REVISION, expected=profile
+    )
+    resources = _resources()
+    workload = _workload(spec, resources)
+    measured = _measured(workload, resources)
+    unstable_rank = replace(
+        measured.phases[0].rank_reports[0],
+        run_peak_hbm_bytes=(1_000, 1_500, 1_100),
+    )
+    unstable_phase = replace(
+        measured.phases[0],
+        rank_reports=(unstable_rank,),
+        max_peak_variance_fraction=0.05,
+    )
+    unstable = replace(
+        measured, phases=(unstable_phase,) + measured.phases[1:]
+    )
+    with pytest.raises(
+        UnresolvedProductionFieldError, match="variance exceeds policy"
+    ):
+        run_resource_preflight(
+            spec,
+            resources,
+            unstable,
+            expected_workload=workload,
+            require_measured=True,
+        )
+
+
+def test_atomic_report_interruption_preserves_previous_file(monkeypatch, tmp_path):
+    import kore.policy.resources as resource_module
+
+    destination = tmp_path / "preflight.json"
+    destination.write_text('{"old": true}\n')
+
+    def interrupted(_source, _destination):
+        raise OSError("simulated interruption")
+
+    monkeypatch.setattr(resource_module.os, "replace", interrupted)
+    with pytest.raises(OSError, match="interruption"):
+        atomic_write_json(destination, {"new": True})
+    assert destination.read_text() == '{"old": true}\n'
+    assert list(tmp_path.glob(".preflight.json.*.tmp")) == []

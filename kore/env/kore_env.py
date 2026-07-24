@@ -47,6 +47,13 @@ from kore.reward.reward import Observation, scan_for_hacks
 from kore.reward.reward import _worst_speedup
 from kore.reward.stats import cv_pct as _cv_pct
 from kore.reward.stats import median as _median
+from kore.reward.stats import paired_timing_stats as _paired_timing_stats
+from kore.reward.stats import publication_admission_error as _publication_admission_error
+from kore.tasks._genops import (
+    DRIVER_CAPABILITY_PROTOCOL,
+    DRIVER_PROTOCOL_ID,
+    PUBLICATION_GUARANTEES,
+)
 from kore.tasks.base import Shape, Task
 
 _LOG = get_logger("env")
@@ -69,18 +76,15 @@ def _sha12(source: str) -> str:
 _SNR = re.compile(r"SNR:\s*([-\d.eE]+)")
 _ALLCLOSE = re.compile(r"allclose:\s*(True|False)", re.IGNORECASE)
 _MEDIAN = re.compile(r"median_ms:\s*([-\d.eE]+)")
-# Batched (--bench-both) per-impl medians: candidate + reference timed in ONE process.
-_CAND_MED = re.compile(r"CAND_median_ms:\s*([-\d.eE]+)")
-_REF_MED = re.compile(r"REF_median_ms:\s*([-\d.eE]+)")
+_TIMING_PAIR = re.compile(r"^KORE_TIMING_PAIR:\s*(\{[^\n]+\})\s*$",
+                          re.MULTILINE)
 _DRIVER_CAPS = re.compile(r"^KORE_DRIVER_CAPABILITIES:\s*(\{[^\n]+\})\s*$",
                           re.MULTILINE)
 _BATCH_CAPABILITIES = {
-    "protocol": 1,
-    "bench_both": True,
-    "multi_shape": True,
-    "fresh_inputs": True,
-    "interleaved": True,
-    "postcheck_all_shapes": True,
+    "protocol": DRIVER_CAPABILITY_PROTOCOL,
+    "protocol_id": DRIVER_PROTOCOL_ID,
+    "performance_eligible": True,
+    **PUBLICATION_GUARANTEES,
 }
 # Candidate import/compile failure (the kernel's fault).
 _COMPILE_ERR = re.compile(
@@ -112,13 +116,60 @@ def _parse_driver_capabilities(text: str) -> dict:
         caps = json.loads(matches[0].group(1))
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
-    if not isinstance(caps, dict) or caps.get("protocol") != 1:
+    if not isinstance(caps, dict) or not isinstance(caps.get("protocol"), int):
         return {}
     return caps
 
 
 def _supports_batch_bench(caps: dict) -> bool:
     return all(caps.get(k) == v for k, v in _BATCH_CAPABILITIES.items())
+
+
+def _parse_timing_pairs(block: str, expected_count: int) -> tuple[list[dict], Optional[str]]:
+    """Parse and validate exact-count, balanced raw timing pairs."""
+    matches = list(_TIMING_PAIR.finditer(block or ""))
+    if len(matches) != expected_count:
+        return [], (
+            f"paired sample count {len(matches)} != requested {expected_count}")
+    pairs: list[dict] = []
+    for expected_index, match in enumerate(matches):
+        try:
+            pair = json.loads(match.group(1))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return [], f"pair {expected_index} is not valid JSON"
+        if not isinstance(pair, dict) or pair.get("pair") != expected_index:
+            return [], f"pair index mismatch at {expected_index}"
+        order = pair.get("order")
+        if order not in ("AB", "BA"):
+            return [], f"pair {expected_index} has invalid order {order!r}"
+        try:
+            cand = float(pair["candidate_ms"])
+            base = float(pair["baseline_ms"])
+            ratio = float(pair["ratio"])
+            log_su = float(pair["log_speedup"])
+        except (KeyError, TypeError, ValueError):
+            return [], f"pair {expected_index} has missing/invalid numeric fields"
+        if not all(math.isfinite(v) for v in (cand, base, ratio, log_su)):
+            return [], f"pair {expected_index} contains non-finite values"
+        if not (cand > 0.0 and base > 0.0 and ratio > 0.0):
+            return [], f"pair {expected_index} contains non-positive values"
+        expected_ratio = base / cand
+        if not math.isclose(ratio, expected_ratio, rel_tol=1e-9, abs_tol=1e-12):
+            return [], f"pair {expected_index} ratio does not match raw times"
+        if not math.isclose(log_su, math.log(expected_ratio),
+                            rel_tol=1e-9, abs_tol=1e-12):
+            return [], f"pair {expected_index} log speedup does not match ratio"
+        pairs.append({
+            "pair": expected_index, "order": order,
+            "candidate_ms": cand, "baseline_ms": base,
+            "ratio": expected_ratio, "log_speedup": math.log(expected_ratio),
+        })
+    orders = [p["order"] for p in pairs]
+    if any(a == b for a, b in zip(orders, orders[1:])):
+        return [], "pair order is not alternating AB/BA"
+    if abs(orders.count("AB") - orders.count("BA")) > 1:
+        return [], "pair order is not balanced AB/BA"
+    return pairs, None
 
 
 def _timing_completeness_error(expected_names, candidate, baseline) -> Optional[str]:
@@ -443,13 +494,36 @@ class KoreEnv:
         if not (correct and do_bench):
             return obs
 
+        caps = self._driver_capabilities(driver, workdir, env)
+        publication_capable = _supports_batch_bench(caps)
+        force_screening = os.environ.get(
+            "KORE_NO_BENCH_BOTH", "").strip().lower() in ("1", "true", "yes")
+        obs.timing_protocol = caps.get("protocol_id") or "unknown"
+        obs.timing_protocol_version = caps.get("protocol")
+        obs.timing_guarantees = {
+            k: bool(caps.get(k, False)) for k in PUBLICATION_GUARANTEES
+        }
+        obs.performance_eligible = publication_capable and not force_screening
+        if not publication_capable and not force_screening:
+            obs.timing_grade = "ineligible"
+            reason = caps.get("ineligible_reason") or (
+                "driver lacks the complete paired-v2 publication guarantees")
+            obs.error_text = f"performance-ineligible: {reason}"
+            _ev("WARN", "eval_performance_ineligible", task=task.task_id,
+                source_sha=_sha12(source), reason=reason,
+                protocol=obs.timing_protocol_version)
+            return obs
+
         wall_by_shape: dict[str, float] = {}
         base_by_shape: dict[str, float] = {}
-        cvs: list[float] = []
-        if self._batch_bench_ok(driver, workdir, env):
-            # Fast + accurate: ALL shapes timed (both impls, n_max repeats) in ONE
-            # process under a single per-GPU timing-lock hold. Contention-fair ratio +
-            # minimal exclusive window -> honest speedups at high throughput.
+        candidate_cvs: list[float] = []
+        baseline_cvs: list[float] = []
+        ratio_cvs: list[float] = []
+        ci_widths: list[float] = []
+        admission_errors: list[str] = []
+        if publication_capable and not force_screening:
+            obs.timing_grade = "publication"
+            obs.timing_pair_count = max(1, int(self.cfg.max_variance_runs))
             per_shape, poisoned = self._bench_all(driver, shapes, workdir, env)
             if poisoned:
                 _ev("WARN", "eval_bench_hack", task=task.task_id, source_sha=_sha12(source),
@@ -458,13 +532,62 @@ class KoreEnv:
                                    flagged_hack=True, hack_reason="bench-time output mismatch",
                                    error_text="reward-hack: kernel incorrect under timing")
             for sh in shapes:
-                cand_s, ref_s = per_shape.get(sh.name, ([], []))
-                if cand_s:
-                    wall_by_shape[sh.name] = _median(cand_s)
-                    cvs.append(_cv_pct(cand_s))
-                if ref_s:
-                    base_by_shape[sh.name] = _median(ref_s)
+                pairs = per_shape.get(sh.name, [])
+                if not pairs:
+                    continue
+                cand_s = [p["candidate_ms"] for p in pairs]
+                ref_s = [p["baseline_ms"] for p in pairs]
+                try:
+                    stats = _paired_timing_stats(
+                        cand_s, ref_s,
+                        noise_floor_pct=float(getattr(
+                            self.cfg, "noise_floor_pct", 2.0)),
+                        z=float(getattr(self.cfg, "paired_confidence_z", 1.96)),
+                    )
+                except ValueError as exc:
+                    admission_errors.append(f"{sh.name}: {exc}")
+                    continue
+                obs.candidate_samples_by_shape[sh.name] = cand_s
+                obs.baseline_samples_by_shape[sh.name] = ref_s
+                obs.paired_ratio_samples_by_shape[sh.name] = stats["paired_ratios"]
+                obs.paired_log_speedup_samples_by_shape[sh.name] = \
+                    stats["paired_log_speedups"]
+                obs.candidate_cv_by_shape[sh.name] = stats["candidate_cv_pct"]
+                obs.baseline_cv_by_shape[sh.name] = stats["baseline_cv_pct"]
+                obs.paired_ratio_cv_by_shape[sh.name] = stats["paired_ratio_cv_pct"]
+                obs.paired_log_ci_by_shape[sh.name] = [
+                    stats["log_ci_lo"], stats["log_ci_hi"]]
+                obs.timing_classification_by_shape[sh.name] = stats["classification"]
+                wall_by_shape[sh.name] = _median(cand_s)
+                base_by_shape[sh.name] = _median(ref_s)
+                candidate_cvs.append(stats["candidate_cv_pct"])
+                baseline_cvs.append(stats["baseline_cv_pct"])
+                ratio_cvs.append(stats["paired_ratio_cv_pct"])
+                ci_widths.append(stats["ci_half_width_pct"])
+                err = _publication_admission_error(
+                    stats,
+                    min_pairs=max(2, int(self.cfg.min_variance_runs)),
+                    candidate_cv_threshold_pct=float(self.cfg.cv_threshold_pct),
+                    baseline_cv_threshold_pct=float(getattr(
+                        self.cfg, "baseline_cv_threshold_pct",
+                        self.cfg.cv_threshold_pct)),
+                    paired_ratio_cv_threshold_pct=float(getattr(
+                        self.cfg, "paired_ratio_cv_threshold_pct",
+                        self.cfg.cv_threshold_pct)),
+                    paired_ci_threshold_pct=float(getattr(
+                        self.cfg, "paired_ci_threshold_pct",
+                        self.cfg.cv_threshold_pct)),
+                )
+                if err:
+                    admission_errors.append(f"{sh.name}: {err}")
         else:
+            # Explicit operator-requested screening only.  This path is useful
+            # for debugging/parity but can never earn vendor-grade speed credit.
+            obs.timing_protocol = "legacy-unpaired-v0"
+            obs.timing_protocol_version = 0
+            obs.timing_guarantees = {}
+            obs.timing_grade = "screening"
+            obs.performance_eligible = False
             for sh in shapes:
                 cand, cand_cv, poisoned = self._bench_multi(driver, sh, "candidate", workdir, env)
                 # Anti-hack: candidate bench re-verifies correctness AFTER timing. A False
@@ -480,30 +603,32 @@ class KoreEnv:
                 ref = self._bench_multi(driver, sh, "reference", workdir, env)[0]
                 if cand is not None:
                     wall_by_shape[sh.name] = cand
-                    cvs.append(cand_cv)
+                    candidate_cvs.append(cand_cv)
                 if ref is not None:
                     base_by_shape[sh.name] = ref
 
-        timing_error = _timing_completeness_error(
-            requested_names, wall_by_shape, base_by_shape)
-        if timing_error:
-            _ev("WARN", "eval_bench_incomplete", task=task.task_id,
-                source_sha=_sha12(source), reason=timing_error)
-            # A correct kernel with missing/invalid timing is an inconclusive,
-            # retryable infrastructure result.  Never expose partial dictionaries:
-            # reward aggregation must not silently score only the shapes that
-            # happened to produce timings.
-            obs.infra_error = True
-            obs.error_text = f"infra: incomplete timing: {timing_error}"
-            return obs
-
+        # Retain raw/summary evidence even when admission subsequently fails.
         obs.wall_by_shape = wall_by_shape
         obs.baseline_by_shape = base_by_shape
-        obs.cv_pct = max(cvs) if cvs else None
+        obs.cv_pct = max(candidate_cvs) if candidate_cvs else None
+        obs.baseline_cv_pct = max(baseline_cvs) if baseline_cvs else None
+        obs.paired_ratio_cv_pct = max(ratio_cvs) if ratio_cvs else None
+        obs.paired_ci_half_width_pct = max(ci_widths) if ci_widths else None
         if wall_by_shape:
             obs.wall_ms = max(wall_by_shape.values())
         if base_by_shape:
             obs.baseline_ms = max(base_by_shape.values())
+
+        timing_error = _timing_completeness_error(
+            requested_names, wall_by_shape, base_by_shape)
+        if timing_error or admission_errors:
+            reason = timing_error or "; ".join(admission_errors)
+            _ev("WARN", "eval_bench_incomplete", task=task.task_id,
+                source_sha=_sha12(source), reason=reason)
+            obs.timing_grade = "rejected"
+            obs.infra_error = True
+            obs.error_text = f"infra: timing admission failed: {reason}"
+            return obs
 
         # P5 (flagship novelty): dense hardware-counter efficiency, baseline-relative.
         # Feature-flagged (profile_reward_weight>0) and fully fail-safe: any profiler
@@ -682,6 +807,20 @@ class KoreEnv:
             [sys.executable, str(driver), "--kore-driver-capabilities"],
             workdir, env, timeout)
         caps = _parse_driver_capabilities(out) if (not timed and rc == 0) else {}
+        if not caps:
+            caps = {
+                "protocol": 0,
+                "protocol_id": "unknown",
+                "performance_eligible": False,
+                "ineligible_reason": (
+                    "driver did not advertise a recognized timing protocol"),
+            }
+        elif not _supports_batch_bench(caps):
+            caps = dict(caps)
+            caps["performance_eligible"] = False
+            caps.setdefault(
+                "ineligible_reason",
+                "driver advertised only partial publication guarantees")
         self._driver_caps_cache = caps
         _ev("DEBUG", "driver_capabilities", task=self.task.task_id,
             protocol=caps.get("protocol"), batch=_supports_batch_bench(caps),
@@ -725,8 +864,11 @@ class KoreEnv:
         if (ac and ac.group(1).lower() == "false") or \
            (snr and float(snr.group(1)) < self._snr_threshold):
             return None, None, True
-        cand = [float(m.group(1)) for m in _CAND_MED.finditer(out)]
-        ref = [float(m.group(1)) for m in _REF_MED.finditer(out)]
+        pairs, pair_error = _parse_timing_pairs(out, n_max)
+        if pair_error:
+            return [], [], False
+        cand = [p["candidate_ms"] for p in pairs]
+        ref = [p["baseline_ms"] for p in pairs]
         _ev("DEBUG", "bench_pair", task=self.task.task_id, shape=sh.name,
             cand_runs=len(cand), ref_runs=len(ref),
             cand_med=round(_median(cand), 4) if cand else None,
@@ -744,7 +886,7 @@ class KoreEnv:
         Collapsing the per-shape spawns to one import means the exclusive (locked)
         window is ~one torch import + the tiny GPU timing, so oversubscribed workers
         barely wait -> max throughput with clean, contention-free measurements.
-        Returns ``({shape_name: (cand_samples, ref_samples)}, poisoned)``."""
+        Returns ``({shape_name: [validated_pair_dict, ...]}, poisoned)``."""
         n_max = max(1, self.cfg.max_variance_runs)
         specs = [self._shape_spec(sh) for sh in shapes]
         cmd = [sys.executable, str(driver), "--bench-both", "--shapes", ";".join(specs),
@@ -774,9 +916,12 @@ class KoreEnv:
             if (ac and ac.group(1).lower() == "false") or \
                (snr and float(snr.group(1)) < self._snr_threshold):
                 return {}, True
-            cand = [float(m.group(1)) for m in _CAND_MED.finditer(block)]
-            ref = [float(m.group(1)) for m in _REF_MED.finditer(block)]
-            result[sh.name] = (cand, ref)
+            pairs, pair_error = _parse_timing_pairs(block, n_max)
+            if pair_error:
+                _ev("DEBUG", "bench_all_pair_error", task=self.task.task_id,
+                    shape=sh.name, error=pair_error)
+                return {}, False
+            result[sh.name] = pairs
         return result, False
 
     def _bench_multi(self, driver: Path, sh: Shape, impl: str, workdir: Path, env: dict):

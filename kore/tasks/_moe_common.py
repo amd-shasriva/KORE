@@ -58,7 +58,16 @@ import importlib.util
 import math
 import os
 
-from kore.tasks._genops import _clone_inputs, _compare_outputs, emit_driver_capabilities
+from kore.tasks._genops import (
+    _clone_inputs,
+    _compare_outputs,
+    _make_paired_invokers,
+    _run_paired_bench_all_shapes,
+    emit_driver_capabilities,
+    publication_driver_capabilities,
+)
+
+PROMOTED_MUTATES_INPUT = False
 
 
 # --------------------------------------------------------------------------- #
@@ -592,6 +601,18 @@ def _run_bench(ref, task_dir, shape, impl, warmup, iters) -> int:
     return _time_fn(fn, warmup, iters)
 
 
+def _build_bench_pair(ref, task_dir, shape, _pair_index):
+    inputs = ref.get_inputs(shape, device="cuda", seed=0)
+    candidate = _load_candidate(task_dir, ref.ENTRY)
+    mutates = bool(getattr(ref, "MUTATES_INPUT", PROMOTED_MUTATES_INPUT))
+    return _make_paired_invokers(
+        inputs,
+        lambda xs: ref.candidate_output(candidate, shape, xs),
+        lambda xs: ref.baseline_output(shape, xs),
+        mutates,
+    )
+
+
 def driver_main(ref, task_dir: str, argv=None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--shape", default="default")
@@ -599,14 +620,23 @@ def driver_main(ref, task_dir: str, argv=None) -> int:
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--iters", type=int, default=30)
     p.add_argument("--bench-mode", action="store_true")
+    p.add_argument("--bench-both", action="store_true")
+    p.add_argument("--shapes", default=None)
+    p.add_argument("--repeat", type=int, default=1)
     p.add_argument("--impl", default="candidate", choices=["candidate", "reference", "torch"])
     p.add_argument("--kore-driver-capabilities", action="store_true",
                    help=argparse.SUPPRESS)
     a = p.parse_args(argv)
     if a.kore_driver_capabilities:
-        emit_driver_capabilities()
+        emit_driver_capabilities(publication_driver_capabilities())
         return 0
     shape = ref.parse_shape(a.shape)
+    if a.bench_both:
+        specs = ([s for s in (a.shapes or "").split(";") if s]
+                 if a.shapes else [a.shape])
+        return _run_paired_bench_all_shapes(
+            ref, task_dir, specs, a.warmup, a.iters, a.repeat,
+            build_pair=_build_bench_pair, postcheck=_run_correctness)
     if a.bench_mode:
         rc = _run_bench(ref, task_dir, shape, a.impl, a.warmup, a.iters)
         # Post-timing anti-hack correctness re-verification on the cached candidate.

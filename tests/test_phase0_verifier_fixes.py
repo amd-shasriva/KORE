@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
-import importlib.util
+import math
 import runpy
 import sys
 from pathlib import Path
@@ -17,10 +17,12 @@ from kore.config import CONFIG
 from kore.env.kore_env import (
     KoreEnv,
     _parse_driver_capabilities,
+    _parse_timing_pairs,
     _supports_batch_bench,
 )
 from kore.policy import grpo
 from kore.reward.reward import Observation, compute_reward
+from kore.reward.stats import paired_timing_stats
 from kore.tasks import _genops
 from kore.tasks.base import Shape, Task
 
@@ -69,30 +71,27 @@ _PROMOTED_BY_COMMON = {
 
 
 def test_generated_driver_advertises_full_versioned_batch_protocol(capsys):
+    ref = SimpleNamespace(mutates_input=False)
     assert _genops.driver_main(
-        object(), "/unused", ["--kore-driver-capabilities"]) == 0
+        ref, "/unused", ["--kore-driver-capabilities"]) == 0
     caps = _parse_driver_capabilities(capsys.readouterr().out)
-    assert caps["protocol"] == _genops.DRIVER_CAPABILITY_PROTOCOL == 1
+    assert caps["protocol"] == _genops.DRIVER_CAPABILITY_PROTOCOL == 2
+    assert caps["protocol_id"] == _genops.DRIVER_PROTOCOL_ID
     assert _supports_batch_bench(caps)
 
 
-def test_all_31_promoted_drivers_handshake_to_supported_legacy_path(
+def test_all_31_promoted_drivers_are_full_protocol_or_explicitly_ineligible(
         capsys, monkeypatch):
-    """Every promoted thin driver explicitly declines unsupported batch flags."""
+    """Every promoted thin driver makes an explicit vendor-grade admission claim."""
     tasks_root = Path(_genops.__file__).resolve().parent
     promoted = [task for tasks in _PROMOTED_BY_COMMON.values() for task in tasks]
     assert len(promoted) == 31 and len(set(promoted)) == 31
-    have_torch = importlib.util.find_spec("torch") is not None
     tested = 0
 
-    for common, task_ids in _PROMOTED_BY_COMMON.items():
+    for _common, task_ids in _PROMOTED_BY_COMMON.items():
         for task_id in task_ids:
             driver = tasks_root / task_id / "driver.py"
             assert driver.is_file()
-            # The quant common has an intentional top-level torch dependency;
-            # exercise those eight too in the normal GPU/test environment.
-            if common == "_quant_common" and not have_torch:
-                continue
             old_path = list(sys.path)
             sys.modules.pop("reference", None)
             monkeypatch.setattr(
@@ -105,13 +104,16 @@ def test_all_31_promoted_drivers_handshake_to_supported_legacy_path(
                 sys.path[:] = old_path
                 sys.modules.pop("reference", None)
             caps = _parse_driver_capabilities(capsys.readouterr().out)
-            assert caps["protocol"] == 1, task_id
-            assert not _supports_batch_bench(caps), task_id
+            full = _supports_batch_bench(caps)
+            ineligible = (
+                caps.get("performance_eligible") is False
+                and bool(caps.get("ineligible_reason")))
+            assert full or ineligible, task_id
             tested += 1
-    assert tested == (31 if have_torch else 23)
+    assert tested == 31
 
 
-def test_legacy_capability_uses_per_impl_bench_even_if_source_mentions_driver_main(
+def test_legacy_capability_is_explicit_screening_not_vendor_grade(
         tmp_path, monkeypatch):
     task_dir = tmp_path / "task"
     workdir = tmp_path / "work"
@@ -126,6 +128,7 @@ def test_legacy_capability_uses_per_impl_bench_even_if_source_mentions_driver_ma
     )
     cfg = dataclasses.replace(CONFIG, verifier_determinism_check=False)
     env = KoreEnv(task, config=cfg, use_replay=False)
+    monkeypatch.setenv("KORE_NO_BENCH_BOTH", "1")
     legacy = (
         'KORE_DRIVER_CAPABILITIES: {"bench_both":false,"fresh_inputs":false,'
         '"interleaved":false,"multi_shape":false,"postcheck_all_shapes":false,'
@@ -154,7 +157,182 @@ def test_legacy_capability_uses_per_impl_bench_even_if_source_mentions_driver_ma
         ("small", "candidate"), ("small", "reference"),
         ("large", "candidate"), ("large", "reference"),
     ]
+    assert obs.timing_grade == "screening"
+    assert obs.performance_eligible is False
+    rr = compute_reward(obs, dtype="bf16")
+    assert rr.tier == "correct_screening" and rr.speedup is None
+
+
+def _publication_obs(candidate, baseline):
+    stats = paired_timing_stats(candidate, baseline)
+    cand_med = sorted(candidate)[len(candidate) // 2]
+    base_med = sorted(baseline)[len(baseline) // 2]
+    return Observation(
+        compiled=True, validation_passed=True, dtype="bf16",
+        snr_by_shape={"s": 80.0}, requested_shapes=["s"],
+        timing_requested=True,
+        timing_protocol=_genops.DRIVER_PROTOCOL_ID,
+        timing_protocol_version=_genops.DRIVER_CAPABILITY_PROTOCOL,
+        timing_guarantees=dict(_genops.PUBLICATION_GUARANTEES),
+        timing_grade="publication", performance_eligible=True,
+        timing_pair_count=len(candidate),
+        wall_by_shape={"s": cand_med}, baseline_by_shape={"s": base_med},
+        wall_ms=cand_med, baseline_ms=base_med,
+        candidate_samples_by_shape={"s": list(candidate)},
+        baseline_samples_by_shape={"s": list(baseline)},
+        paired_ratio_samples_by_shape={"s": stats["paired_ratios"]},
+        paired_log_speedup_samples_by_shape={"s": stats["paired_log_speedups"]},
+        candidate_cv_by_shape={"s": stats["candidate_cv_pct"]},
+        baseline_cv_by_shape={"s": stats["baseline_cv_pct"]},
+        paired_ratio_cv_by_shape={"s": stats["paired_ratio_cv_pct"]},
+        paired_log_ci_by_shape={
+            "s": [stats["log_ci_lo"], stats["log_ci_hi"]]},
+        timing_classification_by_shape={"s": stats["classification"]},
+        cv_pct=stats["candidate_cv_pct"],
+        baseline_cv_pct=stats["baseline_cv_pct"],
+        paired_ratio_cv_pct=stats["paired_ratio_cv_pct"],
+        paired_ci_half_width_pct=stats["ci_half_width_pct"],
+    )
+
+
+def test_paired_count_mismatch_rejects_publication_reward():
+    obs = _publication_obs([1.0] * 5, [2.0] * 5)
+    obs.baseline_samples_by_shape["s"] = [2.0] * 4
+    rr = compute_reward(obs, dtype="bf16")
+    assert rr.tier == "infra" and not rr.correct
+    assert "sample count" in rr.detail
+
+
+def test_baseline_high_variance_rejects_even_with_stable_candidate():
+    obs = _publication_obs(
+        [1.0] * 5,
+        [1.5, 2.5, 1.5, 2.5, 1.5],
+    )
+    rr = compute_reward(obs, dtype="bf16")
+    assert rr.tier == "infra" and not rr.correct
+    assert "baseline CV" in rr.detail
+
+
+def test_paired_ci_classifies_statistical_tie_and_clamps_micro_win():
+    stats = paired_timing_stats(
+        [1.0, 1.0, 1.0, 1.0, 1.0],
+        [1.0, 1.0, 1.0, 1.0, 1.0],
+    )
+    assert stats["classification"] == "tie"
+    assert stats["log_ci_lo"] <= 0.0 <= stats["log_ci_hi"]
+    obs = _publication_obs([1.0] * 5, [1.0] * 5)
+    rr = compute_reward(obs, dtype="bf16")
+    assert rr.tier == "correct_timed" and rr.speedup == 1.0
+    assert not any(f.startswith("fast_p") for f in rr.flags)
+
+
+def test_parse_timing_pairs_rejects_count_and_unbalanced_order():
+    one = (
+        'KORE_TIMING_PAIR: {"baseline_ms":2.0,"candidate_ms":1.0,'
+        '"log_speedup":0.6931471805599453,"order":"AB","pair":0,"ratio":2.0}\n'
+    )
+    assert _parse_timing_pairs(one, 2)[1] is not None
+    repeated = one + one.replace('"pair":0', '"pair":1')
+    assert "alternating" in _parse_timing_pairs(repeated, 2)[1]
+
+
+def test_raw_samples_and_protocol_identity_survive_environment(tmp_path, monkeypatch):
+    task_dir = tmp_path / "task_pub"
+    workdir = tmp_path / "work_pub"
+    task_dir.mkdir()
+    workdir.mkdir()
+    (task_dir / "driver.py").write_text("# paired driver\n")
+    shape = Shape("primary", {"N": 8})
+    task = Task(
+        task_id="paired", operation="op", dtype="bf16", backend="triton",
+        gpu_target="gfx950", dir=task_dir, seed_kernel_name="seed.py",
+        snr_threshold=25.0, comparison_baseline="vendor", shapes=[shape],
+    )
+    cfg = dataclasses.replace(CONFIG, verifier_determinism_check=False)
+    env = KoreEnv(task, config=cfg, use_replay=False)
+    caps = _genops.publication_driver_capabilities()
+    pairs = [
+        {"pair": i, "order": "AB" if i % 2 == 0 else "BA",
+         "candidate_ms": 1.0, "baseline_ms": 2.0,
+         "ratio": 2.0, "log_speedup": math.log(2.0)}
+        for i in range(cfg.max_variance_runs)
+    ]
+    monkeypatch.delenv("KORE_NO_BENCH_BOTH", raising=False)
+    monkeypatch.setattr(env, "_env", lambda: {})
+    monkeypatch.setattr(
+        env, "_exec",
+        lambda *_args: (0, "SNR: 80.0 dB\nallclose: True\n", False))
+    monkeypatch.setattr(
+        env, "_driver_capabilities", lambda *_args: caps)
+    monkeypatch.setattr(
+        env, "_bench_all", lambda *_args: ({"primary": pairs}, False))
+    obs = env._run(task, "kernel source", [shape], workdir, do_bench=True)
+
+    assert obs.timing_grade == "publication"
+    assert obs.timing_protocol == _genops.DRIVER_PROTOCOL_ID
+    assert obs.candidate_samples_by_shape["primary"] == [1.0] * 5
+    assert obs.baseline_samples_by_shape["primary"] == [2.0] * 5
+    assert obs.paired_ratio_samples_by_shape["primary"] == [2.0] * 5
     assert compute_reward(obs, dtype="bf16").tier == "correct_timed"
+
+
+def test_partial_or_unknown_capabilities_are_performance_ineligible(
+        tmp_path, monkeypatch):
+    task_dir = tmp_path / "task_no_perf"
+    workdir = tmp_path / "work_no_perf"
+    task_dir.mkdir()
+    workdir.mkdir()
+    (task_dir / "driver.py").write_text("# no full protocol\n")
+    shape = Shape("primary", {"N": 8})
+    task = Task(
+        task_id="no_perf", operation="op", dtype="bf16", backend="triton",
+        gpu_target="gfx950", dir=task_dir, seed_kernel_name="seed.py",
+        snr_threshold=25.0, comparison_baseline="vendor", shapes=[shape],
+    )
+    cfg = dataclasses.replace(CONFIG, verifier_determinism_check=False)
+    env = KoreEnv(task, config=cfg, use_replay=False)
+    monkeypatch.delenv("KORE_NO_BENCH_BOTH", raising=False)
+    monkeypatch.setattr(env, "_env", lambda: {})
+    monkeypatch.setattr(
+        env, "_exec",
+        lambda *_args: (0, "SNR: 80.0 dB\nallclose: True\n", False))
+    monkeypatch.setattr(
+        env, "_driver_capabilities",
+        lambda *_args: {"protocol": 2, "protocol_id": "partial"})
+    obs = env._run(task, "kernel source", [shape], workdir, do_bench=True)
+
+    assert obs.timing_grade == "ineligible"
+    assert obs.performance_eligible is False
+    rr = compute_reward(obs, dtype="bf16")
+    assert rr.tier == "correct_perf_ineligible" and rr.speedup is None
+
+
+def test_unknown_probe_is_normalized_to_explicit_ineligibility(monkeypatch):
+    env = object.__new__(KoreEnv)
+    env.task = SimpleNamespace(task_id="unknown")
+    env.correctness_timeout = 1
+    monkeypatch.setattr(env, "_exec", lambda *_args: (2, "unknown option", False))
+    caps = env._driver_capabilities(Path("/driver.py"), Path("/tmp"), {})
+    assert caps["performance_eligible"] is False
+    assert caps["protocol_id"] == "unknown"
+    assert caps["ineligible_reason"]
+
+
+def test_old_observation_schema_loads_with_timing_defaults():
+    from kore.env.replay import _obs_from_dict
+
+    obs = _obs_from_dict({
+        "compiled": True,
+        "validation_passed": True,
+        "snr_db": 80.0,
+        "wall_ms": 1.0,
+        "baseline_ms": 2.0,
+        "unknown_future_field": "ignored",
+    })
+    assert obs.timing_grade == "screening"
+    assert obs.timing_protocol == "legacy-unpaired-v0"
+    assert obs.candidate_samples_by_shape == {}
+    assert compute_reward(obs, dtype="bf16").tier == "correct_screening"
 
 
 def test_output_contract_rejects_arity_shape_dtype_and_nonfinite_adversaries():
@@ -210,6 +388,7 @@ def test_correctness_keys_must_cover_every_requested_shape():
 def test_batched_inputs_are_storage_isolated(monkeypatch):
     torch = pytest.importorskip("torch")
     seen = []
+    candidate_ptrs = []
 
     class Ref:
         entry_name = "op"
@@ -225,16 +404,19 @@ def test_batched_inputs_are_storage_isolated(monkeypatch):
             return x
 
     def candidate(x):
+        candidate_ptrs.append(x.data_ptr())
         x.add_(10.0)
         return x
 
     monkeypatch.setattr(_genops, "_load_candidate",
                         lambda _task_dir, _entry: candidate)
-    cand = _genops._build_bench_fn(Ref, "/unused", {}, "candidate")
-    refr = _genops._build_bench_fn(Ref, "/unused", {}, "reference")
-    cand()
-    refr()
-    assert seen == [1.0]
+    for pair_index in (0, 1):
+        cand, refr = _genops._build_bench_pair(
+            Ref, "/unused", {}, pair_index)
+        cand()
+        refr()
+    assert seen == [1.0, 1.0]
+    assert candidate_ptrs[0] != candidate_ptrs[1]  # fresh storage each pair
 
 
 def test_batched_pair_order_alternates_from_randomized_side(monkeypatch):
@@ -242,9 +424,9 @@ def test_batched_pair_order_alternates_from_randomized_side(monkeypatch):
 
     events = []
     monkeypatch.setattr(
-        _genops, "_build_bench_fn",
-        lambda _ref, _task_dir, _shape, impl:
-            (lambda: events.append("C" if impl == "candidate" else "R")),
+        _genops, "_build_bench_pair",
+        lambda _ref, _task_dir, _shape, _pair:
+            (lambda: events.append("C"), lambda: events.append("R")),
     )
 
     def fake_time(fn, _warmup, _iters):
@@ -267,8 +449,8 @@ def test_all_shape_batch_postchecks_every_shape(monkeypatch):
             return {"spec": spec}
 
     monkeypatch.setattr(
-        _genops, "_build_bench_fn",
-        lambda *_args: (lambda: None),
+        _genops, "_build_bench_pair",
+        lambda *_args: ((lambda: None), (lambda: None)),
     )
     monkeypatch.setattr(_genops, "_time_median",
                         lambda _fn, _warmup, _iters: 1.0)
@@ -276,8 +458,10 @@ def test_all_shape_batch_postchecks_every_shape(monkeypatch):
         _genops, "_run_correctness",
         lambda _ref, _task_dir, shape: checked.append(shape) or 0,
     )
-    _genops._run_bench_all_shapes(
-        Ref, "/unused", ["N=8", "N=16", "N=31"], 4, 8, repeat=1)
+    _genops._run_paired_bench_all_shapes(
+        Ref, "/unused", ["N=8", "N=16", "N=31"], 4, 8, repeat=1,
+        build_pair=_genops._build_bench_pair,
+        postcheck=_genops._run_correctness)
     assert checked == [
         {"spec": "N=8"}, {"spec": "N=16"}, {"spec": "N=31"},
     ]

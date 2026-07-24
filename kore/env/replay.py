@@ -23,7 +23,22 @@ _OBS_FIELDS = {f.name for f in fields(Observation)}
 
 
 def _obs_from_dict(rec: dict) -> Observation:
-    return Observation(**{k: v for k, v in rec.items() if k in _OBS_FIELDS})
+    payload = {k: v for k, v in rec.items() if k in _OBS_FIELDS}
+    # Old cache entries have no paired protocol identity.  They remain readable
+    # but are conservatively screening-only; historical unpaired medians cannot
+    # become publication-grade merely because the schema gained new defaults.
+    has_timing = bool(
+        rec.get("wall_by_shape") or rec.get("baseline_by_shape")
+        or rec.get("wall_ms") is not None or rec.get("baseline_ms") is not None)
+    if "timing_grade" not in rec and has_timing:
+        payload.update({
+            "timing_grade": "screening",
+            "timing_protocol": "legacy-unpaired-v0",
+            "timing_protocol_version": 0,
+            "performance_eligible": False,
+            "timing_requested": True,
+        })
+    return Observation(**payload)
 
 
 def kernel_hash(source: str) -> str:

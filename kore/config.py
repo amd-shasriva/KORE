@@ -42,6 +42,10 @@ class KoreConfig:
     min_variance_runs: int = 3
     max_variance_runs: int = 5
     cv_threshold_pct: float = 3.0
+    baseline_cv_threshold_pct: float = 3.0
+    paired_ratio_cv_threshold_pct: float = 3.0
+    paired_ci_threshold_pct: float = 3.0
+    paired_confidence_z: float = 1.96
     noise_floor_pct: float = 2.0
 
     # anti-hack: determinism re-check on the RL correctness path. A reward-hacking

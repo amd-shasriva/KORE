@@ -19,6 +19,12 @@ from typing import Optional
 
 from kore.config import CONFIG
 from kore.obs import get_logger
+from kore.reward.stats import paired_timing_stats, publication_admission_error
+from kore.tasks._genops import (
+    DRIVER_CAPABILITY_PROTOCOL,
+    DRIVER_PROTOCOL_ID,
+    PUBLICATION_GUARANTEES,
+)
 
 _LOG = get_logger("reward")
 
@@ -59,10 +65,32 @@ class Observation:
     # timings for every one of these shapes.
     requested_shapes: list[str] = field(default_factory=list)
     timing_requested: bool = False
+    # Timing provenance/admission.  Defaults keep old replay records loadable;
+    # new KoreEnv observations set these explicitly.
+    timing_protocol: Optional[str] = None
+    timing_protocol_version: Optional[int] = None
+    timing_guarantees: dict[str, bool] = field(default_factory=dict)
+    # ``compat`` preserves direct programmatic/fabricated observations; replay
+    # records lacking provenance are normalized to ``screening`` on load.
+    timing_grade: str = "compat"  # compat | screening | publication | ineligible | rejected
+    performance_eligible: Optional[bool] = None
+    timing_pair_count: Optional[int] = None
+    candidate_samples_by_shape: dict[str, list[float]] = field(default_factory=dict)
+    baseline_samples_by_shape: dict[str, list[float]] = field(default_factory=dict)
+    paired_ratio_samples_by_shape: dict[str, list[float]] = field(default_factory=dict)
+    paired_log_speedup_samples_by_shape: dict[str, list[float]] = field(default_factory=dict)
+    candidate_cv_by_shape: dict[str, float] = field(default_factory=dict)
+    baseline_cv_by_shape: dict[str, float] = field(default_factory=dict)
+    paired_ratio_cv_by_shape: dict[str, float] = field(default_factory=dict)
+    paired_log_ci_by_shape: dict[str, list[float]] = field(default_factory=dict)
+    timing_classification_by_shape: dict[str, str] = field(default_factory=dict)
     validation_passed: bool = False
     error_text: Optional[str] = None
     dtype: str = "fp32"
     cv_pct: Optional[float] = None
+    baseline_cv_pct: Optional[float] = None
+    paired_ratio_cv_pct: Optional[float] = None
+    paired_ci_half_width_pct: Optional[float] = None
     flagged_hack: bool = False
     hack_reason: Optional[str] = None
     infra_error: bool = False   # timeout/OOM/segfault/import - NOT a kernel signal
@@ -306,6 +334,88 @@ def _timing_complete(obs: Observation) -> bool:
     return False
 
 
+def _publication_timing_error(obs: Observation, cfg) -> Optional[str]:
+    """Recompute and verify every publication-grade timing guarantee."""
+    if obs.timing_protocol_version != DRIVER_CAPABILITY_PROTOCOL:
+        return "unknown timing protocol version"
+    if obs.timing_protocol != DRIVER_PROTOCOL_ID:
+        return "unknown timing protocol identity"
+    if obs.performance_eligible is not True:
+        return "task/measurement is not performance eligible"
+    if any(obs.timing_guarantees.get(k) is not v
+           for k, v in PUBLICATION_GUARANTEES.items()):
+        return "timing capability guarantees are incomplete"
+    if not _timing_complete(obs):
+        return "timing keys or medians are incomplete"
+
+    names = _required_shape_names(obs)
+    expected = set(names)
+    if not isinstance(obs.timing_pair_count, int) or obs.timing_pair_count < 1:
+        return "timing pair count is missing or invalid"
+    raw_maps = (
+        obs.candidate_samples_by_shape,
+        obs.baseline_samples_by_shape,
+        obs.paired_ratio_samples_by_shape,
+        obs.paired_log_speedup_samples_by_shape,
+        obs.candidate_cv_by_shape,
+        obs.baseline_cv_by_shape,
+        obs.paired_ratio_cv_by_shape,
+        obs.paired_log_ci_by_shape,
+        obs.timing_classification_by_shape,
+    )
+    if not expected or any(set(m or {}) != expected for m in raw_maps):
+        return "raw paired timing keys do not match requested shapes"
+
+    for name in names:
+        cand = list(obs.candidate_samples_by_shape[name])
+        base = list(obs.baseline_samples_by_shape[name])
+        if len(cand) != obs.timing_pair_count or len(base) != obs.timing_pair_count:
+            return (
+                f"{name}: paired sample count does not match protocol "
+                f"({len(cand)}/{len(base)} != {obs.timing_pair_count})")
+        try:
+            stats = paired_timing_stats(
+                cand, base,
+                noise_floor_pct=float(getattr(cfg, "noise_floor_pct", 2.0)),
+                z=float(getattr(cfg, "paired_confidence_z", 1.96)),
+            )
+        except ValueError as exc:
+            return f"{name}: {exc}"
+        if len(cand) != len(base):
+            return f"{name}: paired sample count mismatch"
+        ratios = list(obs.paired_ratio_samples_by_shape[name])
+        logs = list(obs.paired_log_speedup_samples_by_shape[name])
+        if len(ratios) != len(cand) or len(logs) != len(cand):
+            return f"{name}: derived paired sample count mismatch"
+        for stored, recomputed in zip(ratios, stats["paired_ratios"]):
+            if not math.isclose(float(stored), recomputed, rel_tol=1e-9, abs_tol=1e-12):
+                return f"{name}: retained ratio sample does not match raw timing"
+        for stored, recomputed in zip(logs, stats["paired_log_speedups"]):
+            if not math.isclose(float(stored), recomputed, rel_tol=1e-9, abs_tol=1e-12):
+                return f"{name}: retained log-speedup sample does not match raw timing"
+        err = publication_admission_error(
+            stats,
+            min_pairs=max(2, int(getattr(cfg, "min_variance_runs", 3))),
+            candidate_cv_threshold_pct=float(cfg.cv_threshold_pct),
+            baseline_cv_threshold_pct=float(getattr(
+                cfg, "baseline_cv_threshold_pct", cfg.cv_threshold_pct)),
+            paired_ratio_cv_threshold_pct=float(getattr(
+                cfg, "paired_ratio_cv_threshold_pct", cfg.cv_threshold_pct)),
+            paired_ci_threshold_pct=float(getattr(
+                cfg, "paired_ci_threshold_pct", cfg.cv_threshold_pct)),
+        )
+        if err:
+            return f"{name}: {err}"
+        stored_ci = list(obs.paired_log_ci_by_shape[name])
+        if len(stored_ci) != 2 or not all(math.isclose(
+                float(a), float(b), rel_tol=1e-9, abs_tol=1e-12)
+                for a, b in zip(stored_ci, (stats["log_ci_lo"], stats["log_ci_hi"]))):
+            return f"{name}: retained paired CI does not match raw timing"
+        if obs.timing_classification_by_shape[name] != stats["classification"]:
+            return f"{name}: retained paired classification does not match CI"
+    return None
+
+
 def _shape_ratios(obs: Observation) -> list[float]:
     """Complete per-shape speedups only; partial shape sweeps are never scored."""
     if not (obs.wall_by_shape or obs.baseline_by_shape):
@@ -313,6 +423,19 @@ def _shape_ratios(obs: Observation) -> list[float]:
     if not _timing_complete(obs):
         return []
     names = _required_shape_names(obs) or tuple(obs.wall_by_shape)
+    if getattr(obs, "timing_grade", "legacy") == "publication":
+        ratios = []
+        for name in names:
+            logs = obs.paired_log_speedup_samples_by_shape.get(name, [])
+            if not logs:
+                return []
+            ratio = math.exp(sum(float(x) for x in logs) / len(logs))
+            # A precise CI that still overlaps the configured noise band is a
+            # statistical tie, not a publishable micro-win.
+            if obs.timing_classification_by_shape.get(name) == "tie":
+                ratio = 1.0
+            ratios.append(ratio)
+        return ratios
     return [float(obs.baseline_by_shape[k]) / float(obs.wall_by_shape[k])
             for k in names]
 
@@ -468,7 +591,22 @@ def _speedup_term(su_scored: float, su_raw: float, obs: Observation, cfg,
     bonuses = getattr(cfg, "fast_p_bonus", ()) or ()
     if bonuses:
         sig_only = bool(getattr(cfg, "fast_p_significant_only", True))
-        trustworthy = (obs.cv_pct is None) or (obs.cv_pct <= cfg.cv_threshold_pct)
+        def _under(value, limit):
+            return value is None or (
+                math.isfinite(float(value)) and float(value) <= float(limit))
+
+        trustworthy = (
+            _under(obs.cv_pct, cfg.cv_threshold_pct)
+            and _under(obs.baseline_cv_pct, getattr(
+                cfg, "baseline_cv_threshold_pct", cfg.cv_threshold_pct))
+            and _under(obs.paired_ratio_cv_pct, getattr(
+                cfg, "paired_ratio_cv_threshold_pct", cfg.cv_threshold_pct))
+            and _under(obs.paired_ci_half_width_pct, getattr(
+                cfg, "paired_ci_threshold_pct", cfg.cv_threshold_pct))
+        )
+        classes = list((obs.timing_classification_by_shape or {}).values())
+        if classes and not all(c == "faster" for c in classes):
+            trustworthy = False
         excessive = "excessive_speedup" in flags
         # Require the speedup to clear the threshold by the measurement noise floor
         # (not just tie it): a kernel that merely PARITIES the baseline (1.00x) - or
@@ -596,14 +734,64 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
         _log_decision(rr)
         return rr
 
-    # A requested benchmark is all-or-nothing.  Missing candidate/baseline
-    # timings (or mismatched shape keys) are retryable infrastructure, never a
-    # "correct_no_bench" result and never a reward over the surviving subset.
+    base = cfg.correctness_weight
+    fmt = _format_component(response, cfg)
+
+    # New environment observations explicitly distinguish publication-grade
+    # paired timing from screening/ineligible timing.  Old fabricated/replay
+    # observations (timing_requested=False, grade="compat") retain their prior
+    # scalar/per-shape behavior for schema compatibility.
     timing_expected = (
         getattr(obs, "timing_requested", False)
         or bool(obs.baseline_by_shape)
         or obs.baseline_ms is not None
     )
+    grade = getattr(obs, "timing_grade", "compat")
+    if timing_expected and (
+            grade == "screening"
+            or (grade in ("legacy", "compat")
+                and getattr(obs, "timing_requested", False))):
+        if not _timing_complete(obs):
+            flags.extend(["infra", "incomplete_timing"])
+            rr = RewardResult(
+                cfg.reward_incorrect, False, None, "infra", flags,
+                obs.error_text or "infrastructure error: incomplete screening timing",
+            )
+            _log_decision(rr)
+            return rr
+        flags.append("timing:screening")
+        rr = RewardResult(
+            base + fmt, True, None, "correct_screening", flags,
+            "correct; legacy/unpaired timing is screening-only",
+        )
+        _log_decision(rr)
+        return rr
+    if timing_expected and grade == "ineligible":
+        flags.append("performance_ineligible")
+        rr = RewardResult(
+            base + fmt, True, None, "correct_perf_ineligible", flags,
+            obs.error_text or "correct; driver is not vendor-grade timing eligible",
+        )
+        _log_decision(rr)
+        return rr
+    if timing_expected and grade == "rejected":
+        flags.extend(["infra", "timing_admission"])
+        rr = RewardResult(
+            cfg.reward_incorrect, False, None, "infra", flags,
+            obs.error_text or "infrastructure error: timing admission rejected",
+        )
+        _log_decision(rr)
+        return rr
+    if timing_expected and grade == "publication":
+        publication_error = _publication_timing_error(obs, cfg)
+        if publication_error:
+            flags.extend(["infra", "timing_admission"])
+            rr = RewardResult(
+                cfg.reward_incorrect, False, None, "infra", flags,
+                f"infrastructure error: publication timing rejected: {publication_error}",
+            )
+            _log_decision(rr)
+            return rr
     if timing_expected and not _timing_complete(obs):
         flags.extend(["infra", "incomplete_timing"])
         rr = RewardResult(
@@ -618,8 +806,6 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     # kernel (even a slow one, speedup>0) strictly beats the incorrect tier.
     # A correct kernel always parses to a kernel, so its format term is +format_weight
     # (never a penalty) - correct-fast vs correct-slow stays a pure speed ordering.
-    base = cfg.correctness_weight
-    fmt = _format_component(response, cfg)
     su = _aggregate_speedup(obs, cfg)  # distributionally-robust (default: worst-shape)
     if su is None:
         rr = RewardResult(base + fmt, True, None, "correct_no_bench", flags,

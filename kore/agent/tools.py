@@ -362,6 +362,9 @@ class ToolExecutor:
             "compiled": bool(getattr(obs, "compiled", False)),
             "validation_passed": bool(getattr(obs, "validation_passed", False)),
             "infra_error": bool(getattr(obs, "infra_error", False)),
+            "timing_grade": getattr(obs, "timing_grade", "compat"),
+            "timing_protocol": getattr(obs, "timing_protocol", None),
+            "performance_eligible": getattr(obs, "performance_eligible", None),
             "snr_db": _round(getattr(obs, "snr_db", None), 2),
             "wall_ms": _round(getattr(obs, "wall_ms", None)),
             "baseline_ms": _round(getattr(obs, "baseline_ms", None)),
@@ -500,12 +503,22 @@ class ToolExecutor:
         delta = (round(cur_su - prev_best_su, 3)
                  if (cur_su is not None and prev_best_su is not None) else None)
         improved = bool(cur_su is not None and (prev_best_su is None or cur_su > prev_best_su))
+        grade = getattr(obs, "timing_grade", "compat")
+        vendor_grade = (
+            grade == "publication"
+            or (grade in ("legacy", "compat")
+                and not getattr(obs, "timing_requested", False)
+                and rr.speedup is not None)
+        )
         return {
-            "ok": bool(rr.correct) and not infra,
+            "ok": bool(rr.correct) and not infra and vendor_grade,
             "tool": "bench",
             "compiled": bool(obs.compiled),
             "correct": bool(rr.correct),
             "infra_error": infra,
+            "timing_grade": getattr(obs, "timing_grade", "compat"),
+            "timing_protocol": getattr(obs, "timing_protocol", None),
+            "performance_eligible": getattr(obs, "performance_eligible", None),
             "speedup": _round(rr.speedup, 3),
             # Per-turn measured-latency feedback: the model reads its own kernel's
             # speedup, the running best, the signed delta vs that best, and whether
@@ -519,7 +532,8 @@ class ToolExecutor:
             "tier": rr.tier,
             "reward": _round(rr.reward),
             "error": (obs.error_text or "infrastructure error") if infra
-                     else ((obs.error_text or None) if not rr.correct else None),
+                     else ((obs.error_text or "vendor-grade timing unavailable")
+                           if not vendor_grade else None),
         }
 
     def _tool_pmc(self, args: dict) -> dict:

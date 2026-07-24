@@ -477,6 +477,7 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
         "entry_name": op,
         "dtype_name": dtype,
         "family": family,
+        "mutates_input": False,
     }
     ns[f"{op}_ref"] = ref_fn   # conventional alias
     return ns
@@ -769,15 +770,40 @@ def seed_source(op: str, family: str, dtype: str) -> str:
 # --------------------------------------------------------------------------- #
 # Generic driver (correctness + cold-cache bench + post-timing anti-hack)
 # --------------------------------------------------------------------------- #
-DRIVER_CAPABILITY_PROTOCOL = 1
+DRIVER_CAPABILITY_PROTOCOL = 2
+DRIVER_PROTOCOL_ID = "kore-paired-v2"
+PUBLICATION_GUARANTEES = {
+    "bench_both": True,
+    "multi_shape": True,
+    "paired_samples": True,
+    "raw_samples": True,
+    "fresh_inputs_per_pair": True,
+    "balanced_ab_ba": True,
+    "mutation_semantics": True,
+    "postcheck_all_shapes": True,
+}
 _CAPABILITY_DEFAULTS = {
     "protocol": DRIVER_CAPABILITY_PROTOCOL,
+    "protocol_id": DRIVER_PROTOCOL_ID,
+    "performance_eligible": False,
     "bench_both": False,
     "multi_shape": False,
-    "fresh_inputs": False,
-    "interleaved": False,
+    "paired_samples": False,
+    "raw_samples": False,
+    "fresh_inputs_per_pair": False,
+    "balanced_ab_ba": False,
+    "mutation_semantics": False,
     "postcheck_all_shapes": False,
 }
+
+
+def publication_driver_capabilities() -> dict:
+    return {
+        "protocol": DRIVER_CAPABILITY_PROTOCOL,
+        "protocol_id": DRIVER_PROTOCOL_ID,
+        "performance_eligible": True,
+        **PUBLICATION_GUARANTEES,
+    }
 
 
 def emit_driver_capabilities(overrides: Optional[dict] = None) -> None:
@@ -789,7 +815,6 @@ def emit_driver_capabilities(overrides: Optional[dict] = None) -> None:
     """
     caps = dict(_CAPABILITY_DEFAULTS)
     caps.update(overrides or {})
-    caps["protocol"] = DRIVER_CAPABILITY_PROTOCOL
     print("KORE_DRIVER_CAPABILITIES: "
           + json.dumps(caps, sort_keys=True, separators=(",", ":")))
 
@@ -952,11 +977,38 @@ def _output_pairs(out, ref_out, expected_dtypes=None):
     return pairs
 
 
-def _clone_inputs(inputs):
-    """Clone tensor inputs so an IN-PLACE candidate/oracle (e.g. fused_add_rmsnorm)
-    can't corrupt the shared inputs between the reference and candidate calls."""
+def _clone_value(value):
+    """Recursively clone tensor storage while preserving container structure."""
     import torch
-    return tuple(t.clone() if torch.is_tensor(t) else t for t in inputs)
+    if torch.is_tensor(value):
+        return value.clone()
+    if isinstance(value, tuple):
+        return tuple(_clone_value(v) for v in value)
+    if isinstance(value, list):
+        return [_clone_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _clone_value(v) for k, v in value.items()}
+    return value
+
+
+def _clone_inputs(inputs):
+    """Clone all nested tensor storage for isolated candidate/reference calls."""
+    return tuple(_clone_value(t) for t in inputs)
+
+
+def _make_paired_invokers(inputs, candidate_call, baseline_call,
+                          mutates_input: bool):
+    """Build value-identical, storage-disjoint callables for one timing pair."""
+    candidate_inputs = _clone_inputs(inputs)
+    baseline_inputs = _clone_inputs(inputs)
+
+    def _args(seed):
+        return _clone_inputs(seed) if mutates_input else seed
+
+    return (
+        lambda: candidate_call(_args(candidate_inputs)),
+        lambda: baseline_call(_args(baseline_inputs)),
+    )
 
 
 def _compare_outputs(out, ref_out, atol=1e-2, rtol=1e-2, expected_dtypes=None):
@@ -1066,6 +1118,20 @@ def _build_bench_fn(ref, task_dir, shape, impl):
     return lambda: base(*inputs)
 
 
+def _build_bench_pair(ref, task_dir, shape, _pair_index):
+    """Fresh, storage-isolated candidate/reference callables for one pair."""
+    if not hasattr(ref, "mutates_input"):
+        raise RuntimeError("reference must declare mutates_input for paired timing")
+    inputs = ref.get_inputs(shape, device="cuda", seed=0)
+    candidate = _load_candidate(task_dir, ref.entry_name)
+    return _make_paired_invokers(
+        inputs,
+        lambda xs: candidate(*xs),
+        lambda xs: ref.baseline_fn(*xs),
+        bool(ref.mutates_input),
+    )
+
+
 def _run_bench(ref, task_dir, shape, impl, warmup, iters) -> int:
     return _time_fn(_build_bench_fn(ref, task_dir, shape, impl), warmup, iters)
 
@@ -1080,61 +1146,62 @@ def _time_pair(cand, refr, warmup, iters, candidate_first):
     return cm, rm
 
 
-def _run_bench_both(ref, task_dir, shape, warmup, iters, repeat) -> int:
-    """Time candidate AND reference in ONE process, ``repeat`` runs, interleaved.
-
-    This is the fast + rigorous timing path: a single ``python driver.py`` invocation
-    (one torch import) does all ``repeat`` timed runs for BOTH impls, printing
-    ``CAND_median_ms:`` / ``REF_median_ms:`` per run. Because candidate and reference
-    are timed BACK-TO-BACK within each run, any machine load (GPU oversubscription)
-    hits both equally, so the speedup RATIO stays fair even under heavy concurrency -
-    unlike separate per-impl processes whose windows can see different contention.
-    Warmup/iters are randomized per run (same window for both impls in a run) to
-    defeat fixed-call-index bench sniffing. Median-of-medians + CV are computed by
-    the caller from the emitted samples."""
+def _run_paired_samples(ref, task_dir, shape, warmup, iters, repeat,
+                        build_pair) -> int:
+    """Emit raw repeat-level candidate/reference pairs in balanced AB/BA order."""
     import random
-    cand = _build_bench_fn(ref, task_dir, shape, "candidate")
-    refr = _build_bench_fn(ref, task_dir, shape, "reference")
     candidate_first = bool(random.getrandbits(1))
     for run in range(max(1, repeat)):
+        # Build from a fresh canonical input allocation for EVERY pair.  The
+        # builder clones it independently for candidate/reference and applies
+        # the task-declared mutation policy to every timed invocation.
+        cand, refr = build_pair(ref, task_dir, shape, run)
         w = random.randint(max(4, warmup - 3), warmup + 4)
         it = random.randint(max(8, iters - 5), iters + 6)
-        # Alternate from a randomized starting side.  This balances thermal /
-        # clock-order effects while keeping each pair back-to-back.
-        cm, rm = _time_pair(cand, refr, w, it,
-                            candidate_first if run % 2 == 0 else not candidate_first)
-        print(f"CAND_median_ms: {cm:.4f}")
-        print(f"REF_median_ms: {rm:.4f}")
+        first = candidate_first if run % 2 == 0 else not candidate_first
+        cm, rm = _time_pair(cand, refr, w, it, first)
+        if not (math.isfinite(cm) and cm > 0.0
+                and math.isfinite(rm) and rm > 0.0):
+            raise RuntimeError("timing pair produced a non-finite/non-positive sample")
+        ratio = rm / cm
+        payload = {
+            "pair": run,
+            "order": "AB" if first else "BA",
+            "candidate_ms": cm,
+            "baseline_ms": rm,
+            "ratio": ratio,
+            "log_speedup": math.log(ratio),
+        }
+        print("KORE_TIMING_PAIR: "
+              + json.dumps(payload, sort_keys=True, separators=(",", ":")))
     return 0
 
 
-def _run_bench_all_shapes(ref, task_dir, shape_specs, warmup, iters, repeat) -> int:
-    """Time candidate+reference for ALL shapes in ONE process (one torch import).
-
-    Emits a ``SHAPE_BEGIN <spec>`` marker before each shape's CAND_/REF_median_ms
-    block (blocks are in the given order). This collapses the per-shape process
-    spawns into one, so under the per-GPU timing lock the exclusive window shrinks to
-    a single import + the tiny GPU timing - max throughput with clean, honest
-    measurements. Timing math per shape is identical to :func:`_run_bench_both`."""
-    import random
+def _run_paired_bench_all_shapes(
+        ref, task_dir, shape_specs, warmup, iters, repeat,
+        build_pair=_build_bench_pair, postcheck=None) -> int:
+    """Run the complete publication-grade paired protocol for every shape."""
+    postcheck = postcheck or _run_correctness
     for spec in shape_specs:
         shape = ref.parse_shape(spec)
-        cand = _build_bench_fn(ref, task_dir, shape, "candidate")
-        refr = _build_bench_fn(ref, task_dir, shape, "reference")
         print(f"SHAPE_BEGIN {spec}")
-        candidate_first = bool(random.getrandbits(1))
-        for run in range(max(1, repeat)):
-            w = random.randint(max(4, warmup - 3), warmup + 4)
-            it = random.randint(max(8, iters - 5), iters + 6)
-            cm, rm = _time_pair(cand, refr, w, it,
-                                candidate_first if run % 2 == 0 else not candidate_first)
-            print(f"CAND_median_ms: {cm:.4f}")
-            print(f"REF_median_ms: {rm:.4f}")
+        _run_paired_samples(
+            ref, task_dir, shape, warmup, iters, repeat, build_pair)
         # Every requested shape is re-verified on late invocations of the same
         # cached candidate module.  The environment validates each shape block,
         # so one early failing postcheck cannot be hidden by a later passing one.
-        _run_correctness(ref, task_dir, shape)
+        postcheck(ref, task_dir, shape)
     return 0
+
+
+def _run_bench_both(ref, task_dir, shape, warmup, iters, repeat) -> int:
+    return _run_paired_samples(
+        ref, task_dir, shape, warmup, iters, repeat, _build_bench_pair)
+
+
+def _run_bench_all_shapes(ref, task_dir, shape_specs, warmup, iters, repeat) -> int:
+    return _run_paired_bench_all_shapes(
+        ref, task_dir, shape_specs, warmup, iters, repeat)
 
 
 def driver_main(ref, task_dir: str, argv=None) -> int:
@@ -1155,13 +1222,12 @@ def driver_main(ref, task_dir: str, argv=None) -> int:
                    help=argparse.SUPPRESS)
     a = p.parse_args(argv)
     if a.kore_driver_capabilities:
-        emit_driver_capabilities({
-            "bench_both": True,
-            "multi_shape": True,
-            "fresh_inputs": True,
-            "interleaved": True,
-            "postcheck_all_shapes": True,
-        })
+        if hasattr(ref, "mutates_input"):
+            emit_driver_capabilities(publication_driver_capabilities())
+        else:
+            emit_driver_capabilities({
+                "ineligible_reason": "reference does not declare mutates_input",
+            })
         return 0
     shape = ref.parse_shape(a.shape)
     if a.bench_both:

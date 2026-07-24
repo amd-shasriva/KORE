@@ -1,6 +1,6 @@
 """Materialize an in-memory :class:`~kore.openended.minter.MintedTask` into an
 on-disk, runnable KORE task that :class:`~kore.env.kore_env.KoreEnv` grades with the
-SAME trusted generic driver + reference ABI as the ~282 generated datagen tasks
+SAME trusted generic driver + reference ABI as the registered generated datagen tasks
 (:mod:`kore.tasks._genops`).
 
 Why this is safe to run on an unattended flagship

@@ -2,6 +2,29 @@
 
 Everything needed to run KORE end to end: the campaign orchestrator, the portable conductor and tmux launchers, the FSDP launch helper, the supervision and monitoring tools, and the smoke / proof harnesses.
 
+## Operational safety and supported entrypoints
+
+[`operations_registry.json`](operations_registry.json) is the machine-readable
+authority for script classification. It labels each entrypoint `active`,
+`diagnostic`, `deprecated`, or `destructive`, and records replacements.
+
+Production datagen uses `spur_supervise_datagen.py` →
+`spur_submit_datagen.sh` → `spur_datagen_array.sbatch`. Those active SPUR files
+are intentionally unchanged by the legacy safety quarantine. `complete_base.py`
+and `deepen_wins.py` remain the active workers.
+
+Retired b05, SSH, dynamic-GPU, tmux, and direct-14B wrappers refuse real
+execution by default. `--help` and `--dry-run` are side-effect free. A
+compatibility run requires `KORE_ALLOW_DEPRECATED_DEV=1`; destructive
+`logs/reli.sh` additionally requires `KORE_ALLOW_DESTRUCTIVE_DEV=1`.
+
+Legacy compatibility processes are tracked below a private 0700 runtime
+directory (`$KORE_RUNTIME_DIR`, `$XDG_RUNTIME_DIR/kore-ops`, or
+`/tmp/kore-ops-$UID`). Control state records a run ID, PID, Linux start time,
+process group, uid, and cgroup. A stop verifies that complete identity, sends
+TERM, waits for a bounded interval, and only then sends KILL to the same owned
+group. No command-line substring process discovery is used.
+
 ---
 
 ## Files
@@ -100,24 +123,38 @@ flowchart LR
 
 ---
 
-## Running the full campaign (recommended path)
+## Production datagen
+
+Use the SPUR supervisor for resumable production data generation:
 
 ```bash
-bash scripts/tmux_campaign.sh              # start in a durable tmux session 'kore14b'
-tmux attach -t kore14b                     # watch (Ctrl-b d to detach)
-tail -f runs/full/logs/campaign_*.log      # follow the log
-bash scripts/tmux_campaign.sh --status     # status without attaching
+python scripts/spur_supervise_datagen.py --repo "$PWD" --python "$VIRTUAL_ENV/bin/python"
 ```
 
-`run_conductor_14b.sh` is portable (resolves the repo root from its own path, uses `~/kore-venv`, sources `.env.local`, and prepends the venv `bin` to `PATH` so `accelerate` resolves for FSDP) and overridable via env: `KORE_STAGES`, `KORE_DATAGEN_WORKERS` (default 64), `KORE_PY`, `KORE_TMUX`. Datagen and agentic are teacher-API-bound, so they oversubscribe the 8 GPUs (8 workers per GPU by default) for throughput; the training stages use full-parameter FSDP.
+It submits one immutable partitioned wave at a time and returns nonzero on
+scheduler failure, stalled progress, or exhausted waves. Completion is accepted
+only after `_kf_verify.py` reports no remaining work.
 
-> Use `run_conductor_14b.sh` everywhere. `run_full_14b.sh` hardcodes dev-node paths and will not run on the conductor node.
+## Deprecated direct 14B compatibility path
+
+```bash
+bash scripts/tmux_campaign.sh --help
+bash scripts/tmux_campaign.sh --dry-run
+```
+
+The tmux wrapper now uses a unique run-owned session and exits its pane when the
+launcher exits. Persistent result state distinguishes a completed run from a
+live session; an old fixed-name shell is reported as unowned stale state and is
+never killed or mistaken for training.
 
 ---
 
-## Supervision, monitoring, and the datagen → build pause
+## Deprecated supervision compatibility
 
-Four Python helpers wrap a live, multi-day campaign. They emit sparse `ALERT ` lines (plus periodic `HEARTBEAT` lines), so a `tail -F` with notify-on-output on `"ALERT "` pings the operator only on events that matter: stage transitions, real errors (`Traceback` / `ERROR` / OOM / `CUDA|HIP error`), retention-gate failures and hard-stops, and completion or death. Each reaps **only `shasriva`-owned** processes; shared root-owned workers are never touched.
+The legacy Python helpers remain available only for development compatibility.
+They emit sparse `ALERT` and `HEARTBEAT` lines, append logs, and read only newly
+appended bytes. Supervisors own one process group per run and never search for or
+reap processes by username or command text.
 
 | Script | Launches? | Scope | Role |
 | --- | --- | --- | --- |
@@ -126,9 +163,14 @@ Four Python helpers wrap a live, multi-day campaign. They emit sparse `ALERT ` l
 | `kore_pause_after_datagen.py` | no (stops procs) | at `datagen → build` | Halt cleanly so updated code can land |
 | `kore_resume_supervise.py` | yes | `build..eval` | Resume on the updated code + supervise |
 
-**`kore_monitor.py`** — a read-only watcher. It polls the newest campaign log (from `/tmp/kore_foldin_logpath.txt`, else the newest `runs/full/logs/campaign_foldin_*.log`) and the campaign pid every `KORE_MONITOR_POLL_S` (default 180s), and additionally alerts on a 429 rate-limit storm (a large jump, not the occasional retry). It self-terminates on `campaign complete` or a confirmed death, and never launches or kills the campaign.
+**`kore_monitor.py`** is a read-only watcher. It reads the private active-run
+record, verifies PID/start-time/run-ID identity, and incrementally consumes the
+owned log. It never launches or signals a process.
 
-**`kore_supervise.py`** — keeps a `run_campaign.py --full-ft` invocation alive across transient deaths. Its default `--stages` is `build,sft,dpo,grpo,soup,eval` (override via `KORE_SUP_STAGES`, e.g. to prepend `midtrain` and/or `datagen`); resume relies on the manifest + `shard_done`, so `--force` is appended only when `KORE_SUP_FORCE=1` (default off, so a relaunch resumes rather than re-running completed stages). Each attempt reaps our stale workers, (re)launches `run_campaign.py --full-ft --use-hf --teacher claude --adaptive-steps [--force] …`, and polls the log for the events above. On a non-completion exit it relaunches with bounded retries (`KORE_SUP_MAX_RETRIES`, default 12) and cooldown (`KORE_SUP_COOLDOWN_S`, default 90s), stopping on completion or exhausted retries. It writes the active log path to `/tmp/kore_foldin_logpath.txt`, defaults `KORE_DATAGEN_WORKERS` to 64, and hard-sets `KORE_VERIFIED_CORRECTNESS` / `KORE_COMPILE_BASELINE` / `KORE_SHAPE_AUGMENT` / `KORE_BENCH_COLD=1` (via `setdefault`, so an explicit env still wins) so every training subprocess inherits the verification gates.
+**`kore_supervise.py`** retries a bounded number of owned attempts. Exit code
+zero alone is insufficient: the requested stages must be in the manifest and
+their final artifacts must pass strict validation. Give-up, gate failure,
+missing dependencies, and incomplete artifacts return nonzero.
 
 ### Swapping in updated code at the datagen → build boundary
 
@@ -137,14 +179,18 @@ Code changes must land **before** the build and training stages, which shell out
 ```mermaid
 flowchart LR
   SUP[kore_supervise.py<br/>datagen running] --> PAUSE[kore_pause_after_datagen.py]
-  PAUSE -->|"282 shards OR 'stage start: build'"| STOP["stop supervisor, then campaign<br/>write /tmp/kore_paused_after_datagen"]
+  PAUSE -->|"immutable task-set complete OR build starts"| STOP["verify owned identities<br/>TERM → wait → KILL"]
   STOP --> RES[kore_resume_supervise.py]
-  RES -->|sentinel seen| RELAUNCH["run_campaign.py --force<br/>--stages build,midtrain,sft,dpo,grpo,soup,eval"]
+  RES -->|"consume private sentinel"| RELAUNCH["strictly supervised compatibility run"]
   RELAUNCH --> EVAL[build → … → eval on updated code]
 ```
 
-- **`kore_pause_after_datagen.py`** polls every 30s for the boundary — trigger = all 282 group shards present in `data/full14b/groups/` **or** the log shows `stage start: build`. On trigger it stops the supervisor first (so it cannot relaunch into build), then the campaign and its datagen workers, and writes the sentinel `/tmp/kore_paused_after_datagen`. Datagen shards are on disk, so nothing is lost; build re-runs fresh on resume.
-- **`kore_resume_supervise.py`** waits for that sentinel, reaps stale processes, then relaunches with `--stages build,midtrain,sft,dpo,grpo,soup,eval --force` (datagen is done and skipped; `--force` re-runs `build` on the updated code, which a fresh process picks up via the editable install) and supervises `build → eval` with the same bounded-retry and `ALERT` machinery as `kore_supervise.py`. It writes its log path to `/tmp/kore_resume_logpath.txt`.
+- **`kore_pause_after_datagen.py`** derives the train-task set from the registry,
+  freezes its sorted IDs/count/SHA-256 under the owned run directory, and requires
+  every expected group shard to be valid. It only signals identities recorded by
+  that run. The pause sentinel is private JSON, never a shared `/tmp` pathname.
+- **`kore_resume_supervise.py`** atomically consumes and removes that sentinel.
+  An absent sentinel has a bounded timeout and returns nonzero.
 
 ---
 

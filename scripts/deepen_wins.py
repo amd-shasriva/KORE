@@ -16,8 +16,9 @@ Guarantees (the "no wasted effort" contract):
   * Existing wins are READ and PRESERVED; new wins are APPENDED (atomic tmp+rename,
     so a crash never truncates a shard).
   * A task already at >=target is SKIPPED with ZERO teacher calls (re-runnable).
-  * A crash mid-task loses only the in-flight run's new wins (existing untouched);
-    a re-run resumes and tops it up.
+  * Every distinct win is checkpointed immediately via atomic tmp+rename. A crash
+    or burst preemption loses only the currently executing trajectory; a re-run
+    resumes from all previously completed trajectories.
 
 Parallel across GPU-pinned spawn workers (HIP pinned BEFORE torch import), one
 teacher stream each - the same proven pattern as kore.data.parallel_datagen.
@@ -52,11 +53,20 @@ def _load_existing(path: Path):
     return recs, seen
 
 
+def _checkpoint(path: Path, existing: list, added: list) -> None:
+    """Atomically persist all wins completed so far for this task."""
+    from kore.data.schemas import write_jsonl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".jsonl.tmp")
+    write_jsonl(tmp, list(existing) + list(added))
+    os.replace(tmp, path)
+
+
 def deepen_one(task_id: str, data_root, target: int, gens: int, teacher, cfg):
     """Additively top up ONE task's wins to `target`. Returns (status, have, added, attempts)."""
     from kore.data.amd_knowledge import ExperienceLedger
     from kore.data.gen_wins import generate_wins
-    from kore.data.schemas import write_jsonl
     from kore.env.kore_env import KoreEnv
     from kore.tasks.registry import get_task
 
@@ -93,14 +103,9 @@ def deepen_one(task_id: str, data_root, target: int, gens: int, teacher, cfg):
             continue  # identical kernel -> don't store a duplicate
         seen.add(h)
         added.append(w)
-
-    if added:
-        # ADDITIVE union: untouched existing dicts + new WinRecords. write_jsonl's
-        # _to_dict handles both. Atomic tmp+rename so existing wins are never lost.
-        merged = list(existing) + added
-        tmp = path.with_suffix(".jsonl.tmp")
-        write_jsonl(tmp, merged)
-        os.replace(tmp, path)
+        # Burst jobs can be preempted at any moment. Persist EACH completed
+        # trajectory now, not after all 2-9 attempts for the task.
+        _checkpoint(path, existing, added)
     status = "done" if (have + len(added)) >= target else "partial"
     return (status, have, len(added), attempts)
 

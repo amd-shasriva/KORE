@@ -80,3 +80,22 @@ def test_runs_dir_can_be_isolated_per_spur_process(tmp_path):
     ).strip()
 
     assert out == str(tmp_path / "replay")
+
+
+def test_inprogress_base_shard_remains_schedulable(tmp_path):
+    for kind in ("wins", "repair", "groups"):
+        (tmp_path / kind).mkdir()
+    (tmp_path / "wins" / "task.jsonl").write_text(
+        "".join(json.dumps({"final_source": f"k{i}"}) + "\n" for i in range(3))
+    )
+    repair = tmp_path / "repair" / "task.jsonl"
+    repair.write_text("{}\n")
+    repair.with_suffix(".jsonl.inprogress").write_text("{}\n")
+    (tmp_path / "groups" / "task.jsonl").write_text("{}\n")
+
+    item = work_item(tmp_path, "task", target=3)
+
+    assert item is not None
+    assert not item.needs_deepen
+    assert item.needs_base
+    assert item.missing_repair

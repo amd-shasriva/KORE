@@ -20,7 +20,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from kore.data.amd_knowledge import live_system_prompt
 from kore.data.prompts import (
@@ -686,6 +686,7 @@ def generate_repairs(
     seed: int = 0,
     natural_fraction: float = 0.3,
     diagnostic: bool = True,
+    on_record: Optional[Callable[[RepairRecord], None]] = None,
 ) -> list[RepairRecord]:
     """Produce up to ``n`` RepairRecords for ``task``.
 
@@ -724,14 +725,18 @@ def generate_repairs(
                                      diagnostic=diagnostic)
             if rec is not None:
                 records.append(rec)
+                if on_record is not None:
+                    on_record(rec)
             log.progress(attempts, max(1, n_injected * 5), "repair",
                          t_start=t_start, kept=len(records), target=n_injected)
         _ctx.attempt = {}
         injected_kept = len(records)
 
         # (2) Naturally-failed teacher turns.
-        natural = mine_natural_failures(task, teacher, env, n_natural, seed=seed + 1,
-                                        diagnostic=diagnostic)
+        natural = mine_natural_failures(
+            task, teacher, env, n_natural, seed=seed + 1,
+            diagnostic=diagnostic, on_record=on_record,
+        )
         records += natural
         result = records[:n]
         log.metric(
@@ -750,6 +755,7 @@ def mine_natural_failures(
     n: int,
     seed: int = 0,
     diagnostic: bool = True,
+    on_record: Optional[Callable[[RepairRecord], None]] = None,
 ) -> list[RepairRecord]:
     """Sample teacher rewrites of the seed; whenever one fails, mine a repair."""
     with log.stage("mine_natural_failures", task=task.task_id, n=n):
@@ -789,6 +795,8 @@ def mine_natural_failures(
                                      diagnostic=diagnostic)
             if rec is not None:
                 records.append(rec)
+                if on_record is not None:
+                    on_record(rec)
             log.progress(attempts, budget, "natural_mine",
                          t_start=t_start, mined=len(records), target=n)
         _ctx.attempt = {}

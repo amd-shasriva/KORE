@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import random
 import time
+from typing import Callable, Optional
 
 from kore.config import CONFIG
 from kore.data.amd_knowledge import live_system_prompt
@@ -174,6 +175,7 @@ def generate_groups(
     k: int,
     seed: int = 0,
     cfg=CONFIG,
+    on_record: Optional[Callable[[RankedGroupRecord], None]] = None,
 ) -> list[RankedGroupRecord]:
     """Produce ranked groups: ``n_parents`` groups of ``k`` candidates each."""
     with log.stage("generate_groups", task=task.task_id, n_parents=n_parents, k=k):
@@ -262,20 +264,21 @@ def generate_groups(
                             parent_wall_us = float(rep["wall_us"])
                         except Exception:  # noqa: BLE001
                             parent_counters = None
-            records.append(
-                RankedGroupRecord(
-                    task_id=task.task_id,
-                    parent_id=kernel_hash(parent_src),
-                    candidates=candidates,
-                    preferences=prefs,
-                    gpu=task.gpu_target,
-                    operation=getattr(task, "operation", None),
-                    arch=getattr(task, "gpu_target", None),
-                    counters=counters,
-                    parent_counters=parent_counters,
-                    parent_wall_us=parent_wall_us,
-                )
+            record = RankedGroupRecord(
+                task_id=task.task_id,
+                parent_id=kernel_hash(parent_src),
+                candidates=candidates,
+                preferences=prefs,
+                gpu=task.gpu_target,
+                operation=getattr(task, "operation", None),
+                arch=getattr(task, "gpu_target", None),
+                counters=counters,
+                parent_counters=parent_counters,
+                parent_wall_us=parent_wall_us,
             )
+            records.append(record)
+            if on_record is not None:
+                on_record(record)
             tot_candidates += len(results)
             n_correct = sum(1 for r in results if r.get("correct"))
             tot_correct += n_correct

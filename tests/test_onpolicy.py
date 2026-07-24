@@ -254,6 +254,78 @@ def test_iterative_dpo_train_fn_refreshes_reference():
     assert rounds[1].policy_ckpt == "ckpt-round-1"
 
 
+def test_generation_client_drives_dpo_and_dagger_calls():
+    from kore.policy.serve import GenerationClient
+
+    script = ["cand __FAST__", "cand slow"]
+    state = {"calls": 0}
+
+    def generate_groups_client(_messages, **_kwargs):
+        index = state["calls"]
+        state["calls"] += 1
+        return _wrap(script[index % len(script)])
+
+    dpo_client = GenerationClient(generate_groups_client)
+    groups = relabel_groups_on_policy(
+        FakeTask(), dpo_client, FakeEnv(), n_parents=1, k=2
+    )
+    assert len(groups) == 1
+    assert state["calls"] == 2
+
+    dagger_calls = []
+    dagger_client = GenerationClient(
+        lambda messages, **kwargs: (
+            dagger_calls.append((messages, kwargs)) or _wrap("cand __WRONG__")
+        )
+    )
+    teacher = StubTeacher(fn=lambda _messages: _wrap("cand good"))
+    repairs = dagger_repairs(
+        FakeTask(), dagger_client, teacher, FakeEnv(), n=1, seed=1
+    )
+    assert len(repairs) == 1
+    assert dagger_calls
+    dpo_client.close()
+    dagger_client.close()
+
+
+def test_iterative_dpo_closes_generation_before_training():
+    from kore.policy.serve import GenerationClient
+
+    events = []
+
+    def policy_factory(round_idx, _prev):
+        state = {"calls": 0}
+
+        def generate(_messages, **_kwargs):
+            events.append(("generate", round_idx))
+            state["calls"] += 1
+            source = "cand __FAST__" if state["calls"] % 2 else "cand slow"
+            return _wrap(source)
+
+        return GenerationClient(
+            generate,
+            lambda: events.append(("close", round_idx)),
+        )
+
+    def train_fn(rd):
+        assert events[-1] == ("close", rd.round)
+        events.append(("train", rd.round))
+        return f"ckpt-{rd.round}"
+
+    rounds = iterative_dpo(
+        2,
+        policy_factory,
+        FakeTask(),
+        lambda _task: FakeEnv(),
+        n_parents=1,
+        k=2,
+        train_fn=train_fn,
+    )
+    assert [round_.policy_ckpt for round_ in rounds] == ["ckpt-0", "ckpt-1"]
+    assert events.index(("close", 0)) < events.index(("train", 0))
+    assert events.index(("close", 1)) < events.index(("train", 1))
+
+
 # --------------------------------------------------------------------------- #
 # 4. IPO / cDPO config path
 # --------------------------------------------------------------------------- #

@@ -44,12 +44,14 @@ from kore.data.gen_repair import (
 from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, extract_kernel
 from kore.data.schemas import RankedGroupRecord, RepairRecord
 from kore.obs import get_logger
+from kore.policy.serve import GenerationProtocol, as_generation_client
 
 log = get_logger("data.onpolicy")
 
 
-# A policy is anything with ``generate(messages) -> str`` (TeacherClient duck type).
-Policy = Any
+# One validated policy interface for callable serving clients and TeacherClient-like
+# objects. ``as_generation_client`` performs the only adaptation at runtime.
+Policy = GenerationProtocol
 
 
 # --------------------------------------------------------------------------- #
@@ -73,10 +75,11 @@ def relabel_groups_on_policy(
     verifier + ``rank_candidates`` / ``build_preferences`` (with the margin gate)
     are reused unchanged. Returns ``RankedGroupRecord``s ready for ``build_dpo``.
     """
+    policy_client = as_generation_client(policy)
     with log.stage("relabel_groups_on_policy", task=task.task_id,
                    n_parents=n_parents, k=k):
         return generate_groups(
-            task, policy, env, n_parents=n_parents, k=k, seed=seed, cfg=cfg
+            task, policy_client, env, n_parents=n_parents, k=k, seed=seed, cfg=cfg
         )
 
 
@@ -145,14 +148,19 @@ def iterative_dpo(
     with log.stage("iterative_dpo", rounds=rounds, tasks=len(task_list),
                    aggregate=aggregate):
         for r in range(rounds):
-            policy = policy_factory(r, prev_ckpt)
+            policy = as_generation_client(policy_factory(r, prev_ckpt))
             new_groups: list[RankedGroupRecord] = []
-            for i, task in enumerate(task_list):
-                env = env_factory(task)
-                new_groups += relabel_groups_on_policy(
-                    task, policy, env, n_parents=n_parents, k=k,
-                    seed=seed + r * 100_003 + i, cfg=cfg,
-                )
+            try:
+                for i, task in enumerate(task_list):
+                    env = env_factory(task)
+                    new_groups += relabel_groups_on_policy(
+                        task, policy, env, n_parents=n_parents, k=k,
+                        seed=seed + r * 100_003 + i, cfg=cfg,
+                    )
+            finally:
+                # Rollout serving and training may target the same GPUs. Release
+                # the generation engine before build/train, including on errors.
+                policy.close()
             agg_groups = (agg_groups + new_groups) if aggregate else list(new_groups)
             # Pillar 3: in-context DPO prompts (seed-kernel transcript) so iterative
             # on-policy preferences match the deployment context, exactly like the
@@ -220,6 +228,7 @@ def dagger_repairs(
     exploration early; pass a schedule from :func:`dagger_teacher_frac`, decaying
     30%->0% across rounds). ``diagnostic`` selects the diagnose-then-fix SFT format.
     """
+    policy_client = as_generation_client(policy)
     teacher_frac = max(0.0, min(1.0, float(teacher_frac)))
     with log.stage("dagger_repairs", task=task.task_id, n=n,
                    teacher_frac=teacher_frac):
@@ -241,7 +250,7 @@ def dagger_repairs(
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ]
-            response = policy.generate(messages)
+            response = policy_client.generate(messages)
             cand_src = extract_kernel(response)
             if not cand_src:
                 log.debug("dagger policy sample had no kernel; skipping",

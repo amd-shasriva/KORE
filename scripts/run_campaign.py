@@ -6,8 +6,8 @@ Stages (each gated on the previous via retention + kernel metrics):
                value-prefilter) manufacturing verified wins/ranked-groups per
                TRAIN task, written as extra wins/groups shards
     agentic  : teacher-driven build/test/bench/pmc tool-use trajectories
-    build    : take the AUTHORITATIVE registry train/held-out split (a whole
-               operator family + any arch-specific task is reserved eval-only),
+    build    : take the AUTHORITATIVE versioned registry split (whole product
+               leaves, exact near-probe roots, and foreign arch/dtype are eval-only),
                then assemble a multi-capability SFT mix (kernel + QA + agentic +
                ~45% general) and a DPO set with >=8% hard negatives from the
                TRAIN split only
@@ -266,6 +266,9 @@ _IMPORT_CHECKS = [
     ("kore.tasks.registry", "train_tasks", True, []),
     ("kore.tasks.registry", "heldout_tasks", True, []),
     ("kore.tasks.registry", "operator_family", True, []),
+    ("kore.tasks.registry", "build_split_manifest", True, []),
+    ("kore.tasks.registry", "validate_split_manifest", True, ["payload"]),
+    ("kore.tasks.taxonomy", "taxonomy_digest", True, ["tasks"]),
     ("kore.env.kore_env", "KoreEnv", True, []),
     ("kore.data.assemble", "build_multicap_dataset", True, ["kernel_records", "extra_records"]),
     ("kore.data.assemble", "build_dpo_with_hard_negatives", True,
@@ -396,23 +399,39 @@ def _manifest_path(ctx) -> Path:
 
 
 def _load_manifest_into_ctx(ctx) -> None:
-    """Populate ctx from a prior manifest so a resumed run reuses real ckpts."""
+    """Load a resume manifest only if its frozen split is still authoritative."""
     p = _manifest_path(ctx)
     if not p.exists():
         return
     try:
         m = json.loads(p.read_text())
     except Exception as e:  # noqa: BLE001
-        _log("resume", f"WARNING: could not read manifest ({e}); starting fresh")
-        return
+        from kore.tasks.registry import StaleSplitManifestError
+        raise StaleSplitManifestError(f"malformed campaign manifest {p}: {e}") from e
+
+    from kore.tasks.registry import (
+        StaleSplitManifestError,
+        validate_split_manifest,
+    )
+    serialized_split = m.get("split_manifest")
+    if serialized_split is None:
+        raise StaleSplitManifestError(
+            "legacy campaign manifest has no versioned split_manifest; "
+            "start a new run or use --force to invalidate it"
+        )
+    contract = validate_split_manifest(
+        serialized_split,
+        expected=ctx.get("split_contract"),
+    )
+
     for k in ("midtrain_ckpt", "sft_ckpt", "dpo_ckpt", "grpo_ckpt", "final"):
         if m.get(k):
             ctx[k] = m[k]
     ctx["done_stages"] = set(m.get("done_stages") or [])
-    if m.get("eval_tasks"):
-        ctx["eval_task_ids"] = list(m["eval_tasks"])
-    if m.get("train_tasks"):
-        ctx["train_task_ids"] = list(m["train_tasks"])
+    ctx["split_contract"] = contract
+    ctx["split_manifest"] = contract.as_dict()
+    ctx["train_task_ids"] = list(contract.train_ids)
+    ctx["eval_task_ids"] = list(contract.eval_ids)
     _log("resume", f"manifest loaded: done={sorted(ctx['done_stages'])} "
                    f"midtrain={ctx['midtrain_ckpt']} sft={ctx['sft_ckpt']} "
                    f"dpo={ctx['dpo_ckpt']} grpo={ctx['grpo_ckpt']} final={ctx['final']}")
@@ -423,6 +442,17 @@ def _save_manifest(ctx) -> None:
         return
     p = _manifest_path(ctx)
     p.parent.mkdir(parents=True, exist_ok=True)
+    from kore.tasks.registry import build_split_manifest, get_task
+    contract = ctx.get("split_contract")
+    if contract is None:
+        train_ids = list(ctx.get("train_task_ids") or [])
+        eval_ids = list(ctx.get("eval_task_ids") or [])
+        contract = build_split_manifest(
+            [get_task(task_id) for task_id in train_ids],
+            [get_task(task_id) for task_id in eval_ids],
+        )
+    ctx["split_contract"] = contract
+    ctx["split_manifest"] = contract.as_dict()
     data = {
         "model": ctx["base"],
         "midtrain_ckpt": ctx.get("midtrain_ckpt"),
@@ -431,8 +461,10 @@ def _save_manifest(ctx) -> None:
         "grpo_ckpt": ctx.get("grpo_ckpt"),
         "final": ctx.get("final"),
         "done_stages": sorted(ctx["done_stages"]),
-        "train_tasks": ctx.get("train_task_ids"),
-        "eval_tasks": ctx.get("eval_task_ids"),
+        # Compatibility views; split_manifest is the validated authority.
+        "train_tasks": list(contract.train_ids),
+        "eval_tasks": list(contract.eval_ids),
+        "split_manifest": contract.as_dict(),
         "updated": time.time(),
     }
     tmp = p.with_suffix(".json.tmp")
@@ -545,7 +577,17 @@ def run(args) -> int:
     if dry:
         _dry_import_check()
     else:
-        _load_manifest_into_ctx(ctx)
+        try:
+            _load_manifest_into_ctx(ctx)
+        except Exception as exc:
+            from kore.tasks.registry import StaleSplitManifestError
+            if not isinstance(exc, StaleSplitManifestError) or not args.force:
+                raise
+            _log("resume", f"invalidated stale campaign manifest under --force: {exc}")
+            ctx["done_stages"].clear()
+            for key in ("midtrain_ckpt", "sft_ckpt", "dpo_ckpt", "grpo_ckpt", "final"):
+                ctx[key] = None
+            _apply_split(ctx)
         if args.force:
             for st in stages:
                 ctx["done_stages"].discard(st)
@@ -620,9 +662,7 @@ def _teacher(args):
 def _apply_split(ctx) -> None:
     """Compute the AUTHORITATIVE registry train/held-out split for this run.
 
-    Uses ``kore.tasks.registry.split_tasks(seed)`` (item 1). The held-out set is a
-    fixed function of operator family + arch, so it is independent of ``seed`` (the
-    seed only reorders within each split). From the campaign's selected task set:
+    Uses the versioned registry manifest. From the campaign's selected task set:
 
       * ``train_tasks`` = selected tasks that are NOT held out - every training
         stage (datagen/evolve/agentic/build/sft/dpo/grpo) runs on these ONLY;
@@ -635,30 +675,22 @@ def _apply_split(ctx) -> None:
     Populates ``ctx['train_tasks']``/``['eval_tasks']`` (Task objects) and the
     id lists threaded through the manifest.
     """
-    from kore.tasks.registry import is_heldout, split_tasks
+    from kore.tasks.registry import get_task, split_manifest_for_selection
 
-    seed = getattr(ctx["args"], "split_seed", 0)
-    split = split_tasks(seed)
-    selected = ctx["tasks"]
-
-    train = [t for t in selected if not is_heldout(t)]
-    held_selected = [t for t in selected if is_heldout(t)]
-    eval_tasks = held_selected or list(split["heldout"])
-
-    if not train:  # degenerate: every selected task is held out - train on them
-        _log("plan", "WARNING: every selected task is held out; training on the "
-                     "full selection (no train/eval split available)")
-        train = list(selected)
-
-    ctx["train_tasks"] = train
-    ctx["eval_tasks"] = eval_tasks
-    ctx["train_task_ids"] = [t.task_id for t in train]
-    ctx["eval_task_ids"] = [t.task_id for t in eval_tasks]
+    contract = split_manifest_for_selection(ctx["tasks"])
+    ctx["split_contract"] = contract
+    ctx["split_manifest"] = contract.as_dict()
+    ctx["train_tasks"] = [get_task(task_id) for task_id in contract.train_ids]
+    ctx["eval_tasks"] = [get_task(task_id) for task_id in contract.eval_ids]
+    ctx["train_task_ids"] = list(contract.train_ids)
+    ctx["eval_task_ids"] = list(contract.eval_ids)
 
 
 def _train_tasks(ctx) -> list:
     """The TRAIN-split tasks every training stage operates on (item 1)."""
-    return ctx.get("train_tasks") or ctx["tasks"]
+    if "train_tasks" not in ctx:
+        raise RuntimeError("authoritative train split was not initialized")
+    return ctx["train_tasks"]
 
 
 def _eval_tasks(ctx) -> list:
@@ -1018,25 +1050,8 @@ def _rec_is_heldout(rec, heldout_ids: set) -> bool:
     hard-coded gfx950 + "first op family") with the registry as the single
     authority, so a stray held-out-family record can never leak into TRAIN.
     """
-    from types import SimpleNamespace
-
-    from kore.tasks.registry import (
-        HELDOUT_FAMILIES, HELDOUT_TASKS, TRAIN_ARCHS, operator_family,
-    )
-
-    d = _rec_dict(rec)
-    tid = d.get("task_id")
-    if tid and tid in heldout_ids:
-        return True
-    if tid and tid in HELDOUT_TASKS:   # registry task-level holdout (paged-KV / MLA)
-        return True
-    arch = _rec_arch(rec)
-    if arch is not None and arch not in TRAIN_ARCHS:  # foreign arch (gfx950/gfx942 both train)
-        return True
-    op = _rec_op(rec)
-    if op and operator_family(SimpleNamespace(operation=op, task_id=tid or "")) in HELDOUT_FAMILIES:
-        return True
-    return False
+    from kore.tasks.registry import is_heldout_record
+    return is_heldout_record(rec, heldout_ids)
 
 
 def _stage_build(ctx):
@@ -1092,8 +1107,8 @@ def _stage_build(ctx):
 
     # 2. Enforce the AUTHORITATIVE registry held-out split at the record level
     #    (item 1). ``ctx['eval_task_ids']`` is fixed by registry.split_tasks (see
-    #    _apply_split) -- the reserved held-out family + arch-specific tasks -- so any
-    #    record whose family/arch/id is reserved is DROPPED from TRAIN, guaranteeing
+    #    _apply_split) -- so any record whose leaf/root/arch/dtype is eval-only is
+    #    DROPPED from TRAIN, guaranteeing
     #    training never sees the eval distribution.
     #    We deliberately do NOT do a random 80/10/10 op-family leakage_split here:
     #    this is a per-op SPECIALIST model, so every NON-held-out op family must be
@@ -1532,17 +1547,16 @@ def _stage_grpo(ctx):
     init = ctx.get("dpo_ckpt") or sft
 
     # item 1: GRPO must train ONLY on the TRAIN-split tasks. The held-out eval ids
-    # (reserved operator family + arch-specific tasks) are the generalization set;
+    # (whole leaves + near roots + foreign arch/dtype) are the generalization set;
     # training on them would invalidate the eval.
     eval_ids = set(ctx.get("eval_task_ids") or [])
     train_task_ids = [t.task_id for t in _train_tasks(ctx) if t.task_id not in eval_ids]
     if not train_task_ids:
-        _log("grpo", f"WARNING: every task is held out for eval ({sorted(eval_ids)}); "
-                     "falling back to training on the selected tasks (no split available)")
-        train_task_ids = [t.task_id for t in ctx["tasks"]]
-    else:
-        _log("grpo", f"training on TRAIN-split tasks={train_task_ids} "
-                     f"(held-out eval-only={sorted(eval_ids)})")
+        raise RuntimeError(
+            "GRPO train split is empty; refusing to train on held-out eval tasks"
+        )
+    _log("grpo", f"training on TRAIN-split tasks={train_task_ids} "
+                 f"(held-out eval-only={sorted(eval_ids)})")
 
     # Fix 1: under --full-ft the GRPO RL stage runs FULL-PARAMETER + SHARDED
     # (ZeRO-3 / FSDP) via the one-command launcher - there is NO LoRA shortcut for

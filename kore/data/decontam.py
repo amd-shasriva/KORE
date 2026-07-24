@@ -2,9 +2,9 @@
 
 A credible "best dataset in the world" must PROVE the training data never
 contains the held-out generalization set. KORE reserves the structurally-distinct
-MLA and paged-KV-decode operator families (``mla`` / ``paged_attention``) + any
-arch-specific task as held-out (core attention is TRAINED); see
-``kore.tasks.registry``. Two leak paths must be closed:
+MLA and paged-KV-decode product leaves, 43 exact near-probe provenance roots, and
+foreign architecture/dtype slices (core attention otherwise trains); see the
+versioned task taxonomy. Two leak paths must be closed:
   1. the midtrain corpus ingests ALL ``kore/tasks/*.py`` - including the held-out
      MLA / paged-attention kernels - as raw text (``source == "kore_tasks"``);
   2. nothing checks general-replay / mined corpus chunks for a copied held-out
@@ -29,69 +29,30 @@ from typing import Any, Iterable, Optional
 @lru_cache(maxsize=1)
 def heldout_task_ids() -> frozenset[str]:
     from kore.tasks.registry import heldout_tasks
-    try:
-        return frozenset(t.task_id for t in heldout_tasks())
-    except Exception:  # noqa: BLE001 - registry unavailable (e.g. minimal test env)
-        return frozenset()
+    return frozenset(t.task_id for t in heldout_tasks())
 
 
 @lru_cache(maxsize=1)
 def heldout_families() -> frozenset[str]:
-    from kore.tasks.registry import HELDOUT_FAMILIES
-    return frozenset(HELDOUT_FAMILIES)
+    from kore.tasks.taxonomy import WHOLE_FAMILY_HOLDOUTS
+    return frozenset(WHOLE_FAMILY_HOLDOUTS)
 
 
 def _family_of(op_or_task: str) -> str:
-    """Infer the operator family from an operation / task_id string (no Task obj).
-
-    Mirrors :func:`kore.tasks.registry.operator_family`. The held-out families
-    (``mla``, ``paged_attention``) MUST be matched before the generic ``attn``
-    catch, because ``paged_attn_decode`` also contains ``attn`` and ``mla_decode``
-    would otherwise fall through to its raw string. Getting this wrong makes the
-    family branch of :func:`is_contaminated_record` inert for held-out families,
-    so a generated MLA / paged variant with a novel task id could leak into the
-    corpus past the family gate (the exact-task-id check would still miss it).
-    """
-    op = (op_or_task or "").lower()
-    if "mla" in op or "latent_attn" in op or "latent_attention" in op:
-        return "mla"
-    if "paged" in op:
-        return "paged_attention"
-    if "attn" in op or "attention" in op:
-        return "attention"
-    if "topk" in op:
-        return "moe_router"
-    if "moe" in op:
-        return "moe"
-    if "rmsnorm" in op:
-        return "rmsnorm"
-    if "layernorm" in op:
-        return "layernorm"
-    if "gemm" in op or "matmul" in op:
-        return "gemm"
-    if "quant" in op:
-        return "quant"
-    if "rope" in op:
-        return "rope"
-    if "softmax" in op:
-        return "softmax"
-    if "gelu" in op or "silu" in op or "relu" in op:
-        return "activation"
-    return op or "other"
+    """Canonical product family adapter for unregistered text identities."""
+    from kore.tasks.taxonomy import product_family_for_name
+    return product_family_for_name(op_or_task) or "unclassified"
 
 
 def record_family(rec: Any) -> str:
-    d = rec if isinstance(rec, dict) else getattr(rec, "__dict__", {})
-    return _family_of(str(d.get("operation") or d.get("task_id") or ""))
+    from kore.tasks.registry import product_family_for_record
+    return product_family_for_record(rec)
 
 
 def is_contaminated_record(rec: Any) -> bool:
     """True if a labeled record belongs to a held-out family or task id."""
-    d = rec if isinstance(rec, dict) else getattr(rec, "__dict__", {})
-    tid = str(d.get("task_id") or "")
-    if tid and tid in heldout_task_ids():
-        return True
-    return record_family(rec) in heldout_families()
+    from kore.tasks.registry import is_heldout_record
+    return is_heldout_record(rec)
 
 
 def decontaminate_records(records: Iterable[Any]) -> tuple[list, dict]:

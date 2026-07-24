@@ -1,6 +1,6 @@
 """Materialize an in-memory :class:`~kore.openended.minter.MintedTask` into an
 on-disk, runnable KORE task that :class:`~kore.env.kore_env.KoreEnv` grades with the
-SAME trusted generic driver + reference ABI as the ~282 generated datagen tasks
+SAME trusted generic driver + reference ABI as the live generated task registry
 (:mod:`kore.tasks._genops`).
 
 Why this is safe to run on an unattended flagship
@@ -136,6 +136,7 @@ def _spec_of(minted) -> dict:
         "name": minted.name,
         "family": minted.family,
         "arity": int(minted.arity),
+        "provenance_root": minted.provenance_root,
     }
 
 
@@ -172,6 +173,8 @@ def _task_yaml(spec: dict) -> str:
         "seed_kernel_name": "seed_triton.py",
         "snr_threshold": _SNR_BY_DTYPE.get(dtype, 30.0),
         "op_family": spec["family"],
+        "taxonomy_family": spec["family"],
+        "provenance_root": spec["provenance_root"],
         "generated": True,
         "minted": True,
         "shapes": {"minimal": shape, "primary": shape},

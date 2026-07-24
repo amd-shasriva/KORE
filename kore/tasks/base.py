@@ -46,6 +46,7 @@ class Task:
     comparison_baseline: str
     shapes: list[Shape] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    provenance_root: str = ""
 
     @property
     def driver_path(self) -> Path:
@@ -69,28 +70,123 @@ class Task:
                 return s
         return None
 
+    @property
+    def source_family(self) -> Optional[str]:
+        """Generator-native family metadata (not the canonical taxonomy leaf)."""
+        value = self.raw.get("op_family")
+        return str(value) if value is not None else None
+
     @classmethod
     def from_dir(cls, d: Path) -> "Task":
-        meta = yaml.safe_load((d / "task.yaml").read_text())
+        d = Path(d)
+        yaml_path = d / "task.yaml"
+        if not yaml_path.is_file():
+            raise ValueError(f"{d}: missing task.yaml")
+        meta = yaml.safe_load(yaml_path.read_text())
+        if not isinstance(meta, dict):
+            raise ValueError(f"{yaml_path}: top-level YAML must be a mapping")
+
+        required = (
+            "task_id",
+            "operation",
+            "dtype",
+            "backend",
+            "gpu_target",
+            "seed_kernel_name",
+            "snr_threshold",
+            "shapes",
+            "targets",
+        )
+        missing = [key for key in required if key not in meta]
+        if missing:
+            raise ValueError(f"{yaml_path}: missing required keys {missing}")
+
+        def required_string(key: str) -> str:
+            value = meta.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{yaml_path}: {key} must be a non-empty string")
+            return value.strip()
+
+        task_id = required_string("task_id")
+        operation = required_string("operation")
+        dtype = required_string("dtype")
+        backend = required_string("backend")
+        gpu_target = required_string("gpu_target")
+        seed_kernel_name = required_string("seed_kernel_name")
+        if task_id != d.name:
+            raise ValueError(
+                f"{yaml_path}: task_id {task_id!r} collides with directory {d.name!r}"
+            )
+
         shapes: list[Shape] = []
-        raw_shapes = meta.get("shapes", {}) or {}
+        raw_shapes = meta.get("shapes")
+        if not isinstance(raw_shapes, dict) or not raw_shapes:
+            raise ValueError(f"{yaml_path}: shapes must be a non-empty mapping")
+
+        def validated_dims(name: str, value: Any) -> dict[str, int]:
+            if not isinstance(value, dict) or not value:
+                raise ValueError(f"{yaml_path}: shape {name!r} must be a non-empty mapping")
+            dims: dict[str, int] = {}
+            for key, dim in value.items():
+                if not isinstance(key, str) or not key:
+                    raise ValueError(f"{yaml_path}: shape {name!r} has an invalid dimension key")
+                if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+                    raise ValueError(
+                        f"{yaml_path}: shape {name!r} dimension {key!r} "
+                        f"must be a positive integer, got {dim!r}"
+                    )
+                dims[key] = dim
+            return dims
+
         for key, val in raw_shapes.items():
             if key == "validation" and isinstance(val, list):
                 for i, dims in enumerate(val):
-                    shapes.append(Shape(f"validation_{i}", dict(dims)))
+                    shapes.append(
+                        Shape(f"validation_{i}", validated_dims(f"validation_{i}", dims))
+                    )
             elif isinstance(val, dict):
-                shapes.append(Shape(key, dict(val)))
-        targets = meta.get("targets", {}) or {}
+                shapes.append(Shape(str(key), validated_dims(str(key), val)))
+            else:
+                raise ValueError(f"{yaml_path}: invalid shape entry {key!r}")
+        if not shapes:
+            raise ValueError(f"{yaml_path}: no concrete shapes declared")
+
+        targets = meta.get("targets")
+        if not isinstance(targets, dict):
+            raise ValueError(f"{yaml_path}: targets must be a mapping")
+        comparison_baseline = targets.get("comparison_baseline")
+        if not isinstance(comparison_baseline, str) or not comparison_baseline.strip():
+            raise ValueError(
+                f"{yaml_path}: targets.comparison_baseline must be a non-empty string"
+            )
+        try:
+            snr_threshold = float(meta["snr_threshold"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{yaml_path}: snr_threshold must be numeric") from exc
+
+        for artifact in ("driver.py", "reference.py", seed_kernel_name):
+            if not (d / artifact).is_file():
+                raise ValueError(f"{yaml_path}: missing required artifact {artifact}")
+
+        provenance = meta.get("provenance")
+        provenance_root = meta.get("provenance_root") or meta.get("lineage_root")
+        if not provenance_root and isinstance(provenance, dict):
+            provenance_root = provenance.get("root")
+        provenance_root = str(provenance_root or task_id).strip()
+        if not provenance_root:
+            raise ValueError(f"{yaml_path}: provenance root must be non-empty")
+
         return cls(
-            task_id=meta["task_id"],
-            operation=meta.get("operation", meta["task_id"]),
-            dtype=meta.get("dtype", "fp32"),
-            backend=meta.get("backend", "triton"),
-            gpu_target=meta.get("gpu_target", "gfx950"),  # KORE target = CDNA4 (MI350X)
+            task_id=task_id,
+            operation=operation,
+            dtype=dtype,
+            backend=backend,
+            gpu_target=gpu_target,
             dir=d,
-            seed_kernel_name=meta.get("seed_kernel_name", "seed_triton.py"),
-            snr_threshold=float(meta.get("snr_threshold", targets.get("snr_db", 30.0))),
-            comparison_baseline=targets.get("comparison_baseline", "torch"),
+            seed_kernel_name=seed_kernel_name,
+            snr_threshold=snr_threshold,
+            comparison_baseline=comparison_baseline.strip(),
             shapes=shapes,
             raw=meta,
+            provenance_root=provenance_root,
         )

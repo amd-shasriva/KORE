@@ -73,7 +73,14 @@ Enabled via `coevolve: true` in [`configs/grpo_14b_full.json`](../../configs/REA
 
 ## Open-ended task minting (`grammar.py` + `minter.py`)
 
-The controller above curriculum-selects from the *fixed* registered task menu — it re-weights the ~282 registered (op × dtype) tasks. `grammar.py` + `minter.py` grow it open-endedly: they mint net-new, correct-by-construction tasks, and `materialize.py` turns each into a runnable on-disk task dir, so the RL curriculum is no longer capped at the registered set. Minting is wired into `CoevolutionController` (`next_task_id` / `resolve_task`) behind the `coevolve_mint` GRPO flag and enabled in the flagship run (`coevolve_mint: true`, `coevolve_mint_batch: 6`).
+The controller above curriculum-selects from the live strict registry (inspect it
+with `kore.tasks.registry.taxonomy_description`). `grammar.py` + `minter.py` grow
+that menu open-endedly: they mint net-new, correct-by-construction identities while
+using the same canonical product-family leaves as registered tasks.
+`materialize.py` records the taxonomy family and a stable provenance root in each
+ephemeral task, so reserved-family and held-out-lineage checks remain effective.
+Minting is wired into `CoevolutionController` (`next_task_id` / `resolve_task`)
+behind the `coevolve_mint` GRPO flag.
 
 Minting is implemented and unit-tested (`kore/openended/tests/test_minter.py` covers the four moves, the construction gate, behavioral dedup, held-out rejection, fused-vs-sequential reference equality, niche placement, and a runnable-namespace round-trip). It is fail-safe: any bad mint or self-check mismatch is skipped and the loop falls back to registered tasks, so enabling it can never crash or corrupt the run. It is CPU-only (torch is imported lazily, only to build / gate / self-check references — never a GPU).
 

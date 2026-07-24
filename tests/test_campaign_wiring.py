@@ -59,13 +59,22 @@ def test_selected_heldout_task_routes_to_eval_not_train():
     assert held not in ctx["train_task_ids"]
 
 
+def test_all_heldout_selection_refuses_fallback_training():
+    from kore.tasks.registry import SplitManifestError
+    held = heldout_tasks()[0]
+    ctx = {"tasks": [held], "args": _args(["--tasks", held.task_id])}
+    with pytest.raises(SplitManifestError, match="train split is empty"):
+        rc._apply_split(ctx)
+
+
 def test_manifest_threads_train_and_eval_ids(tmp_path):
+    eval_id = heldout_tasks()[0].task_id
     ctx = {
         "data_root": tmp_path, "dry": False, "base": "Qwen/Qwen3-14B",
         "midtrain_ckpt": None, "sft_ckpt": "sft", "dpo_ckpt": None,
         "grpo_ckpt": None, "final": None, "done_stages": {"build"},
         "train_task_ids": ["rmsnorm_aiter", "gemm_bf16"],
-        "eval_task_ids": ["flash_attn_decode_bf16"],
+        "eval_task_ids": [eval_id],
     }
     rc._save_manifest(ctx)
 
@@ -75,8 +84,36 @@ def test_manifest_threads_train_and_eval_ids(tmp_path):
         "done_stages": set(), "eval_task_ids": None, "train_task_ids": None,
     }
     rc._load_manifest_into_ctx(ctx2)
-    assert ctx2["train_task_ids"] == ["rmsnorm_aiter", "gemm_bf16"]
-    assert ctx2["eval_task_ids"] == ["flash_attn_decode_bf16"]
+    assert ctx2["train_task_ids"] == ["gemm_bf16", "rmsnorm_aiter"]
+    assert ctx2["eval_task_ids"] == [eval_id]
+    assert ctx2["split_manifest"]["taxonomy"]["version"]
+    assert ctx2["split_manifest"]["taxonomy"]["digest"]
+
+
+def test_stale_campaign_manifest_is_invalidated(tmp_path):
+    from kore.tasks.registry import StaleSplitManifestError
+    args = _args(["--tasks", "rmsnorm_aiter"])
+    ctx = {
+        "data_root": tmp_path,
+        "dry": False,
+        "base": "base",
+        "midtrain_ckpt": None,
+        "sft_ckpt": None,
+        "dpo_ckpt": None,
+        "grpo_ckpt": None,
+        "final": None,
+        "done_stages": set(),
+        "tasks": [get_task("rmsnorm_aiter")],
+        "args": args,
+    }
+    rc._apply_split(ctx)
+    rc._save_manifest(ctx)
+    path = tmp_path / "campaign_manifest.json"
+    payload = json.loads(path.read_text())
+    payload["split_manifest"]["taxonomy"]["digest"] = "stale"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StaleSplitManifestError, match="taxonomy digest changed"):
+        rc._load_manifest_into_ctx(ctx)
 
 
 def test_apply_split_overrides_a_stale_manifest_split():

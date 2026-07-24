@@ -9,8 +9,8 @@ sparse, losses + fused optimizers) into ``genb_<op>_<dtype>/`` task dirs, each w
     driver.py            + thin driver shim (-> _genops.driver_main)
 
 Idempotent; the ``genb_`` prefix avoids collision with ``gen_``/``genv_``. Registry
-discovery (``kore/tasks/registry.py`` globs ``*/task.yaml``) picks them up
-automatically, and since none are named ``mla``/``paged`` they all land in TRAIN.
+discovery picks them up automatically, maps each source module through the versioned
+taxonomy, and keeps the explicit stratified near-probe IDs eval-only.
 
     python -m kore.tasks.generate_breadth [--list]
 

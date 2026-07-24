@@ -2,23 +2,19 @@
 
 Every RL "environment instance" is a **kernel-optimization task**: a Triton kernel to make fast, an fp32 **reference oracle** for correctness, a **production vendor baseline** to beat (AITER / hipBLASLt / framework), a set of evaluation **shapes**, and a driver contract the verifier speaks. Tasks are discovered from `<task_id>/task.yaml` directories.
 
-The registry holds **282 tasks** (280 train, 2 held-out):
-
-| Group | Prefix | Count | Baseline |
-| --- | --- | --- | --- |
-| Hand-authored | — | 55 | per-task (`reference.py`) |
-| Generated | `gen_*` | 201 | torch / framework |
-| Vendor-baselined | `genv_*` | 26 | real AITER / hipBLASLt |
-
-`registry.all_tasks()` is the source of truth; re-derive the live count with:
+Counts, families, split reasons, and the taxonomy digest are machine-derived from
+the strict registry. At taxonomy v1.0.0 the pinned whole-registry test covers
+1,334 tasks (1,289 train / 45 eval), including the materialized `genb_*` breadth
+suite. Re-derive the complete live description instead of copying counts into
+another document:
 
 ```bash
-PYTHONPATH=. python -c "from kore.tasks import registry; print(len(registry.all_tasks()))"
+python -c "from pprint import pprint; from kore.tasks.registry import taxonomy_description; pprint(taxonomy_description())"
 ```
 
-A further **16 op-class generator engines** under `kore/tasks/breadth/` materialize **1,052** additional verified `genb_*` task variants on demand (opt-in; not part of the 282 above until generated — see [Breadth op-class generators](#breadth-op-class-generators)).
-
-The registry also defines the **authoritative train / held-out split** by operator family and architecture, so generalization can never be leaked.
+Discovery is fail-closed: malformed YAML/artifacts, duplicate or case-colliding
+IDs, directory/ID collisions, unknown generator families, and conflicting
+operation assignments abort registry load rather than being printed and skipped.
 
 ---
 
@@ -27,7 +23,8 @@ The registry also defines the **authoritative train / held-out split** by operat
 | File | Purpose |
 | --- | --- |
 | `base.py` | Task ABI: `Shape`, `Task`, `Task.from_dir()` — parses `task.yaml` |
-| `registry.py` | Discovery, `operator_family`, `is_heldout`, `split_tasks`, `all_tasks`, `get_task` |
+| `taxonomy.py` | Versioned product-family leaves, analysis hierarchy, source mappings, split policy |
+| `registry.py` | Strict discovery, immutable split manifest, record/task split adapters |
 | `augment.py` | Deterministic shape augmentation (scale factors + an odd non-aligned shape) |
 | `audit.py` | Live data-scale audit from the registry |
 | `_genops.py` | Operator spec registry + `make_reference`, `seed_source`, generic `driver_main` |
@@ -73,39 +70,51 @@ class Task:
 
 ```python
 TRAIN_ARCH  = "gfx950"                          # primary target: CDNA4 (MI350X / MI355X)
-TRAIN_ARCHS = {"gfx950", "gfx942"}              # arches accepted into train (override: KORE_TRAIN_ARCHS)
+TRAIN_ARCHS = {"gfx950", "gfx942"}              # accepted hardware lineage
 HELDOUT_FAMILIES = ("mla", "paged_attention")
-HELDOUT_TASKS    = {"mla_decode_bf16", "paged_attn_decode_bf16"}
+NEAR_GENERALIZATION_TASKS = {...43 exact genb task IDs...}
 ```
 
-A task is held out if **any** of these hold (`registry.is_heldout`):
+A task is eval-only if **any** of these hold (`registry.split_decision`):
 
-1. its `task_id` is in `HELDOUT_TASKS`, **or**
-2. its `operator_family()` is in `HELDOUT_FAMILIES` (`mla` or `paged_attention`), **or**
-3. it targets a **foreign arch** (a `gpu_target` outside `TRAIN_ARCHS`).
+1. its ID or provenance root is one of the explicit near-generalization probes;
+2. its product-family leaf is `mla` or `paged_attention`;
+3. its architecture is outside `TRAIN_ARCHS`; or
+4. its dtype is outside the reviewed `TRAIN_DTYPES`.
 
-This is the single source of truth used by both datagen (never trains on held-out) and eval (measures zero-shot transfer to the held-out families).
+Unclassified external records are also eval-only. `build_split_manifest()` freezes
+sorted train/eval ID tuples, per-ID provenance roots, taxonomy version/digest, and
+the architecture/dtype policy. Resume rejects stale or malformed manifests.
 
 ```mermaid
 flowchart TD
-  T[Task] --> ID{task_id in HELDOUT_TASKS?}
-  ID -->|yes| HO[held-out: eval only]
-  ID -->|no| F{"family in (mla, paged_attention)?"}
+  T[Task] --> ID{ID or root is near probe?}
+  ID -->|yes| HO[eval only]
+  ID -->|no| F{"product leaf is mla or paged_attention?"}
   F -->|yes| HO
-  F -->|no| A{"gpu_target in TRAIN_ARCHS?"}
+  F -->|no| A{"arch and dtype are train-approved?"}
   A -->|no| HO
   A -->|yes| TR[train]
 ```
 
 **Core attention is trained, not held out.** Flash-attention prefill / decode / sliding-window / varlen / fp8 all train, so the product model is strong at attention. Only the two *structurally distinct* families are withheld to measure genuine cross-family transfer: **MLA** (DeepSeek latent attention) and **paged-KV decode** (a different KV-cache mechanism).
 
-**Why family-level, not task-level.** Reserving whole families (not just the two seed task ids) keeps any generated or mined MLA/paged variant out of training by its family, closing the last leakage path. `operator_family` therefore classifies `mla`/`paged` **before** the generic `attn` catch, so those variants never fall through into the trained `attention` bucket.
+**Whole-family and task-level probes are distinct.** Any generated or mined
+MLA/paged variant stays out by product leaf. The 43 stratified near probes are
+exact task/provenance-root reservations: the rest of their families still train,
+so their presence does not falsely declare the whole `attention` rollup held out.
 
-**Why deterministic.** The held-out set is a pure function of family + arch, independent of any seed, so datagen can exclude it with no seed coordination. `split_tasks(seed)` returns `{"train", "heldout", "seed"}`; `seed` only reorders *within* a split (for sharding / CV folds) and never moves a task across the boundary.
+**Why deterministic.** Assignment is a pure function of the versioned taxonomy,
+task metadata, and provenance root. `split_tasks(seed)` only reorders within the
+immutable manifest; it never moves an ID across the boundary.
 
 **Why gfx942 stays in train.** gfx942/CDNA3 shares the hardware lineage with the gfx950/CDNA4 target and runs correctly on-node, so previous-gen-tagged tasks and any in-flight gfx942 datagen keep training instead of being retroactively held out when the primary arch advanced to gfx950. A truly foreign arch (gfx1100, NVIDIA) is still held out.
 
-> **Two family taxonomies exist by design.** `registry.operator_family` is the coarse split authority (the `mla` / `paged_attention` / `attention` / … buckets above). `kore.eval.generalization.family_of` is a richer 8-family classifier (attention, moe, gemm, norm, positional, quant, reduction, activation) used for offline leave-one-family-out analysis. The two are distinct; do not conflate them.
+> **One hierarchy, two views.** `registry.operator_family` returns the product
+> leaf used by the split. `taxonomy.analysis_family` returns its reporting/LOFO
+> parent. Thus `attention`, `mla`, and `paged_attention` are separate product
+> leaves but all roll up to the analysis family `attention`; consumers do not
+> maintain independent first-match rules.
 
 ---
 
@@ -116,7 +125,7 @@ flowchart LR
   GO[generate_ops.py] --> GEN["gen_*/ dirs"]
   GVO[generate_vendor_ops.py] --> GENV["genv_*/ dirs"]
   GB[generate_breadth.py] --> GENB["genb_*/ dirs"]
-  HAND[55 hand-authored tasks] --> REG
+  HAND[hand-authored tasks] --> REG
   GEN --> REG[registry discovery]
   GENV --> REG
   GENB --> REG
@@ -134,14 +143,21 @@ flowchart LR
 
 `kore/tasks/breadth/` holds **16 op-class authoring engines** — attention, MoE, GEMM, norm, quant, reduction, convolution, scan/SSM, sequence, sort/sparse, sampling, and training-op families. Each engine exposes the shared ABI (`OPS`, `SHAPES`, `make_reference`, `seed_source`) and ships CPU-side tests under `breadth/tests/`.
 
-`generate_breadth.py` auto-discovers every conformant engine and writes `genb_<op>_<dtype>/` dirs, each with a `task.yaml`, a naive-but-correct Triton seed, and thin `reference.py`/`driver.py` shims. Together the engines materialize **1,052** verified task variants:
+`generate_breadth.py` auto-discovers every conformant engine and writes
+`genb_<op>_<dtype>/` dirs, each with a `task.yaml`, a naive-but-correct Triton
+seed, and thin `reference.py`/`driver.py` shims. The checked-in registry already
+contains the materialized breadth suite; use `taxonomy_description()` for its
+current count:
 
 ```bash
 python -m kore.tasks.generate_breadth --list   # dry-run: list the genb_* ids
 python -m kore.tasks.generate_breadth          # write the dirs into this checkout
 ```
 
-Generation is opt-in and idempotent. Registry discovery globs `*/task.yaml`, so freshly written `genb_*` dirs are picked up with no code edits, and since none are named `mla`/`paged` they all land in TRAIN. Only run it on a node whose task suite you intend to widen — never on a node whose in-flight run must keep a frozen task set.
+Generation is opt-in and idempotent. Registry discovery globs `*/task.yaml`;
+new operations must have a source-module family assignment and change the taxonomy
+digest. Most breadth tasks train, while the explicit 43-ID stratified probe remains
+eval-only. Never regenerate an in-flight run's frozen task set.
 
 ---
 

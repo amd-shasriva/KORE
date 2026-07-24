@@ -562,6 +562,12 @@ def _dense_profile_bonus(env, task, code, obs, config):
 # --------------------------------------------------------------------------- #
 # training entrypoint
 # --------------------------------------------------------------------------- #
+def default_grpo_task_ids() -> list[str]:
+    """Authoritative train-only default for direct GRPO invocations."""
+    from kore.tasks.registry import train_tasks
+    return [task.task_id for task in train_tasks()]
+
+
 def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inprocess"):
     """Run multi-turn GRPO natively on AMD; return the output checkpoint dir (str).
 
@@ -570,6 +576,9 @@ def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inproc
     no extra install, no config. ``backend`` is accepted for back-compat and
     always routes to this native loop.
     """
+    tasks = default_grpo_task_ids() if tasks is None else list(tasks)
+    if not tasks:
+        raise ValueError("GRPO requires a non-empty train task list")
     log.info("grpo backend: native in-process (transformers+PEFT on AMD)",
              backend=backend, model=getattr(config, "model_id", None))
     # Bridge the reward mode to the agentic tool path (tools.ToolExecutor reads
@@ -1109,9 +1118,10 @@ def _train_grpo_fallback(config, tasks):
     from kore.env.kore_env import KoreEnv
     from kore.policy import anticollapse as ac
     from kore.policy.configs import fsdp_enabled
-    from kore.tasks.registry import get_task, task_ids
+    from kore.tasks.registry import get_task
 
-    tasks = tasks or task_ids()
+    if not tasks:
+        raise ValueError("GRPO requires a non-empty train task list")
     configure(run_dir=getattr(config, "output_dir", None))
     t_start = time.time()
     last_mean_r = None
@@ -1957,9 +1967,10 @@ def _train_grpo_distributed(config, tasks):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from kore.policy.configs import grpo_sharding_backend
-    from kore.tasks.registry import get_task, task_ids
+    from kore.tasks.registry import get_task
 
-    tasks = tasks or task_ids()
+    if not tasks:
+        raise ValueError("GRPO requires a non-empty train task list")
     backend = grpo_sharding_backend(config)
     accelerator = build_grpo_accelerator(config)
     world = accelerator.num_processes

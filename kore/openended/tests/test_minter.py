@@ -14,8 +14,8 @@ import torch.nn.functional as F
 
 from kore.openended import grammar as g
 from kore.openended import minter as m
-from kore.openended import task_space as ts
 from kore.openended.archive import TaskArchive
+from kore.tasks import taxonomy
 
 
 # --------------------------------------------------------------------------- #
@@ -40,7 +40,8 @@ def test_mint_batch_executes_deterministic_and_finite():
     for t in batch:
         # the 6-field task ABI is populated
         assert t.name and callable(t.reference_fn) and callable(t.input_sampler)
-        assert t.dtype in m.MINT_DTYPES and t.tol > 0 and t.family.startswith("minted_")
+        assert t.dtype in m.MINT_DTYPES and t.tol > 0
+        assert t.family in taxonomy.PRODUCT_FAMILIES
         # executes on the cheap probe inputs
         out = t.reference_fn(*t.probe_inputs())
         assert torch.isfinite(out.float()).all()
@@ -70,7 +71,7 @@ def test_gate_rejects_constant_output():
     src, mid, _term = _prims()
     # relu(neg(abs(x))) == relu(-|x|) == 0 everywhere -> constant, must be rejected.
     p = g.Pipeline((src["input"], mid["abs"], mid["neg"], mid["relu"]))
-    res = m.construction_gate(p, "fp32", "const_op", "minted_elementwise")
+    res = m.construction_gate(p, "fp32", "const_op", "activation")
     assert not res.ok and res.reason == "constant_output"
 
 
@@ -81,7 +82,7 @@ def test_gate_rejects_input_insensitivity():
                          lambda main, auxs, t, F: main,
                          aux_roles=(g.ROLE_MATRIX,), tag="binary")
     p = g.Pipeline((src["input"], ignore))
-    res = m.construction_gate(p, "fp32", "ignore_aux", "minted_fusion")
+    res = m.construction_gate(p, "fp32", "ignore_aux", "fusion")
     assert not res.ok and res.reason == "insensitive_input_1"
 
 
@@ -92,14 +93,16 @@ def test_gate_rejects_axis_collapse():
                            lambda main, auxs, t, F: main.mean(-1, keepdim=True).expand_as(main),
                            aux_roles=(), tag="norm")
     p = g.Pipeline((src["input"], row_bcast))
-    res = m.construction_gate(p, "fp32", "row_bcast", "minted_norm")
+    res = m.construction_gate(p, "fp32", "row_bcast", "normalization")
     assert not res.ok and res.reason == "constant_along_rows"
 
 
 def test_gate_accepts_wellformed_op():
     src, mid, _term = _prims()
     p = g.Pipeline((src["input"], mid["add"], mid["gelu"], mid["rmsnorm"]))
-    assert m.construction_gate(p, "bf16", "input_add_gelu_rmsnorm", "minted_norm").ok
+    assert m.construction_gate(
+        p, "bf16", "input_add_gelu_rmsnorm", "normalization"
+    ).ok
 
 
 # --------------------------------------------------------------------------- #
@@ -134,13 +137,14 @@ def test_heldout_families_rejected_by_construction():
     assert m.is_heldout("mla_decode_bf16")
     assert m.is_heldout("paged_attn_decode_bf16")
     assert m.is_heldout("latent_attn_x")
-    assert not m.is_heldout("matmul_add_bias_gelu", "minted_gemm_fusion")
+    assert not m.is_heldout("matmul_add_bias_gelu", "gemm")
 
     # a minted batch never names/keys a held-out family
     batch = m.mint_batch(TaskArchive(0), _p, 24, seed=2)
     for t in batch:
         assert not m.is_heldout(t.name, t.family)
-        assert t.family not in ts.families(include_vendor=True)  # net-new families
+        assert t.family in taxonomy.PRODUCT_FAMILIES
+        assert t.task_id.startswith("gen_")  # net-new identity, canonical family
 
     # structural guarantee: no grammar primitive is an attention/mla/paged op
     src, mid, term = _prims()
@@ -187,7 +191,7 @@ def test_novelty_and_distinct_niche_placement():
     minter = m.TaskMinter(seed=0)
     arch = TaskArchive(seed=0)
     # empty archive -> maximal novelty
-    assert minter.novelty(("minted_fusion", "memory-bound", 3, "16b", "small"), arch) == 1.0
+    assert minter.novelty(("fusion", "memory-bound", 3, "16b", "small"), arch) == 1.0
 
     batch = minter.mint_batch(arch, _p, 16)
     niches = {t.niche_key for t in batch}
@@ -226,7 +230,7 @@ def test_arithmetic_intensity_classification():
     gemm = g.Pipeline((src["matmul"], mid["add_bias"], mid["gelu"]))
     fg, ai_g = m.features_of(gemm, {"M": 256, "N": 1024, "K": 4096}, "bf16")
     assert fg["arithmetic_intensity"] == "compute-bound" and ai_g >= m.AI_RIDGE
-    assert fg["family"] == "minted_gemm_fusion"
+    assert fg["family"] == "gemm"
 
 
 # --------------------------------------------------------------------------- #

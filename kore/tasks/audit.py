@@ -13,8 +13,15 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from kore.config import CONFIG
+from kore.tasks import taxonomy
 from kore.tasks.augment import augment_shapes
-from kore.tasks.registry import all_tasks, is_heldout, operator_family
+from kore.tasks.registry import (
+    all_tasks,
+    analysis_family,
+    operator_family,
+    split_decision,
+    taxonomy_digest,
+)
 
 
 @dataclass
@@ -31,13 +38,20 @@ class DataScaleReport:
     baseline_tiers: dict[str, int] = field(default_factory=dict)
     heldout_families: list[str] = field(default_factory=list)
     vendor_baselines: dict[str, int] = field(default_factory=dict)
+    analysis_rollups: dict[str, int] = field(default_factory=dict)
+    split_reasons: dict[str, int] = field(default_factory=dict)
+    near_generalization_tasks: list[str] = field(default_factory=list)
+    taxonomy_version: str = ""
+    taxonomy_digest: str = ""
 
     def summary(self) -> str:
         lines = [
             "KORE data-scale audit",
             f"  operators:        {self.n_operators} "
             f"(train {self.n_train}, held-out {self.n_heldout})",
-            f"  families:         {len(self.families)}  {dict(self.families)}",
+            f"  product families: {len(self.families)}  {dict(self.families)}",
+            f"  analysis rollups: {len(self.analysis_rollups)}  "
+            f"{dict(self.analysis_rollups)}",
             f"  dtypes:           {dict(self.dtypes)}",
             # honest headroom breakdown: vendor (real AITER/hipBLASLt baseline) +
             # fusion (real multi-kernel headroom) are the "real speedup" ops;
@@ -49,7 +63,9 @@ class DataScaleReport:
             f"  base shapes:      {self.total_base_shapes}",
             f"  effective shapes: {self.total_effective_shapes} "
             f"(per-op {self.shapes_per_op_min}-{self.shapes_per_op_max})",
-            f"  held-out family:  {self.heldout_families}",
+            f"  whole-family eval:{self.heldout_families}",
+            f"  near probes:      {len(self.near_generalization_tasks)} task-level",
+            f"  taxonomy:         v{self.taxonomy_version} {self.taxonomy_digest}",
         ]
         return "\n".join(lines)
 
@@ -59,16 +75,18 @@ def audit(shape_augment: bool | None = None, augment_max: int = 6) -> DataScaleR
         shape_augment = getattr(CONFIG, "shape_augment", False)
     tasks = all_tasks()
     fams: Counter = Counter()
+    rollups: Counter = Counter()
     dtypes: Counter = Counter()
     base_total = 0
     eff_total = 0
     per_op: list[int] = []
-    heldout_fams: set[str] = set()
+    reasons: Counter = Counter()
     tiers: Counter = Counter()
     vendor_baselines: Counter = Counter()
 
     for t in tasks:
         fams[operator_family(t)] += 1
+        rollups[analysis_family(t)] += 1
         dtypes[t.dtype] += 1
         # honest headroom tier: generated tasks carry baseline_tier; hand-authored
         # tasks (with real AITER/hipBLASLt baselines) count as "vendor".
@@ -79,25 +97,33 @@ def audit(shape_augment: bool | None = None, augment_max: int = 6) -> DataScaleR
         base = t.shapes or []
         base_total += len(base)
         eff = augment_shapes(base, max_shapes=augment_max) if shape_augment else base
+        # ``augment_max`` is a cap on generated additions, not permission to
+        # discard a task that already declares more base validation shapes.
+        if len(eff) < len(base):
+            eff = base
         n_eff = len(eff) or len(base)
         eff_total += n_eff
         per_op.append(n_eff)
-        if is_heldout(t):
-            heldout_fams.add(operator_family(t))
+        reasons[split_decision(t).reason] += 1
 
     return DataScaleReport(
         baseline_tiers=dict(tiers),
         vendor_baselines=dict(sorted(vendor_baselines.items())),
         n_operators=len(tasks),
-        n_train=sum(1 for t in tasks if not is_heldout(t)),
-        n_heldout=sum(1 for t in tasks if is_heldout(t)),
-        families=dict(fams),
+        n_train=reasons["train"],
+        n_heldout=len(tasks) - reasons["train"],
+        families=dict(sorted(fams.items())),
+        analysis_rollups=dict(sorted(rollups.items())),
+        split_reasons=dict(sorted(reasons.items())),
         dtypes=dict(dtypes),
         total_base_shapes=base_total,
         total_effective_shapes=eff_total,
         shapes_per_op_min=min(per_op) if per_op else 0,
         shapes_per_op_max=max(per_op) if per_op else 0,
-        heldout_families=sorted(heldout_fams),
+        heldout_families=sorted(taxonomy.WHOLE_FAMILY_HOLDOUTS),
+        near_generalization_tasks=sorted(taxonomy.NEAR_GENERALIZATION_TASK_IDS),
+        taxonomy_version=taxonomy.TAXONOMY_VERSION,
+        taxonomy_digest=taxonomy_digest(),
     )
 
 

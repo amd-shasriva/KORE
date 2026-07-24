@@ -349,6 +349,6 @@ def test_registry_split_tasks_deterministic_and_stable_heldout():
 def test_registry_operator_family_known_ops():
     from kore.tasks import registry as reg
     fam = {t.task_id: reg.operator_family(t) for t in reg.all_tasks()}
-    assert fam.get("rmsnorm_aiter") == "rmsnorm"
+    assert fam.get("rmsnorm_aiter") == "normalization"
     assert fam.get("gemm_bf16") == "gemm"
     assert fam.get("flash_attn_decode_bf16") == "attention"

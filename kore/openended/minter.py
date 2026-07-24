@@ -1,8 +1,8 @@
 """Verifiable, open-ended TASK MINTER for the KORE RL curriculum (P3 paradigm).
 
 The proposer (:mod:`kore.openended.proposer`) selects tasks at the policy's
-competence frontier from a FIXED parametric space (the 282 registered op x dtype
-tasks). This module removes that ceiling: it MINTS *net-new*, correct-by-
+competence frontier from the live registered task space. This module removes that
+ceiling: it MINTS *net-new*, correct-by-
 construction tasks at train time by composing verified torch primitives
 (:mod:`kore.openended.grammar`), so the curriculum can grow open-endedly instead
 of only re-weighting a fixed menu.
@@ -52,6 +52,7 @@ from kore.openended import archive as arch_mod
 from kore.openended import grammar as g
 from kore.openended import task_space as ts
 from kore.openended.proposer import DescriptorStats, clamp, learnability
+from kore.tasks import taxonomy
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -85,10 +86,6 @@ _REGIMES_GEMM = {
     "medium": {"M": 128, "N": 512, "K": 512},    # vol 3.4e7
     "large": {"M": 256, "N": 1024, "K": 4096},   # vol 1.1e9
 }
-
-# held-out tokens (defense in depth on top of the grammar having NO attention/
-# mla/paged primitives at all - so a held-out task is unrepresentable).
-_HELDOUT_TOKENS = ("mla", "paged", "latent_attn", "latent_attention")
 
 # --- open-ended grammar EVOLUTION (paradigm-v2 P3+): default OFF -------------- #
 # The four MOVES above compose the FIXED grammar with bounded-depth templates - a
@@ -162,6 +159,14 @@ class MintedTask:
         exact same op is."""
         return (self.behavioral_hash, self.dtype, self.features["shape_scale"])
 
+    @property
+    def provenance_root(self) -> str:
+        """Stable lineage root shared by descendants of this minted identity."""
+        return (
+            f"minted:{self.behavioral_hash}:{self.dtype}:"
+            f"{self.features['shape_scale']}"
+        )
+
     def carrier(self) -> ts.TaskDescriptor:
         """A ``TaskDescriptor`` view for archive bookkeeping (``source='minted'``).
 
@@ -224,16 +229,16 @@ def _fusion_depth(pipeline: g.Pipeline) -> int:
 
 
 def family_of(pipeline: g.Pipeline) -> str:
-    """Coarse minted family (the categorical MAP-Elites dimension)."""
+    """Canonical product-family leaf for a minted pipeline."""
     if pipeline.uses_matmul:
-        return "minted_gemm_fusion"
+        return "gemm"
     if pipeline.out_type == g.ROWVEC:
-        return "minted_reduce"
+        return "reduction"
     if any(st.tag == "norm" for st in pipeline.stages):
-        return "minted_norm"
+        return "normalization"
     if _fusion_depth(pipeline) >= 2:
-        return "minted_fusion"
-    return "minted_elementwise"
+        return "fusion"
+    return "activation"
 
 
 def _shape_scale(volume: int) -> str:
@@ -288,24 +293,17 @@ def difficulty_of(features: dict) -> float:
 # --------------------------------------------------------------------------- #
 # Held-out rejection (by construction; enforced anyway)
 # --------------------------------------------------------------------------- #
-def is_heldout(name: str, family: str = "") -> bool:
-    """True iff a task names a held-out generalization family (mla / paged_attn).
-
-    Reuses the canonical registry classifier so the guard can never drift from the
-    train/held-out split, then a token backstop. The grammar has no attention /
-    mla / paged primitive, so this never fires for a real minted task - it is a
-    correctness guarantee, not a runtime filter."""
-    text = f"{name} {family}".lower()
-    if any(tok in text for tok in _HELDOUT_TOKENS):
-        return True
-    try:
-        from types import SimpleNamespace
-
-        from kore.tasks import registry
-        fam = registry.operator_family(SimpleNamespace(operation=name, task_id=name))
-        return fam in registry.HELDOUT_FAMILIES
-    except Exception:  # noqa: BLE001 - registry optional; token check already ran
-        return False
+def is_heldout(name: str, family: str = "", dtype: Optional[str] = None) -> bool:
+    """Apply the authoritative fail-closed split to a minted identity."""
+    decision = taxonomy.split_decision_for_identity(
+        task_id=f"minted:{name}:{dtype or 'unspecified'}",
+        operation=name,
+        product_family=family or None,
+        architecture=taxonomy.PRIMARY_TRAIN_ARCHITECTURE,
+        dtype=dtype,
+        provenance_root=f"minted:{name}:{dtype or 'unspecified'}",
+    )
+    return decision.heldout
 
 
 # --------------------------------------------------------------------------- #
@@ -341,7 +339,7 @@ def construction_gate(pipeline: g.Pipeline, dtype: str, name: str, family: str,
     except g.GrammarTypeError as e:
         return GateResult(False, f"typecheck:{e}")
     # 2. held-out rejection
-    if is_heldout(name, family):
+    if is_heldout(name, family, dtype):
         return GateResult(False, "heldout_family")
 
     import torch

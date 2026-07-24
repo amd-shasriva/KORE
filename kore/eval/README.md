@@ -69,9 +69,18 @@ flowchart TD
 
 ## Generalization (held-out families)
 
-`generalization.py` classifies tasks into 8 families (`attention, moe, gemm, norm, positional, quant, reduction, activation`, first-match-wins rules), builds a leakage-checked split by **entire families**, and evaluates the physics residual reward on held-out families from a P0 measures JSON — offline, no training. It gates aggregation on the reward's own correctness verdict (`rr.correct`), not just the raw measure flag.
+`generalization.py` imports the analysis parents from the versioned
+`kore.tasks.taxonomy` hierarchy, builds leakage-checked leave-one-analysis-family-out
+probes, and evaluates the physics residual reward from a P0 measures JSON — offline,
+no training. It gates aggregation on the reward's own correctness verdict
+(`rr.correct`), not just the raw measure flag.
 
-> **Two family taxonomies, by design.** The 8-family `classify` here is the richer analysis / leave-one-family-out grouping. The authoritative product split is `kore.tasks.registry` (`operator_family` + `HELDOUT_FAMILIES`): the model **trains** core attention (flash prefill/decode/varlen/fp8) and reserves the structurally distinct **MLA** (latent attention) and **paged-KV decode** families (plus any foreign-arch task) as the never-trained set. `korebench.py`'s per-family view uses the registry taxonomy; the two taxonomies are kept separate.
+The product split and analysis report are two views of one mapping. Core attention,
+MLA, and paged attention are separate product leaves (only MLA/paged are whole-leaf
+holdouts), but all roll up to analysis `attention`. The 43 stratified near probes are
+task/provenance-root holdouts, so they do not mark the whole attention leaf or
+analysis rollup held out. `korebench.py` emits both `per_product_family` and
+`per_analysis_family` views and carries the taxonomy version.
 
 ---
 

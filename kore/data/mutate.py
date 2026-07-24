@@ -18,6 +18,8 @@ from __future__ import annotations
 import random
 import re
 
+from kore.tasks import taxonomy
+
 FailureHint = str  # "compile_fail" | "snr_fail"
 
 
@@ -580,20 +582,9 @@ _BREAKERS = (break_block_size, break_accumulator_dtype, break_index_offset)
 
 
 def infer_family(operation_or_task_id: str) -> str:
-    """Map an operation name or task id (e.g. "rmsnorm_bf16") to an op family."""
-    s = (operation_or_task_id or "").lower()
-    families = (
-        ("gemm", ("gemm", "matmul")),
-        ("norm", ("rmsnorm", "layernorm", "rms_norm", "layer_norm", "norm")),
-        ("attention", ("attention", "attn", "mha", "mla", "mqa", "flash", "sdpa")),
-        ("moe", ("moe", "expert")),
-        ("activation", ("silu", "gelu", "relu", "swiglu", "geglu", "glu", "act")),
-        ("quant", ("quant", "dequant", "w8a8", "scaled_mm", "fp8_scale")),
-    )
-    for family, keys in families:
-        if any(k in s for k in keys):
-            return family
-    return "generic"
+    """Map an identity to a mutator family through the task taxonomy authority."""
+    product = taxonomy.product_family_for_name(operation_or_task_id)
+    return taxonomy.mutation_family(product) if product is not None else "generic"
 
 
 def apply_random_breakage(

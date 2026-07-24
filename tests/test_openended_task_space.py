@@ -20,8 +20,8 @@ def test_enumerate_is_deterministic_and_nonempty():
 
 def test_families_cover_genops_and_vendor():
     fams = set(ts.families())
-    assert {"unary", "binary", "reduce", "fusion", "gemm_fusion"} <= fams
-    assert any(f.startswith("vendor_") for f in fams)
+    assert {"activation", "elementwise", "reduction", "fusion", "gemm"} <= fams
+    assert {"normalization", "positional", "data_movement"} <= fams
 
 
 def test_include_vendor_toggle():
@@ -48,6 +48,8 @@ def test_descriptor_features_keys_and_niche():
     key = ts.descriptor_key(d)
     assert key == tuple(feats[f] for f in ts.NICHE_FIELDS)
     assert len(key) == len(ts.NICHE_FIELDS)
+    assert feats["family"] == "activation"
+    assert feats["source_family"] == "unary"
 
 
 def test_arithmetic_intensity_gemm_is_compute_bound():
@@ -143,4 +145,6 @@ def test_describe_is_json_friendly():
     d = ts.TaskDescriptor("vendor", "vendor_rmsnorm", "rmsnorm", "bf16", "primary")
     info = ts.describe(d)
     assert info["task_id"] == "genv_rmsnorm_bf16"
+    assert info["family"] == "normalization"
+    assert info["source_family"] == "vendor_rmsnorm"
     assert "shape" in info and "family" in info

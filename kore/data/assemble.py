@@ -46,21 +46,8 @@ def _agentic_row_is_heldout(rec: dict) -> bool:
     run_campaign._rec_is_heldout so the agentic slice enforces the SAME authority as
     every other SFT source (audit R2 sft I3: the old task_id-only check missed the
     MLA/paged family holdout + foreign-arch trajectories)."""
-    from types import SimpleNamespace
-
-    from kore.tasks.registry import (HELDOUT_FAMILIES, HELDOUT_TASKS, TRAIN_ARCHS,
-                                     operator_family)
-    prov = rec.get("_provenance") or {}
-    tid = rec.get("task_id") or prov.get("task_id")
-    if tid and tid in HELDOUT_TASKS:
-        return True
-    arch = rec.get("arch") or rec.get("gpu") or prov.get("arch")
-    if arch is not None and arch not in TRAIN_ARCHS:
-        return True
-    op = rec.get("operation") or prov.get("op") or ((tid or "").split("_")[0] if tid else "")
-    if op and operator_family(SimpleNamespace(operation=op, task_id=tid or "")) in HELDOUT_FAMILIES:
-        return True
-    return False
+    from kore.tasks.registry import is_heldout_record
+    return is_heldout_record(rec)
 
 
 def _agentic_rows(data_root: Path) -> list[dict]:

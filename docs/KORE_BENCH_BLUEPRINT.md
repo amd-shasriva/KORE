@@ -509,11 +509,11 @@ re-verification on the cached candidate module, reward lexicographic `r = 1[corr
 
 ### 4.6 Leakage-safe held-out split
 
-`registry.py` already reserves two structurally-distinct attention variants as whole
-families (`mla` latent attention + `paged_attention` KV-decode), plus any task on a foreign
-arch (outside the `gfx950`/`gfx942` lineage), as held-out. Core attention still trains, so
-the product model stays strong at attention while the eval measures true cross-family
-transfer. For the release we additionally:
+`taxonomy.py` reserves two structurally-distinct attention leaves as whole families
+(`mla` latent attention + `paged_attention` KV-decode), 43 exact stratified
+near-generalization task/provenance roots, and any foreign architecture or unreviewed
+dtype. Core attention still trains, so the product model stays strong at attention while
+the eval measures both near-task and cross-family transfer. For the release we additionally:
 - Hold out **≥1 more whole family end-to-end** (recommend **grouped-GEMM MoE**) as an extra
   never-trained generalization eval.
 - Held-out **shapes within trained ops**.
@@ -562,10 +562,12 @@ Sections 1-4 above are a **build spec** for growing the taxonomy toward 200-400 
   (`bakeoff.py`/`vs_opus.py`), so per-task deltas are paired and far more powerful than an unpaired
   comparison.
 
-What's still aspirational (not yet built): the `author.py` semi-automatic task generator (§3), the
-`coverage_report.py` completeness checker (§4.1), and growing the registry from its current 282
-tasks (§5.1) toward the 200-400-task taxonomy in §1. Tests: `kore/eval/tests/test_eval_frontier.py`
-and `tests/test_korebench.py`.
+What's still aspirational (not yet built): the `author.py` semi-automatic task generator (§3)
+and the `coverage_report.py` completeness checker (§4.1). The registry inventory has moved
+beyond this blueprint's original target; derive its current size, family counts, split reasons,
+and digest with `kore.tasks.registry.taxonomy_description()` rather than treating this planning
+document as a manifest. Tests: `tests/test_task_taxonomy.py`,
+`kore/eval/tests/test_eval_frontier.py`, and `tests/test_korebench.py`.
 
 ---
 
@@ -573,11 +575,10 @@ and `tests/test_korebench.py`.
 
 ### 5.1 First ~50 tasks (highest value = Amdahl weight × headroom × already-have-baseline)
 
-The registry has grown past this blueprint's original snapshot - `kore/tasks/registry.py` holds
-**282 tasks today** (55 hand-authored + 201 `gen_*` + 26 `genv_*` vendor-baselined; see
-[`kore/tasks/README.md`](../kore/tasks/README.md) for the live count), and many of the "first ~50"
-below already exist with a real vendor binding (marked `(have)`). Re-derive what's actually
-missing from `registry.all_tasks()` rather than this list before starting new authoring work.
+The registry has grown past this blueprint's original snapshot, and many of the
+"first ~50" below already exist with a real vendor binding (marked `(have)`).
+Re-derive the live inventory with `registry.taxonomy_description()` and actual task
+metadata rather than this list before starting new authoring work.
 Order:
 
 1. **GEMM core (10):** G1 bf16 square, G2 MLP-up, G6 fp8 per-tensor, G7 fp8 a8w8 (have),

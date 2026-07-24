@@ -53,19 +53,38 @@ def run_korebench(
     n = len(per)
     n_wins = sum(1 for t in per if _win(t, win_margin))
 
-    # per operator-family breakdown (generalization view)
-    from kore.tasks.registry import get_task, operator_family
-    fam: dict[str, list] = {}
+    # Product leaves and their analysis parents are two views of one authority.
+    from kore.tasks import taxonomy
+    from kore.tasks.registry import analysis_family, get_task, operator_family
+    product_groups: dict[str, list] = {}
+    analysis_groups: dict[str, list] = {}
     for t in per:
         try:
-            f = operator_family(get_task(t["task_id"]))
-        except Exception:  # noqa: BLE001 - unknown/ad-hoc task id
-            f = "other"
-        fam.setdefault(f, []).append(t)
-    per_family = {
-        f: {"n": len(ts), "win_rate": sum(1 for t in ts if _win(t, win_margin)) / len(ts)}
-        for f, ts in fam.items()
-    }
+            task = get_task(t["task_id"])
+            product = operator_family(task)
+            analysis = analysis_family(task)
+        except KeyError:  # unknown/ad-hoc benchmark task
+            product = taxonomy.product_family_for_name(t["task_id"]) or "unclassified"
+            analysis = (
+                taxonomy.analysis_family(product)
+                if product != "unclassified"
+                else "other"
+            )
+        product_groups.setdefault(product, []).append(t)
+        analysis_groups.setdefault(analysis, []).append(t)
+
+    def summarize(groups: dict[str, list]) -> dict[str, dict]:
+        return {
+            family: {
+                "n": len(items),
+                "win_rate": sum(1 for item in items if _win(item, win_margin)) / len(items),
+            }
+            for family, items in groups.items()
+        }
+
+    per_product_family = summarize(product_groups)
+    per_analysis_family = summarize(analysis_groups)
+    per_family = per_analysis_family
 
     from kore.reward import timing_integrity as ti
     return {
@@ -77,6 +96,10 @@ def run_korebench(
         "correct_rate": (res["num_correct"] / n) if n else 0.0,
         "fast_p": res["fast_p"],
         "geometric_mean_speedup": res["geometric_mean_speedup"],
+        "taxonomy_version": taxonomy.TAXONOMY_VERSION,
+        "per_product_family": per_product_family,
+        "per_analysis_family": per_analysis_family,
+        # Compatibility alias: report-family means the analysis rollup.
         "per_family": per_family,
         "timing_integrity_complete": ti.uncovered() == [],
         "speed_aggregation": getattr(cfg, "speed_aggregation", "worst"),
@@ -90,8 +113,13 @@ def data_scale_summary() -> dict:
     rep = audit()
     return {
         "operators": rep.n_operators, "train": rep.n_train, "heldout": rep.n_heldout,
-        "families": len(rep.families), "base_shapes": rep.total_base_shapes,
+        "families": len(rep.families),
+        "analysis_rollups": len(rep.analysis_rollups),
+        "base_shapes": rep.total_base_shapes,
         "dtypes": rep.dtypes, "heldout_families": rep.heldout_families,
+        "near_generalization_tasks": rep.near_generalization_tasks,
+        "taxonomy_version": rep.taxonomy_version,
+        "taxonomy_digest": rep.taxonomy_digest,
     }
 
 

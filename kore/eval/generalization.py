@@ -5,10 +5,8 @@ stall/occupancy residual) is *operator-independent*, so a policy trained to
 descend the residual on some operator families should transfer to families it
 never saw. This harness makes that claim falsifiable WITHOUT any training:
 
-  1. Classify every task into a disjoint operator FAMILY (gemm, norm, activation,
-     reduction, attention, moe, positional, quant) via :func:`classify` - a
-     registry-independent, ordered pattern match on the task id / operation, so it
-     scales to the full authoring-engine task zoo (100s of ops) and future ops.
+  1. Roll every canonical product-family leaf up to its analysis parent via the
+     versioned :mod:`kore.tasks.taxonomy` authority.
   2. Hold out ENTIRE families (a leave-one-family-out probe) and assert there is
      no task- or family-level leakage between the train and held-out splits.
   3. Evaluate eta and the physics residual-descent reward on the HELD-OUT
@@ -17,14 +15,9 @@ never saw. This harness makes that claim falsifiable WITHOUT any training:
      a trained checkpoint's measured kernels -- it is a pure offline eval and
      NEVER launches training.
 
-This ``classify`` taxonomy is the richer analysis / leave-one-family-out (LOFO)
-grouping and is kept deliberately SEPARATE from the AUTHORITATIVE product split in
-``kore.tasks.registry`` (``operator_family`` + ``HELDOUT_FAMILIES``). The product
-model TRAINS core attention (flash prefill / decode / varlen / fp8) and reserves
-only the structurally-distinct MLA (latent attention) and paged-KV decode families
-(plus any foreign-arch task) as the never-trained generalization set. Do not
-conflate the two taxonomies: here ``attention`` lumps flash/paged together for
-coarse offline study, whereas the registry separates them to protect the split.
+The product leaves and analysis parents are two levels of one hierarchy, not two
+independent classifiers.  Core attention, MLA, and paged attention are distinct
+product leaves, while all three roll up to ``attention`` for LOFO reporting.
 """
 
 from __future__ import annotations
@@ -36,6 +29,7 @@ from pathlib import Path
 from statistics import median
 from typing import Optional
 
+from kore.tasks import taxonomy
 from kore.reward.physics import (
     DEFAULT_PHYSICS_WEIGHT,
     compute_residual_reward,
@@ -43,36 +37,18 @@ from kore.reward.physics import (
     physics_from_measure,
 )
 
-# --------------------------------------------------------------------------- #
-# Operator-family classifier. Ordered rules: FIRST match wins. Matches on the
-# task id (e.g. "gen_gemm_silu_fp16") or a raw operation ("gemm_silu") -- task
-# ids encode the operation, so this is registry-independent. NB order matters:
-# gemm-epilogue fusions (gemm_silu) must hit "gemm" before "activation", and
-# "row_"/"softmax" hit "reduction" while bare "maximum"/"minimum" fall through to
-# the "activation" elementwise catch-all.
-# --------------------------------------------------------------------------- #
-FAMILY_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("attention",  ("attn", "attention", "flash", "paged")),
-    ("moe",        ("moe", "expert", "topk")),
-    ("gemm",       ("gemm", "matmul", "bmm")),
-    ("norm",       ("rmsnorm", "layernorm", "layer_norm", "rms_norm", "groupnorm", "batchnorm", "norm")),
-    ("positional", ("rope", "rotary")),
-    ("quant",      ("quant",)),
-    ("reduction",  ("softmax", "row_", "reduce", "argmax", "cumsum")),
-    ("activation", ()),  # catch-all: elementwise ops + (gated) activations
-]
-FAMILIES: tuple[str, ...] = tuple(f for f, _ in FAMILY_RULES)
+FAMILIES: tuple[str, ...] = taxonomy.ANALYSIS_FAMILIES
 
 
 def classify(name: str) -> str:
-    """Classify a task id OR operation string into one operator family."""
-    s = (name or "").lower()
-    for fam, keys in FAMILY_RULES:
-        if not keys:
-            return fam  # catch-all
-        if any(k in s for k in keys):
-            return fam
-    return "activation"
+    """Analysis rollup for a registered task ID or unregistered operation name."""
+    if not name:
+        return "other"
+    try:
+        from kore.tasks.registry import analysis_family, get_task
+        return analysis_family(get_task(name))
+    except KeyError:
+        return taxonomy.analysis_family_for_name(name)
 
 
 def family_of(task_id: str) -> Optional[str]:
@@ -87,12 +63,9 @@ def all_families() -> tuple[str, ...]:
 
 
 def registry_task_ids() -> list[str]:
-    """All task ids from the KORE registry (best-effort; empty if unavailable)."""
-    try:
-        from kore.tasks.registry import all_tasks
-        return [t.task_id for t in all_tasks()]
-    except Exception:  # noqa: BLE001
-        return []
+    """All task IDs from the fail-closed KORE registry."""
+    from kore.tasks.registry import all_tasks
+    return [t.task_id for t in all_tasks()]
 
 
 def families_of_tasks(task_ids) -> dict:
@@ -113,7 +86,10 @@ class HoldoutSplit:
     train_tasks: list[str]
 
     def as_dict(self) -> dict:
+        from kore.tasks.registry import taxonomy_digest
         return {
+            "taxonomy_version": taxonomy.TAXONOMY_VERSION,
+            "taxonomy_digest": taxonomy_digest(),
             "heldout_families": sorted(self.heldout_families),
             "train_families": sorted(self.train_families),
             "heldout_tasks": sorted(self.heldout_tasks),

@@ -228,7 +228,7 @@ def test_degenerate_evolved_production_rejected_by_gate():
         g.Production("relu", g.MATRIX, g.MATRIX, (mid["relu"],)))
     pipe = g.pipeline_from_production(src["input"], deg)
     res = m.construction_gate(pipe, "fp32", pipe.signature().replace("->", "_"),
-                             "minted_fusion")
+                             "fusion")
     assert not res.ok and res.reason == "constant_output"
 
     # and the minter NEVER emits a gate-failing task, even with evolution on.

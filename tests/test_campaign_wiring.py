@@ -144,6 +144,11 @@ def test_stale_campaign_manifest_is_invalidated(tmp_path):
         "done_stages": set(),
         "tasks": [get_task("rmsnorm_aiter")],
         "args": args,
+        # The merged campaign requires complete lineage before a manifest is written
+        # (frontier lineage hardening); a consistent stub suffices to exercise the
+        # taxonomy stale-split rejection on load.
+        "lineage": {"compatibility_digest": "test-lineage",
+                    "tasks": {"train": ["rmsnorm_aiter"], "eval": []}},
     }
     rc._apply_split(ctx)
     rc._save_manifest(ctx)

@@ -329,7 +329,12 @@ class KoreEnv:
         self._active_source: Optional[str] = None
         self._active_task: Optional[Task] = None
         self._task_descriptor_cache: dict[str, dict] = {}
-        if self._sandbox_enabled:
+        # The in-process "trusted-code-only" isolation controller is ALWAYS
+        # constructed when kore.sandbox is available: it needs no external broker,
+        # provides ambient-secret scrubbing + a trusted backend label, and is the
+        # safe default. Only broker-backed STRONG isolation (execution routing) is
+        # gated by self._sandbox_enabled below.
+        if _SANDBOX_AVAILABLE:
             self.sandbox_config = (
                 sandbox_config
                 or getattr(config, "sandbox", None)
@@ -560,6 +565,23 @@ class KoreEnv:
             )
 
         env = os.environ.copy()
+        # Trusted-code-only ambient-secret scrub (default isolation posture): the
+        # candidate/driver subprocess runs untrusted-authored kernel code, so never
+        # leak host credentials or process-injection vectors into it. Drop known
+        # sensitive vars + credential/token patterns, while KEEPING vars the ROCm
+        # driver actually needs (PATH, LD_LIBRARY_PATH, HOME/GPU/cache are set below).
+        _AMBIENT_SECRET_DENY = {
+            "ANTHROPIC_API_KEY", "AMD_LLM_API_KEY", "OPENAI_API_KEY", "HF_TOKEN",
+            "HUGGING_FACE_HUB_TOKEN", "GITHUB_TOKEN", "HTTPS_PROXY", "HTTP_PROXY",
+            "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy", "NO_PROXY",
+            "SSH_AUTH_SOCK", "SSH_AGENT_PID", "LD_PRELOAD", "PYTHONUSERBASE",
+            "PYTHONSTARTUP", "SLURM_JOB_ID",
+        }
+        for _sk in list(env):
+            if (_sk in _AMBIENT_SECRET_DENY
+                    or _sk.startswith(("AWS_", "GOOGLE_", "AZURE_", "GCP_", "SLURM_"))
+                    or _sk.endswith(("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD"))):
+                env.pop(_sk, None)
         # Repo root (the parent of the kore/ package). Prepended to PYTHONPATH so the
         # compile/bench driver subprocess can ``import kore.*`` (e.g. _genops.driver_main).
         project_root = str(Path(__file__).resolve().parents[2])

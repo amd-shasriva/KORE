@@ -142,12 +142,12 @@ def test_legacy_capability_is_explicit_screening_not_vendor_grade(
 
     calls = []
 
-    def fake_bench(_driver, sh, impl, _workdir, _env):
+    def fake_bench(_driver, sh, impl, _workdir, _env, **_kw):
         calls.append((sh.name, impl))
         return (1.0 if impl == "candidate" else 2.0), 0.0, False
 
     monkeypatch.setattr(env, "_exec", fake_exec)
-    monkeypatch.setattr(env, "_env", lambda: {})
+    monkeypatch.setattr(env, "_env", lambda *a, **k: {})
     monkeypatch.setattr(env, "_bench_multi", fake_bench)
     obs = env._run(task, "kernel source", shapes, workdir, do_bench=True)
 
@@ -258,14 +258,14 @@ def test_raw_samples_and_protocol_identity_survive_environment(tmp_path, monkeyp
         for i in range(cfg.max_variance_runs)
     ]
     monkeypatch.delenv("KORE_NO_BENCH_BOTH", raising=False)
-    monkeypatch.setattr(env, "_env", lambda: {})
+    monkeypatch.setattr(env, "_env", lambda *a, **k: {})
     monkeypatch.setattr(
         env, "_exec",
-        lambda *_args: (0, "SNR: 80.0 dB\nallclose: True\n", False))
+        lambda *_args, **_kw: (0, "SNR: 80.0 dB\nallclose: True\n", False))
     monkeypatch.setattr(
-        env, "_driver_capabilities", lambda *_args: caps)
+        env, "_driver_capabilities", lambda *_args, **_kw: caps)
     monkeypatch.setattr(
-        env, "_bench_all", lambda *_args: ({"primary": pairs}, False))
+        env, "_bench_all", lambda *_args, **_kw: ({"primary": pairs}, False))
     obs = env._run(task, "kernel source", [shape], workdir, do_bench=True)
 
     assert obs.timing_grade == "publication"
@@ -292,13 +292,13 @@ def test_partial_or_unknown_capabilities_are_performance_ineligible(
     cfg = dataclasses.replace(CONFIG, verifier_determinism_check=False)
     env = KoreEnv(task, config=cfg, use_replay=False)
     monkeypatch.delenv("KORE_NO_BENCH_BOTH", raising=False)
-    monkeypatch.setattr(env, "_env", lambda: {})
+    monkeypatch.setattr(env, "_env", lambda *a, **k: {})
     monkeypatch.setattr(
         env, "_exec",
-        lambda *_args: (0, "SNR: 80.0 dB\nallclose: True\n", False))
+        lambda *_args, **_kw: (0, "SNR: 80.0 dB\nallclose: True\n", False))
     monkeypatch.setattr(
         env, "_driver_capabilities",
-        lambda *_args: {"protocol": 2, "protocol_id": "partial"})
+        lambda *_args, **_kw: {"protocol": 2, "protocol_id": "partial"})
     obs = env._run(task, "kernel source", [shape], workdir, do_bench=True)
 
     assert obs.timing_grade == "ineligible"
@@ -311,7 +311,7 @@ def test_unknown_probe_is_normalized_to_explicit_ineligibility(monkeypatch):
     env = object.__new__(KoreEnv)
     env.task = SimpleNamespace(task_id="unknown")
     env.correctness_timeout = 1
-    monkeypatch.setattr(env, "_exec", lambda *_args: (2, "unknown option", False))
+    monkeypatch.setattr(env, "_exec", lambda *_args, **_kw: (2, "unknown option", False))
     caps = env._driver_capabilities(Path("/driver.py"), Path("/tmp"), {})
     assert caps["performance_eligible"] is False
     assert caps["protocol_id"] == "unknown"
@@ -450,7 +450,7 @@ def test_all_shape_batch_postchecks_every_shape(monkeypatch):
 
     monkeypatch.setattr(
         _genops, "_build_bench_pair",
-        lambda *_args: ((lambda: None), (lambda: None)),
+        lambda *_args, **_kw: ((lambda: None), (lambda: None)),
     )
     monkeypatch.setattr(_genops, "_time_median",
                         lambda _fn, _warmup, _iters: 1.0)
@@ -488,7 +488,7 @@ REF_median_ms: 2.0
 SNR: 80.0 dB
 allclose: True
 """
-    monkeypatch.setattr(env, "_exec", lambda *_args: (0, out, False))
+    monkeypatch.setattr(env, "_exec", lambda *_args, **_kw: (0, out, False))
     result, poisoned = env._bench_all(
         Path("/driver.py"),
         [Shape("a", {"N": 8}), Shape("b", {"N": 16})],

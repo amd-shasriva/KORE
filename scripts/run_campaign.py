@@ -744,6 +744,14 @@ def _load_manifest_into_ctx(ctx, manifest: dict | None = None) -> bool:
         return False
     if not ctx.get("lineage"):
         raise RuntimeError("current lineage must be built before loading a manifest")
+    # Fail-closed split-contract validation FIRST (taxonomy branch): a stale taxonomy/
+    # split digest is a specific, cheap rejection that must precede the broader lineage
+    # diff, so callers see StaleSplitManifestError; also exposes the validated split.
+    persisted_split = manifest.get("split_manifest")
+    if persisted_split is not None:
+        from kore.tasks.registry import validate_split_manifest
+        validate_split_manifest(persisted_split)
+        ctx["split_manifest"] = persisted_split
     mismatches = _lineage_mismatches(manifest["lineage"], ctx["lineage"])
     if (
         manifest["lineage"].get("compatibility_digest")
@@ -779,9 +787,17 @@ def _save_manifest(ctx) -> None:
         return
     if not ctx.get("lineage"):
         raise RuntimeError("refusing to write a manifest without complete lineage")
+    # Persist the versioned, digest-bound split manifest alongside lineage so a
+    # resume can fail-closed if the taxonomy/split contract drifted (taxonomy branch).
+    # Derive from the live registry when ctx has no pre-applied split.
+    split_manifest = ctx.get("split_manifest")
+    if not split_manifest:
+        from kore.tasks.registry import build_split_manifest
+        split_manifest = build_split_manifest().as_dict()
     data = {
         "schema": {"name": _MANIFEST_NAME, "version": _MANIFEST_VERSION},
         "lineage": ctx["lineage"],
+        "split_manifest": split_manifest,
         "state": {
             "midtrain_ckpt": ctx.get("midtrain_ckpt"),
             "sft_ckpt": ctx.get("sft_ckpt"),

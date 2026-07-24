@@ -1,8 +1,8 @@
 """Verify dataset completeness and emit the remaining-undone list for cleanup.
 
 Prints a one-line summary (fully-complete count, wins histogram, missing repair/
-groups) and writes /tmp/cleanup.txt with every task still short of
-repair+groups+wins>=target, so the supervisor can mop up stragglers on b05-2.
+groups) and writes a private-runtime cleanup list with every task still short of
+repair+groups+wins>=target. ``--cleanup-out`` selects an explicit owned state file.
 """
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def main() -> int:
     ap.add_argument("target", type=int)
     ap.add_argument("--tasks", default="", help="optional comma-separated task IDs")
     ap.add_argument("--prefix", default="genb_")
-    ap.add_argument("--cleanup-out", default="/tmp/cleanup.txt")
+    ap.add_argument("--cleanup-out", default="")
     ap.add_argument("--require-complete", action="store_true")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
@@ -111,8 +111,12 @@ def main() -> int:
             if task.task_id.startswith(args.prefix)
         ]
     summary, undone = verify(Path(args.root), tasks, args.target)
-    if args.cleanup_out:
-        _write_cleanup(Path(args.cleanup_out), undone)
+    cleanup_out = args.cleanup_out
+    if not cleanup_out:
+        from kore.ops.runtime import SecureRuntime
+
+        cleanup_out = str(SecureRuntime().state_path("kf-verify/cleanup.txt"))
+    _write_cleanup(Path(cleanup_out), undone)
     if args.json:
         print(json.dumps(summary, sort_keys=True))
     else:

@@ -1,0 +1,270 @@
+{
+  "schema_version": 1,
+  "classifications": [
+    "active",
+    "diagnostic",
+    "deprecated",
+    "destructive"
+  ],
+  "deprecated_development_override": "KORE_ALLOW_DEPRECATED_DEV=1",
+  "destructive_development_override": "KORE_ALLOW_DESTRUCTIVE_DEV=1",
+  "production_datagen_entrypoint": "scripts/spur_supervise_datagen.py",
+  "scripts": [
+    {
+      "path": "scripts/complete_base.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "SPUR-compatible repair/groups worker"
+    },
+    {
+      "path": "scripts/datagen_half.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scripts/spur_submit_datagen.sh"
+    },
+    {
+      "path": "scripts/deepen_wins.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "SPUR-compatible additive wins worker"
+    },
+    {
+      "path": "scripts/eval_bakeoff_multi.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/_factory_smoke.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/factory_supervise.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scripts/spur_supervise_datagen.py"
+    },
+    {
+      "path": "scripts/gpu_pick_hip.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "site_specific": true
+    },
+    {
+      "path": "scripts/grpo_smoke.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/_kf_split.py",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scripts/spur_partition.py"
+    },
+    {
+      "path": "scripts/_kf_verify.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "strict SPUR and maintenance verifier"
+    },
+    {
+      "path": "scripts/_kf_worker.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scripts/spur_datagen_array.sbatch"
+    },
+    {
+      "path": "scripts/kore_monitor.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "side_effect_free": true
+    },
+    {
+      "path": "scripts/kore_pause_after_datagen.py",
+      "classification": "destructive",
+      "lifecycle": "deprecated",
+      "replacement": "scheduler-native job dependencies",
+      "signals_owned_processes": true
+    },
+    {
+      "path": "scripts/kore_resume_supervise.py",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scheduler-native job dependencies"
+    },
+    {
+      "path": "scripts/kore_supervise.py",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scripts/spur_supervise_datagen.py"
+    },
+    {
+      "path": "scripts/launch_distributed.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "single allocated training-stage launcher"
+    },
+    {
+      "path": "scripts/lib/ops_runtime.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "shared shell library",
+      "entrypoint": false
+    },
+    {
+      "path": "scripts/_maxed_smoke.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/merge_datagen_roots.py",
+      "classification": "destructive",
+      "lifecycle": "active",
+      "side_effect_free_by_default": true,
+      "mutation_requires": "--apply"
+    },
+    {
+      "path": "scripts/prove_dense_reward.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/prove_new_ops.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/_repro_grpo_step.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/run_campaign.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "training orchestrator"
+    },
+    {
+      "path": "scripts/run_conductor_14b.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scheduler-approved training submission"
+    },
+    {
+      "path": "scripts/run_e2e_14b.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scheduler validation job"
+    },
+    {
+      "path": "scripts/run_full_14b.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scheduler-approved training submission"
+    },
+    {
+      "path": "scripts/run_grpo_resilient.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scheduler GRPO job with explicit GPU allocation"
+    },
+    {
+      "path": "scripts/run_sft_gate_dynamic.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scheduler retention-gate job"
+    },
+    {
+      "path": "scripts/run_sft_gate.py",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "supported campaign retention gate"
+    },
+    {
+      "path": "scripts/run_v2_reuse_14b.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "SPUR datagen plus scheduler training jobs"
+    },
+    {
+      "path": "scripts/sft_finish_dynamic.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scheduler SFT and retention-gate jobs"
+    },
+    {
+      "path": "scripts/sft_smoke.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/smoke_env.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/spur_datagen_array.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true
+    },
+    {
+      "path": "scripts/spur_partition.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true
+    },
+    {
+      "path": "scripts/spur_submit_datagen.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true
+    },
+    {
+      "path": "scripts/spur_supervise_datagen.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true
+    },
+    {
+      "path": "scripts/test_amd_gateway.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/tmux_campaign.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scheduler-native durable job"
+    },
+    {
+      "path": "scripts/two_node_maximize.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scripts/spur_supervise_datagen.py"
+    },
+    {
+      "path": "scripts/_validate_benchboth.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/verify_breadth.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/wins_deepen_supervise.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scripts/spur_supervise_datagen.py"
+    },
+    {
+      "path": "logs/reli.sh",
+      "classification": "destructive",
+      "lifecycle": "deprecated",
+      "replacement": "isolated scheduler test job",
+      "deletes_artifacts": true
+    }
+  ]
+}

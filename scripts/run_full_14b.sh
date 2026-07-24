@@ -4,8 +4,23 @@
 # counts, FULL GRPO horizon, full-parameter FSDP across 8x MI325X, every
 # best-in-world lever engaged. Durable/resumable from data/full14b/campaign_manifest.json.
 set -euo pipefail
-cd /root/Kore-rl/kore
-export PYTHONPATH=/root/Kore-rl/kore:${PYTHONPATH:-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ops_runtime.sh
+source "$SCRIPT_DIR/lib/ops_runtime.sh"
+kore_deprecated_guard \
+  "scripts/run_full_14b.sh" \
+  "use scripts/spur_supervise_datagen.py for production data and a scheduler-approved training submission" \
+  "bash scripts/run_full_14b.sh [--dry-run]" \
+  "$@"
+
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+PY="$(kore_resolve_python "$REPO_ROOT")"
+RUNTIME="$(kore_private_runtime)"
+export PATH="$(dirname "$PY"):$PATH"
+export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
+kore_secure_source_env "$REPO_ROOT/.env.local"
+kore_require_commands od stat
 
 # CRITICAL: the FSDP stages need ALL GPUs visible so accelerate assigns one per rank.
 # A stale HIP_VISIBLE_DEVICES/CUDA_VISIBLE_DEVICES in the calling shell pins every rank
@@ -18,7 +33,8 @@ export KORE_VERIFIED_CORRECTNESS=1     # enumerated adversarial no-lucky-pass ga
 export KORE_COMPILE_BASELINE=1         # honest compiler-fused baseline (anti speedup-inflation)
 export KORE_GENERAL_REPLAY_HF=1        # real SOTA replay (AMD kernels / reasoning / code)
 export KORE_BENCH_COLD=1               # cold-cache (L2-flushed) timing
-export TORCHINDUCTOR_CACHE_DIR=/root/Kore-rl/.inductor_cache
+export TORCHINDUCTOR_CACHE_DIR="$REPO_ROOT/.inductor_cache"
+kore_export_rigor_env
 
 # No --tasks  -> ALL registered tasks (train = non-held-out; eval = held-out MLA + paged-KV decode).
 # No datagen caps -> full defaults (n_repair=50, n_parents=20, k=6, wins_gens=8,
@@ -26,7 +42,10 @@ export TORCHINDUCTOR_CACHE_DIR=/root/Kore-rl/.inductor_cache
 #   early-stop). dpo-rounds=2, sft_total=20000, eval-n=300, retention gate @ 0.02:
 #   all campaign defaults (the real, no-shortcut pipeline). Curriculum / anti-collapse
 #   / value-prefilter / RFT / retention gates are ON by default.
-python scripts/run_campaign.py \
+RUN_ID="${KORE_RUN_ID:-$(kore_new_run_id full-14b)}"
+mkdir -p runs/full/logs
+LOG="runs/full/logs/full_${RUN_ID}.log"
+COMMAND=("$PY" scripts/run_campaign.py \
   --model Qwen/Qwen3-14B \
   --full-ft --use-hf --teacher claude \
   --adaptive-steps \
@@ -36,5 +55,18 @@ python scripts/run_campaign.py \
   --sft-out runs/full/sft \
   --dpo-out runs/full/dpo \
   --grpo-out runs/full/grpo \
-  --soup-out runs/full/soup
-echo "[run_full_14b] campaign process exited with code $?"
+  --soup-out runs/full/soup)
+set +e
+kore_owned_run "$PY" "$REPO_ROOT" "$RUNTIME" "$RUN_ID" "full-14b" "$LOG" \
+  "${COMMAND[@]}"
+rc=$?
+set -e
+if (( rc != 0 )); then
+  echo "[run_full_14b] campaign failed rc=$rc (run_id=$RUN_ID)" >&2
+  exit "$rc"
+fi
+kore_verify "$PY" "$REPO_ROOT" campaign \
+  --repo "$REPO_ROOT" \
+  --data-root data/full14b \
+  --required-stages midtrain,datagen,agentic,build,sft,dpo,grpo,soup,eval
+echo "[run_full_14b] strict completion verified (run_id=$RUN_ID)"

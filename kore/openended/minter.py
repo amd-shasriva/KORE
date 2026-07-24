@@ -1,8 +1,8 @@
 """Verifiable, open-ended TASK MINTER for the KORE RL curriculum (P3 paradigm).
 
 The proposer (:mod:`kore.openended.proposer`) selects tasks at the policy's
-competence frontier from a FIXED parametric space (the 282 registered op x dtype
-tasks). This module removes that ceiling: it MINTS *net-new*, correct-by-
+competence frontier from the current FIXED registered op x dtype task set. This
+module removes that ceiling: it MINTS *net-new*, correct-by-
 construction tasks at train time by composing verified torch primitives
 (:mod:`kore.openended.grammar`), so the curriculum can grow open-endedly instead
 of only re-weighting a fixed menu.

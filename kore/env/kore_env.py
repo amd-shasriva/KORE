@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
+import math
 import os
 import re
 import resource
@@ -70,6 +72,16 @@ _MEDIAN = re.compile(r"median_ms:\s*([-\d.eE]+)")
 # Batched (--bench-both) per-impl medians: candidate + reference timed in ONE process.
 _CAND_MED = re.compile(r"CAND_median_ms:\s*([-\d.eE]+)")
 _REF_MED = re.compile(r"REF_median_ms:\s*([-\d.eE]+)")
+_DRIVER_CAPS = re.compile(r"^KORE_DRIVER_CAPABILITIES:\s*(\{[^\n]+\})\s*$",
+                          re.MULTILINE)
+_BATCH_CAPABILITIES = {
+    "protocol": 1,
+    "bench_both": True,
+    "multi_shape": True,
+    "fresh_inputs": True,
+    "interleaved": True,
+    "postcheck_all_shapes": True,
+}
 # Candidate import/compile failure (the kernel's fault).
 _COMPILE_ERR = re.compile(
     r"(SyntaxError|CompilationError|triton\..*Error|IndentationError|"
@@ -89,6 +101,46 @@ _INFRA_ERR = re.compile(
 def _last(pattern: re.Pattern, text: str):
     ms = list(pattern.finditer(text))
     return ms[-1] if ms else None
+
+
+def _parse_driver_capabilities(text: str) -> dict:
+    """Parse the strict, versioned driver handshake from subprocess output."""
+    matches = list(_DRIVER_CAPS.finditer(text or ""))
+    if len(matches) != 1:
+        return {}
+    try:
+        caps = json.loads(matches[0].group(1))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(caps, dict) or caps.get("protocol") != 1:
+        return {}
+    return caps
+
+
+def _supports_batch_bench(caps: dict) -> bool:
+    return all(caps.get(k) == v for k, v in _BATCH_CAPABILITIES.items())
+
+
+def _timing_completeness_error(expected_names, candidate, baseline) -> Optional[str]:
+    """Return why per-shape timing is incomplete, else ``None``."""
+    expected_list = list(expected_names)
+    expected = set(expected_list)
+    if len(expected) != len(expected_list):
+        return "requested shape names are not unique"
+    for label, values in (("candidate", candidate), ("baseline", baseline)):
+        keys = set(values)
+        if keys != expected:
+            missing = sorted(expected - keys)
+            extra = sorted(keys - expected)
+            return f"{label} timing keys mismatch (missing={missing}, extra={extra})"
+        for name, value in values.items():
+            try:
+                valid = math.isfinite(float(value)) and float(value) > 0.0
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                return f"{label} timing for {name!r} is not finite and positive"
+    return None
 
 
 def _preexec():  # pragma: no cover - runs in child only
@@ -300,6 +352,7 @@ class KoreEnv:
         driver = workdir / "driver.py"
         env = self._env()
 
+        requested_names = [sh.name for sh in shapes]
         snr_by_shape: dict[str, float] = {}
         compiled = True
         validation_passed = True
@@ -337,7 +390,13 @@ class KoreEnv:
                 last_err = _tail(out)
 
         thr = self._snr_threshold
-        correct = validation_passed and bool(snr_by_shape) and all(v >= thr for v in snr_by_shape.values())
+        requested_set = set(requested_names)
+        correct = (
+            validation_passed
+            and len(requested_set) == len(requested_names)
+            and set(snr_by_shape) == requested_set
+            and all(v >= thr for v in snr_by_shape.values())
+        )
 
         # Anti-hack determinism re-check: re-run the primary shape once and require
         # a stable verdict, so a kernel cannot be rewarded for passing the SNR gate
@@ -378,6 +437,8 @@ class KoreEnv:
             snr_by_shape=snr_by_shape,
             snr_db=min(snr_by_shape.values()) if snr_by_shape else None,
             validation_passed=correct, error_text=last_err if not correct else None,
+            requested_shapes=list(requested_names),
+            timing_requested=bool(correct and do_bench),
         )
         if not (correct and do_bench):
             return obs
@@ -385,7 +446,7 @@ class KoreEnv:
         wall_by_shape: dict[str, float] = {}
         base_by_shape: dict[str, float] = {}
         cvs: list[float] = []
-        if self._batch_bench_ok(driver):
+        if self._batch_bench_ok(driver, workdir, env):
             # Fast + accurate: ALL shapes timed (both impls, n_max repeats) in ONE
             # process under a single per-GPU timing-lock hold. Contention-fair ratio +
             # minimal exclusive window -> honest speedups at high throughput.
@@ -422,6 +483,20 @@ class KoreEnv:
                     cvs.append(cand_cv)
                 if ref is not None:
                     base_by_shape[sh.name] = ref
+
+        timing_error = _timing_completeness_error(
+            requested_names, wall_by_shape, base_by_shape)
+        if timing_error:
+            _ev("WARN", "eval_bench_incomplete", task=task.task_id,
+                source_sha=_sha12(source), reason=timing_error)
+            # A correct kernel with missing/invalid timing is an inconclusive,
+            # retryable infrastructure result.  Never expose partial dictionaries:
+            # reward aggregation must not silently score only the shapes that
+            # happened to produce timings.
+            obs.infra_error = True
+            obs.error_text = f"infra: incomplete timing: {timing_error}"
+            return obs
+
         obs.wall_by_shape = wall_by_shape
         obs.baseline_by_shape = base_by_shape
         obs.cv_pct = max(cvs) if cvs else None
@@ -597,23 +672,33 @@ class KoreEnv:
             finally:
                 f.close()
 
-    def _batch_bench_ok(self, driver: Path) -> bool:
-        """True iff this task uses the shared genops driver (supports ``--bench-both``).
+    def _driver_capabilities(self, driver: Path, workdir: Path, env: dict) -> dict:
+        """Probe and cache the driver's explicit versioned capability handshake."""
+        cached = getattr(self, "_driver_caps_cache", None)
+        if cached is not None:
+            return cached
+        timeout = min(max(int(self.correctness_timeout), 1), 30)
+        rc, out, timed = self._exec(
+            [sys.executable, str(driver), "--kore-driver-capabilities"],
+            workdir, env, timeout)
+        caps = _parse_driver_capabilities(out) if (not timed and rc == 0) else {}
+        self._driver_caps_cache = caps
+        _ev("DEBUG", "driver_capabilities", task=self.task.task_id,
+            protocol=caps.get("protocol"), batch=_supports_batch_bench(caps),
+            probe_rc=rc, timed_out=timed)
+        return caps
 
-        Detected once by scanning the driver for ``driver_main`` (all generated
-        ``gen_*``/``genv_*`` tasks route through it). Bespoke drivers fall back to the
-        proven per-impl path. Set ``KORE_NO_BENCH_BOTH=1`` to force the legacy path
-        (used for the head-to-head timing-parity validation)."""
+    def _batch_bench_ok(self, driver: Path, workdir: Path, env: dict) -> bool:
+        """True only for a driver that explicitly promises the full batch protocol.
+
+        Unsupported and older drivers safely fall back to their per-implementation
+        ``--bench-mode`` path.  Set ``KORE_NO_BENCH_BOTH=1`` to force that path for
+        timing-parity validation.
+        """
         if os.environ.get("KORE_NO_BENCH_BOTH", "").strip().lower() in ("1", "true", "yes"):
             return False
-        v = getattr(self, "_batch_ok_cache", None)
-        if v is None:
-            try:
-                v = "driver_main" in Path(driver).read_text()
-            except Exception:  # noqa: BLE001
-                v = False
-            self._batch_ok_cache = v
-        return v
+        return _supports_batch_bench(
+            self._driver_capabilities(driver, workdir, env))
 
     def _bench_pair(self, driver: Path, sh: Shape, workdir: Path, env: dict):
         """Time candidate AND reference in ONE ``--bench-both`` process (``max_variance_runs``
@@ -635,6 +720,8 @@ class KoreEnv:
             return [], [], False
         ac = _last(_ALLCLOSE, out)
         snr = _last(_SNR, out)
+        if ac is None and snr is None:
+            return [], [], False
         if (ac and ac.group(1).lower() == "false") or \
            (snr and float(snr.group(1)) < self._snr_threshold):
             return None, None, True
@@ -669,14 +756,24 @@ class KoreEnv:
         if timed or rc != 0:
             _ev("DEBUG", "bench_all", task=self.task.task_id, ok=False, rc=rc)
             return {}, False
-        ac = _last(_ALLCLOSE, out)
-        snr = _last(_SNR, out)
-        if (ac and ac.group(1).lower() == "false") or \
-           (snr and float(snr.group(1)) < self._snr_threshold):
-            return {}, True
         blocks = out.split("SHAPE_BEGIN")[1:]  # per-shape, in the order we passed them
+        if len(blocks) != len(shapes):
+            return {}, False
         result: dict[str, tuple] = {}
-        for sh, block in zip(shapes, blocks):
+        for sh, spec, block in zip(shapes, specs, blocks):
+            marker, _, _body = block.partition("\n")
+            if marker.strip() != spec:
+                return {}, False
+            # The shared driver emits one late correctness verdict in EVERY
+            # shape block.  Validate per block; looking only at the final global
+            # verdict would let an earlier failing shape hide behind a later pass.
+            ac = _last(_ALLCLOSE, block)
+            snr = _last(_SNR, block)
+            if ac is None and snr is None:
+                return {}, False
+            if (ac and ac.group(1).lower() == "false") or \
+               (snr and float(snr.group(1)) < self._snr_threshold):
+                return {}, True
             cand = [float(m.group(1)) for m in _CAND_MED.finditer(block)]
             ref = [float(m.group(1)) for m in _REF_MED.finditer(block)]
             result[sh.name] = (cand, ref)
@@ -713,6 +810,9 @@ class KoreEnv:
             if impl == "candidate":
                 ac = _last(_ALLCLOSE, out)
                 snr = _last(_SNR, out)
+                if ac is None and snr is None:
+                    samples = []
+                    break
                 if (ac and ac.group(1).lower() == "false") or \
                    (snr and float(snr.group(1)) < self._snr_threshold):
                     poisoned = True

@@ -54,6 +54,11 @@ class Observation:
     wall_by_shape: dict[str, float] = field(default_factory=dict)
     baseline_by_shape: dict[str, float] = field(default_factory=dict)
     snr_by_shape: dict[str, float] = field(default_factory=dict)
+    # Exact shape-key contract supplied by KoreEnv.  ``timing_requested`` marks
+    # a correct evaluation that was expected to produce candidate+baseline
+    # timings for every one of these shapes.
+    requested_shapes: list[str] = field(default_factory=list)
+    timing_requested: bool = False
     validation_passed: bool = False
     error_text: Optional[str] = None
     dtype: str = "fp32"
@@ -254,15 +259,62 @@ def _ceiling_measured_ms(obs: "Observation") -> Optional[float]:
     return obs.wall_ms if (obs.wall_ms and obs.wall_ms > 0) else None
 
 
+def _required_shape_names(obs: Observation) -> tuple[str, ...]:
+    explicit = tuple(getattr(obs, "requested_shapes", ()) or ())
+    if explicit:
+        return explicit
+    if obs.snr_by_shape:
+        return tuple(obs.snr_by_shape)
+    return ()
+
+
+def _declared_shape_names(obs: Observation) -> tuple[str, ...]:
+    """Shapes explicitly requested by the environment (not legacy SNR hints)."""
+    return tuple(getattr(obs, "requested_shapes", ()) or ())
+
+
+def _valid_positive_timing(value) -> bool:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(v) and v > 0.0
+
+
+def _timing_complete(obs: Observation) -> bool:
+    """Whether timing covers the exact requested/correctness shape key set."""
+    walls = obs.wall_by_shape or {}
+    bases = obs.baseline_by_shape or {}
+    # Backward-compatible scalar observations carry no explicit shape contract.
+    if not walls and not bases and not _declared_shape_names(obs):
+        return (_valid_positive_timing(obs.wall_ms)
+                and _valid_positive_timing(obs.baseline_ms))
+    names = _required_shape_names(obs)
+    expected = set(names)
+    if len(expected) != len(names):
+        return False
+    if expected:
+        if set(walls) != expected or set(bases) != expected:
+            return False
+        return all(_valid_positive_timing(v) for v in walls.values()) and all(
+            _valid_positive_timing(v) for v in bases.values())
+    if walls or bases:
+        if not walls or set(walls) != set(bases):
+            return False
+        return all(_valid_positive_timing(v) for v in walls.values()) and all(
+            _valid_positive_timing(v) for v in bases.values())
+    return False
+
+
 def _shape_ratios(obs: Observation) -> list[float]:
-    """Per-shape speedup ratios base_ms/cand_ms (a gain; higher is better)."""
-    out: list[float] = []
-    if obs.baseline_by_shape and obs.wall_by_shape:
-        for k, cand in obs.wall_by_shape.items():
-            base = obs.baseline_by_shape.get(k)
-            if base and cand and cand > 0:
-                out.append(base / cand)
-    return out
+    """Complete per-shape speedups only; partial shape sweeps are never scored."""
+    if not (obs.wall_by_shape or obs.baseline_by_shape):
+        return []
+    if not _timing_complete(obs):
+        return []
+    names = _required_shape_names(obs) or tuple(obs.wall_by_shape)
+    return [float(obs.baseline_by_shape[k]) / float(obs.wall_by_shape[k])
+            for k in names]
 
 
 def _worst_speedup(obs: Observation) -> Optional[float]:
@@ -273,6 +325,8 @@ def _worst_speedup(obs: Observation) -> Optional[float]:
     ratios = _shape_ratios(obs)
     if ratios:
         return min(ratios)
+    if (_declared_shape_names(obs) or obs.wall_by_shape or obs.baseline_by_shape):
+        return None
     if obs.baseline_ms and obs.wall_ms and obs.wall_ms > 0:
         return obs.baseline_ms / obs.wall_ms
     return None
@@ -299,6 +353,8 @@ def _aggregate_speedup(obs: Observation, cfg) -> Optional[float]:
     """
     ratios = _shape_ratios(obs)
     if not ratios:
+        if (_declared_shape_names(obs) or obs.wall_by_shape or obs.baseline_by_shape):
+            return None
         if obs.baseline_ms and obs.wall_ms and obs.wall_ms > 0:
             return obs.baseline_ms / obs.wall_ms
         return None
@@ -429,6 +485,11 @@ def _speedup_term(su_scored: float, su_raw: float, obs: Observation, cfg,
 
 def _all_shapes_pass(obs: Observation, dtype: str, cfg, snr_threshold: Optional[float] = None) -> bool:
     thr = snr_threshold if snr_threshold is not None else cfg.snr_threshold_for(dtype)
+    requested = tuple(getattr(obs, "requested_shapes", ()) or ())
+    if requested:
+        expected = set(requested)
+        if len(expected) != len(requested) or set(obs.snr_by_shape) != expected:
+            return False
     if obs.snr_by_shape:
         return all(v is not None and v >= thr for v in obs.snr_by_shape.values())
     return obs.snr_db is not None and obs.snr_db >= thr
@@ -532,6 +593,23 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
         if credit > 0.0 or fmt:
             detail += f" (shaped +{credit:.4f}, format {fmt:+.4f})"
         rr = RewardResult(reward, False, None, "incorrect", flags, detail)
+        _log_decision(rr)
+        return rr
+
+    # A requested benchmark is all-or-nothing.  Missing candidate/baseline
+    # timings (or mismatched shape keys) are retryable infrastructure, never a
+    # "correct_no_bench" result and never a reward over the surviving subset.
+    timing_expected = (
+        getattr(obs, "timing_requested", False)
+        or bool(obs.baseline_by_shape)
+        or obs.baseline_ms is not None
+    )
+    if timing_expected and not _timing_complete(obs):
+        flags.extend(["infra", "incomplete_timing"])
+        rr = RewardResult(
+            cfg.reward_incorrect, False, None, "infra", flags,
+            obs.error_text or "infrastructure error: incomplete all-shape timing",
+        )
         _log_decision(rr)
         return rr
 

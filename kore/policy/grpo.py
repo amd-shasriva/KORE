@@ -2552,6 +2552,7 @@ def _rollout_agentic(model, tok, env, task, config, ref_model=None):
     # Per-turn MEASURED speedup + candidate source + roofline potential, recovered
     # from the harness's per-turn trace (aligned + correctness-gated; degrades safely).
     codes_t, speedups_t, phis_t = _agentic_per_turn_signal(episode, turn_correct, n)
+    infra_t = _agentic_turn_infra(episode, n)
     out = {"rewards": [], "correct": [], "infra": [], "gen_inputs": [],
            "ref_logps": [], "old_logps": [], "n_tokens": [], "codes": [],
            "speedups": [], "phis": []}
@@ -2569,7 +2570,7 @@ def _rollout_agentic(model, tok, env, task, config, ref_model=None):
             ref_lp = None
         out["rewards"].append(float(turn_rewards[t]))
         out["correct"].append(bool(turn_correct[t]))
-        out["infra"].append(False)  # harness exposes no per-turn infra trace
+        out["infra"].append(infra_t[t])
         out["gen_inputs"].append(gen_inputs)
         out["ref_logps"].append(ref_lp)
         out["old_logps"].append(old_lp)
@@ -2641,6 +2642,30 @@ def _agentic_per_turn_signal(episode, turn_correct, n: int):
         else:
             phis.append(None)
     return codes, speedups, phis
+
+
+def _agentic_turn_infra(episode, n: int) -> list[bool]:
+    """Recover per-assistant-turn infrastructure failures from tool results.
+
+    ``ToolExecutor`` marks every environment-backed result with
+    ``infra_error``.  The harness already records those results with their turn
+    index in ``tool_trace``, so no new episode schema is required.  Any infra
+    result in a turn excludes that assistant generation from Kevin samples and
+    therefore from group-relative advantages.
+    """
+    flags = [False] * max(0, n)
+    for entry in list(getattr(episode, "tool_trace", []) or []):
+        if not isinstance(entry, dict):
+            continue
+        turn = entry.get("turn")
+        result = entry.get("result")
+        if not isinstance(turn, int) or not (0 <= turn < len(flags)):
+            continue
+        if isinstance(result, dict) and (
+                result.get("infra_error") is True
+                or result.get("tier") == "infra"):
+            flags[turn] = True
+    return flags
 
 
 def _episode_turn_rewards(episode):

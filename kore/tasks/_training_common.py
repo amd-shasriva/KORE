@@ -46,6 +46,13 @@ import importlib.util
 import math
 import os
 
+from kore.tasks._genops import (
+    _clone_inputs,
+    _compare_outputs,
+    _output_pairs,
+    emit_driver_capabilities,
+)
+
 DEFAULT_TOL = (2e-2, 2e-2)
 
 
@@ -116,6 +123,33 @@ def _as_tuple(x) -> tuple:
     return tuple(x) if isinstance(x, (tuple, list)) else (x,)
 
 
+def _expected_grad_dtypes(ref, inputs, refs):
+    """Exact candidate gradient dtype ABI for the promoted training tasks.
+
+    References may declare ``OUTPUT_DTYPES`` (a sequence or callable).  The
+    shipped contracts otherwise return activation/weight gradients in the task's
+    native floating dtype, while LayerNorm's cross-token parameter reductions
+    (dgamma/dbeta) are explicitly fp32.
+    """
+    import torch
+
+    declared = getattr(ref, "OUTPUT_DTYPES", None)
+    if callable(declared):
+        declared = declared(inputs)
+    if declared is not None:
+        return tuple(declared)
+    native = next(
+        (t.dtype for t in inputs
+         if torch.is_tensor(t) and torch.is_floating_point(t)),
+        None,
+    )
+    names = tuple(getattr(ref, "GRAD_NAMES", ()))
+    return tuple(
+        r.dtype if (name in {"dgamma", "dbeta"} or native is None) else native
+        for name, r in zip(names, refs)
+    )
+
+
 def _load_candidate(task_dir: str, entry: str):
     # Cache the module so a stateful kernel's globals persist from the bench timing
     # loop into the post-timing re-verification (anti invocation-count timing hack).
@@ -139,24 +173,30 @@ def _run_correctness(ref, task_dir, shape) -> int:
     worst, maxd, ok = 999.0, 0.0, True
     for s in range(_num_correct_trials()):
         inputs = ref.get_inputs(shape, device="cuda", seed=s)
-        refs = _as_tuple(ref.reference_grads(shape, inputs))
+        refs_raw = ref.reference_grads(shape, _clone_inputs(inputs))
+        refs = _as_tuple(refs_raw)
         try:
-            outs = _as_tuple(ref.candidate_grads(fn, shape, inputs))
+            outs_raw = ref.candidate_grads(fn, shape, _clone_inputs(inputs))
         except Exception as e:  # noqa: BLE001
             print("SNR: -999.00 dB"); print("allclose: False"); print("max_diff: inf")
             print(f"CANDIDATE_ERROR: {type(e).__name__}: {e}")
             return 0
         torch.cuda.synchronize()
-        if len(outs) != len(refs):
+        expected_dtypes = _expected_grad_dtypes(ref, inputs, refs)
+        pairs = _output_pairs(outs_raw, refs_raw, expected_dtypes=expected_dtypes)
+        if pairs is None:
             print("SNR: -999.00 dB"); print("allclose: False"); print("max_diff: inf")
-            print(f"CANDIDATE_ERROR: returned {len(outs)} grads, expected {len(refs)}")
+            print("CANDIDATE_ERROR: output arity/shape/dtype contract mismatch")
             return 0
-        for i, (o, r) in enumerate(zip(outs, refs)):
+        for i, ((o, r), expected_dtype) in enumerate(zip(pairs, expected_dtypes)):
             nm = names[i] if i < len(names) else f"grad{i}"
             atol, rtol = _tol_for(ref, nm)
-            worst = min(worst, _snr_db(o, r))
-            maxd = max(maxd, (o.float() - r.float()).abs().max().item())
-            ok = ok and torch.allclose(o.float(), r.float(), atol=atol, rtol=rtol)
+            snr, md, cok = _compare_outputs(
+                o, r, atol=atol, rtol=rtol,
+                expected_dtypes=(expected_dtype,))
+            worst = min(worst, snr)
+            maxd = max(maxd, md)
+            ok = ok and cok
     print(f"SNR: {worst:.2f} dB"); print(f"allclose: {ok}"); print(f"max_diff: {maxd:.6f}")
     return 0
 
@@ -181,7 +221,12 @@ def driver_main(ref, task_dir: str, argv=None) -> int:
     p.add_argument("--iters", type=int, default=30)
     p.add_argument("--bench-mode", action="store_true")
     p.add_argument("--impl", default="candidate", choices=["candidate", "reference", "torch"])
+    p.add_argument("--kore-driver-capabilities", action="store_true",
+                   help=argparse.SUPPRESS)
     a = p.parse_args(argv)
+    if a.kore_driver_capabilities:
+        emit_driver_capabilities()
+        return 0
     shape = ref.parse_shape(a.shape)
     if a.bench_mode:
         rc = _run_bench(ref, task_dir, shape, a.impl, a.warmup, a.iters)

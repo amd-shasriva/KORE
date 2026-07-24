@@ -361,6 +361,7 @@ class ToolExecutor:
         return {
             "compiled": bool(getattr(obs, "compiled", False)),
             "validation_passed": bool(getattr(obs, "validation_passed", False)),
+            "infra_error": bool(getattr(obs, "infra_error", False)),
             "snr_db": _round(getattr(obs, "snr_db", None), 2),
             "wall_ms": _round(getattr(obs, "wall_ms", None)),
             "baseline_ms": _round(getattr(obs, "baseline_ms", None)),
@@ -429,6 +430,11 @@ class ToolExecutor:
                 self.candidate_phi = None
         return obs, rr
 
+    @staticmethod
+    def _is_infra(obs, rr) -> bool:
+        return bool(getattr(obs, "infra_error", False)
+                    or getattr(rr, "tier", None) == "infra")
+
     # -- dispatch --------------------------------------------------------- #
     def dispatch(self, call: dict, turn: Optional[int] = None) -> dict:
         """Execute one parsed tool call. Never raises; returns a compact dict."""
@@ -451,28 +457,34 @@ class ToolExecutor:
     def _tool_build(self, args: dict) -> dict:
         src = args["kernel_src"]
         obs, rr = self._evaluate(src, do_bench=False, multi_shape=False)
+        infra = self._is_infra(obs, rr)
         return {
-            "ok": bool(obs.compiled),
+            "ok": bool(obs.compiled) and not infra,
             "tool": "build",
             "compiled": bool(obs.compiled),
-            "error": (obs.error_text or None) if not obs.compiled else None,
+            "infra_error": infra,
+            "error": (obs.error_text or "infrastructure error") if infra
+                     else ((obs.error_text or None) if not obs.compiled else None),
         }
 
     def _tool_test(self, args: dict) -> dict:
         src = args["kernel_src"]
         multi = args.get("shape") is None
         obs, rr = self._evaluate(src, do_bench=False, multi_shape=multi)
+        infra = self._is_infra(obs, rr)
         return {
-            "ok": bool(rr.correct),
+            "ok": bool(rr.correct) and not infra,
             "tool": "test",
             "compiled": bool(obs.compiled),
             "correct": bool(rr.correct),
+            "infra_error": infra,
             "snr_db": _round(getattr(obs, "snr_db", None), 2),
             "snr_by_shape": {k: _round(v, 2) for k, v in
                              (getattr(obs, "snr_by_shape", {}) or {}).items()},
             "tier": rr.tier,
             "reward": _round(rr.reward),
-            "error": (obs.error_text or None) if not rr.correct else None,
+            "error": (obs.error_text or "infrastructure error") if infra
+                     else ((obs.error_text or None) if not rr.correct else None),
         }
 
     def _tool_bench(self, args: dict) -> dict:
@@ -483,15 +495,17 @@ class ToolExecutor:
         # kernel so far?" - the per-turn latency feedback the policy optimizes.
         prev_best_su = self.best_speedup
         obs, rr = self._evaluate(src, do_bench=True, multi_shape=multi)
+        infra = self._is_infra(obs, rr)
         cur_su = self.candidate_speedup
         delta = (round(cur_su - prev_best_su, 3)
                  if (cur_su is not None and prev_best_su is not None) else None)
         improved = bool(cur_su is not None and (prev_best_su is None or cur_su > prev_best_su))
         return {
-            "ok": bool(rr.correct),
+            "ok": bool(rr.correct) and not infra,
             "tool": "bench",
             "compiled": bool(obs.compiled),
             "correct": bool(rr.correct),
+            "infra_error": infra,
             "speedup": _round(rr.speedup, 3),
             # Per-turn measured-latency feedback: the model reads its own kernel's
             # speedup, the running best, the signed delta vs that best, and whether
@@ -504,26 +518,31 @@ class ToolExecutor:
             "baseline_ms": _round(getattr(obs, "baseline_ms", None)),
             "tier": rr.tier,
             "reward": _round(rr.reward),
-            "error": (obs.error_text or None) if not rr.correct else None,
+            "error": (obs.error_text or "infrastructure error") if infra
+                     else ((obs.error_text or None) if not rr.correct else None),
         }
 
     def _tool_pmc(self, args: dict) -> dict:
         src = args["kernel_src"]
         obs, rr = self._evaluate(src, do_bench=True, multi_shape=False)
+        infra = self._is_infra(obs, rr)
         # Surface the real hardware-counter signal KoreEnv computes: the
         # baseline-relative roofline efficiency (rocprofv3). Available only when
         # profiling is enabled (KORE_PROFILE_REWARD_WEIGHT>0), else honest stub.
         eff = getattr(obs, "profile_efficiency", None)
-        available = eff is not None
+        available = eff is not None and not infra
         return {
-            "ok": bool(obs.compiled),
+            "ok": bool(obs.compiled) and not infra,
             "tool": "pmc",
+            "infra_error": infra,
             "available": bool(available),
             "profile_efficiency": _round(eff, 3),
-            "diagnosis": (f"roofline efficiency vs baseline: {eff:.2f} "
+            "diagnosis": ("infrastructure error; retry this measurement" if infra else
+                          (f"roofline efficiency vs baseline: {eff:.2f} "
                           "(1.0 = as efficient as the vendor kernel)" if available
                           else "hardware-counter profiling disabled on this env "
-                               "(set KORE_PROFILE_REWARD_WEIGHT>0 to enable)"),
+                               "(set KORE_PROFILE_REWARD_WEIGHT>0 to enable)")),
+            "error": (obs.error_text or "infrastructure error") if infra else None,
         }
 
     def _tool_keep(self, args: dict) -> dict:
@@ -728,6 +747,8 @@ def _is_failed_call(t: dict) -> bool:
     if name not in ("build", "test", "bench", "pmc"):
         return False
     res = t.get("result") or {}
+    if res.get("infra_error"):
+        return False
     return res.get("ok") is False
 
 

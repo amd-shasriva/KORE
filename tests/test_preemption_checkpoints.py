@@ -67,7 +67,11 @@ def test_deepen_checkpoints_each_win_before_preemption(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         deepen_one("task", tmp_path, 3, 8, object(), SimpleNamespace())
 
-    records = read_jsonl(tmp_path / "wins" / "task.jsonl", typed=False)
+    records = read_jsonl(
+        tmp_path / "wins" / "task.jsonl",
+        typed=False,
+        mode="generic_training_row",
+    )
     assert [record["final_source"] for record in records] == ["kernel-one"]
 
 
@@ -119,7 +123,8 @@ def test_base_resumes_from_each_checkpointed_record(tmp_path, monkeypatch):
         complete_one("task", tmp_path, 2, 1, 2, object())
 
     repair_path = tmp_path / "repair" / "task.jsonl"
-    assert len(read_jsonl(repair_path, typed=False)) == 1
+    assert len(read_jsonl(
+        repair_path, typed=False, mode="generic_training_row")) == 1
     assert (tmp_path / "repair" / "task.jsonl.inprogress").exists()
 
     def resumed_repairs(*args, n, on_record, **kwargs):
@@ -141,7 +146,12 @@ def test_base_resumes_from_each_checkpointed_record(tmp_path, monkeypatch):
 
     assert status == "done"
     assert counts == {"repair": 1, "groups": 1}
-    assert len(read_jsonl(repair_path, typed=False)) == 2
-    assert len(read_jsonl(tmp_path / "groups" / "task.jsonl", typed=False)) == 1
+    assert len(read_jsonl(
+        repair_path, typed=False, mode="generic_training_row")) == 2
+    assert len(read_jsonl(
+        tmp_path / "groups" / "task.jsonl",
+        typed=False,
+        mode="generic_training_row",
+    )) == 1
     assert not (tmp_path / "repair" / "task.jsonl.inprogress").exists()
     assert not (tmp_path / "groups" / "task.jsonl.inprogress").exists()

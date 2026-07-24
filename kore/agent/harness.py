@@ -134,7 +134,8 @@ class WinsKB:
         if not wins_dir or not os.path.isdir(wins_dir):
             return cls(entries)
         for path in sorted(glob.glob(os.path.join(wins_dir, "*.jsonl"))):
-            for rec in read_jsonl(path, typed=False):
+            for rec in read_jsonl(
+                path, typed=False, mode="generic_training_row"):
                 if not isinstance(rec, dict) or rec.get("type") != "win":
                     continue
                 src = rec.get("final_source") or ""

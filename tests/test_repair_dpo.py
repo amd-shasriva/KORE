@@ -79,7 +79,11 @@ def test_driver_writes_typed_roundtrip_and_caps(tmp_path):
     assert summary["repair_pairs"] == 4          # per_task_cap bounds one task
     assert summary["tasks_covered"] == 1
 
-    back = read_jsonl(dr / "groups" / "_repair_pairs.jsonl", typed=True)
+    back = read_jsonl(
+        dr / "groups" / "_repair_pairs.jsonl",
+        typed=True,
+        mode="production_strict",
+    )
     assert back and all(isinstance(r, RankedGroupRecord) for r in back)
     assert len(build_dpo(back)) == 4
     # Determinism.

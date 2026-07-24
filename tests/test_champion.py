@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kore.data.schemas import WinRecord, write_jsonl
+from kore.data.schemas import WinRecord, stamp_source_only_record, write_jsonl
 from kore.eval.champion import (
     Champion,
     ChampionReport,
@@ -59,13 +59,22 @@ def test_no_claim_still_certifiable():
 
 def test_load_champions_keeps_best_per_task(tmp_path):
     p = tmp_path / "wins.jsonl"
-    write_jsonl(p, [
+    records = [
         WinRecord(task_id="a", trajectory=[], initial_wall_us=None,
                   final_wall_us=None, speedup=1.2, final_source="src_a_slow"),
         WinRecord(task_id="a", trajectory=[], initial_wall_us=None,
                   final_wall_us=None, speedup=1.9, final_source="src_a_fast"),
         WinRecord(task_id="b", trajectory=[], initial_wall_us=None,
                   final_wall_us=None, speedup=2.5, final_source="src_b"),
+    ]
+    write_jsonl(p, [
+        stamp_source_only_record(
+            record,
+            provenance_id="champion-test",
+            evaluation_id=f"champion-test:{index}",
+            source_status="verified_external",
+        )
+        for index, record in enumerate(records)
     ])
     champs = {c.task_id: c for c in load_champions(str(p))}
     assert set(champs) == {"a", "b"}

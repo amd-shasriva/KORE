@@ -94,7 +94,7 @@ def test_schema_roundtrip_jsonl(tmp_path):
     recs = [_sample_repair(), _sample_group(), _sample_win()]
     path = tmp_path / "records.jsonl"
     write_jsonl(path, recs)
-    loaded = read_jsonl(path)
+    loaded = read_jsonl(path, mode="generic_training_row")
     assert loaded == recs
     # type dispatch produced the right classes
     assert isinstance(loaded[0], RepairRecord)
@@ -105,7 +105,8 @@ def test_schema_roundtrip_jsonl(tmp_path):
 def test_read_jsonl_raw(tmp_path):
     path = tmp_path / "r.jsonl"
     write_jsonl(path, [_sample_repair()])
-    raw = read_jsonl(path, typed=False)
+    raw = read_jsonl(
+        path, typed=False, mode="generic_training_row")
     assert isinstance(raw[0], dict) and raw[0]["type"] == "repair"
 
 

@@ -36,7 +36,8 @@ def _read_dir(data_root: Path, sub: str, typed: bool = True) -> list:
     recs: list = []
     if d.exists():
         for p in sorted(d.glob("*.jsonl")):
-            recs += read_jsonl(p, typed=typed)
+            recs += read_jsonl(
+                p, typed=typed, mode="production_strict")
     return recs
 
 
@@ -70,7 +71,8 @@ def _agentic_rows(data_root: Path) -> list[dict]:
     if not d.exists():
         return rows
     for p in sorted(d.glob("*.jsonl")):
-        for rec in read_jsonl(p, typed=False):
+        for rec in read_jsonl(
+            p, typed=False, mode="production_strict"):
             if not isinstance(rec, dict):
                 continue
             # Defense-in-depth: never route a held-out generalization trajectory into

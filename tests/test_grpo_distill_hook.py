@@ -24,7 +24,7 @@ def test_distill_group_writes_win(tmp_path):
     sink = _build_distill_sink(cfg)
     assert sink is not None
     _distill_group(sink, "gen_relu_bf16", 1.5, "def relu(x):\n    return x", cfg)
-    recs = read_jsonl(p)
+    recs = read_jsonl(p, mode="generic_training_row")
     assert len(recs) == 1
     assert isinstance(recs[0], WinRecord)
     assert recs[0].task_id == "gen_relu_bf16"
@@ -39,7 +39,7 @@ def test_distill_group_filters_slow_and_empty(tmp_path):
     _distill_group(sink, "gen_relu_bf16", 0.5, "def relu(x): return x", cfg)  # too slow
     _distill_group(sink, "gen_relu_bf16", None, "def relu(x): return x", cfg)  # no speedup
     _distill_group(sink, "gen_relu_bf16", 2.0, None, cfg)                       # no source
-    assert read_jsonl(p) == []  # nothing written
+    assert read_jsonl(p, mode="generic_training_row") == []  # nothing written
 
 
 def test_distill_group_dedup_keeps_best(tmp_path):
@@ -49,5 +49,5 @@ def test_distill_group_dedup_keeps_best(tmp_path):
     src = "def relu(x):\n    return x"
     _distill_group(sink, "gen_relu_bf16", 1.2, src, cfg)
     _distill_group(sink, "gen_relu_bf16", 1.9, src, cfg)  # same kernel, faster
-    recs = read_jsonl(p)
+    recs = read_jsonl(p, mode="generic_training_row")
     assert len(recs) == 1 and recs[0].speedup == 1.9

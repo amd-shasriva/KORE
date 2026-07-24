@@ -276,7 +276,7 @@ def load_champions(path: str, *, min_speedup: float = 1.0) -> list[Champion]:
     from kore.data.schemas import read_jsonl
 
     best: dict[str, Champion] = {}
-    for rec in read_jsonl(path):
+    for rec in read_jsonl(path, mode="production_strict"):
         src = getattr(rec, "final_source", None) if not isinstance(rec, dict) \
             else rec.get("final_source")
         tid = getattr(rec, "task_id", None) if not isinstance(rec, dict) \

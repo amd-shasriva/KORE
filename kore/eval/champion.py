@@ -10,8 +10,8 @@ a run - the "robust-kbench" bar.
 This gate re-benchmarks each champion (the best kernel discovered per task) under
 strictly harder conditions than training and only certifies the ones that survive:
 
-  * HELD-OUT shapes - scaled + non-power-of-two "odd" variants the kernel was never
-    benchmarked on (catches shape-overfit / tile-memorization).
+  * HELD-OUT shapes - semantics-preserving, non-power-of-two "odd" variants from
+    a lane frozen away from every training augmentation (catches shape overfit).
   * VERIFIED correctness - the enumerated adversarial gate + determinism re-check
     (KORE_VERIFIED_CORRECTNESS=1) + more reseeded trials.
   * HONEST baseline - the compiler-fused bar (KORE_COMPILE_BASELINE=1) so a
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -116,19 +117,15 @@ def champion_verdict(
 # --------------------------------------------------------------------------- #
 # Held-out shapes
 # --------------------------------------------------------------------------- #
-def held_out_shapes(task, max_shapes: int = 8):
-    """Shapes the champion was NEVER benchmarked on: scaled + odd variants of the
-    task's base shapes (via :func:`kore.tasks.augment.augment_shapes`), with any
-    dims identical to a base training shape removed so the set is genuinely held-out."""
-    from kore.tasks.augment import augment_shapes
+def held_out_shapes(task, max_shapes: int = 8, *, frozen_split=None):
+    """Consume hidden shapes from the training-time frozen split artifact."""
+    from kore.tasks.augment import FrozenShapeSplit, generate_hidden_shapes
 
-    base = task.shapes or []
-    if not base:
-        return []
-    base_keys = {tuple(sorted(s.dims.items())) for s in base}
-    aug = augment_shapes(base, max_shapes=max_shapes * 2)
-    held = [s for s in aug if tuple(sorted(s.dims.items())) not in base_keys]
-    return (held or aug)[:max_shapes]
+    if frozen_split is None:
+        raise ValueError("a training-time frozen shape manifest is required")
+    split = FrozenShapeSplit.read(frozen_split) if isinstance(
+        frozen_split, (str, os.PathLike)) else frozen_split
+    return generate_hidden_shapes(task, split, max_shapes=max_shapes)
 
 
 # --------------------------------------------------------------------------- #
@@ -167,7 +164,7 @@ class Champion:
 
 def reeval_champion(champ: Champion, *, max_shapes: int = 8,
                     min_speedup: float = 1.0, collapse_ratio: float = 0.7,
-                    config=None) -> ChampionVerdict:
+                    config=None, shape_manifest=None) -> ChampionVerdict:
     """Re-evaluate ONE champion under maximum scrutiny on held-out shapes."""
     from kore.env.kore_env import KoreEnv
     from kore.reward.reward import compute_reward
@@ -178,7 +175,13 @@ def reeval_champion(champ: Champion, *, max_shapes: int = 8,
     try:
         task = get_task(champ.task_id)
         cfg = config or _scrutiny_config()
-        shapes = held_out_shapes(task, max_shapes=max_shapes)
+        if shape_manifest is None:
+            v = champion_verdict(champ.task_id, champ.claimed_speedup, None,
+                                 correct=False, hack_free=True, high_variance=False)
+            v.reason = "training-time frozen shape manifest is required"
+            return v
+        shapes = held_out_shapes(
+            task, max_shapes=max_shapes, frozen_split=shape_manifest)
         if not shapes:
             v = champion_verdict(champ.task_id, champ.claimed_speedup, None,
                                  correct=False, hack_free=True, high_variance=False)
@@ -239,13 +242,18 @@ class ChampionReport:
 
 def run_champion_reeval(champions: list[Champion], *, max_shapes: int = 8,
                         min_speedup: float = 1.0, collapse_ratio: float = 0.7,
-                        out_path: Optional[str] = None, config=None) -> ChampionReport:
+                        out_path: Optional[str] = None, config=None,
+                        shape_manifests: Optional[Mapping[str, object]] = None
+                        ) -> ChampionReport:
     """Re-evaluate all champions and write a JSON certification report."""
     verdicts: list[ChampionVerdict] = []
     for champ in champions:
         try:
             v = reeval_champion(champ, max_shapes=max_shapes, min_speedup=min_speedup,
-                               collapse_ratio=collapse_ratio, config=config)
+                               collapse_ratio=collapse_ratio, config=config,
+                               shape_manifest=(
+                                   shape_manifests.get(champ.task_id)
+                                   if shape_manifests else None))
         except Exception as e:  # noqa: BLE001 - one bad champion can't abort the gate
             v = champion_verdict(champ.task_id, champ.claimed_speedup, None,
                                  correct=False, hack_free=True, high_variance=False)
@@ -263,6 +271,19 @@ def run_champion_reeval(champions: list[Champion], *, max_shapes: int = 8,
     log.metric("champion_reeval_done", n_champions=report.n_champions,
                n_certified=report.n_certified, n_collapsed=report.n_collapsed)
     return report
+
+
+def load_shape_manifests(path: str) -> dict[str, object]:
+    """Load one frozen split JSON per task from a lineage artifact directory."""
+    from kore.tasks.augment import FrozenShapeSplit
+
+    manifests: dict[str, object] = {}
+    for manifest_path in sorted(Path(path).glob("*.json")):
+        manifest = FrozenShapeSplit.read(manifest_path)
+        if manifest.task_id in manifests:
+            raise ValueError(f"duplicate shape manifest for {manifest.task_id!r}")
+        manifests[manifest.task_id] = manifest
+    return manifests
 
 
 # --------------------------------------------------------------------------- #
@@ -301,11 +322,15 @@ def main(argv=None) -> int:  # pragma: no cover - CLI
     p.add_argument("--max-shapes", type=int, default=8)
     p.add_argument("--min-speedup", type=float, default=1.0)
     p.add_argument("--collapse-ratio", type=float, default=0.7)
+    p.add_argument("--shape-manifests",
+                   help="directory of training-time frozen shape manifests")
     a = p.parse_args(argv)
     champs = load_champions(a.champions)
+    manifests = load_shape_manifests(a.shape_manifests) if a.shape_manifests else {}
     report = run_champion_reeval(
         champs, max_shapes=a.max_shapes, min_speedup=a.min_speedup,
-        collapse_ratio=a.collapse_ratio, out_path=a.out)
+        collapse_ratio=a.collapse_ratio, out_path=a.out,
+        shape_manifests=manifests)
     print(report.summary())
     print(f"\n[champion] report -> {a.out}")
     return 0

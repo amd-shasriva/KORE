@@ -2,13 +2,31 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+
 from kore.data.schemas import WinRecord, stamp_source_only_record, write_jsonl
 from kore.eval.champion import (
     Champion,
     ChampionReport,
     champion_verdict,
+    held_out_shapes,
     load_champions,
+    load_shape_manifests,
 )
+from kore.tasks.augment import (
+    FrozenShapeSplit,
+    boundary_regime,
+    freeze_shape_split,
+    shape_key,
+    validate_frozen_split,
+)
+from kore.tasks.base import Shape
+from kore.tasks.registry import get_task
 
 
 def test_certified_when_survives():
@@ -93,3 +111,87 @@ def test_report_summary_counts():
                          verdicts=verdicts)
     assert rep.n_certified == 1 and rep.n_collapsed == 1
     assert "CERTIFIED" in rep.summary() and "COLLAPSED" in rep.summary()
+
+
+def test_hidden_shapes_are_built_after_and_disjoint_from_frozen_train_lane():
+    task = get_task("softmax_bf16")
+    split = freeze_shape_split(task)
+    hidden = held_out_shapes(task, max_shapes=8, frozen_split=split)
+    assert len(hidden) == 8
+    assert {shape_key(shape) for shape in hidden}.isdisjoint(split.train_keys)
+    assert all(shape.dims["N"] in {s.dims["N"] for s in task.shapes} for shape in hidden)
+    assert len({boundary_regime(shape) for shape in hidden}) >= 3
+
+
+def test_hidden_evaluation_requires_training_time_manifest():
+    task = get_task("softmax_bf16")
+    with pytest.raises(ValueError, match="training-time frozen"):
+        held_out_shapes(task, max_shapes=8)
+    split = freeze_shape_split(task)
+    assert held_out_shapes(task, max_shapes=0, frozen_split=split) == []
+
+
+def test_hidden_generation_rejects_task_changes_after_freeze():
+    task = SimpleNamespace(
+        task_id="snapshot",
+        operation="softmax",
+        raw={},
+        shapes=[Shape("primary", {"M": 4096, "N": 4096})],
+    )
+    split = freeze_shape_split(task)
+    task.shapes[0].dims["M"] = 8192
+    with pytest.raises(ValueError, match="task digest changed"):
+        held_out_shapes(task, max_shapes=1, frozen_split=split)
+
+
+def test_manifest_round_trip_and_loader(tmp_path):
+    task = get_task("softmax_bf16")
+    split = freeze_shape_split(
+        task, seed=9, created_at="2000-01-01T00:00:00+00:00")
+    path = tmp_path / "softmax_bf16.json"
+    split.write(path)
+    loaded = FrozenShapeSplit.read(path)
+    assert loaded.to_dict() == split.to_dict()
+    assert loaded.schema_version == 1
+    assert loaded.seed == 9
+    assert loaded.created_at == "2000-01-01T00:00:00+00:00"
+    assert loaded.code_identity and loaded.policy_digest and loaded.task_file_digest
+    assert load_shape_manifests(str(tmp_path))["softmax_bf16"] == loaded
+    assert held_out_shapes(task, frozen_split=path) == list(loaded.hidden_shapes)
+
+
+def test_manifest_rejects_content_and_code_tampering(tmp_path):
+    task = get_task("softmax_bf16")
+    split = freeze_shape_split(task)
+    value = split.to_dict()
+    value["hidden_shapes"][0]["dims"]["M"] += 2
+    path = tmp_path / "tampered.json"
+    path.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="content hash"):
+        FrozenShapeSplit.read(path)
+    with pytest.raises(ValueError, match="code identity"):
+        validate_frozen_split(task, split, code_identity="different-commit")
+    incomplete = replace(split, train_shapes=split.train_shapes[:-1], content_hash="")
+    incomplete = replace(incomplete, content_hash=incomplete.computed_hash())
+    with pytest.raises(ValueError, match="train/augmentation universe"):
+        validate_frozen_split(task, incomplete)
+
+
+def test_manifest_rejects_task_file_change(tmp_path):
+    task_file = tmp_path / "task.yaml"
+    task_file.write_text("task_id: file_change\n")
+    task = SimpleNamespace(
+        task_id="file_change",
+        operation="softmax",
+        dtype="bf16",
+        backend="triton",
+        gpu_target="gfx950",
+        dir=tmp_path,
+        raw={"task_id": "file_change"},
+        task_file_digest=hashlib.sha256(task_file.read_bytes()).hexdigest(),
+        shapes=[Shape("primary", {"M": 4096, "N": 4096})],
+    )
+    split = freeze_shape_split(task)
+    task_file.write_text("task_id: file_change\nchanged: true\n")
+    with pytest.raises(ValueError, match="task file digest changed"):
+        held_out_shapes(task, frozen_split=split)

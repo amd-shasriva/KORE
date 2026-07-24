@@ -78,7 +78,8 @@ def audit(shape_augment: bool | None = None, augment_max: int = 6) -> DataScaleR
             vendor_baselines[t.comparison_baseline or "unknown"] += 1
         base = t.shapes or []
         base_total += len(base)
-        eff = augment_shapes(base, max_shapes=augment_max) if shape_augment else base
+        eff = augment_shapes(
+            base, task=t, max_shapes=augment_max) if shape_augment else base
         n_eff = len(eff) or len(base)
         eff_total += n_eff
         per_op.append(n_eff)

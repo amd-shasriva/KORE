@@ -14,6 +14,7 @@ import argparse
 from pathlib import Path
 
 from kore.tasks import vendor_ops as V
+from kore.tasks.shape_policy import shape_policy_yaml_lines
 
 TASKS_DIR = Path(__file__).resolve().parent
 
@@ -56,6 +57,10 @@ def _yaml(op: str, dtype: str, snr: float) -> str:
         f"op_family: vendor_{op}",
         "baseline_tier: vendor",
         "generated: true",
+    ]
+    lines += shape_policy_yaml_lines(
+        op, shp, source=f"generator:vendor_{op}")
+    lines += [
         "shapes:",
         f"  minimal: {_shape_str(shp['minimal'])}",
         f"  primary: {_shape_str(shp['primary'])}",

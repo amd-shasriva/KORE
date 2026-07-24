@@ -8,7 +8,9 @@ from kore.policy.configs import MultiCapSFTConfig
 from kore.tasks.registry import all_tasks
 
 
-def test_build_multicap_dataset_offline_stub(tmp_path):
+def test_build_multicap_dataset_offline_stub(tmp_path, monkeypatch):
+    # Explicitly label this bundled-smoke decontamination path as development.
+    monkeypatch.setenv("KORE_DECONTAM_DEVELOPMENT", "1")
     tasks = all_tasks()[:3]
     cfg = MultiCapSFTConfig()
     rows = assemble.build_multicap_dataset(tmp_path, tasks, StubTeacher(), cfg,

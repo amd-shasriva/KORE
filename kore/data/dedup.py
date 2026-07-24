@@ -29,12 +29,12 @@ from __future__ import annotations
 import ast
 import hashlib
 import re
+from collections import Counter
 from typing import Any, Callable, Iterable, Optional
 
-# Identifiers we NEVER alpha-rename: module aliases + dunder-ish names that carry
-# semantic meaning across kernels (renaming `tl` -> v0 is fine since it is
-# consistent, but keeping the well-known roots avoids surprising collapses).
-_KEEP_NAMES = {"tl", "triton", "torch", "hl", "self", "True", "False", "None"}
+# ``self`` is scope-significant; imported module *paths* remain semantic in
+# ``ast.alias.name``, while their local aliases are normalized like other names.
+_KEEP_NAMES = {"self"}
 
 
 class _AlphaRename(ast.NodeTransformer):
@@ -63,12 +63,32 @@ class _AlphaRename(ast.NodeTransformer):
         node.annotation = None  # annotations are noise for structure
         return node
 
+    def visit_alias(self, node: ast.alias) -> ast.AST:
+        # Preserve the imported module path (``triton.language`` vs ``torch``)
+        # but normalize a local ``as tl`` / ``as language`` spelling.
+        if node.asname:
+            node.asname = self._canon(node.asname)
+        return node
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
-        # keep the public entry-point NAME (semantic), rename only the body
+        # Function names are provenance noise for clone/leakage detection: copied
+        # kernels are routinely renamed when moved between repos.
+        node.name = self._canon(node.name)
         node = self.generic_visit(node)  # type: ignore[assignment]
         node.returns = None
         _strip_docstring(node)
         return node
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
+        node.name = self._canon(node.name)
+        node = self.generic_visit(node)  # type: ignore[assignment]
+        node.returns = None
+        _strip_docstring(node)
+        return node
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        node.name = self._canon(node.name)
+        return self.generic_visit(node)
 
 
 def _strip_docstring(node: ast.AST) -> None:
@@ -111,7 +131,107 @@ def structural_fingerprint(source: str) -> str:
         return "txt:" + hashlib.sha1(norm.encode()).hexdigest()[:16]
 
 
-def _shingles(source: str, k: int = 5) -> set[str]:
+def content_hash(source: str) -> str:
+    """Stable full-content SHA-256 used by provenance and exact dedup."""
+    return "sha256:" + hashlib.sha256((source or "").encode("utf-8")).hexdigest()
+
+
+def normalized_ast_fingerprint(source: str) -> Optional[str]:
+    """Full SHA-256 of the alpha-normalized Python AST, or ``None`` if invalid.
+
+    Unlike :func:`structural_fingerprint`, this never falls back to normalized
+    text. That distinction matters to leakage reports: an ``ast`` reason proves
+    both documents parsed and had the same normalized syntax tree.
+    """
+    src = (source or "").strip()
+    if not src:
+        return None
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            _strip_docstring(node)
+    tree = _AlphaRename().visit(tree)
+    ast.fix_missing_locations(tree)
+    dump = ast.dump(tree, annotate_fields=False, include_attributes=False)
+    return "ast-sha256:" + hashlib.sha256(dump.encode("utf-8")).hexdigest()
+
+
+def _attribute_name(node: ast.AST) -> str:
+    parts: list[str] = []
+    cur = node
+    while isinstance(cur, ast.Attribute):
+        parts.append(cur.attr)
+        cur = cur.value
+    # Attribute names carry the operation semantics. The root binding is omitted
+    # because import aliases are arbitrary; imported module paths are represented
+    # separately by ``import:`` graph features below.
+    return ".".join(reversed(parts)) if parts else type(node).__name__
+
+
+def semantic_graph_features(source: str) -> tuple[str, ...]:
+    """Return a normalized AST/data-flow graph feature multiset.
+
+    Constants and local names are intentionally omitted, while call targets,
+    operators, control-flow nodes, and parent->child edges are retained. This
+    catches a copied kernel with renamed locals or tuned constants without
+    equating unrelated kernels that merely share ``import triton`` boilerplate.
+    Repeated features carry counts so a tiny skeleton cannot equal a real kernel.
+    """
+    try:
+        tree = ast.parse((source or "").strip())
+    except SyntaxError:
+        return tuple()
+    counts: Counter[str] = Counter()
+    for parent in ast.walk(tree):
+        ptype = type(parent).__name__
+        if isinstance(parent, ast.Import):
+            for alias in parent.names:
+                counts[f"import:{alias.name}"] += 1
+        elif isinstance(parent, ast.ImportFrom):
+            counts[f"import:{parent.module or ''}"] += 1
+        elif isinstance(parent, ast.Call):
+            counts[f"call:{_attribute_name(parent.func)}"] += 1
+        elif isinstance(parent, ast.BinOp):
+            counts[f"binop:{type(parent.op).__name__}"] += 1
+        elif isinstance(parent, ast.UnaryOp):
+            counts[f"unary:{type(parent.op).__name__}"] += 1
+        elif isinstance(parent, ast.BoolOp):
+            counts[f"boolop:{type(parent.op).__name__}"] += 1
+        elif isinstance(parent, ast.Compare):
+            for op in parent.ops:
+                counts[f"compare:{type(op).__name__}"] += 1
+        elif isinstance(parent, (ast.For, ast.AsyncFor, ast.While, ast.If, ast.Try)):
+            counts[f"control:{ptype}"] += 1
+        for child in ast.iter_child_nodes(parent):
+            ctype = type(child).__name__
+            # Identifier/context leaf nodes add noise but no semantics.
+            if ctype not in {"Load", "Store", "Del", "Name", "arg", "Constant"}:
+                counts[f"edge:{ptype}>{ctype}"] += 1
+    return tuple(f"{key}#{count}" for key, count in sorted(counts.items()))
+
+
+def graph_fingerprint(source: str) -> Optional[str]:
+    """Hash of :func:`semantic_graph_features`, or ``None`` for non-Python."""
+    features = semantic_graph_features(source)
+    if not features:
+        return None
+    payload = "\n".join(features).encode("utf-8")
+    return "graph-sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def graph_similarity(source_a: str, source_b: str) -> float:
+    """Jaccard similarity between two normalized semantic-graph feature sets."""
+    a, b = set(semantic_graph_features(source_a)), set(semantic_graph_features(source_b))
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def token_shingles(source: str, k: int = 5) -> set[str]:
+    """Token ``k``-shingles after comment/whitespace normalization."""
     toks = re.findall(r"[A-Za-z_][A-Za-z_0-9]*|[^\sA-Za-z_0-9]", _strip_comments_text(source))
     if len(toks) < k:
         return {" ".join(toks)} if toks else set()
@@ -120,7 +240,7 @@ def _shingles(source: str, k: int = 5) -> set[str]:
 
 def minhash_signature(source: str, num_perm: int = 64, k: int = 5) -> tuple[int, ...]:
     """MinHash signature over k-token shingles (stdlib, deterministic)."""
-    sh = _shingles(source, k)
+    sh = token_shingles(source, k)
     if not sh:
         return tuple([0] * num_perm)
     sig = []
@@ -137,12 +257,33 @@ def jaccard(sig_a: tuple[int, ...], sig_b: tuple[int, ...]) -> float:
     return sum(1 for a, b in zip(sig_a, sig_b) if a == b) / len(sig_a)
 
 
+def directional_containment(candidate: str, reference: str, k: int = 8) -> dict:
+    """Measure how much of ``reference`` is contained in ``candidate``.
+
+    The denominator is the reference, never the candidate. A held-out kernel
+    pasted into a very long training document therefore remains a 1.0 match
+    instead of being diluted by unrelated candidate text.
+    """
+    cand = token_shingles(candidate, k)
+    ref = token_shingles(reference, k)
+    shared = cand & ref
+    return {
+        "containment": (len(shared) / len(ref)) if ref else 0.0,
+        "candidate_coverage": (len(shared) / len(cand)) if cand else 0.0,
+        "shared_shingles": len(shared),
+        "reference_shingles": len(ref),
+        "candidate_shingles": len(cand),
+    }
+
+
 def dedup_near(
     items: Iterable[dict],
     source_key: str = "source",
     scorer: Optional[Callable[[dict], float]] = None,
     per_fingerprint_cap: int = 1,
     fuzzy_threshold: float = 0.0,
+    partition_key: Optional[str] = None,
+    merge: Optional[Callable[[dict, list[dict]], dict]] = None,
 ) -> tuple[list[dict], dict]:
     """Collapse near-duplicate kernels, keeping the best representative(s).
 
@@ -157,38 +298,46 @@ def dedup_near(
     """
     items = list(items)
     scorer = scorer or (lambda d: 0.0)
-    # 1) exact-structural buckets
-    buckets: dict[str, list[dict]] = {}
+    # 1) exact-structural buckets. ``partition_key`` lets corpus assembly dedup
+    # within a source channel while preserving intentional weighted channels.
+    buckets: dict[tuple[Any, str], list[dict]] = {}
     for it in items:
         fp = structural_fingerprint(str(it.get(source_key, "")))
-        buckets.setdefault(fp, []).append(it)
+        partition = it.get(partition_key) if partition_key else None
+        buckets.setdefault((partition, fp), []).append(it)
 
     # 2) optional fuzzy merge of buckets via representative MinHash
     if fuzzy_threshold > 0.0 and len(buckets) > 1:
-        reps = {fp: minhash_signature(str(grp[0].get(source_key, "")))
-                for fp, grp in buckets.items()}
-        parent: dict[str, str] = {fp: fp for fp in buckets}
+        reps = {key: minhash_signature(str(grp[0].get(source_key, "")))
+                for key, grp in buckets.items()}
+        parent = {key: key for key in buckets}
 
-        def _find(x: str) -> str:
+        def _find(x):
             while parent[x] != x:
                 parent[x] = parent[parent[x]]
                 x = parent[x]
             return x
 
-        fps = list(buckets)
-        for i in range(len(fps)):
-            for j in range(i + 1, len(fps)):
-                if jaccard(reps[fps[i]], reps[fps[j]]) >= fuzzy_threshold:
-                    parent[_find(fps[j])] = _find(fps[i])
-        merged: dict[str, list[dict]] = {}
-        for fp, grp in buckets.items():
-            merged.setdefault(_find(fp), []).extend(grp)
+        keys = list(buckets)
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                # Never bridge source partitions through fuzzy transitivity.
+                if keys[i][0] != keys[j][0]:
+                    continue
+                if jaccard(reps[keys[i]], reps[keys[j]]) >= fuzzy_threshold:
+                    parent[_find(keys[j])] = _find(keys[i])
+        merged: dict[tuple[Any, str], list[dict]] = {}
+        for key, grp in buckets.items():
+            merged.setdefault(_find(key), []).extend(grp)
         buckets = merged
 
     kept: list[dict] = []
     for grp in buckets.values():
         grp_sorted = sorted(grp, key=scorer, reverse=True)
-        kept.extend(grp_sorted[:max(1, per_fingerprint_cap)])
+        winners = grp_sorted[:max(1, per_fingerprint_cap)]
+        if merge is not None and winners:
+            winners[0] = merge(winners[0], grp)
+        kept.extend(winners)
     stats = {
         "n_in": len(items),
         "n_clusters": len(buckets),
@@ -199,7 +348,14 @@ def dedup_near(
 
 
 __all__ = [
+    "content_hash",
     "structural_fingerprint",
+    "normalized_ast_fingerprint",
+    "semantic_graph_features",
+    "graph_fingerprint",
+    "graph_similarity",
+    "token_shingles",
+    "directional_containment",
     "minhash_signature",
     "jaccard",
     "dedup_near",

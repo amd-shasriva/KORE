@@ -11,7 +11,8 @@ ROCm / gfx942 environment notes (set these before constructing the engine):
     keeps the process-level device visibility that vLLM expects.
   - ``VLLM_ROCM_USE_AITER=1`` - enable AMD AITER fused kernels (attention/MoE)
     for MI3xx, giving faster decode on gfx942.
-  - ``HIP_VISIBLE_DEVICES`` / ``ROCR_VISIBLE_DEVICES`` - pin the specific GPUs.
+  - ``HIP_VISIBLE_DEVICES`` - the sole authoritative visibility mask. Setting
+    both HIP and ROCR masks can remap an already-remapped ordinal and is rejected.
 """
 
 from __future__ import annotations
@@ -135,20 +136,87 @@ ROCM_ENV_DEFAULTS = {
     "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "1",
     "VLLM_ROCM_USE_AITER": "1",
 }
+ROCM_VISIBILITY_ENV = "HIP_VISIBLE_DEVICES"
+_ROCM_SECONDARY_VISIBILITY_ENV = "ROCR_VISIBLE_DEVICES"
+
+
+class DeviceVisibilityError(ValueError):
+    """Raised when ROCm visibility cannot be represented by one exact mask."""
+
+
+def _validated_gpu_ordinals(values, *, field: str) -> tuple[int, ...]:
+    if isinstance(values, str):
+        pieces = [piece.strip() for piece in values.split(",")]
+        if not pieces or any(not piece or not piece.isdigit() for piece in pieces):
+            raise DeviceVisibilityError(
+                f"{field} must be a comma-separated list of non-negative ordinals"
+            )
+        ordinals = tuple(int(piece) for piece in pieces)
+    else:
+        if values is None:
+            raise DeviceVisibilityError(f"{field} is missing")
+        ordinals = tuple(values)
+        if not ordinals:
+            raise DeviceVisibilityError(f"{field} cannot be an empty mask")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in ordinals
+        ):
+            raise DeviceVisibilityError(
+                f"{field} must contain only non-negative integer ordinals"
+            )
+    if len(set(ordinals)) != len(ordinals):
+        raise DeviceVisibilityError(f"{field} contains duplicate ordinals")
+    return ordinals
 
 
 def configure_rocm_env(gpu_ids: Optional[list[int]] = None) -> dict:
-    """Apply the ROCm/gfx942 env defaults (idempotent) and pin GPUs if given.
+    """Apply one validated, non-composed HIP visibility policy.
 
-    Returns the resulting relevant env subset for logging.
+    An inherited ROCR-only mask is normalized to HIP before GPU initialization.
+    Two masks, malformed masks, or a requested mask that differs from an
+    inherited mask are rejected instead of intersecting/remapping them.
     """
     for k, v in ROCM_ENV_DEFAULTS.items():
         os.environ.setdefault(k, v)
-    if gpu_ids:
-        ids = ",".join(str(i) for i in gpu_ids)
-        os.environ["HIP_VISIBLE_DEVICES"] = ids
-        os.environ["ROCR_VISIBLE_DEVICES"] = ids
-    keys = list(ROCM_ENV_DEFAULTS) + ["HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"]
+
+    hip_raw = os.environ.get(ROCM_VISIBILITY_ENV)
+    rocr_raw = os.environ.get(_ROCM_SECONDARY_VISIBILITY_ENV)
+    if hip_raw is not None and rocr_raw is not None:
+        raise DeviceVisibilityError(
+            "HIP_VISIBLE_DEVICES and ROCR_VISIBLE_DEVICES are both set; "
+            "double masks are forbidden"
+        )
+
+    requested = (
+        _validated_gpu_ordinals(gpu_ids, field="gpu_ids")
+        if gpu_ids is not None
+        else None
+    )
+    inherited_raw = hip_raw if hip_raw is not None else rocr_raw
+    inherited = (
+        _validated_gpu_ordinals(
+            inherited_raw,
+            field=(
+                ROCM_VISIBILITY_ENV
+                if hip_raw is not None
+                else _ROCM_SECONDARY_VISIBILITY_ENV
+            ),
+        )
+        if inherited_raw is not None
+        else None
+    )
+    if requested is not None and inherited is not None and requested != inherited:
+        raise DeviceVisibilityError(
+            "requested GPU ordinals differ from the inherited visibility mask; "
+            "refusing to compose masks"
+        )
+    effective = requested or inherited
+    os.environ.pop(_ROCM_SECONDARY_VISIBILITY_ENV, None)
+    if effective is not None:
+        os.environ[ROCM_VISIBILITY_ENV] = ",".join(str(i) for i in effective)
+
+    keys = list(ROCM_ENV_DEFAULTS) + [ROCM_VISIBILITY_ENV]
     return {k: os.environ.get(k) for k in keys if os.environ.get(k) is not None}
 
 
@@ -171,6 +239,9 @@ class VLLMPolicy:
         revision: Optional[str] = None,
         **engine_kwargs,
     ):
+        from kore.policy.model_spec import validate_pinned_revision
+
+        revision = validate_pinned_revision(revision)
         configure_rocm_env(gpu_ids)
 
         from vllm import LLM  # guarded heavy import
@@ -187,8 +258,7 @@ class VLLMPolicy:
             seed=seed,
             **engine_kwargs,
         )
-        if revision is not None:
-            load_kwargs["revision"] = revision
+        load_kwargs["revision"] = revision
         self._llm = LLM(**load_kwargs)
 
     @property
@@ -342,6 +412,7 @@ def load_generate(
     max_new_tokens: int = 1024,
     gpu_ids: Optional[list[int]] = None,
     revision: Optional[str] = None,
+    base_revision: Optional[str] = None,
     model_spec=None,
     **kw,
 ) -> GenerationClient:
@@ -361,16 +432,15 @@ def load_generate(
       - ``"hf"``   : transformers ``AutoModelForCausalLM`` + ``apply_chat_template``.
       - ``"vllm"`` : :class:`VLLMPolicy` (fast rollout serving on ROCm).
     """
+    from kore.policy.model_spec import ModelSpec, validate_pinned_revision
+
     if model_spec is not None:
-        from kore.policy.model_spec import ModelSpec
 
         if not isinstance(model_spec, ModelSpec):
             raise TypeError("model_spec must be a resolved ModelSpec")
         model_spec.validate_for_load(model_id, revision=revision)
         revision = model_spec.revision
-    elif revision is not None:
-        from kore.policy.model_spec import validate_pinned_revision
-
+    else:
         revision = validate_pinned_revision(revision)
 
     if backend == "vllm":
@@ -396,8 +466,7 @@ def load_generate(
         # Pin device_map="auto" to the requested physical GPUs BEFORE the first HIP
         # init (from_pretrained below), so the retention gate stays on the free GPUs
         # of a shared node instead of grabbing every visible (incl. busy) GPU.
-        if gpu_ids:
-            configure_rocm_env(gpu_ids)
+        configure_rocm_env(gpu_ids)
         import torch  # guarded heavy import
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -410,15 +479,41 @@ def load_generate(
         if _is_lora_adapter_dir(model_id):
             import json as _json
             import os as _os
-            cfg = _json.loads(open(_os.path.join(model_id, "adapter_config.json")).read())
-            base_id = cfg.get("base_model_name_or_path") or model_id
+            with open(_os.path.join(model_id, "adapter_config.json")) as handle:
+                cfg = _json.load(handle)
+            base_id = cfg.get("base_model_name_or_path")
+            if not isinstance(base_id, str) or not base_id.strip():
+                raise ValueError(
+                    "adapter_config.json must identify its exact base model"
+                )
+            configured_base_revision = cfg.get("revision")
+            if (
+                base_revision is not None
+                and configured_base_revision is not None
+                and validate_pinned_revision(base_revision)
+                != validate_pinned_revision(configured_base_revision)
+            ):
+                raise ValueError(
+                    "explicit base_revision conflicts with adapter_config.json"
+                )
+            resolved_base_revision = validate_pinned_revision(
+                base_revision or configured_base_revision
+            )
             from peft import PeftModel
-            tok = AutoTokenizer.from_pretrained(base_id, **revision_kw)
+            tok = AutoTokenizer.from_pretrained(
+                base_id, revision=resolved_base_revision
+            )
             base = AutoModelForCausalLM.from_pretrained(
                 base_id, torch_dtype=torch.bfloat16, device_map="auto",
-                **revision_kw, **kw)
-            model = PeftModel.from_pretrained(base, model_id).merge_and_unload()
+                revision=resolved_base_revision, **kw)
+            model = PeftModel.from_pretrained(
+                base, model_id, revision=revision
+            ).merge_and_unload()
         else:
+            if base_revision is not None:
+                raise ValueError(
+                    "base_revision is only valid when model_id is a LoRA adapter"
+                )
             tok = AutoTokenizer.from_pretrained(model_id, **revision_kw)
             model = AutoModelForCausalLM.from_pretrained(
                 model_id, torch_dtype=torch.bfloat16, device_map="auto",
@@ -463,9 +558,11 @@ def load_generate(
 
 
 __all__ = [
+    "DeviceVisibilityError",
     "GenerationClient",
     "GenerationProtocol",
     "VLLMPolicy",
+    "ROCM_VISIBILITY_ENV",
     "as_generation_client",
     "configure_rocm_env",
     "load_generate",

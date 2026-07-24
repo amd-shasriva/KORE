@@ -846,28 +846,27 @@ class ModelSpec:
         """Ensure a serving request still targets this verified checkpoint."""
 
         requested = Path(model_id).expanduser()
-        if requested.exists():
-            if requested.resolve() != Path(self.checkpoint_path):
-                raise ModelSpecError(
-                    f"serving path {requested.resolve()} differs from validated "
-                    f"checkpoint {self.checkpoint_path}"
-                )
-            # Close the preflight-to-load TOCTOU window. This is deliberately
-            # completed before serve.load_generate imports torch/vLLM.
-            current = ModelSpec.from_local_checkpoint(
-                requested,
-                revision=self.revision,
-                expected=self.architecture,
-                model_id=self.model_id,
-            )
-            if current.profile_hash != self.profile_hash:
-                raise ModelSpecError(
-                    "local checkpoint files changed after ModelSpec validation"
-                )
-        elif str(model_id) != self.model_id:
+        if not requested.exists():
             raise ModelSpecError(
-                f"serving model_id {str(model_id)!r} differs from validated "
-                f"model_id {self.model_id!r}"
+                "a local ModelSpec cannot authorize a remote/model-id load; "
+                "load the exact validated checkpoint_path"
+            )
+        if requested.resolve() != Path(self.checkpoint_path):
+            raise ModelSpecError(
+                f"serving path {requested.resolve()} differs from validated "
+                f"checkpoint {self.checkpoint_path}"
+            )
+        # Close the preflight-to-load TOCTOU window. This is deliberately
+        # completed before serve.load_generate imports torch/vLLM.
+        current = ModelSpec.from_local_checkpoint(
+            requested,
+            revision=self.revision,
+            expected=self.architecture,
+            model_id=self.model_id,
+        )
+        if current.profile_hash != self.profile_hash:
+            raise ModelSpecError(
+                "local checkpoint files changed after ModelSpec validation"
             )
         if revision is not None and validate_pinned_revision(revision) != self.revision:
             raise ModelSpecError(

@@ -5,12 +5,15 @@ Example:
       --model-path /models/Qwen3-32B \
       --revision <full-hub-commit-sha> \
       --scratch-path /scratch \
+      --workload-config resolved-workload.json \
       --measured-profile measured-peak.json \
       --output preflight.json
 
 The default Qwen3-32B profile intentionally contains ``revision=MEASURE``.
 Omitting ``--revision`` therefore fails.  Omitting a matching measured peak
 profile emits analytical lower bounds but never reports that the workload fits.
+Known-absent optional packages are recorded as ``ABSENT``; a run fails only when
+its resolved workload declares that package as required.
 """
 
 from __future__ import annotations
@@ -30,6 +33,8 @@ from kore.policy.resources import (
     MeasuredPeakProfile,
     ResourcePreflightError,
     UnresolvedProductionFieldError,
+    WorkloadSpec,
+    atomic_write_json,
     collect_resource_snapshot,
     evaluate_resource_preflight,
     load_resource_snapshot,
@@ -39,9 +44,7 @@ from kore.policy.resources import (
 def _emit(payload: dict[str, Any], output: Optional[str]) -> None:
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if output:
-        destination = Path(output)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(text, encoding="utf-8")
+        atomic_write_json(output, payload)
     print(text, end="")
 
 
@@ -61,6 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resources-json",
         help="recorded resource snapshot; otherwise probe this host",
+    )
+    parser.add_argument(
+        "--workload-config",
+        help=(
+            "fully resolved workload/config JSON; mandatory for measured "
+            "production evidence"
+        ),
     )
     parser.add_argument(
         "--measured-profile",
@@ -89,10 +99,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             if args.measured_profile
             else None
         )
+        expected_workload = None
+        if args.workload_config:
+            workload_payload = json.loads(
+                Path(args.workload_config).read_text(encoding="utf-8")
+            )
+            if not isinstance(workload_payload, dict):
+                raise ResourcePreflightError(
+                    "workload config must contain a JSON object"
+                )
+            expected_workload = WorkloadSpec.from_dict(workload_payload)
         report = evaluate_resource_preflight(
             model_spec,
             resources,
             measured,
+            expected_workload=expected_workload,
             headroom_fraction=args.headroom_fraction,
         )
         _emit(report.to_dict(), args.output)

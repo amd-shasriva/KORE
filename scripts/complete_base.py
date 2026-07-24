@@ -22,17 +22,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
+import fcntl
 import json
 import os
 from pathlib import Path
+import tempfile
 
 KINDS = ("repair", "groups")
 
 
 def _shard_done(data_root, task_id: str, kind: str) -> bool:
     p = Path(data_root) / kind / f"{task_id}.jsonl"
-    return p.exists() and p.stat().st_size > 0
+    return not _marker(p).exists() and bool(_load_records(p))
 
 
 def _marker(path: Path) -> Path:
@@ -55,21 +58,60 @@ def _record_key(record) -> str:
     )
 
 
-def _load_records(path: Path) -> list:
-    from kore.data.schemas import read_jsonl
+@contextmanager
+def _task_lock(data_root: Path, task_id: str):
+    """Serialize base completion for one task across overlapping campaigns."""
+    lock_path = data_root / ".locks" / "base" / f"{task_id}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        yield
 
+
+def _load_records(path: Path) -> list:
     if not path.exists() or path.stat().st_size == 0:
         return []
-    return read_jsonl(path, typed=False)
+    records = []
+    with path.open() as fh:
+        for line_no, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"invalid JSONL {path}:{line_no}: {exc}") from exc
+            if not isinstance(record, dict):
+                raise RuntimeError(
+                    f"invalid JSONL record {path}:{line_no}: expected object"
+                )
+            records.append(record)
+    return records
 
 
 def _checkpoint(path: Path, records: list) -> None:
     from kore.data.schemas import write_jsonl
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".jsonl.tmp")
-    write_jsonl(tmp, records)
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        write_jsonl(tmp, records)
+        with tmp.open("rb") as fh:
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _checkpoint_collector(path: Path, existing: list):
@@ -95,6 +137,21 @@ def complete_one(task_id: str, data_root, n_repair: int, n_parents: int, k: int,
 
     Returns (status, {kind: n_records}). Never touches wins/.
     """
+    root = Path(data_root)
+    with _task_lock(root, task_id):
+        return _complete_one_locked(
+            task_id, root, n_repair, n_parents, k, teacher
+        )
+
+
+def _complete_one_locked(
+    task_id: str,
+    data_root: Path,
+    n_repair: int,
+    n_parents: int,
+    k: int,
+    teacher,
+):
     from kore.data.gen_groups import generate_groups
     from kore.data.gen_repair import generate_repairs
     from kore.env.kore_env import KoreEnv
@@ -102,8 +159,7 @@ def complete_one(task_id: str, data_root, n_repair: int, n_parents: int, k: int,
 
     todo = []
     for kind in KINDS:
-        path = Path(data_root) / kind / f"{task_id}.jsonl"
-        if not _shard_done(data_root, task_id, kind) or _marker(path).exists():
+        if not _shard_done(data_root, task_id, kind):
             todo.append(kind)
     if not todo:
         return ("skip", {})
@@ -112,7 +168,7 @@ def complete_one(task_id: str, data_root, n_repair: int, n_parents: int, k: int,
     env = KoreEnv(task)
     counts: dict[str, int] = {}
     for kind in todo:
-        out = Path(data_root) / kind / f"{task_id}.jsonl"
+        out = data_root / kind / f"{task_id}.jsonl"
         existing = _load_records(out)
         target = n_repair if kind == "repair" else n_parents
         remaining = max(0, target - len(existing))
@@ -194,11 +250,20 @@ def main():
     from kore.tasks.registry import train_tasks
 
     gpu_ids = [int(x) for x in a.gpu_ids.split(",") if x != ""]
+    if not gpu_ids:
+        ap.error("--gpu-ids must contain at least one GPU")
+    if a.n_repair < 1 or a.n_parents < 1 or a.k < 1:
+        ap.error("--n-repair, --n-parents, and --k must be positive")
     if a.tasks.strip():
-        tasks = [t for t in a.tasks.split(",") if t]
+        tasks = list(dict.fromkeys(t for t in a.tasks.split(",") if t))
     else:
         tasks = [t.task_id for t in train_tasks()]
-    n_workers = a.workers or (len(gpu_ids) * 4)
+    if not tasks:
+        print("[base] COMPLETE: no tasks", flush=True)
+        return 0
+    n_workers = min(a.workers or (len(gpu_ids) * 4), len(tasks))
+    if n_workers < 1:
+        ap.error("--workers must be non-negative")
 
     print(f"[base] START tasks={len(tasks)} gpus={gpu_ids} workers={n_workers} "
           f"n_repair={a.n_repair} n_parents={a.n_parents} k={a.k} data_root={a.data_root}",
@@ -261,6 +326,13 @@ def main():
         if p.is_alive():
             p.terminate()
             p.join(timeout=5)
+    if done != len(tasks):
+        missing = len(tasks) - done
+        errors += max(0, missing)
+        print(
+            f"[base] FATAL received results for {done}/{len(tasks)} tasks",
+            flush=True,
+        )
     print(
         f"[base] COMPLETE: {done} tasks, +{rep_tot} repair recs, "
         f"+{grp_tot} groups recs, {skipped} skipped, {partials} partial, "

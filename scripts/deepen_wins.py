@@ -31,24 +31,74 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
+import tempfile
 
 
 def _src_hash(s) -> str:
-    return hashlib.sha1((s or "").encode("utf-8", "ignore")).hexdigest()
+    source = str(s or "").strip()
+    return hashlib.sha1(source.encode("utf-8", "ignore")).hexdigest()
+
+
+@contextmanager
+def _task_lock(data_root: Path, task_id: str):
+    """Serialize one task across accidental overlapping campaigns."""
+    lock_path = data_root / ".locks" / "deepen" / f"{task_id}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def _atomic_write_jsonl(path: Path, records: list) -> None:
+    from kore.data.schemas import write_jsonl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        write_jsonl(tmp, records)
+        with tmp.open("rb") as fh:
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _load_existing(path: Path):
     """Return (existing_dict_records, set_of_final_source_hashes) for a wins shard."""
-    from kore.data.schemas import read_jsonl
     if not path.exists() or path.stat().st_size == 0:
         return [], set()
-    try:
-        recs = read_jsonl(path, typed=False)
-    except Exception:
-        return [], set()
+    recs = []
+    with path.open() as fh:
+        for line_no, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"invalid JSONL {path}:{line_no}: {exc}") from exc
+            if not isinstance(record, dict):
+                raise RuntimeError(
+                    f"invalid JSONL record {path}:{line_no}: expected object"
+                )
+            recs.append(record)
     distinct = []
     seen = set()
     for record in recs:
@@ -67,22 +117,23 @@ def _load_existing(path: Path):
 
 def _checkpoint(path: Path, existing: list, added: list) -> None:
     """Atomically persist all wins completed so far for this task."""
-    from kore.data.schemas import write_jsonl
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".jsonl.tmp")
-    write_jsonl(tmp, list(existing) + list(added))
-    os.replace(tmp, path)
+    _atomic_write_jsonl(path, list(existing) + list(added))
 
 
 def deepen_one(task_id: str, data_root, target: int, gens: int, teacher, cfg):
     """Additively top up ONE task's wins to `target`. Returns (status, have, added, attempts)."""
+    root = Path(data_root)
+    with _task_lock(root, task_id):
+        return _deepen_one_locked(task_id, root, target, gens, teacher, cfg)
+
+
+def _deepen_one_locked(task_id: str, data_root: Path, target: int, gens: int, teacher, cfg):
     from kore.data.amd_knowledge import ExperienceLedger
     from kore.data.gen_wins import generate_wins
     from kore.env.kore_env import KoreEnv
     from kore.tasks.registry import get_task
 
-    path = Path(data_root) / "wins" / f"{task_id}.jsonl"
+    path = data_root / "wins" / f"{task_id}.jsonl"
     existing, seen = _load_existing(path)
     have = len(existing)
     if have >= target:
@@ -110,7 +161,10 @@ def deepen_one(task_id: str, data_root, target: int, gens: int, teacher, cfg):
         if not ws:
             continue
         w = ws[0]
-        h = _src_hash(getattr(w, "final_source", ""))
+        source = str(getattr(w, "final_source", "") or "").strip()
+        if not source:
+            continue
+        h = _src_hash(source)
         if h in seen:
             continue  # identical kernel -> don't store a duplicate
         seen.add(h)
@@ -169,11 +223,22 @@ def main():
     from kore.tasks.registry import train_tasks
 
     gpu_ids = [int(x) for x in a.gpu_ids.split(",") if x != ""]
+    if not gpu_ids:
+        ap.error("--gpu-ids must contain at least one GPU")
+    if a.target < 1:
+        ap.error("--target must be positive")
+    if a.gens < 1:
+        ap.error("--gens must be positive")
     if a.tasks.strip():
-        tasks = [t for t in a.tasks.split(",") if t]
+        tasks = list(dict.fromkeys(t for t in a.tasks.split(",") if t))
     else:
         tasks = [t.task_id for t in train_tasks()]  # excludes held-out by construction
-    n_workers = a.workers or (len(gpu_ids) * 4)
+    if not tasks:
+        print("[deepen] COMPLETE: no tasks", flush=True)
+        return 0
+    n_workers = min(a.workers or (len(gpu_ids) * 4), len(tasks))
+    if n_workers < 1:
+        ap.error("--workers must be non-negative")
 
     print(f"[deepen] START tasks={len(tasks)} target={a.target} gens={a.gens} "
           f"gpus={gpu_ids} workers={n_workers} data_root={a.data_root}", flush=True)
@@ -232,6 +297,13 @@ def main():
         if p.is_alive():
             p.terminate()
             p.join(timeout=5)
+    if done != len(tasks):
+        missing = len(tasks) - done
+        errors += max(0, missing)
+        print(
+            f"[deepen] FATAL received results for {done}/{len(tasks)} tasks",
+            flush=True,
+        )
     print(
         f"[deepen] COMPLETE: {done} tasks, +{total_added} new wins, "
         f"{skipped} skipped, {partials} partial, {errors} errors, "

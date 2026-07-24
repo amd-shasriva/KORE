@@ -35,9 +35,30 @@ class WorkItem:
 
 
 def _canonical_hash(record: dict) -> str:
-    source = record.get("final_source", "")
+    source = str(record.get("final_source", "") or "").strip()
     payload = source or json.dumps(record, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(payload.encode("utf-8", "ignore")).hexdigest()
+
+
+def jsonl_record_count(path: Path) -> int:
+    """Count object records, failing loudly on malformed/unsupported JSONL."""
+    if not path.exists() or path.stat().st_size == 0:
+        return 0
+    count = 0
+    with path.open() as fh:
+        for line_no, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"invalid JSONL {path}:{line_no}: {exc}") from exc
+            if not isinstance(record, dict):
+                raise RuntimeError(
+                    f"invalid JSONL record {path}:{line_no}: expected object"
+                )
+            count += 1
+    return count
 
 
 def distinct_wins(path: Path) -> int:
@@ -54,7 +75,9 @@ def distinct_wins(path: Path) -> int:
             except json.JSONDecodeError as exc:
                 raise RuntimeError(f"invalid JSONL {path}:{line_no}: {exc}") from exc
             if not isinstance(record, dict):
-                continue
+                raise RuntimeError(
+                    f"invalid JSONL record {path}:{line_no}: expected object"
+                )
             if not str(record.get("final_source", "") or "").strip():
                 continue
             seen.add(_canonical_hash(record))
@@ -64,7 +87,7 @@ def distinct_wins(path: Path) -> int:
 def shard_present(data_root: Path, kind: str, task_id: str) -> bool:
     path = data_root / kind / f"{task_id}.jsonl"
     marker = path.with_suffix(path.suffix + ".inprogress")
-    return path.exists() and path.stat().st_size > 0 and not marker.exists()
+    return not marker.exists() and jsonl_record_count(path) > 0
 
 
 def work_item(data_root: Path, task_id: str, target: int) -> WorkItem | None:

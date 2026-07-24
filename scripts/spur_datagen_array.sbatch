@@ -12,6 +12,7 @@
 #SBATCH --time=08:00:00
 #SBATCH --requeue
 #SBATCH --exclusive
+#SBATCH --open-mode=append
 # SPUR expands %j (child job id), but not Slurm's %A/%a array placeholders.
 #SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/spur-%j.out
 #SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/spur-%j.err
@@ -27,24 +28,53 @@ SHARD_DIR="${1:?arg1 must be the absolute shard directory}"
 DATA_ROOT="${2:-$REPO/data/b05factory}"
 TARGET="${3:-3}"
 MODE="${4:-run}"
-DEEP_WORKERS="${KORE_DEEP_WORKERS:-48}"
+MIXED_DEEP_WORKERS="${KORE_MIXED_DEEP_WORKERS:-${KORE_DEEP_WORKERS:-32}}"
 DEEP_ONLY_WORKERS="${KORE_DEEP_ONLY_WORKERS:-48}"
-BASE_WORKERS="${KORE_BASE_WORKERS:-32}"
+MIXED_BASE_WORKERS="${KORE_MIXED_BASE_WORKERS:-${KORE_BASE_WORKERS:-16}}"
+BASE_ONLY_WORKERS="${KORE_BASE_ONLY_WORKERS:-32}"
 GENS="${KORE_WINS_GENS:-8}"
 ARRAY_ID="${SLURM_ARRAY_TASK_ID:?must be submitted as a Slurm array}"
+
+cd "$REPO"
+for cmd in scontrol setsid; do
+    command -v "$cmd" >/dev/null || { echo "missing required command: $cmd" >&2; exit 2; }
+done
 
 printf -v IDX "%03d" "$ARRAY_ID"
 DEEP_FILE="$SHARD_DIR/deep_${IDX}.txt"
 BASE_FILE="$SHARD_DIR/base_${IDX}.txt"
+[[ -f "$DEEP_FILE" ]] || { echo "missing task list: $DEEP_FILE" >&2; exit 2; }
+[[ -f "$BASE_FILE" ]] || { echo "missing task list: $BASE_FILE" >&2; exit 2; }
 DEEP_TASKS="$(cat "$DEEP_FILE" 2>/dev/null || true)"
 BASE_TASKS="$(cat "$BASE_FILE" 2>/dev/null || true)"
 
-cd "$REPO"
 mkdir -p runs
 source /home/shasriva/kore-venv/bin/activate
 set -a
 source "$REPO/.env.local"
 set +a
+
+"$PY" - "$SHARD_DIR/manifest.json" "$REPO" "$DATA_ROOT" "$TARGET" "$ARRAY_ID" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+manifest_path, repo, data_root, target, array_id = sys.argv[1:]
+manifest = json.loads(Path(manifest_path).read_text())
+head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+errors = []
+if manifest.get("repo_commit") != head:
+    errors.append(f"manifest commit {manifest.get('repo_commit')} != checkout {head}")
+if Path(manifest.get("data_root", "")).resolve() != Path(data_root).resolve():
+    errors.append("manifest data_root does not match job argument")
+if int(manifest.get("target_wins", -1)) != int(target):
+    errors.append("manifest target_wins does not match job argument")
+if not 0 <= int(array_id) < int(manifest.get("n_shards", 0)):
+    errors.append("array index is outside manifest shard range")
+if errors:
+    raise SystemExit("FATAL manifest preflight: " + "; ".join(errors))
+PY
 
 # Fail closed: SPUR partial-GPU allocations mount unusable device subsets. Every
 # production child must see all eight MI355X devices before masks are remapped.
@@ -65,6 +95,10 @@ export KORE_COMPILE_BASELINE=1
 export KORE_BENCH_COLD=1
 export KORE_SHAPE_AUGMENT=1
 export KORE_WINS_PMC=0
+export KORE_GROUND_REASONING=0
+export KORE_TIMING_LOCK=1
+export GPU_TARGET=gfx950
+export PYTHONUNBUFFERED=1
 export OPENBLAS_NUM_THREADS=2
 export OMP_NUM_THREADS=2
 export MKL_NUM_THREADS=2
@@ -83,17 +117,57 @@ DEEP_LOG="runs/spur-${SLURM_JOB_ID}_${ARRAY_ID}-deep.log"
 BASE_LOG="runs/spur-${SLURM_JOB_ID}_${ARRAY_ID}-base.log"
 PIDS=()
 NAMES=()
+REQUEUE_TIMER_PID=""
 
 terminate_children() {
-    trap - TERM INT
+    local pid
     if ((${#PIDS[@]})); then
-        kill -TERM "${PIDS[@]}" 2>/dev/null || true
+        for pid in "${PIDS[@]}"; do
+            kill -TERM -- "-$pid" 2>/dev/null || true
+        done
         wait "${PIDS[@]}" 2>/dev/null || true
     fi
+}
+
+handle_termination() {
+    trap - USR1 TERM INT
+    terminate_children
     echo "[spur-worker] signal received; completed shards are safe; exiting for requeue"
     exit 143
 }
-trap terminate_children TERM INT
+
+handle_requeue_warning() {
+    trap - USR1 TERM INT
+    echo "[spur-worker] USR1 time-limit warning; draining and requesting requeue"
+    terminate_children
+    if scontrol requeue "$SLURM_JOB_ID"; then
+        exit 0
+    fi
+    echo "[spur-worker] FATAL explicit requeue failed" >&2
+    exit 143
+}
+
+cleanup_local() {
+    if [[ -n "$REQUEUE_TIMER_PID" ]]; then
+        kill "$REQUEUE_TIMER_PID" 2>/dev/null || true
+    fi
+    rm -rf -- "$LOCAL_ROOT"
+}
+
+trap cleanup_local EXIT
+trap handle_termination TERM INT
+trap handle_requeue_warning USR1
+
+# SPUR's sbatch does not implement Slurm's --signal option. Generate the same
+# five-minute warning locally so an eight-hour child explicitly requeues after
+# draining all checkpointing drivers.
+if [[ "$MODE" != "probe" ]]; then
+    (
+        sleep "${KORE_REQUEUE_AFTER_SECONDS:-28500}"
+        kill -USR1 "$$"
+    ) &
+    REQUEUE_TIMER_PID="$!"
+fi
 
 echo "[spur-worker] START job=$SLURM_JOB_ID array=$ARRAY_ID host=$(hostname) shard=$IDX"
 DEEP_COUNT="$([ -n "$DEEP_TASKS" ] && awk -F, '{print NF}' <<<"$DEEP_TASKS" || echo 0)"
@@ -107,9 +181,13 @@ if [[ "$MODE" == "probe" ]]; then
 fi
 
 if [[ -n "$BASE_TASKS" ]]; then
-    N_BASE="$BASE_WORKERS"
+    if [[ -n "$DEEP_TASKS" ]]; then
+        N_BASE="$MIXED_BASE_WORKERS"
+    else
+        N_BASE="$BASE_ONLY_WORKERS"
+    fi
     ((N_BASE > BASE_COUNT)) && N_BASE="$BASE_COUNT"
-    KORE_RUNS_DIR="$LOCAL_ROOT/replay/base" "$PY" scripts/complete_base.py \
+    KORE_RUNS_DIR="$LOCAL_ROOT/replay/base" setsid "$PY" scripts/complete_base.py \
         --data-root "$DATA_ROOT" \
         --tasks "$BASE_TASKS" \
         --gpu-ids 0,1,2,3,4,5,6,7 \
@@ -122,12 +200,12 @@ fi
 
 if [[ -n "$DEEP_TASKS" ]]; then
     if [[ -n "$BASE_TASKS" ]]; then
-        N_DEEP="$DEEP_WORKERS"
+        N_DEEP="$MIXED_DEEP_WORKERS"
     else
         N_DEEP="$DEEP_ONLY_WORKERS"
     fi
     ((N_DEEP > DEEP_COUNT)) && N_DEEP="$DEEP_COUNT"
-    KORE_RUNS_DIR="$LOCAL_ROOT/replay/deepen" "$PY" scripts/deepen_wins.py \
+    KORE_RUNS_DIR="$LOCAL_ROOT/replay/deepen" setsid "$PY" scripts/deepen_wins.py \
         --data-root "$DATA_ROOT" \
         --tasks "$DEEP_TASKS" \
         --gpu-ids 0,1,2,3,4,5,6,7 \
@@ -153,6 +231,19 @@ for i in "${!PIDS[@]}"; do
         STATUS=$RC
     fi
 done
+
+if ((STATUS == 0)); then
+    ASSIGNED_TASKS="${DEEP_TASKS},${BASE_TASKS}"
+    if "$PY" scripts/_kf_verify.py "$DATA_ROOT" "$TARGET" \
+            --tasks "$ASSIGNED_TASKS" \
+            --cleanup-out "$LOCAL_ROOT/remaining.txt" \
+            --require-complete; then
+        :
+    else
+        STATUS=$?
+        echo "[spur-worker] assigned-shard verification failed rc=$STATUS" >&2
+    fi
+fi
 
 echo "[spur-worker] END job=$SLURM_JOB_ID array=$ARRAY_ID status=$STATUS"
 exit "$STATUS"

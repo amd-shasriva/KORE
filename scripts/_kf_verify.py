@@ -6,67 +6,125 @@ repair+groups+wins>=target, so the supervisor can mop up stragglers on b05-2.
 """
 from __future__ import annotations
 
+import argparse
 import collections
 import json
 import os
-import sys
+from pathlib import Path
+
+
+def _records(path: Path) -> list[dict]:
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    records = []
+    with path.open() as fh:
+        for line_no, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"invalid JSONL {path}:{line_no}: {exc}") from exc
+            if not isinstance(record, dict):
+                raise RuntimeError(
+                    f"invalid JSONL record {path}:{line_no}: expected object"
+                )
+            records.append(record)
+    return records
+
+
+def _distinct_wins(root: Path, task_id: str) -> int:
+    sources = {
+        str(record.get("final_source", "") or "").strip()
+        for record in _records(root / "wins" / f"{task_id}.jsonl")
+    }
+    sources.discard("")
+    return len(sources)
+
+
+def _has_shard(root: Path, kind: str, task_id: str) -> bool:
+    path = root / kind / f"{task_id}.jsonl"
+    return not path.with_suffix(path.suffix + ".inprogress").exists() and bool(
+        _records(path)
+    )
+
+
+def verify(root: Path, task_ids: list[str], target: int) -> tuple[dict, list[str]]:
+    wins_hist = collections.Counter()
+    missing_repair = missing_groups = fully_complete = 0
+    undone = []
+    for task_id in task_ids:
+        wins = _distinct_wins(root, task_id)
+        wins_hist[min(wins, target)] += 1
+        repair = _has_shard(root, "repair", task_id)
+        groups = _has_shard(root, "groups", task_id)
+        if not repair:
+            missing_repair += 1
+        if not groups:
+            missing_groups += 1
+        if wins >= target and repair and groups:
+            fully_complete += 1
+        else:
+            undone.append(task_id)
+    summary = {
+        "tasks": len(task_ids),
+        "fully_complete": fully_complete,
+        "wins_hist": dict(sorted(wins_hist.items())),
+        "missing_repair": missing_repair,
+        "missing_groups": missing_groups,
+        "remaining_undone": len(undone),
+    }
+    return summary, undone
+
+
+def _write_cleanup(path: Path, undone: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(",".join(undone))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def main() -> int:
-    root = sys.argv[1]
-    target = int(sys.argv[2])
+    ap = argparse.ArgumentParser()
+    ap.add_argument("root")
+    ap.add_argument("target", type=int)
+    ap.add_argument("--tasks", default="", help="optional comma-separated task IDs")
+    ap.add_argument("--prefix", default="genb_")
+    ap.add_argument("--cleanup-out", default="/tmp/cleanup.txt")
+    ap.add_argument("--require-complete", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+    if args.target < 1:
+        ap.error("target must be positive")
+
     from kore.tasks.registry import train_tasks
 
-    def nwins(t: str) -> int:
-        f = f"{root}/wins/{t}.jsonl"
-        if not os.path.exists(f) or os.path.getsize(f) == 0:
-            return 0
-        sources = set()
-        with open(f) as fh:
-            for line_no, line in enumerate(fh, 1):
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise RuntimeError(f"invalid JSONL {f}:{line_no}: {exc}") from exc
-                if isinstance(record, dict):
-                    source = str(record.get("final_source", "") or "").strip()
-                    if source:
-                        sources.add(source)
-        return len(sources)
-
-    def has(kind: str, t: str) -> bool:
-        f = f"{root}/{kind}/{t}.jsonl"
-        marker = f + ".inprogress"
-        return os.path.exists(f) and os.path.getsize(f) > 0 \
-            and not os.path.exists(marker)
-
-    tasks = [t.task_id for t in train_tasks() if t.task_id.startswith("genb_")]
-    wh = collections.Counter()
-    miss_r = miss_g = full = 0
-    undone = []
-    for t in tasks:
-        w = nwins(t)
-        wh[min(w, target)] += 1
-        r = has("repair", t)
-        g = has("groups", t)
-        if not r:
-            miss_r += 1
-        if not g:
-            miss_g += 1
-        if w >= target and r and g:
-            full += 1
-        else:
-            undone.append(t)
-
-    with open("/tmp/cleanup.txt", "w") as fh:
-        fh.write(",".join(undone))
-
-    print(f"VERIFY tasks={len(tasks)} fully_complete={full} "
-          f"wins_hist={dict(sorted(wh.items()))} "
-          f"missing_repair={miss_r} missing_groups={miss_g} remaining_undone={len(undone)}")
-    return 0
+    if args.tasks.strip():
+        tasks = list(dict.fromkeys(t for t in args.tasks.split(",") if t))
+    else:
+        tasks = [
+            task.task_id
+            for task in train_tasks()
+            if task.task_id.startswith(args.prefix)
+        ]
+    summary, undone = verify(Path(args.root), tasks, args.target)
+    if args.cleanup_out:
+        _write_cleanup(Path(args.cleanup_out), undone)
+    if args.json:
+        print(json.dumps(summary, sort_keys=True))
+    else:
+        print(
+            f"VERIFY tasks={summary['tasks']} "
+            f"fully_complete={summary['fully_complete']} "
+            f"wins_hist={summary['wins_hist']} "
+            f"missing_repair={summary['missing_repair']} "
+            f"missing_groups={summary['missing_groups']} "
+            f"remaining_undone={summary['remaining_undone']}"
+        )
+    return 1 if args.require_complete and undone else 0
 
 
 if __name__ == "__main__":

@@ -54,6 +54,21 @@ _OBS_NUMBER_FIELDS = (
     "profile_efficiency",
 )
 
+# Conservative backfill applied to timing-bearing payloads that predate the
+# paired-protocol identity fields.  Historical unpaired medians must never be
+# promoted to publication-grade merely because the schema gained new defaults:
+# they are marked screening-only and performance-ineligible.  Only keys that are
+# actual Observation fields are applied (mirrors the _OBS_FIELDS filtering used
+# throughout this module), so this stays safe even before reward.Observation
+# grows these fields.
+_LEGACY_TIMING_BACKFILL = {
+    "timing_grade": "screening",
+    "timing_protocol": "legacy-unpaired-v0",
+    "timing_protocol_version": 0,
+    "performance_eligible": False,
+    "timing_requested": True,
+}
+
 
 def _is_finite_number(value: Any) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -93,6 +108,16 @@ def _obs_from_dict(rec: Mapping[str, Any]) -> Observation:
     for name in ("error_text", "hack_reason"):
         if name in values and values[name] is not None and not isinstance(values[name], str):
             raise TypeError(f"observation field {name} must be a string or null")
+    # Old cache entries have no paired protocol identity.  If the payload carries
+    # timing but no timing_grade, conservatively mark it screening-only so
+    # unpaired legacy medians cannot silently count as performance-eligible.
+    has_timing = bool(
+        rec.get("wall_by_shape") or rec.get("baseline_by_shape")
+        or rec.get("wall_ms") is not None or rec.get("baseline_ms") is not None)
+    if "timing_grade" not in rec and has_timing:
+        for name, default in _LEGACY_TIMING_BACKFILL.items():
+            if name in _OBS_FIELDS and name not in values:
+                values[name] = default
     obs = Observation(**values)
     if obs.infra_error:
         raise ValueError("infrastructure failures are not replayable")

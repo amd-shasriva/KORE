@@ -1,104 +1,151 @@
-"""CPU-only tests for the hardware-counter dense reward (flagship novelty)."""
+"""Dimension and evidence gates for profile diagnostics."""
 
 from __future__ import annotations
 
 import dataclasses
+import math
 
+import pytest
+
+from kore.analysis.roofline import (
+    estimate_work,
+    make_physical_model,
+    mfma_flops,
+)
 from kore.config import CONFIG
-from kore.reward import profile_reward as pr
+from kore.reward import profile_reward as profile
 from kore.reward.reward import Observation, compute_reward
 
 
-# Synthetic counter dicts (rocprofv3-style names).
-def _c(valu, salu, vmem, mfma, wait):
-    return {
-        "SQ_INSTS_VALU": valu, "SQ_INSTS_SALU": salu, "SQ_INSTS_VMEM": vmem,
-        "SQ_INSTS_VALU_MFMA_BF16": mfma, "SQ_WAIT_INST_ANY": wait,
+MODEL = make_physical_model("mi350x")
+WORK = estimate_work("elementwise", 1_000_000, "bf16")
+
+
+def test_raw_qcycles_are_not_divided_by_instructions():
+    raw = {"SQ_WAIT_INST_ANY": 100, "SQ_INSTS_VALU": 100}
+    assert profile.stall_fraction(raw) is None
+    assert profile.issue_efficiency(raw) is None
+    assert profile.issued_instructions(raw) == 100
+
+
+def test_derived_percentage_is_validated():
+    assert profile.stall_fraction({"MemUnitStalled": 25.0}) == pytest.approx(0.25)
+    assert profile.issue_efficiency({"MemUnitStalled": 25.0}) == pytest.approx(0.75)
+    assert profile.stall_fraction({"MemUnitStalled": 250.0}) is None
+    assert profile.stall_fraction({"MemUnitStalled": math.nan}) is None
+
+
+def test_mfma_mops_never_enter_instruction_total():
+    counters = {
+        "SQ_INSTS_VALU": 100,
+        "SQ_INSTS_VMEM": 20,
+        "SQ_INSTS_VALU_MFMA_MOPS_BF16": 1000,
     }
+    assert profile.issued_instructions(counters) == 120
+    assert mfma_flops(counters) == 1000 * 512 * 2
 
 
-def test_issue_efficiency_and_stall_fraction():
-    c = _c(valu=800, salu=100, vmem=100, mfma=0, wait=1000)  # issued=1000, wait=1000
-    assert abs(pr.stall_fraction(c) - 0.5) < 1e-9
-    assert abs(pr.issue_efficiency(c) - 0.5) < 1e-9
+def test_profile_score_uses_same_unit_components():
+    ref = {
+        "MemUnitStalled": 40.0,
+        "SQ_INSTS_VMEM": 200,
+    }
+    better = {
+        "MemUnitStalled": 20.0,
+        "SQ_INSTS_VMEM": 100,
+    }
+    worse = {
+        "MemUnitStalled": 80.0,
+        "SQ_INSTS_VMEM": 400,
+    }
+    assert profile.profile_efficiency_score(better, ref) == pytest.approx(1.0)
+    assert 0.0 <= profile.profile_efficiency_score(worse, ref) < 1.0
 
 
-def test_score_is_one_when_candidate_matches_baseline():
-    ref = _c(800, 100, 100, 0, 500)
-    assert abs(pr.profile_efficiency_score(dict(ref), dict(ref)) - 1.0) < 1e-9
+def test_profile_score_requires_usable_counter_units():
+    assert profile.profile_efficiency_score(
+        {"SQ_WAIT_INST_ANY": 1}, {"SQ_WAIT_INST_ANY": 2}) is None
 
 
-def test_score_rewards_fewer_stalls_and_less_traffic():
-    ref = _c(valu=800, salu=100, vmem=200, mfma=0, wait=1000)
-    # candidate: fewer stalls (better scheduling) AND less memory traffic
-    better = _c(valu=800, salu=100, vmem=100, mfma=0, wait=200)
-    worse = _c(valu=800, salu=100, vmem=400, mfma=0, wait=3000)
-    s_better = pr.profile_efficiency_score(better, ref)
-    s_worse = pr.profile_efficiency_score(worse, ref)
-    assert s_better > s_worse
-    assert 0.0 <= s_worse < s_better <= 1.0
+def test_roofline_score_requires_explicit_model():
+    t_min = WORK.bytes / MODEL.hbm_bytes_per_s * 1e3
+    assert profile.roofline_dense_score(
+        {}, work=WORK, measured_ms=t_min) is None
+    near = profile.roofline_dense_score(
+        {}, work=WORK, model=MODEL, measured_ms=t_min * 1.1)
+    far = profile.roofline_dense_score(
+        {}, work=WORK, model=MODEL, measured_ms=t_min * 10)
+    assert near > far
+    assert 0.0 <= far < near <= 1.0
 
 
-def test_score_bounded_and_capped_at_one():
-    ref = _c(800, 100, 100, 0, 1000)
-    # candidate hugely better than baseline -> clamped to 1.0, never > 1
-    great = _c(800, 100, 10, 0, 1)
-    assert pr.profile_efficiency_score(great, ref) <= 1.0
+def test_roofline_score_blends_valid_derived_counter():
+    t_min = WORK.bytes / MODEL.hbm_bytes_per_s * 1e3
+    good = profile.roofline_dense_score(
+        {"MemUnitStalled": 10.0},
+        work=WORK,
+        model=MODEL,
+        measured_ms=t_min * 1.1,
+    )
+    bad = profile.roofline_dense_score(
+        {"MemUnitStalled": 90.0},
+        work=WORK,
+        model=MODEL,
+        measured_ms=t_min * 10,
+    )
+    assert good > bad
 
 
-def test_score_none_when_no_usable_counters():
-    assert pr.profile_efficiency_score({}, {}) is None
+def _obs(profile_value, *, evidence=False):
+    return Observation(
+        compiled=True,
+        validation_passed=True,
+        snr_by_shape={"s": 99.0},
+        wall_by_shape={"s": 1.25},
+        baseline_by_shape={"s": 1.0},
+        profile_efficiency=profile_value,
+        profile_evidence_passed=evidence,
+        profile_evidence_fingerprint=("sha256:evidence" if evidence else None),
+    )
 
 
-# --- reward integration ---------------------------------------------------- #
-def _obs(su, prof=None):
-    return Observation(compiled=True, validation_passed=True, snr_by_shape={"s": 99.0},
-                       wall_by_shape={"s": 1.0 / su}, baseline_by_shape={"s": 1.0},
-                       profile_efficiency=prof)
-
-
-def test_profile_reward_inert_by_default():
-    """Default weight 0 => profile_efficiency never changes the reward."""
-    with_prof = compute_reward(_obs(0.8, prof=1.0), "x=1", dtype="bf16")
-    without = compute_reward(_obs(0.8, prof=None), "x=1", dtype="bf16")
-    assert abs(with_prof.reward - without.reward) < 1e-9
-    assert not any(f.startswith("profile") for f in with_prof.flags)
-
-
-def test_profile_reward_adds_bounded_bonus_when_enabled():
+def test_profile_reward_weight_is_not_sufficient_without_evidence():
     cfg = dataclasses.replace(CONFIG, profile_reward_weight=0.15)
-    hi = compute_reward(_obs(0.8, prof=1.0), "x=1", dtype="bf16", cfg=cfg)
-    lo = compute_reward(_obs(0.8, prof=0.0), "x=1", dtype="bf16", cfg=cfg)
-    # dense signal in the correct-but-slow band: better counters -> higher reward
-    assert abs((hi.reward - lo.reward) - 0.15) < 1e-9
-    assert any(f.startswith("profile+") for f in hi.flags)
+    with_profile = compute_reward(
+        _obs(1.0, evidence=False), "x=1", dtype="bf16", cfg=cfg)
+    without = compute_reward(
+        _obs(None, evidence=False), "x=1", dtype="bf16", cfg=cfg)
+    assert with_profile.reward == without.reward
+    assert not any(flag.startswith("profile+") for flag in with_profile.flags)
 
 
-def test_parses_rocprofv3_long_format(tmp_path):
-    """rocprofv3 1.x emits a LONG csv (one row per counter). The parser must fold
-    those into per-dispatch counter dicts (regression: this silently no-op'd)."""
+def test_profile_reward_applies_only_with_explicit_evidence_gate():
+    cfg = dataclasses.replace(CONFIG, profile_reward_weight=0.15)
+    high = compute_reward(
+        _obs(1.0, evidence=True), "x=1", dtype="bf16", cfg=cfg)
+    low = compute_reward(
+        _obs(0.0, evidence=True), "x=1", dtype="bf16", cfg=cfg)
+    assert high.reward - low.reward == pytest.approx(0.15)
+    assert any(flag.startswith("profile+") for flag in high.flags)
+
+
+def test_nonfinite_profile_value_never_enters_reward():
+    cfg = dataclasses.replace(CONFIG, profile_reward_weight=0.15)
+    result = compute_reward(
+        _obs(math.nan, evidence=True), "x=1", dtype="bf16", cfg=cfg)
+    assert math.isfinite(result.reward)
+    assert not any(flag.startswith("profile+") for flag in result.flags)
+
+
+def test_long_format_parser_preserves_units_without_inventing_efficiency(tmp_path):
     from kore.verifier.parsers.rocprofv3 import parse_rocprofv3_csv
-    csv = tmp_path / "123_counter_collection.csv"
+
+    csv = tmp_path / "counter_collection.csv"
     csv.write_text(
         "Dispatch_Id,Kernel_Name,Counter_Name,Counter_Value\n"
-        "1,my_kernel,SQ_INSTS_VALU,1000\n"
-        "1,my_kernel,SQ_WAIT_INST_ANY,500\n"
-        "1,my_kernel,SQ_INSTS_VMEM,200\n"
-        "2,other_kernel,SQ_INSTS_VALU,50\n"
+        "1,k,SQ_INSTS_VALU,1000\n"
+        "1,k,SQ_WAIT_INST_ANY,500\n"
     )
-    ks = parse_rocprofv3_csv(csv)
-    assert len(ks) == 2
-    k0 = next(k for k in ks if k.kernel_name == "my_kernel")
-    assert k0.counters["SQ_INSTS_VALU"] == 1000
-    assert k0.counters["SQ_WAIT_INST_ANY"] == 500
-    from kore.reward.profile_reward import issue_efficiency
-    assert issue_efficiency(k0.counters) is not None
-
-
-def test_profile_reward_never_dominates_fast_p():
-    """A counter-efficient SLOW kernel must not out-reward a kernel that actually
-    beats the baseline - the profiler shapes, it never leads."""
-    cfg = dataclasses.replace(CONFIG, profile_reward_weight=0.15)
-    slow_but_efficient = compute_reward(_obs(0.9, prof=1.0), "x=1", dtype="bf16", cfg=cfg)
-    genuinely_fast = compute_reward(_obs(1.3, prof=0.0), "x=1", dtype="bf16", cfg=cfg)
-    assert genuinely_fast.reward > slow_but_efficient.reward
+    (kernel,) = parse_rocprofv3_csv(csv)
+    assert kernel.counters["SQ_WAIT_INST_ANY"] == 500
+    assert profile.issue_efficiency(kernel.counters) is None

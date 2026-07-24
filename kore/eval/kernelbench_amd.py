@@ -474,7 +474,8 @@ def _load_one_kernelbench_problem(path: Path, level: int, dtype: str) -> Optiona
     # KernelBench fixes shapes inside get_inputs; expose one nominal shape so KORE's
     # augmenter can still widen it for the held-out protocol.
     from kore.tasks.base import Shape
-    fam = "gemm" if any(k in name.lower() for k in ("matmul", "gemm", "conv")) else "kernelbench"
+    from kore.tasks.taxonomy import product_family_for_name
+    fam = product_family_for_name(name) or "unclassified"
     return KernelBenchSpec(
         name=name, level=level, family=fam, operation=name.lower(),
         reference=_reference, make_inputs=_make_inputs,

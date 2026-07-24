@@ -59,7 +59,25 @@ def test_selected_heldout_task_routes_to_eval_not_train():
     assert held not in ctx["train_task_ids"]
 
 
+def test_all_heldout_selection_refuses_fallback_training():
+    # taxonomy (fail-closed split): a selection that is ENTIRELY held-out must NOT
+    # silently fall back to training on the eval probes -- the split is authored
+    # fail-closed and raises SplitManifestError with an empty train split.
+    from kore.tasks.registry import SplitManifestError
+    held = heldout_tasks()[0]
+    ctx = {"tasks": [held], "args": _args(["--tasks", held.task_id])}
+    with pytest.raises(SplitManifestError, match="train split is empty"):
+        rc._apply_split(ctx)
+
+
 def test_manifest_threads_train_and_eval_ids(tmp_path):
+    # frontier-integration: the campaign manifest carries a complete versioned
+    # lineage contract (schema {"name": "kore.campaign", "version": 1}); the
+    # train/eval task ids live under lineage.tasks and round-trip through
+    # _save_manifest / _load_manifest_into_ctx.
+    # taxonomy (fail-closed split): the manifest ALSO carries a versioned
+    # split_manifest whose taxonomy {version, digest} must be present so a stale
+    # split can be detected on resume.
     lineage = {
         "compatibility_digest": "sha256:test",
         "model": {"requested_id": "Qwen/Qwen3-14B", "content_digest": "sha256:model"},
@@ -89,6 +107,9 @@ def test_manifest_threads_train_and_eval_ids(tmp_path):
     assert persisted["schema"] == {"name": "kore.campaign", "version": 1}
     assert persisted["lineage"]["tasks"]["train"] == ["rmsnorm_aiter", "gemm_bf16"]
     assert persisted["lineage"]["tasks"]["eval"] == ["flash_attn_decode_bf16"]
+    # taxonomy: the versioned split_manifest is persisted alongside the lineage.
+    assert persisted["split_manifest"]["taxonomy"]["version"]
+    assert persisted["split_manifest"]["taxonomy"]["digest"]
 
     ctx2 = {
         "data_root": tmp_path, "midtrain_ckpt": None, "sft_ckpt": None,
@@ -100,6 +121,38 @@ def test_manifest_threads_train_and_eval_ids(tmp_path):
     rc._load_manifest_into_ctx(ctx2)
     assert ctx2["train_task_ids"] == ["rmsnorm_aiter", "gemm_bf16"]
     assert ctx2["eval_task_ids"] == ["flash_attn_decode_bf16"]
+    # taxonomy: the loaded ctx exposes the validated split_manifest taxonomy stamp.
+    assert ctx2["split_manifest"]["taxonomy"]["version"]
+    assert ctx2["split_manifest"]["taxonomy"]["digest"]
+
+
+def test_stale_campaign_manifest_is_invalidated(tmp_path):
+    # taxonomy (fail-closed split): a manifest whose persisted taxonomy digest no
+    # longer matches the LIVE taxonomy must be rejected on load -- never silently
+    # reused -- so a stale train/eval split cannot corrupt a resumed campaign.
+    from kore.tasks.registry import StaleSplitManifestError
+    args = _args(["--tasks", "rmsnorm_aiter"])
+    ctx = {
+        "data_root": tmp_path,
+        "dry": False,
+        "base": "base",
+        "midtrain_ckpt": None,
+        "sft_ckpt": None,
+        "dpo_ckpt": None,
+        "grpo_ckpt": None,
+        "final": None,
+        "done_stages": set(),
+        "tasks": [get_task("rmsnorm_aiter")],
+        "args": args,
+    }
+    rc._apply_split(ctx)
+    rc._save_manifest(ctx)
+    path = tmp_path / "campaign_manifest.json"
+    payload = json.loads(path.read_text())
+    payload["split_manifest"]["taxonomy"]["digest"] = "stale"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(StaleSplitManifestError, match="taxonomy digest changed"):
+        rc._load_manifest_into_ctx(ctx)
 
 
 def test_apply_split_overrides_a_stale_manifest_split():
@@ -365,6 +418,8 @@ def test_grpo_trains_only_on_train_split(monkeypatch, tmp_path):
 # 5. assemble folds on-policy / evolve / DAgger records
 # --------------------------------------------------------------------------- #
 def test_assemble_multicap_folds_extra_records(tmp_path, monkeypatch):
+    # frontier-integration: decontamination runs in development mode so the
+    # StubTeacher fixtures are not rejected by the contamination gate.
     monkeypatch.setenv("KORE_DECONTAM_DEVELOPMENT", "1")
     from kore.data import assemble
     from kore.data.schemas import WinRecord

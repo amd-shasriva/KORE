@@ -434,11 +434,13 @@ def synthesize_agentic(
     rng = random.Random(seed)
     budgets = {k: max(0, int(round(cap * frac))) for k, frac in mix}
     built: dict[str, list[AgenticTrajectoryRecord]] = {k: [] for k in _SYNTH_FN}
-    # Held-out generalization tasks (paged-KV decode, MLA) must NEVER be synthesized
-    # into agentic SFT trajectories - otherwise they leak into training and invalidate
-    # the eval split (audit C2). The kernel repair/win/group slices are already
-    # train-filtered; this closes the agentic bypass at the source.
-    from kore.tasks.registry import HELDOUT_TASKS
+    # Every eval-only identity (whole-family, near-probe lineage, foreign arch/dtype,
+    # or unclassified) must be excluded from agentic SFT too - otherwise held-out
+    # generalization tasks (paged-KV decode, MLA, ...) leak into training and
+    # invalidate the eval split (audit C2). ``is_heldout_record`` is the fail-closed
+    # split decision: it drops anything it cannot positively classify as train, which
+    # closes the agentic bypass at the source.
+    from kore.tasks.registry import is_heldout_record
     n_heldout_skipped = 0
 
     for kind in _SYNTH_FN:
@@ -451,7 +453,7 @@ def synthesize_agentic(
         for r in recs:
             if len(built[kind]) >= want:
                 break
-            if isinstance(r, dict) and r.get("task_id") in HELDOUT_TASKS:
+            if is_heldout_record(r):
                 n_heldout_skipped += 1
                 continue
             try:

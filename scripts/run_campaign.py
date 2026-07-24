@@ -278,6 +278,12 @@ _IMPORT_CHECKS = [
     ("kore.tasks.registry", "train_tasks", True, []),
     ("kore.tasks.registry", "heldout_tasks", True, []),
     ("kore.tasks.registry", "operator_family", True, []),
+    # Fail-closed versioned split contract (taxonomy): the registry builds/validates a
+    # frozen split manifest and hashes the task taxonomy so a stale-manifest resume or
+    # a foreign selection can never silently repartition train/eval.
+    ("kore.tasks.registry", "build_split_manifest", True, []),
+    ("kore.tasks.registry", "validate_split_manifest", True, ["payload"]),
+    ("kore.tasks.taxonomy", "taxonomy_digest", True, ["tasks"]),
     ("kore.env.kore_env", "KoreEnv", True, []),
     ("kore.data.assemble", "build_multicap_dataset", True, ["kernel_records", "extra_records"]),
     ("kore.data.assemble", "build_dpo_with_hard_negatives", True,
@@ -554,13 +560,20 @@ def _resolved_stage_contract(ctx) -> dict:
 def _task_lineage(ctx) -> dict:
     from kore.campaign_lineage import object_digest
     from kore.tasks.registry import all_tasks
+    from kore.tasks.taxonomy import taxonomy_digest
 
     registry = [_task_snapshot(t) for t in all_tasks()]
+    # Taxonomy fail-closed split contract: bind the versioned split manifest and the
+    # task-taxonomy digest into lineage so a resume whose taxonomy/split contract has
+    # drifted is rejected by the compatibility check.
+    split_manifest = ctx.get("split_manifest")
     split = {
         "seed": int(getattr(ctx["args"], "split_seed", 0)),
         "selected": [t.task_id for t in ctx["tasks"]],
         "train": list(ctx["train_task_ids"]),
         "eval": list(ctx["eval_task_ids"]),
+        "split_manifest": split_manifest,
+        "taxonomy_digest": taxonomy_digest(tasks=all_tasks()),
     }
     return {
         **split,
@@ -1346,52 +1359,63 @@ def _teacher(args):
 
 
 def _apply_split(ctx) -> None:
-    """Compute the AUTHORITATIVE registry train/held-out split for this run.
+    """Compute the AUTHORITATIVE versioned registry train/held-out split for this run.
 
-    Uses ``kore.tasks.registry.split_tasks(seed)`` (item 1). The held-out set is a
-    fixed function of operator family + arch, so it is independent of ``seed`` (the
-    seed only reorders within each split). From the campaign's selected task set:
+    Uses the fail-closed versioned split contract
+    (``kore.tasks.registry.split_manifest_for_selection``): whole product leaves,
+    exact near-probe roots, and foreign arch/dtype are eval-only. From the campaign's
+    selected task set the contract fixes:
 
       * ``train_tasks`` = selected tasks that are NOT held out - every training
         stage (datagen/evolve/agentic/build/sft/dpo/grpo) runs on these ONLY;
       * ``eval_tasks``  = the held-out generalization tasks - eval runs on these.
-        We prefer any selected held-out tasks; if none of the selected tasks are
-        held out (the common bring-up case, e.g. ``--tasks rmsnorm_aiter,gemm_bf16``)
-        we fall back to the registry's full held-out set so eval still measures
-        generalization to an unseen operator family.
+        The contract prefers any selected held-out tasks and falls back to the
+        registry's full held-out set (the common bring-up case, e.g.
+        ``--tasks rmsnorm_aiter,gemm_bf16``) so eval still measures generalization
+        to an unseen leaf/root.
 
-    Populates ``ctx['train_tasks']``/``['eval_tasks']`` (Task objects) and the
-    id lists threaded through the manifest.
+    Populates ``ctx['split_contract']`` / ``ctx['split_manifest']`` plus the
+    ``train_tasks``/``eval_tasks`` Task objects and the id lists threaded through
+    the versioned manifest.
     """
-    from kore.tasks.registry import is_heldout, split_tasks
+    from kore.tasks.registry import get_task, split_manifest_for_selection
 
-    seed = getattr(ctx["args"], "split_seed", 0)
-    split = split_tasks(seed)
-    selected = ctx["tasks"]
+    contract = split_manifest_for_selection(ctx["tasks"])
+    train_ids = list(contract.train_ids)
 
-    train = [t for t in selected if not is_heldout(t)]
-    held_selected = [t for t in selected if is_heldout(t)]
-    eval_tasks = held_selected or list(split["heldout"])
-
-    if not train and _production(ctx):
-        raise SystemExit(
-            "production split has no training tasks; refusing to train on held-out "
-            "evaluation tasks. Select at least one non-held-out task."
-        )
-    if not train:  # explicit development/smoke fallback only
+    # Frontier production guard: a fully-held-out selection must never silently train
+    # on the eval distribution. In production this is fatal; development/smoke may
+    # fall back to training on the whole selection with a LOUD warning.
+    if not train_ids:
+        if _production(ctx):
+            raise SystemExit(
+                "production split has no training tasks; refusing to train on held-out "
+                "evaluation tasks. Select at least one non-held-out task."
+            )
         _log("plan", "WARNING: every selected task is held out; training on the "
                      "full selection (no train/eval split available)")
-        train = list(selected)
+        ctx["split_contract"] = contract
+        ctx["split_manifest"] = contract.as_dict()
+        selected = list(ctx["tasks"])
+        ctx["train_tasks"] = selected
+        ctx["eval_tasks"] = [get_task(task_id) for task_id in contract.eval_ids]
+        ctx["train_task_ids"] = [t.task_id for t in selected]
+        ctx["eval_task_ids"] = list(contract.eval_ids)
+        return
 
-    ctx["train_tasks"] = train
-    ctx["eval_tasks"] = eval_tasks
-    ctx["train_task_ids"] = [t.task_id for t in train]
-    ctx["eval_task_ids"] = [t.task_id for t in eval_tasks]
+    ctx["split_contract"] = contract
+    ctx["split_manifest"] = contract.as_dict()
+    ctx["train_tasks"] = [get_task(task_id) for task_id in train_ids]
+    ctx["eval_tasks"] = [get_task(task_id) for task_id in contract.eval_ids]
+    ctx["train_task_ids"] = list(train_ids)
+    ctx["eval_task_ids"] = list(contract.eval_ids)
 
 
 def _train_tasks(ctx) -> list:
     """The TRAIN-split tasks every training stage operates on (item 1)."""
-    return ctx.get("train_tasks") or ctx["tasks"]
+    if "train_tasks" not in ctx:
+        raise RuntimeError("authoritative train split was not initialized")
+    return ctx["train_tasks"]
 
 
 def _eval_tasks(ctx) -> list:
@@ -1753,31 +1777,16 @@ def _rec_arch(rec):
 def _rec_is_heldout(rec, heldout_ids: set) -> bool:
     """True iff a record belongs to the AUTHORITATIVE held-out split (item 1).
 
-    Uses the registry's split logic - a record is held out if its ``task_id`` is
-    reserved, its arch is not the train arch, or its operator family is one of the
-    reserved held-out families. This SUBSUMES the ad-hoc ``_force_holdout`` (which
-    hard-coded gfx950 + "first op family") with the registry as the single
-    authority, so a stray held-out-family record can never leak into TRAIN.
+    Delegates to the registry's single-authority ``is_heldout_record`` (taxonomy
+    fail-closed split): a record is held out if its ``task_id`` is reserved, its
+    arch/dtype is foreign, or its product leaf / near-probe root is eval-only. This
+    SUBSUMES the ad-hoc ``_force_holdout`` (which hard-coded gfx950 + "first op
+    family") with the registry as the single authority, so a stray held-out record
+    can never leak into TRAIN. (``_rec_dict``/``_rec_op``/``_rec_arch`` are retained
+    as the record-normalization helpers used elsewhere and by the registry adapter.)
     """
-    from types import SimpleNamespace
-
-    from kore.tasks.registry import (
-        HELDOUT_FAMILIES, HELDOUT_TASKS, TRAIN_ARCHS, operator_family,
-    )
-
-    d = _rec_dict(rec)
-    tid = d.get("task_id")
-    if tid and tid in heldout_ids:
-        return True
-    if tid and tid in HELDOUT_TASKS:   # registry task-level holdout (paged-KV / MLA)
-        return True
-    arch = _rec_arch(rec)
-    if arch is not None and arch not in TRAIN_ARCHS:  # foreign arch (gfx950/gfx942 both train)
-        return True
-    op = _rec_op(rec)
-    if op and operator_family(SimpleNamespace(operation=op, task_id=tid or "")) in HELDOUT_FAMILIES:
-        return True
-    return False
+    from kore.tasks.registry import is_heldout_record
+    return is_heldout_record(rec, heldout_ids)
 
 
 def _stage_build(ctx):
@@ -2279,6 +2288,12 @@ def _stage_grpo(ctx):
     eval_ids = set(ctx.get("eval_task_ids") or [])
     train_task_ids = [t.task_id for t in _train_tasks(ctx) if t.task_id not in eval_ids]
     if not train_task_ids:
+        # Taxonomy fail-closed: production refuses to train GRPO on held-out eval
+        # tasks. Development/smoke may fall back to the selected tasks (LOUD warning).
+        if _production(ctx):
+            raise RuntimeError(
+                "GRPO train split is empty; refusing to train on held-out eval tasks"
+            )
         _log("grpo", f"WARNING: every task is held out for eval ({sorted(eval_ids)}); "
                      "falling back to training on the selected tasks (no split available)")
         train_task_ids = [t.task_id for t in ctx["tasks"]]

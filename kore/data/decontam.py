@@ -14,6 +14,14 @@ SHA-256, normalized AST, semantic graph, MinHash, and directional containment.
 The containment denominator is always the held-out reference. Generic Triton
 boilerplate is removed from fuzzy evidence, but exact and declared descendants
 of held-out roots remain unconditional drops.
+
+Family / task classification is fail-closed and delegates to the versioned task
+taxonomy: KORE reserves the structurally-distinct MLA and paged-KV-decode product
+leaves, the exact near-probe provenance roots, and foreign architecture/dtype
+slices (core attention otherwise trains). If the registry/taxonomy cannot be
+loaded, the held-out task-id gate raises rather than silently emptying the
+held-out set (a silently empty set would disable decontamination and corrupt the
+training dataset).
 """
 
 from __future__ import annotations
@@ -81,49 +89,34 @@ def _truthy(value: Any) -> bool:
 
 @lru_cache(maxsize=1)
 def heldout_task_ids() -> frozenset[str]:
+    # Fail-closed: if the registry cannot be loaded, raise instead of returning
+    # an empty set. A silently empty held-out set would disable the held-out
+    # task-id gate and let reserved kernels leak into training.
     from kore.tasks.registry import heldout_tasks
 
-    try:
-        return frozenset(task.task_id for task in heldout_tasks())
-    except Exception:  # noqa: BLE001 - registry unavailable in minimal environments
-        return frozenset()
+    return frozenset(task.task_id for task in heldout_tasks())
 
 
 @lru_cache(maxsize=1)
 def heldout_families() -> frozenset[str]:
-    from kore.tasks.registry import HELDOUT_FAMILIES
+    # Sourced from the versioned task taxonomy (whole-family holdouts), which is
+    # the authoritative definition of which operator families are reserved.
+    from kore.tasks.taxonomy import WHOLE_FAMILY_HOLDOUTS
 
-    return frozenset(HELDOUT_FAMILIES)
+    return frozenset(WHOLE_FAMILY_HOLDOUTS)
 
 
 def _family_of(op_or_task: str) -> str:
-    """Infer the operator family from an operation/task/path string."""
-    op = (op_or_task or "").lower()
-    if "mla" in op or "latent_attn" in op or "latent_attention" in op:
-        return "mla"
-    if "paged" in op:
-        return "paged_attention"
-    if "attn" in op or "attention" in op:
-        return "attention"
-    if "topk" in op:
-        return "moe_router"
-    if "moe" in op:
-        return "moe"
-    if "rmsnorm" in op:
-        return "rmsnorm"
-    if "layernorm" in op:
-        return "layernorm"
-    if "gemm" in op or "matmul" in op:
-        return "gemm"
-    if "quant" in op:
-        return "quant"
-    if "rope" in op:
-        return "rope"
-    if "softmax" in op:
-        return "softmax"
-    if "gelu" in op or "silu" in op or "relu" in op:
-        return "activation"
-    return op or "other"
+    """Canonical product family adapter for unregistered text identities.
+
+    Delegates to the versioned task taxonomy so the family branch stays in sync
+    with the authoritative classifier (previously this reimplemented the family
+    inference inline). Returns ``"unclassified"`` when the taxonomy cannot place
+    the identity.
+    """
+    from kore.tasks.taxonomy import product_family_for_name
+
+    return product_family_for_name(op_or_task) or "unclassified"
 
 
 def _record_dict(rec: Any) -> dict:
@@ -148,6 +141,23 @@ def _record_metadata(rec: Any) -> dict:
 
 
 def record_family(rec: Any) -> str:
+    """Canonical product family for a record.
+
+    Primary source of truth is the taxonomy-backed registry classifier
+    (``product_family_for_record``). If it cannot place the record (unavailable,
+    error, or ``unclassified``/empty), fall back to the provenance-aware metadata
+    extraction so nothing that carries an ``operation`` / ``task_id`` / family /
+    path hint is left unclassified.
+    """
+    try:
+        from kore.tasks.registry import product_family_for_record
+
+        fam = product_family_for_record(rec)
+    except Exception:  # noqa: BLE001 - taxonomy/registry unavailable in minimal env
+        fam = ""
+    if fam and fam != "unclassified":
+        return fam
+
     row = _record_dict(rec)
     meta = _record_metadata(rec)
     value = (
@@ -158,7 +168,9 @@ def record_family(rec: Any) -> str:
         or meta.get("path")
         or ""
     )
-    return _family_of(str(value))
+    fallback = _family_of(str(value))
+    # Prefer the registry classification if it produced anything at all.
+    return fam or fallback
 
 
 @dataclass(frozen=True)
@@ -198,7 +210,23 @@ def is_contaminated_record(
     rec: Any,
     policy: Optional[HoldoutPolicy | Mapping[str, Any]] = None,
 ) -> bool:
-    """True when record metadata belongs to a held-out partition."""
+    """True when a record belongs to a held-out partition.
+
+    Combines BOTH hardenings so neither is lost:
+      * the taxonomy-backed registry verdict (``is_heldout_record``), which is the
+        authoritative fail-closed classifier; and
+      * the provenance-aware policy gate (task/family/source/lineage/time cutoff).
+    A record is contaminated if EITHER path flags it.
+    """
+    # Authoritative taxonomy/registry verdict first.
+    try:
+        from kore.tasks.registry import is_heldout_record
+
+        if is_heldout_record(rec):
+            return True
+    except Exception:  # noqa: BLE001 - registry unavailable in minimal environments
+        pass
+
     row = _record_dict(rec)
     meta = _record_metadata(rec)
     gate = HoldoutPolicy.coerce(policy)

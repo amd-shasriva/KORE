@@ -36,7 +36,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from kore.config import CONFIG
 from kore.env.evaluation_contract import (
@@ -122,7 +122,8 @@ class KoreEnv:
 
     def __init__(self, task: Task, config=CONFIG, use_replay: bool = True,
                  correctness_timeout: int = 300, bench_timeout: int = 300,
-                 gpu: Optional[str] = None):
+                 gpu: Optional[str] = None,
+                 runtime_identity: Optional[Mapping[str, Any]] = None):
         self.task = task
         self.cfg = config
         self.correctness_timeout = correctness_timeout
@@ -133,6 +134,13 @@ class KoreEnv:
         # all ranks default to GPU 0, contend/OOM there, one stalls, and the
         # cross-rank all_gather deadlocks. None => inherit/legacy default "0".
         self._gpu = gpu
+        # A preflight-produced, validated identity for the selected physical GPU.
+        # Without it replay fails closed (evaluation still runs normally).
+        self._runtime_identity = (
+            runtime_identity
+            if runtime_identity is not None
+            else getattr(config, "runtime_identity", None)
+        )
         self._cache_obj = ReplayCache(self.cfg.runs_dir / f"replay_{task.task_id}.jsonl") \
             if use_replay else None
 
@@ -190,6 +198,8 @@ class KoreEnv:
             snr_threshold=self._snr_threshold_for(task),
             correctness_timeout=self.correctness_timeout,
             bench_timeout=self.bench_timeout,
+            gpu_selection=self._gpu_selection(task),
+            runtime_identity=self._runtime_identity,
         )
         replay_ready = contract_is_cacheable(contract)
         if self.use_replay and self._cache_obj is not None and replay_ready:
@@ -221,6 +231,8 @@ class KoreEnv:
                 snr_threshold=self._snr_threshold_for(task),
                 correctness_timeout=self.correctness_timeout,
                 bench_timeout=self.bench_timeout,
+                gpu_selection=self._gpu_selection(task),
+                runtime_identity=self._runtime_identity,
             )
             if final_contract == contract and contract_is_cacheable(final_contract):
                 self._cache_obj.put(task.task_id, source, obs, context=contract)
@@ -235,12 +247,54 @@ class KoreEnv:
             infra_error=obs.infra_error, cached=cached)
 
     # ------------------------------------------------------------------ #
+    def _gpu_selection(self, task: Optional[Task] = None) -> dict[str, Any]:
+        """Exact visibility mapping used by the evaluator subprocess.
+
+        This is pure environment bookkeeping: it never imports torch/HIP or
+        initializes a GPU in the parent process.
+        """
+        active_task = task or self.task
+        target = str(
+            getattr(active_task, "gpu_target", None) or self.cfg.gpu_target
+        )
+        names = (
+            "ROCR_VISIBLE_DEVICES",
+            "HIP_VISIBLE_DEVICES",
+            "CUDA_VISIBLE_DEVICES",
+        )
+        parent = {name: os.environ.get(name) for name in names}
+        child = dict(parent)
+        if self._gpu is not None:
+            selected = str(self._gpu)
+            child["ROCR_VISIBLE_DEVICES"] = None
+            child["HIP_VISIBLE_DEVICES"] = selected
+            child["CUDA_VISIBLE_DEVICES"] = selected
+            mode = "explicit-physical"
+        else:
+            child["HIP_VISIBLE_DEVICES"] = (
+                parent["HIP_VISIBLE_DEVICES"]
+                if parent["HIP_VISIBLE_DEVICES"] is not None
+                else "0"
+            )
+            selected = str(child["HIP_VISIBLE_DEVICES"]).split(",")[0].strip()
+            mode = "inherited"
+        return {
+            "state": "selected",
+            "mode": mode,
+            "selected_gpu": selected,
+            "parent_visibility": parent,
+            "child_visibility": child,
+            "effective_gpu_target": target,
+        }
+
     def _env(self, task: Optional[Task] = None) -> dict:
         env = os.environ.copy()
         # Repo root (the parent of the kore/ package). Prepended to PYTHONPATH so the
         # compile/bench driver subprocess can ``import kore.*`` (e.g. _genops.driver_main).
         project_root = str(Path(__file__).resolve().parents[2])
         env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
+        active_task = task or self.task
+        selection = self._gpu_selection(active_task)
         if self._gpu is not None:
             # ABSOLUTE physical GPU id for the compile/bench subprocess. Set BOTH
             # HIP_ and CUDA_VISIBLE_DEVICES to it (and drop any inherited list) so the
@@ -249,15 +303,14 @@ class KoreEnv:
             env.pop("ROCR_VISIBLE_DEVICES", None)
             # str(): subprocess env values MUST be strings - an int gpu id (e.g.
             # KoreEnv(gpu=5)) would make subprocess.Popen raise inside os.fsencode.
-            env["HIP_VISIBLE_DEVICES"] = str(self._gpu)
-            env["CUDA_VISIBLE_DEVICES"] = str(self._gpu)
+            env["HIP_VISIBLE_DEVICES"] = selection["child_visibility"]["HIP_VISIBLE_DEVICES"]
+            env["CUDA_VISIBLE_DEVICES"] = selection["child_visibility"]["CUDA_VISIBLE_DEVICES"]
         else:
-            env["HIP_VISIBLE_DEVICES"] = env.get("HIP_VISIBLE_DEVICES", "0")
+            env["HIP_VISIBLE_DEVICES"] = selection["child_visibility"]["HIP_VISIBLE_DEVICES"]
         # Prefer the TASK's declared arch over the global default so the driver
         # subprocess compiles/benches + selects the fp8 encoding for the arch the
         # task actually targets (a gfx950 task must not be built as gfx942/FNUZ).
-        active_task = task or self.task
-        env["GPU_TARGET"] = getattr(active_task, "gpu_target", None) or self.cfg.gpu_target
+        env["GPU_TARGET"] = selection["effective_gpu_target"]
         env["HOME"] = str(Path(env.get("TMPDIR", "/tmp")))
         # Shared, persistent Triton/inductor compile caches (audit R2 perf M3). Pinned
         # to a STABLE dir -- NOT the per-eval HOME/TMPDIR above -- so the FIRST worker to

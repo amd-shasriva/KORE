@@ -20,7 +20,12 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from kore.data.schemas import RankedGroupRecord, read_jsonl, write_jsonl
+from kore.data.schemas import (
+    RankedGroupRecord,
+    read_jsonl,
+    stamp_production_record,
+    write_jsonl,
+)
 from kore.obs import get_logger
 
 log = get_logger("data.repair_dpo")
@@ -92,7 +97,8 @@ def mint_repair_dpo(
                     continue
             except OSError:
                 continue
-            for r in read_jsonl(p, typed=False):
+            for r in read_jsonl(
+                p, typed=False, mode="generic_training_row"):
                 if isinstance(r, dict):
                     recs.append(r)
     rng.shuffle(recs)
@@ -116,7 +122,15 @@ def mint_repair_dpo(
 
     if write and out:
         (data_root / "groups").mkdir(parents=True, exist_ok=True)
-        write_jsonl(data_root / "groups" / out_name, [g.to_dict() for g in out])
+        rows = [
+            stamp_production_record(
+                group,
+                provenance_id="repair_dpo_v1",
+                evaluation_id=f"repair_dpo:{group.task_id}:{group.parent_id}",
+            )
+            for group in out
+        ]
+        write_jsonl(data_root / "groups" / out_name, rows)
 
     summary = {
         "repair_pairs": len(out),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from kore.data.schemas import RankedGroupRecord
+from kore.data.schemas import RankedGroupRecord, stamp_production_record
 from kore.value import replay_train as rt
 from kore.value.train_value import _synth_source
 
@@ -55,11 +55,15 @@ def test_train_value_from_real_looking_groups(tmp_path):
     with (gdir / "gen_gemm_bf16.jsonl").open("w") as f:
         for k in range(8):
             rec = _mk_group("gen_gemm_bf16", "gemm", "bf16", [good, mid, bad])
-            f.write(json.dumps(rec.to_dict()) + "\n")
+            row = stamp_production_record(
+                rec, provenance_id="value-test", evaluation_id=f"gemm:{k}")
+            f.write(json.dumps(row) + "\n")
     with (gdir / "gen_add_fp16.jsonl").open("w") as f:
         for k in range(6):
             rec = _mk_group("gen_add_fp16", "add", "fp16", [good, bad, mid])
-            f.write(json.dumps(rec.to_dict()) + "\n")
+            row = stamp_production_record(
+                rec, provenance_id="value-test", evaluation_id=f"add:{k}")
+            f.write(json.dumps(row) + "\n")
 
     groups = rt.load_groups_from_dir(str(gdir))
     assert len(groups) == 14 and all(len(g) == 3 for g in groups)

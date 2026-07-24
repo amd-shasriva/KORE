@@ -819,6 +819,9 @@ def _stage_datagen(ctx):
             [t.task_id for t in train], DATAGEN_KINDS, ctx["data_root"],
             _datagen_counts(ctx), n_workers=(workers or len(pinned) or 1), n_gpus=n_gpus,
             teacher_kind=ctx["args"].teacher, model_teacher=ctx["args"].model_teacher,
+            model_teacher_revision=ctx["args"].model_teacher_revision,
+            seed=int(getattr(ctx["args"], "seed", 0) or 0),
+            completion_gate="quota_only",
             gpu_ids=pinned or None, log=lambda m: _log("datagen", m))
         LOG.event("datagen_parallel", workers=workers, n_gpus=n_gpus, pinned=pinned, **summary)
         _log_datagen_coverage(ctx)
@@ -840,7 +843,8 @@ def _stage_datagen(ctx):
         # redoes verified work. Delete a shard to force its regeneration.
         env = None
         for kind in ("repair", "groups", "wins"):
-            if shard_done(ctx["data_root"], task.task_id, kind):
+            if shard_done(
+                ctx["data_root"], task.task_id, kind, gate="quota_only"):
                 _log("datagen", f"{task.task_id}:{kind} skip (resume)")
                 continue
             if env is None:
@@ -922,6 +926,9 @@ def _stage_agentic(ctx):
             [t.task_id for t in train], AGENTIC_KINDS, ctx["data_root"],
             _datagen_counts(ctx), n_workers=workers, n_gpus=n_gpus,
             teacher_kind=ctx["args"].teacher, model_teacher=ctx["args"].model_teacher,
+            model_teacher_revision=ctx["args"].model_teacher_revision,
+            seed=int(getattr(ctx["args"], "seed", 0) or 0),
+            completion_gate="quota_only",
             log=lambda m: _log("agentic", m))
         LOG.event("agentic_parallel", workers=workers, n_gpus=n_gpus, **summary)
         return
@@ -1086,7 +1093,8 @@ def _stage_build(ctx):
         d = ctx["data_root"] / sub
         if d.exists():
             for p in sorted(d.glob("*.jsonl")):
-                raw += read_jsonl(p, typed=True)
+                raw += read_jsonl(
+                    p, typed=True, mode="production_strict")
     raw = dedup_by_source_hash(raw)
     _log("build", f"gathered {len(raw)} deduped raw records")
 
@@ -1978,6 +1986,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data-root", default="data", dest="data_root")
     p.add_argument("--teacher", default="claude")
     p.add_argument("--model-teacher", default=None, dest="model_teacher")
+    p.add_argument(
+        "--model-teacher-revision",
+        default=os.environ.get("KORE_TEACHER_REVISION"),
+        dest="model_teacher_revision",
+        help="immutable teacher checkpoint/API revision required for receipted datagen",
+    )
     p.add_argument("--use-hf", action="store_true", dest="use_hf")
     p.add_argument("--n-repair", type=int, default=50, dest="n_repair")
     p.add_argument("--n-parents", type=int, default=20, dest="n_parents")

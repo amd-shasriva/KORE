@@ -56,12 +56,13 @@ if [[ "$WORK" == 0 ]]; then
 fi
 
 ARRAY="0-$((SHARDS - 1))%${MAX_CONCURRENT}"
-EXPORTS="ALL,KORE_REPO=$REPO,KORE_PY=$PY,KORE_DATA_ROOT=$DATA_ROOT,KORE_SHARD_DIR=$SHARD_DIR,KORE_WINS_TARGET=$TARGET"
-JOB_ID="$(sbatch --parsable --array="$ARRAY" --export="$EXPORTS" scripts/spur_datagen_array.sbatch)"
+JOB_ID="$(sbatch --parsable --array="$ARRAY" scripts/spur_datagen_array.sbatch \
+    "$SHARD_DIR" "$DATA_ROOT" "$TARGET")"
 printf '%s\n' "$JOB_ID" > "$SHARD_DIR/job_id"
 
 echo "SPUR_DATAGEN_SUBMITTED job_id=$JOB_ID array=$ARRAY work=$WORK shard_dir=$SHARD_DIR"
 echo "Monitor:"
 echo "  squeue -j $JOB_ID"
 echo "  $PY scripts/_kf_verify.py $DATA_ROOT $TARGET"
-echo "  tail -f $REPO/runs/spur-${JOB_ID}_0.out"
+echo "  sacct -j $JOB_ID -l"
+echo "  ls -lt $REPO/runs/spur-*.out"

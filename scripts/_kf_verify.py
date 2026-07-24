@@ -7,6 +7,7 @@ repair+groups+wins>=target, so the supervisor can mop up stragglers on b05-2.
 from __future__ import annotations
 
 import collections
+import json
 import os
 import sys
 
@@ -20,7 +21,20 @@ def main() -> int:
         f = f"{root}/wins/{t}.jsonl"
         if not os.path.exists(f) or os.path.getsize(f) == 0:
             return 0
-        return sum(1 for _ in open(f))
+        sources = set()
+        with open(f) as fh:
+            for line_no, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(f"invalid JSONL {f}:{line_no}: {exc}") from exc
+                if isinstance(record, dict):
+                    source = str(record.get("final_source", "") or "").strip()
+                    if source:
+                        sources.add(source)
+        return len(sources)
 
     def has(kind: str, t: str) -> bool:
         f = f"{root}/{kind}/{t}.jsonl"

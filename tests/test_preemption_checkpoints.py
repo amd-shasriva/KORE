@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +12,7 @@ from kore.data.schemas import (
     read_jsonl,
 )
 from scripts.complete_base import complete_one
-from scripts.deepen_wins import deepen_one
+from scripts.deepen_wins import _load_existing, deepen_one
 
 
 class _FakeEnv:
@@ -68,6 +69,22 @@ def test_deepen_checkpoints_each_win_before_preemption(tmp_path, monkeypatch):
 
     records = read_jsonl(tmp_path / "wins" / "task.jsonl", typed=False)
     assert [record["final_source"] for record in records] == ["kernel-one"]
+
+
+def test_deepen_existing_count_matches_distinct_partition_count(tmp_path):
+    path = tmp_path / "wins.jsonl"
+    records = [
+        _win("same").to_dict(),
+        _win("same").to_dict(),
+        _win("").to_dict(),
+        _win("different").to_dict(),
+    ]
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    existing, seen = _load_existing(path)
+
+    assert [record["final_source"] for record in existing] == ["same", "different"]
+    assert len(seen) == 2
 
 
 def test_base_resumes_from_each_checkpointed_record(tmp_path, monkeypatch):

@@ -189,6 +189,7 @@ def main():
     a = ap.parse_args()
 
     import multiprocessing as mp
+    import queue
 
     from kore.tasks.registry import train_tasks
 
@@ -220,9 +221,25 @@ def main():
         p.start()
         procs.append(p)
 
-    done = finished = skipped = rep_tot = grp_tot = 0
+    done = finished = skipped = partials = errors = rep_tot = grp_tot = 0
+    worker_failures = 0
     while finished < n_workers:
-        item = result_q.get()
+        try:
+            item = result_q.get(timeout=30)
+        except queue.Empty:
+            failed = [p for p in procs if p.exitcode not in (None, 0)]
+            if not failed:
+                continue
+            worker_failures += len(failed)
+            print(
+                "[base] FATAL worker exit(s): "
+                + ", ".join(f"pid={p.pid} rc={p.exitcode}" for p in failed),
+                flush=True,
+            )
+            for p in procs:
+                if p.is_alive():
+                    p.terminate()
+            break
         if item is None:
             finished += 1
             continue
@@ -230,16 +247,32 @@ def main():
         done += 1
         if st == "skip":
             skipped += 1
+        elif st == "partial":
+            partials += 1
+        elif st == "error":
+            errors += 1
         rep_tot += counts.get("repair", 0)
         grp_tot += counts.get("groups", 0)
         if done % 10 == 0:
             print(f"[base] progress {done}/{len(tasks)} (+{rep_tot} repair, +{grp_tot} groups recs, "
                   f"{skipped} already-done)", flush=True)
     for p in procs:
-        p.join()
-    print(f"[base] COMPLETE: {done} tasks, +{rep_tot} repair recs, +{grp_tot} groups recs, "
-          f"{skipped} skipped", flush=True)
+        p.join(timeout=10)
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=5)
+    print(
+        f"[base] COMPLETE: {done} tasks, +{rep_tot} repair recs, "
+        f"+{grp_tot} groups recs, {skipped} skipped, {partials} partial, "
+        f"{errors} errors, {worker_failures} worker failures",
+        flush=True,
+    )
+    if errors or worker_failures:
+        return 2
+    if partials:
+        return 3
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -38,6 +38,16 @@ _REQUIRES_ACCELERATOR = pytest.mark.skipif(
     ),
 )
 
+import os as _os
+_REQUIRES_DISTRIBUTED = pytest.mark.skipif(
+    not (_accelerator_available() and _os.environ.get("RANK")),
+    reason=(
+        "Needs a real distributed launch (torchrun: RANK/WORLD_SIZE) on an "
+        "accelerator; the fsdp-kwargs path initializes torch.distributed. A "
+        "single-process GPU host has no rendezvous env."
+    ),
+)
+
 from kore.policy.configs import (
     DPOConfig,
     MultiCapSFTConfig,
@@ -354,7 +364,7 @@ def _restore_fsdp_env():
         os.environ.update(snapshot)
 
 
-@_REQUIRES_ACCELERATOR
+@_REQUIRES_DISTRIBUTED
 def test_training_arguments_accept_fsdp_kwargs(tmp_path, _restore_fsdp_env):
     trl = pytest.importorskip("trl")
     TRLSFTConfig = trl.SFTConfig

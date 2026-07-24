@@ -62,6 +62,7 @@ import argparse
 import importlib
 import inspect
 import json
+import math
 import os
 import subprocess
 import threading
@@ -80,6 +81,17 @@ DEFAULT_STAGES = ["midtrain", "datagen", "agentic", "build", "sft", "dpo", "grpo
 
 # Kernel metric key used to drive the soup alpha sweep (fast_p at p=1.0).
 _SOUP_KERNEL_KEY = "kernel_fast1"
+
+_MANIFEST_NAME = "kore.campaign"
+_MANIFEST_VERSION = 1
+_GENERAL_GATE_KEYS = (
+    "mmlu", "humaneval", "livecodebench", "ifeval", "bfcl", "mtbench",
+)
+_CLAIM_PROFILE_TRACKS = {
+    "core": (),
+    "kernel-frontier": ("paired_significance", "kernelbench_amd"),
+    "flagship": ("paired_significance", "kernelbench_amd", "opus_head_to_head"),
+}
 
 # Central structured logger; run_dir is bound in run() via configure(). Every
 # _log() line, stage, progress and heartbeat lands in <data_root>/events.jsonl
@@ -303,9 +315,14 @@ _IMPORT_CHECKS = [
     ("kore.policy.grpo", "grpo_config_from_dict", False, []),
     ("kore.policy.soup", "build_soup", True, []),
     ("kore.policy.soup", "soup_sweep", True, ["kernel_key", "general_keys", "base_scores", "epsilon"]),
+    ("kore.policy.soup", "soup_sweep_materialized", True,
+     ["kernel_key", "general_keys", "base_scores", "epsilon"]),
     ("kore.policy.format", "parse_response", True, []),
+    ("kore.eval.gates", "StageGate", True, []),
     ("kore.eval.gates", "retention_gate", True, []),
     ("kore.eval.gates", "format_gate_report", True, []),
+    ("kore.campaign_lineage", "resolve_model_snapshot", True, []),
+    ("kore.campaign_lineage", "git_source_identity", True, []),
     ("kore.eval.retention", "run_retention_suite", True, []),
     ("kore.eval.bakeoff", "matched_budget_bakeoff", True, ["env_factory", "budget", "dry_run"]),
     ("kore.eval.bakeoff", "evaluate_policy", True, ["env_factory", "budget"]),
@@ -389,55 +406,672 @@ def _dry_import_check() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Fix 3: run manifest (resume) + Fix 7: structured JSONL events
+# Versioned campaign lineage, fail-closed resume, and artifact receipts.
 # --------------------------------------------------------------------------- #
 def _manifest_path(ctx) -> Path:
     return ctx["data_root"] / "campaign_manifest.json"
 
 
-def _load_manifest_into_ctx(ctx) -> None:
-    """Populate ctx from a prior manifest so a resumed run reuses real ckpts."""
+def _campaign_mode(ctx) -> str:
+    return str(getattr(ctx["args"], "campaign_mode", "production"))
+
+
+def _production(ctx) -> bool:
+    return _campaign_mode(ctx) == "production"
+
+
+def _atomic_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False))
+    tmp.replace(path)
+
+
+def _read_json_object(path: Path, *, label: str) -> dict:
+    try:
+        value = json.loads(path.read_text())
+    except Exception as exc:  # noqa: BLE001 - unreadable promotion state is fatal
+        raise RuntimeError(f"{label} is unreadable: {path}: {exc}") from exc
+    if not isinstance(value, dict) or not value:
+        raise RuntimeError(f"{label} must be a non-empty JSON object: {path}")
+    return value
+
+
+def _read_manifest_strict(ctx) -> dict | None:
     p = _manifest_path(ctx)
     if not p.exists():
-        return
+        return None
     try:
-        m = json.loads(p.read_text())
-    except Exception as e:  # noqa: BLE001
-        _log("resume", f"WARNING: could not read manifest ({e}); starting fresh")
-        return
-    for k in ("midtrain_ckpt", "sft_ckpt", "dpo_ckpt", "grpo_ckpt", "final"):
-        if m.get(k):
-            ctx[k] = m[k]
-    ctx["done_stages"] = set(m.get("done_stages") or [])
-    if m.get("eval_tasks"):
-        ctx["eval_task_ids"] = list(m["eval_tasks"])
-    if m.get("train_tasks"):
-        ctx["train_task_ids"] = list(m["train_tasks"])
-    _log("resume", f"manifest loaded: done={sorted(ctx['done_stages'])} "
-                   f"midtrain={ctx['midtrain_ckpt']} sft={ctx['sft_ckpt']} "
-                   f"dpo={ctx['dpo_ckpt']} grpo={ctx['grpo_ckpt']} final={ctx['final']}")
+        manifest = json.loads(p.read_text())
+    except Exception as exc:  # noqa: BLE001 - never turn corruption into a fresh run
+        raise SystemExit(
+            f"campaign manifest is unreadable; refusing to start fresh over existing "
+            f"artifacts: {p}: {exc}"
+        ) from exc
+    schema = manifest.get("schema") if isinstance(manifest, dict) else None
+    if schema != {"name": _MANIFEST_NAME, "version": _MANIFEST_VERSION}:
+        raise SystemExit(
+            f"campaign manifest schema is missing/incompatible at {p}; expected "
+            f"{_MANIFEST_NAME} v{_MANIFEST_VERSION}. Legacy manifests cannot be "
+            f"resumed safely; migrate to a new --data-root."
+        )
+    if not isinstance(manifest.get("lineage"), dict) or not manifest["lineage"].get(
+        "compatibility_digest"
+    ):
+        raise SystemExit(f"campaign manifest has no complete lineage contract: {p}")
+    return manifest
+
+
+def _task_snapshot(task) -> dict:
+    from kore.campaign_lineage import canonical_json
+
+    # Round-trip through the canonical serializer so callables, Paths, dataclasses,
+    # and nested shape specs all receive deterministic representations.
+    return json.loads(canonical_json(vars(task) if hasattr(task, "__dict__") else task))
+
+
+def _resolved_stage_contract(ctx) -> dict:
+    from kore.campaign_lineage import canonical_json, file_digest, object_digest
+    from kore.policy.configs import (
+        DPOConfig,
+        GRPOConfig,
+        MidTrainConfig,
+        MultiCapSFTConfig,
+        SoupConfig,
+    )
+
+    ignored = {"dry_run", "force", "stages"}
+    resolved_args = {
+        key: value for key, value in vars(ctx["args"]).items() if key not in ignored
+    }
+    if ctx.get("resolved_model_revision"):
+        resolved_args["model_revision"] = ctx["resolved_model_revision"]
+    templates = {}
+    for stage, name in sorted(_FULL_FT_CONFIGS.items()):
+        path = _repo_root() / "configs" / name
+        templates[stage] = {
+            "path": str(path.relative_to(_repo_root())),
+            "digest": file_digest(path),
+            "resolved": json.loads(path.read_text()),
+        }
+    args = ctx["args"]
+    data_root = ctx["data_root"]
+    stage_configs = {
+        "midtrain": vars(MidTrainConfig(
+            model_id=args.model,
+            corpus_path=str(data_root / "midtrain" / "corpus.jsonl"),
+            output_dir=args.midtrain_out,
+            use_lora=args.lora,
+        )),
+        "sft": vars(MultiCapSFTConfig(
+            model_id="<resolved-midtrain-or-base>",
+            output_dir=args.sft_out,
+            use_lora=args.lora,
+        )),
+        "dpo": vars(DPOConfig(
+            model_id="<resolved-sft>",
+            dataset_path=str(data_root / "dpo" / "pairs.jsonl"),
+            output_dir=args.dpo_out,
+            use_lora=args.lora,
+        )),
+        "grpo": vars(GRPOConfig(
+            model_id="<resolved-dpo-or-sft>",
+            output_dir=args.grpo_out,
+            use_lora=args.lora,
+        )),
+        "soup": vars(SoupConfig(
+            base_model_id=args.model,
+            kore_checkpoint="<resolved-specialist>",
+            output_dir=args.soup_out,
+        )),
+    }
+    environment = {
+        key: value
+        for key, value in sorted(os.environ.items())
+        if (
+            key.startswith("KORE_")
+            or key in {
+                "HSA_OVERRIDE_GFX_VERSION",
+                "PYTORCH_ROCM_ARCH",
+                "ROCM_PATH",
+                "TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL",
+            }
+        )
+        and not any(secret in key.upper() for secret in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
+    }
+    value = {
+        "version": 1,
+        "resolved_args": resolved_args,
+        "resolved_stage_configs": stage_configs,
+        "full_ft_templates": templates,
+        "resolved_environment": environment,
+        "selected_tasks": [t.task_id for t in ctx["tasks"]],
+    }
+    value = json.loads(canonical_json(value))
+    return {**value, "digest": object_digest(value)}
+
+
+def _task_lineage(ctx) -> dict:
+    from kore.campaign_lineage import object_digest
+    from kore.tasks.registry import all_tasks
+
+    registry = [_task_snapshot(t) for t in all_tasks()]
+    split = {
+        "seed": int(getattr(ctx["args"], "split_seed", 0)),
+        "selected": [t.task_id for t in ctx["tasks"]],
+        "train": list(ctx["train_task_ids"]),
+        "eval": list(ctx["eval_task_ids"]),
+    }
+    return {
+        **split,
+        "registry_digest": object_digest(registry),
+        "split_digest": object_digest(split),
+    }
+
+
+def _gate_contract(ctx) -> dict:
+    from kore.campaign_lineage import object_digest
+    from kore.config import CONFIG
+    from kore.tasks.registry import TRAIN_ARCH
+
+    profile = str(getattr(ctx["args"], "claim_profile", "core"))
+    contract = {
+        "version": 1,
+        "mode": _campaign_mode(ctx),
+        "claim_profile": profile,
+        "required_frontier_tracks": list(_CLAIM_PROFILE_TRACKS[profile]),
+        "kernel": {
+            "metric": "fast_p@1.0",
+            "strict_improvement": True,
+            "require_all": True,
+            "timing_integrity_gated": True,
+        },
+        "general": {
+            "metrics": list(_GENERAL_GATE_KEYS),
+            "epsilon": float(getattr(ctx["args"], "retention_epsilon", 0.02)),
+            "require_every_metric": True,
+            "require_source_match": True,
+            "production_source": "full-hf",
+            "smoke_fallback_allowed": not _production(ctx),
+        },
+        "verifier": {
+            "rigorous": bool(getattr(ctx["args"], "rigorous_verify", True)),
+            "speed_aggregation": str(getattr(ctx["args"], "speed_aggregation", "worst")),
+            "target_arch": TRAIN_ARCH,
+            "runtime_config_digest": object_digest(vars(CONFIG)),
+        },
+        "soup": {
+            "alpha_zero_safety_required": True,
+            "nonzero_alpha_promotion_required": True,
+            "exact_keys_and_shapes": True,
+            "fp32_interpolation": True,
+        },
+        "track_pass_criteria": {
+            "paired_significance": "kore_better_and_significant",
+            "kernelbench_amd": "full_nonempty_finite_report",
+            "opus_head_to_head": "kore_better_and_significant",
+        },
+    }
+    return {**contract, "digest": object_digest(contract)}
+
+
+def _build_lineage(ctx, *, prior: dict | None = None) -> dict:
+    from kore.campaign_lineage import (
+        git_source_identity,
+        object_digest,
+        resolve_model_snapshot,
+        runtime_identity,
+    )
+
+    requested_revision = getattr(ctx["args"], "model_revision", None)
+    prior_model = ((prior or {}).get("lineage") or {}).get("model") or {}
+    if prior_model and prior_model.get("requested_id") != ctx["args"].model:
+        raise SystemExit(
+            "campaign resume rejected before model download: requested model "
+            f"{ctx['args'].model!r} does not match manifest model "
+            f"{prior_model.get('requested_id')!r}"
+        )
+    if (
+        not requested_revision
+        and prior_model.get("requested_id") == ctx["args"].model
+        and prior_model.get("kind") == "huggingface"
+    ):
+        requested_revision = prior_model.get("resolved_revision")
+    try:
+        model, tokenizer, load_path = resolve_model_snapshot(
+            ctx["args"].model, requested_revision,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"cannot establish exact model/tokenizer lineage: {exc}") from exc
+    ctx["base_ref"] = ctx["args"].model
+    ctx["base"] = load_path
+    ctx["resolved_model_revision"] = model["resolved_revision"]
+
+    source = git_source_identity(_repo_root())
+    stage_config = _resolved_stage_contract(ctx)
+    tasks = _task_lineage(ctx)
+    gate = _gate_contract(ctx)
+    runtime = runtime_identity()
+    compatibility = {
+        "mode": _campaign_mode(ctx),
+        "claim_profile": str(getattr(ctx["args"], "claim_profile", "core")),
+        "model": {
+            k: v for k, v in model.items()
+            if k not in {"snapshot_path", "requested_revision"}
+        },
+        "tokenizer": {
+            k: v for k, v in tokenizer.items()
+            if k not in {"snapshot_path", "files", "requested_revision"}
+        },
+        "source": source,
+        "stage_config_digest": stage_config["digest"],
+        "registry_digest": tasks["registry_digest"],
+        "split_digest": tasks["split_digest"],
+        "gate_contract_digest": gate["digest"],
+        "runtime_compatibility_digest": runtime["compatibility_digest"],
+    }
+    return {
+        "model": model,
+        "tokenizer": tokenizer,
+        "source": source,
+        "stage_config": stage_config,
+        "tasks": tasks,
+        "verifier_gate_contract": gate,
+        "hardware_runtime": runtime,
+        "compatibility_digest": object_digest(compatibility),
+    }
+
+
+def _lineage_mismatches(stored: dict, current: dict) -> list[str]:
+    checks = {
+        "model revision/content": (
+            stored.get("model", {}).get("content_digest"),
+            current.get("model", {}).get("content_digest"),
+        ),
+        "model identity": (
+            stored.get("model", {}).get("requested_id"),
+            current.get("model", {}).get("requested_id"),
+        ),
+        "tokenizer revision/content": (
+            stored.get("tokenizer", {}).get("content_digest"),
+            current.get("tokenizer", {}).get("content_digest"),
+        ),
+        "source commit/content": (
+            stored.get("source", {}).get("content_digest"),
+            current.get("source", {}).get("content_digest"),
+        ),
+        "resolved stage config": (
+            stored.get("stage_config", {}).get("digest"),
+            current.get("stage_config", {}).get("digest"),
+        ),
+        "task registry": (
+            stored.get("tasks", {}).get("registry_digest"),
+            current.get("tasks", {}).get("registry_digest"),
+        ),
+        "task split": (
+            stored.get("tasks", {}).get("split_digest"),
+            current.get("tasks", {}).get("split_digest"),
+        ),
+        "verifier/gate contract": (
+            stored.get("verifier_gate_contract", {}).get("digest"),
+            current.get("verifier_gate_contract", {}).get("digest"),
+        ),
+        "hardware/runtime": (
+            stored.get("hardware_runtime", {}).get("compatibility_digest"),
+            current.get("hardware_runtime", {}).get("compatibility_digest"),
+        ),
+    }
+    return [name for name, (old, new) in checks.items() if not old or old != new]
+
+
+def _load_manifest_into_ctx(ctx, manifest: dict | None = None) -> bool:
+    """Strictly load a compatible manifest; never reinterpret it as a fresh run."""
+    manifest = _read_manifest_strict(ctx) if manifest is None else manifest
+    if manifest is None:
+        return False
+    if not ctx.get("lineage"):
+        raise RuntimeError("current lineage must be built before loading a manifest")
+    mismatches = _lineage_mismatches(manifest["lineage"], ctx["lineage"])
+    if (
+        manifest["lineage"].get("compatibility_digest")
+        != ctx["lineage"].get("compatibility_digest")
+        or mismatches
+    ):
+        detail = ", ".join(mismatches or ["compatibility digest"])
+        raise SystemExit(
+            f"campaign resume rejected: incompatible {detail}. This commonly means "
+            f"a 14B/32B model, model revision, config, split, source, or runtime was "
+            f"changed. Use a new --data-root; --force does not bypass lineage."
+        )
+    state = manifest.get("state")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(state, dict) or not isinstance(artifacts, dict):
+        raise SystemExit("campaign manifest state/artifacts section is invalid")
+    for key in ("midtrain_ckpt", "sft_ckpt", "dpo_ckpt", "grpo_ckpt", "final"):
+        if state.get(key):
+            ctx[key] = state[key]
+    ctx["done_stages"] = set(state.get("done_stages") or [])
+    ctx["artifacts"] = dict(artifacts)
+    _log(
+        "resume",
+        f"manifest loaded: done={sorted(ctx['done_stages'])} "
+        f"midtrain={ctx['midtrain_ckpt']} sft={ctx['sft_ckpt']} "
+        f"dpo={ctx['dpo_ckpt']} grpo={ctx['grpo_ckpt']} final={ctx['final']}",
+    )
+    return True
 
 
 def _save_manifest(ctx) -> None:
     if ctx["dry"]:
         return
-    p = _manifest_path(ctx)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    if not ctx.get("lineage"):
+        raise RuntimeError("refusing to write a manifest without complete lineage")
     data = {
-        "model": ctx["base"],
-        "midtrain_ckpt": ctx.get("midtrain_ckpt"),
-        "sft_ckpt": ctx.get("sft_ckpt"),
-        "dpo_ckpt": ctx.get("dpo_ckpt"),
-        "grpo_ckpt": ctx.get("grpo_ckpt"),
-        "final": ctx.get("final"),
-        "done_stages": sorted(ctx["done_stages"]),
-        "train_tasks": ctx.get("train_task_ids"),
-        "eval_tasks": ctx.get("eval_task_ids"),
+        "schema": {"name": _MANIFEST_NAME, "version": _MANIFEST_VERSION},
+        "lineage": ctx["lineage"],
+        "state": {
+            "midtrain_ckpt": ctx.get("midtrain_ckpt"),
+            "sft_ckpt": ctx.get("sft_ckpt"),
+            "dpo_ckpt": ctx.get("dpo_ckpt"),
+            "grpo_ckpt": ctx.get("grpo_ckpt"),
+            "final": ctx.get("final"),
+            "done_stages": sorted(ctx["done_stages"]),
+        },
+        "artifacts": ctx.get("artifacts") or {},
         "updated": time.time(),
     }
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    tmp.replace(p)  # atomic: a crash mid-write never corrupts the manifest
+    _atomic_json(_manifest_path(ctx), data)
+
+
+def _jsonl_artifact(path: Path, *, required_keys=(), expected_task: str | None = None) -> dict:
+    from kore.campaign_lineage import file_digest
+
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise RuntimeError(f"required non-empty JSONL artifact is missing: {path}")
+    count = 0
+    try:
+        with path.open() as fh:
+            for line_no, line in enumerate(fh, 1):
+                if not line.strip():
+                    raise ValueError(f"blank line {line_no}")
+                row = json.loads(line)
+                if not isinstance(row, dict) or not row:
+                    raise ValueError(f"line {line_no} is not a non-empty object")
+                missing = [key for key in required_keys if key not in row]
+                if missing:
+                    raise ValueError(f"line {line_no} misses keys {missing}")
+                empty = [
+                    key for key in required_keys
+                    if row.get(key) is None or row.get(key) == "" or row.get(key) == []
+                ]
+                if empty:
+                    raise ValueError(f"line {line_no} has empty required fields {empty}")
+                if expected_task and row.get("task_id") != expected_task:
+                    raise ValueError(
+                        f"line {line_no} task_id={row.get('task_id')!r}, expected {expected_task!r}"
+                    )
+                count += 1
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"invalid JSONL artifact {path}: {exc}") from exc
+    if count <= 0:
+        raise RuntimeError(f"JSONL artifact contains no records: {path}")
+    return {
+        "path": str(path),
+        "kind": "jsonl",
+        "records": count,
+        "bytes": path.stat().st_size,
+        "digest": file_digest(path),
+    }
+
+
+def _json_artifact(path: Path) -> tuple[dict, dict]:
+    from kore.campaign_lineage import file_digest
+
+    value = _read_json_object(path, label="campaign artifact")
+    return value, {
+        "path": str(path),
+        "kind": "json",
+        "bytes": path.stat().st_size,
+        "digest": file_digest(path),
+    }
+
+
+def _checkpoint_artifact(ctx, checkpoint) -> dict:
+    from kore.campaign_lineage import architecture_signature, digest_files
+
+    root = Path(str(checkpoint)).expanduser().resolve()
+    if not root.is_dir():
+        raise RuntimeError(f"checkpoint directory is missing: {root}")
+    config_path = root / "config.json"
+    adapter_path = root / "adapter_config.json"
+    if config_path.is_file():
+        config = _read_json_object(config_path, label="checkpoint config")
+        actual_arch = architecture_signature(config)
+        expected_arch = ctx["lineage"]["model"].get("architecture") or {}
+        if actual_arch != expected_arch:
+            raise RuntimeError(
+                f"checkpoint architecture mismatch at {root}: "
+                f"expected={expected_arch}, actual={actual_arch}"
+            )
+        weight_files = sorted(root.glob("*.safetensors")) + sorted(root.glob("pytorch_model*.bin"))
+    elif adapter_path.is_file():
+        adapter = _read_json_object(adapter_path, label="adapter config")
+        expected_id = ctx["lineage"]["model"].get("requested_id")
+        adapter_base = adapter.get("base_model_name_or_path")
+        if adapter_base not in {expected_id, ctx.get("base"), ctx.get("base_ref")}:
+            raise RuntimeError(
+                f"adapter base-model lineage mismatch: {adapter_base!r} != {expected_id!r}"
+            )
+        weight_files = sorted(root.glob("adapter_model*.safetensors")) + sorted(
+            root.glob("adapter_model*.bin")
+        )
+        actual_arch = ctx["lineage"]["model"].get("architecture") or {}
+    else:
+        raise RuntimeError(f"checkpoint has neither config.json nor adapter_config.json: {root}")
+    if not weight_files or any(p.stat().st_size <= 0 for p in weight_files):
+        raise RuntimeError(f"checkpoint has no non-empty model weights: {root}")
+    for index_path in sorted(root.glob("*model*.index.json")):
+        index = _read_json_object(index_path, label="checkpoint weight index")
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise RuntimeError(f"checkpoint weight index is empty: {index_path}")
+        referenced = {root / str(name) for name in weight_map.values()}
+        missing_shards = sorted(str(path) for path in referenced if not path.is_file())
+        if missing_shards:
+            raise RuntimeError(
+                f"checkpoint weight index references missing shards: {missing_shards[:8]}"
+            )
+    tokenizer_files = [
+        p for p in root.iterdir()
+        if p.is_file() and (
+            p.name.startswith(("tokenizer", "vocab", "merges", "special_tokens", "chat_template"))
+            or p.suffix in {".model", ".tiktoken"}
+        )
+    ]
+    if not tokenizer_files and not adapter_path.is_file():
+        raise RuntimeError(f"checkpoint has no tokenizer files: {root}")
+    metadata = [
+        p for p in root.iterdir()
+        if p.is_file() and p.suffix in {".json", ".txt", ".model", ".tiktoken"}
+    ]
+    bundle = digest_files(weight_files + tokenizer_files + metadata, root=root)
+    return {
+        "path": str(root),
+        "kind": "hf_checkpoint",
+        "architecture": actual_arch,
+        "digest": bundle["digest"],
+        "total_bytes": bundle["total_bytes"],
+        "files": bundle["files"],
+    }
+
+
+def _gate_receipt_path(ctx, stage: str) -> Path:
+    return ctx["data_root"] / "gates" / f"{stage}.json"
+
+
+def _gate_receipt_artifact(ctx, stage: str) -> dict:
+    value, artifact = _json_artifact(_gate_receipt_path(ctx, stage))
+    if value.get("status") == "passed" and value.get("result", {}).get("passed") is True:
+        return artifact
+    if value.get("status") == "skipped" and not _production(ctx):
+        return artifact
+    raise RuntimeError(f"stage {stage!r} has no passing gate receipt")
+
+
+def _artifact_digest(stage: str, outputs: list[dict], inputs: list[dict], ctx) -> str:
+    from kore.campaign_lineage import object_digest
+
+    return object_digest({
+        "stage": stage,
+        "lineage": ctx["lineage"]["compatibility_digest"],
+        "gate_contract": ctx["lineage"]["verifier_gate_contract"]["digest"],
+        "outputs": outputs,
+        "inputs": inputs,
+    })
+
+
+def _artifact_dependency(ctx, *stages: str) -> list[dict]:
+    dependencies = []
+    artifacts = ctx.get("artifacts") or {}
+    for stage in stages:
+        artifact = artifacts.get(stage)
+        if artifact and artifact.get("digest"):
+            dependencies.append({
+                "kind": "stage_artifact",
+                "stage": stage,
+                "digest": artifact["digest"],
+            })
+    return dependencies
+
+
+def _capture_stage_artifact(ctx, stage: str) -> dict:
+    """Validate stage-specific contents and capture exact input/output digests."""
+    dr = ctx["data_root"]
+    outputs: list[dict] = []
+    inputs: list[dict] = []
+
+    if stage == "reverify":
+        source_shards = [
+            p for sub in ("repair", "groups", "wins")
+            for p in sorted((dr / sub).glob("*.jsonl"))
+            if not p.name.startswith("_") and not p.stem.endswith(".evolve")
+        ]
+        task_ids = sorted({p.stem for p in source_shards} - set(ctx.get("eval_task_ids") or []))
+        for path in source_shards:
+            if path.stem in task_ids:
+                inputs.append(_jsonl_artifact(path, expected_task=path.stem))
+        for task_id in task_ids:
+            marker = dr / ".reverified" / f"{task_id}.done"
+            if marker.read_text().strip() != "ok":
+                raise RuntimeError(f"reverify completion marker is invalid: {marker}")
+            from kore.campaign_lineage import file_digest
+            outputs.append({"path": str(marker), "kind": "marker", "digest": file_digest(marker)})
+    elif stage == "datagen":
+        for task_id in ctx["train_task_ids"]:
+            for kind in ("repair", "groups", "wins"):
+                outputs.append(
+                    _jsonl_artifact(
+                        dr / kind / f"{task_id}.jsonl", expected_task=task_id,
+                    )
+                )
+    elif stage == "evolve":
+        for task_id in ctx["train_task_ids"]:
+            task_outputs = []
+            for kind in ("groups", "wins"):
+                path = dr / kind / f"{task_id}.evolve.jsonl"
+                if path.exists():
+                    task_outputs.append(_jsonl_artifact(path, expected_task=task_id))
+            if not task_outputs:
+                raise RuntimeError(f"evolve produced no records for task {task_id!r}")
+            outputs.extend(task_outputs)
+    elif stage == "agentic":
+        paths = sorted((dr / "agentic").glob("*.jsonl"))
+        if not paths:
+            raise RuntimeError("agentic stage produced no JSONL trajectories")
+        outputs.extend(
+            _jsonl_artifact(
+                path, required_keys=("task_id", "messages", "tool_trace"),
+            )
+            for path in paths
+        )
+    elif stage == "build":
+        outputs = [
+            _jsonl_artifact(dr / "sft" / "multicap.jsonl", required_keys=("messages",)),
+            _jsonl_artifact(
+                dr / "dpo" / "pairs.jsonl", required_keys=("prompt", "chosen", "rejected"),
+            ),
+        ]
+        for sub in ("repair", "groups", "wins", "agentic"):
+            for path in sorted((dr / sub).glob("*.jsonl")):
+                inputs.append(_jsonl_artifact(path))
+    elif stage in {"midtrain", "sft", "dpo", "grpo"}:
+        checkpoint_key = {
+            "midtrain": "midtrain_ckpt", "sft": "sft_ckpt",
+            "dpo": "dpo_ckpt", "grpo": "grpo_ckpt",
+        }[stage]
+        outputs = [
+            _checkpoint_artifact(ctx, ctx.get(checkpoint_key)),
+            _gate_receipt_artifact(ctx, stage),
+        ]
+        if stage == "midtrain":
+            inputs.append(_jsonl_artifact(dr / "midtrain" / "corpus.jsonl", required_keys=("text",)))
+        elif stage == "sft":
+            inputs.append(_jsonl_artifact(dr / "sft" / "multicap.jsonl", required_keys=("messages",)))
+            inputs.extend(_artifact_dependency(ctx, "midtrain", "build"))
+        elif stage == "dpo":
+            pair_paths = [dr / "dpo" / "pairs.jsonl"] + sorted(
+                (dr / "dpo").glob("round*/pairs.jsonl")
+            )
+            inputs.extend(
+                _jsonl_artifact(
+                    path, required_keys=("prompt", "chosen", "rejected"),
+                )
+                for path in pair_paths
+            )
+            for path in sorted((dr / "dagger").glob("*.jsonl")):
+                inputs.append(_jsonl_artifact(path))
+            inputs.extend(_artifact_dependency(ctx, "sft", "build"))
+        elif stage == "grpo":
+            inputs.extend(_artifact_dependency(ctx, "dpo", "sft", "build"))
+    elif stage == "soup":
+        sweep, sweep_artifact = _json_artifact(dr / "eval" / "soup_sweep.json")
+        try:
+            best_alpha = float(sweep.get("best_alpha"))
+        except (TypeError, ValueError, OverflowError):
+            best_alpha = float("nan")
+        if (
+            sweep.get("gate_satisfied") is not True
+            or sweep.get("nonzero_promoted") is not True
+            or not math.isfinite(best_alpha)
+            or best_alpha <= 0.0
+        ):
+            raise RuntimeError("soup sweep receipt does not authorize nonzero promotion")
+        outputs = [_checkpoint_artifact(ctx, ctx.get("final")), sweep_artifact]
+        inputs.extend(_artifact_dependency(ctx, "grpo", "dpo", "sft"))
+    elif stage == "eval":
+        bakeoff, bakeoff_artifact = _json_artifact(dr / "eval" / "bakeoff.json")
+        promotion, promotion_artifact = _json_artifact(dr / "eval" / "promotion_gate.json")
+        claim, claim_artifact = _json_artifact(dr / "eval" / "claim_status.json")
+        if not bakeoff.get("policies") or promotion.get("passed") is not True:
+            raise RuntimeError("eval has no valid bakeoff or passing StageGate")
+        if claim.get("profile") != getattr(ctx["args"], "claim_profile", "core"):
+            raise RuntimeError("eval claim profile does not match the campaign")
+        if claim.get("passed") is not True:
+            raise RuntimeError("eval required frontier track contract did not pass")
+        outputs = [bakeoff_artifact, promotion_artifact, claim_artifact]
+        inputs.extend(_artifact_dependency(ctx, "soup", "grpo", "dpo", "sft"))
+    else:
+        raise RuntimeError(f"no artifact contract for campaign stage {stage!r}")
+
+    digest = _artifact_digest(stage, outputs, inputs, ctx)
+    return {
+        "version": 1,
+        "stage": stage,
+        "digest": digest,
+        "outputs": outputs,
+        "inputs": inputs,
+        "captured_at": time.time(),
+    }
 
 
 def _emit_event(ctx, stage: str, status: str, elapsed: float, artifact=None) -> None:
@@ -452,48 +1086,102 @@ def _emit_event(ctx, stage: str, status: str, elapsed: float, artifact=None) -> 
         f.write(json.dumps(ev) + "\n")
 
 
-def _path_exists(p) -> bool:
-    return bool(p) and Path(p).exists()
-
-
 def _artifact_of(ctx, stage: str):
-    dr = ctx["data_root"]
+    artifact = (ctx.get("artifacts") or {}).get(stage)
+    if not artifact:
+        return None
     return {
-        "datagen": str(dr / "repair"),
-        "agentic": str(dr / "agentic"),
-        "build": str(dr / "sft" / "multicap.jsonl"),
-        "midtrain": ctx.get("midtrain_ckpt"),
-        "sft": ctx.get("sft_ckpt"),
-        "dpo": ctx.get("dpo_ckpt"),
-        "grpo": ctx.get("grpo_ckpt"),
-        "soup": ctx.get("final"),
-        "eval": str(dr / "eval" / "bakeoff.json"),
-    }.get(stage)
+        "stage": stage,
+        "digest": artifact.get("digest"),
+        "outputs": [item.get("path") for item in artifact.get("outputs", [])],
+    }
 
 
 def _artifact_ok(ctx, stage: str) -> bool:
-    """True iff a completed stage's on-disk artifact is present (resume skip)."""
-    dr = ctx["data_root"]
-    checks = {
-        "datagen": lambda: any((dr / k).exists() for k in ("repair", "groups", "wins")),
-        "agentic": lambda: (dr / "agentic").exists(),
-        "build": lambda: (dr / "sft" / "multicap.jsonl").exists()
-                          and (dr / "dpo" / "pairs.jsonl").exists(),
-        "midtrain": lambda: _path_exists(ctx.get("midtrain_ckpt")),
-        "sft": lambda: _path_exists(ctx.get("sft_ckpt")),
-        "dpo": lambda: _path_exists(ctx.get("dpo_ckpt")),
-        "grpo": lambda: _path_exists(ctx.get("grpo_ckpt")),
-        "soup": lambda: _path_exists(ctx.get("final")),
-        "eval": lambda: (dr / "eval" / "bakeoff.json").exists(),
-    }
-    fn = checks.get(stage)
-    return bool(fn and fn())
+    """Re-validate contents and their exact digest before a resume skip."""
+    stored = (ctx.get("artifacts") or {}).get(stage)
+    if not isinstance(stored, dict) or not stored.get("digest"):
+        return False
+    try:
+        current = _capture_stage_artifact(ctx, stage)
+    except Exception as exc:  # noqa: BLE001 - caller turns this into a hard resume reject
+        _log(stage, f"resume artifact validation failed: {exc}")
+        return False
+    return current.get("digest") == stored.get("digest")
 
 
 # --------------------------------------------------------------------------- #
+def _validate_campaign_contract(args) -> None:
+    mode = str(getattr(args, "campaign_mode", "production"))
+    profile = str(getattr(args, "claim_profile", "core"))
+    if profile not in _CLAIM_PROFILE_TRACKS:
+        raise SystemExit(f"unknown claim profile {profile!r}")
+    try:
+        epsilon = float(getattr(args, "retention_epsilon", 0.02))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise SystemExit("retention epsilon must be numeric") from exc
+    if not math.isfinite(epsilon) or epsilon < 0.0:
+        raise SystemExit("retention epsilon must be finite and non-negative")
+    if int(getattr(args, "eval_budget", 0)) <= 0:
+        raise SystemExit("eval budget must be positive")
+    requested_stages = (
+        str(args.stages).split(",") if getattr(args, "stages", None) else []
+    )
+    unknown = [stage for stage in requested_stages if stage not in ALL_STAGES]
+    if unknown:
+        raise SystemExit(f"unknown campaign stages: {unknown}")
+    if mode == "production":
+        problems = []
+        if not bool(getattr(args, "retention_gate", True)):
+            problems.append("--no-retention-gate")
+        if not bool(getattr(args, "rigorous_verify", True)):
+            problems.append("--no-rigorous-verify")
+        if not bool(getattr(args, "use_hf", False)):
+            problems.append("missing --use-hf (full retention sources are mandatory)")
+        if "kernelbench_amd" in _CLAIM_PROFILE_TRACKS[profile] and not getattr(
+            args, "kernelbench_root", None
+        ):
+            problems.append(
+                f"--claim-profile {profile} requires --kernelbench-root (bundled specs are smoke)"
+            )
+        if problems:
+            raise SystemExit(
+                "production campaign contract rejected weakened settings: "
+                + "; ".join(problems)
+                + ". Use --campaign-mode development or --campaign-mode smoke explicitly "
+                "for non-promotable bring-up."
+            )
+
+
+def _reject_orphan_artifacts(ctx) -> None:
+    """A production lineage cannot silently adopt outputs with no manifest."""
+    if not _production(ctx):
+        return
+    dr = ctx["data_root"]
+    known = [
+        dr / name for name in (
+            "repair", "groups", "wins", "agentic", "sft", "dpo", "midtrain",
+            "gates", "eval",
+        )
+    ]
+    populated = []
+    for path in known:
+        if path.is_file() and path.stat().st_size:
+            populated.append(str(path))
+        elif path.is_dir() and any(child.is_file() for child in path.rglob("*")):
+            populated.append(str(path))
+    if populated:
+        raise SystemExit(
+            "production data root contains artifacts but no versioned campaign manifest; "
+            f"refusing unbound adoption: {populated[:8]}. Use a new --data-root or an "
+            "explicit development/smoke campaign."
+        )
+
+
 def run(args) -> int:
     from kore.tasks.registry import all_tasks, get_task
 
+    _validate_campaign_contract(args)
     # P5: propagate the hardware-counter dense-reward weight to every stage
     # subprocess (env + training run under their own processes) BEFORE anything
     # imports CONFIG, so the reward path picks it up consistently.
@@ -506,7 +1194,8 @@ def run(args) -> int:
     # Real retention eval: with --use-hf, measure general-capability retention on the
     # REAL public benchmark splits (MMLU/HumanEval/IFEval/BFCL/LiveCodeBench/MTBench)
     # via HuggingFace, capped to KORE_EVAL_N items/bench so the gate stays fast. The
-    # bundled smoke JSONLs remain the offline/CI fallback.
+    # bundled smoke JSONLs are accepted only in explicit development/smoke mode;
+    # production validates every reported source and fails closed on fallback.
     if getattr(args, "use_hf", False):
         os.environ.setdefault("KORE_EVAL_FULL", "1")
         os.environ.setdefault("KORE_EVAL_N", str(getattr(args, "eval_n", 300)))
@@ -527,7 +1216,7 @@ def run(args) -> int:
         "base": args.model, "midtrain_ckpt": None, "sft_ckpt": None,
         "dpo_ckpt": None, "grpo_ckpt": None, "final": None, "metrics": {},
         "done_stages": set(), "eval_task_ids": None, "train_task_ids": None,
-        "current_stage": "-",
+        "current_stage": "-", "artifacts": {}, "lineage": None,
     }
 
     # Authoritative train / held-out generalization split (item 1). Training
@@ -545,10 +1234,18 @@ def run(args) -> int:
     if dry:
         _dry_import_check()
     else:
-        _load_manifest_into_ctx(ctx)
+        prior = _read_manifest_strict(ctx)
+        if prior is None:
+            _reject_orphan_artifacts(ctx)
+        ctx["lineage"] = _build_lineage(ctx, prior=prior)
+        loaded = _load_manifest_into_ctx(ctx, prior)
+        if not loaded:
+            # Persist the immutable contract before any stage can create output.
+            _save_manifest(ctx)
         if args.force:
             for st in stages:
                 ctx["done_stages"].discard(st)
+                ctx["artifacts"].pop(st, None)
             # --force is a CLEAN re-run: recompute the authoritative train/held-out
             # split from the CURRENT registry rather than reusing a stale manifest
             # split. Otherwise a prior run's split (e.g. computed before the held-out
@@ -558,6 +1255,7 @@ def run(args) -> int:
             _apply_split(ctx)
             _log("plan", f"--force: will re-run {stages} regardless of manifest; "
                          f"recomputed split from the live registry")
+            _save_manifest(ctx)
 
     _log("plan", f"model={args.model} tasks={[t.task_id for t in tasks]} "
                  f"stages={stages} dry_run={dry}")
@@ -576,8 +1274,14 @@ def run(args) -> int:
             if st not in dispatch:
                 _log("plan", f"unknown stage '{st}', skipping")
                 continue
-            if (not dry) and st in ctx["done_stages"] and _artifact_ok(ctx, st):
-                _log(st, "already complete (artifact present) - skipping [resume]")
+            if (not dry) and st in ctx["done_stages"]:
+                if not _artifact_ok(ctx, st):
+                    raise SystemExit(
+                        f"campaign resume rejected: completed stage {st!r} has missing, "
+                        f"malformed, or digest-mismatched contents. Use --force with the "
+                        f"same lineage to rerun that stage."
+                    )
+                _log(st, "already complete (validated content digest) - skipping [resume]")
                 _emit_event(ctx, st, "skipped", 0.0, _artifact_of(ctx, st))
                 continue
 
@@ -587,7 +1291,31 @@ def run(args) -> int:
             try:
                 with LOG.stage(st):
                     dispatch[st](ctx)
+                if not dry:
+                    # Iterative DPO intentionally appends DAgger repairs to the SFT
+                    # corpus. Refresh the completed build receipt so a later resume
+                    # validates the post-DAgger dataset rather than treating this
+                    # campaign-owned mutation as external tampering.
+                    if st == "dpo" and "build" in ctx["done_stages"]:
+                        ctx["artifacts"]["build"] = _capture_stage_artifact(ctx, "build")
+                    if st == "reverify" and "datagen" in ctx["done_stages"]:
+                        ctx["artifacts"]["datagen"] = _capture_stage_artifact(ctx, "datagen")
+                    ctx["artifacts"][st] = _capture_stage_artifact(ctx, st)
             except BaseException as e:  # noqa: BLE001 - record the failure then re-raise
+                refresh_stage = (
+                    "build" if st == "dpo" and "build" in ctx["done_stages"]
+                    else "datagen" if st == "reverify" and "datagen" in ctx["done_stages"]
+                    else None
+                )
+                if not dry and refresh_stage:
+                    try:
+                        ctx["artifacts"][refresh_stage] = _capture_stage_artifact(
+                            ctx, refresh_stage,
+                        )
+                        _save_manifest(ctx)
+                    except Exception as receipt_error:  # noqa: BLE001
+                        _log(st, f"could not refresh mutated {refresh_stage} receipt: "
+                                 f"{receipt_error}")
                 _emit_event(ctx, st, "error", time.perf_counter() - start, repr(e))
                 raise
             elapsed = time.perf_counter() - start
@@ -645,7 +1373,12 @@ def _apply_split(ctx) -> None:
     held_selected = [t for t in selected if is_heldout(t)]
     eval_tasks = held_selected or list(split["heldout"])
 
-    if not train:  # degenerate: every selected task is held out - train on them
+    if not train and _production(ctx):
+        raise SystemExit(
+            "production split has no training tasks; refusing to train on held-out "
+            "evaluation tasks. Select at least one non-held-out task."
+        )
+    if not train:  # explicit development/smoke fallback only
         _log("plan", "WARNING: every selected task is held out; training on the "
                      "full selection (no train/eval split available)")
         train = list(selected)
@@ -759,7 +1492,8 @@ def _stage_reverify(ctx):
         if d.exists():
             for p in d.glob("*.jsonl"):
                 if not p.stem.startswith("_"):
-                    seen.add(p.stem)
+                    if not p.stem.endswith(".evolve"):
+                        seen.add(p.stem)
     # only re-verify TRAIN tasks (never touch held-out) that have data
     heldout = set(ctx.get("eval_task_ids") or [])
     task_ids = sorted(t for t in seen if t not in heldout)
@@ -1669,69 +2403,81 @@ def _stage_grpo(ctx):
 
 def _stage_soup(ctx):
     if ctx["dry"]:
-        _log("soup", "would SWEEP alpha via soup_sweep (score kernel fast_p + retention per "
-                     "alpha; pick best kernel s.t. no general regression) then build_soup")
+        _log("soup", "would include alpha=0 safety, materialize one FP32-streamed "
+                     "checkpoint at a time, and promote only a nonzero alpha that "
+                     "strictly improves kernel fast_p while retaining every general metric")
         return
     import tempfile
-
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from kore.env.kore_env import KoreEnv
     from kore.eval.bakeoff import evaluate_policy
     from kore.eval.policies import model_policy
-    from kore.eval.retention import run_retention_suite
     from kore.policy.configs import SoupConfig
-    from kore.policy.serve import load_generate
-    from kore.policy.soup import build_soup, soup_sweep
+    from kore.policy.soup import (
+        SoupPromotionError,
+        build_soup,
+        soup_sweep_materialized,
+    )
 
     base = ctx["base"]
     kore_ckpt = ctx.get("grpo_ckpt") or ctx.get("dpo_ckpt") or ctx.get("sft_ckpt") or base
+    if str(kore_ckpt) == str(base):
+        raise SystemExit("soup requires a trained specialist checkpoint; refusing to soup the base")
     cfg = SoupConfig(base_model_id=base, kore_checkpoint=kore_ckpt, output_dir=ctx["args"].soup_out)
     tasks = _eval_tasks(ctx)
     budget = ctx["args"].eval_budget
 
-    # Base-model general scores define the no-regression floor for the sweep.
-    base_ret = run_retention_suite(load_generate(base))
+    # The immutable base-model suite defines the no-regression floor. Production
+    # checks below reject every smoke fallback before an alpha can be considered.
+    base_ret = _evaluate_model_retention(ctx, base, stage="soup", role="base")
+    _release_model_memory()
     base_scores = dict(base_ret["scores"])
-    general_keys = list(base_scores.keys())
+    general_keys = list(_GENERAL_GATE_KEYS)
+    temp_parent = ctx["data_root"] / "eval"
+    temp_parent.mkdir(parents=True, exist_ok=True)
 
-    base_model = AutoModelForCausalLM.from_pretrained(base, torch_dtype=torch.bfloat16)
-    kore_model = AutoModelForCausalLM.from_pretrained(kore_ckpt, torch_dtype=torch.bfloat16)
-    # Fix 3: snapshot IMMUTABLE copies of the endpoint weights. ``state_dict()``
-    # returns tensors that ALIAS the live params; the eval_fn below materializes
-    # each interpolation via ``scratch.load_state_dict(...)`` (an in-place write),
-    # which would otherwise mutate ``kore_sd``/``base_sd`` and make every alpha
-    # after the first interpolate from ALREADY-interpolated weights -> wrong
-    # best_alpha. Cloning detaches the sweep endpoints from any live model.
-    base_sd = {k: v.detach().clone() for k, v in base_model.state_dict().items()}
-    kore_sd = {k: v.detach().clone() for k, v in kore_model.state_dict().items()}
-    tok = AutoTokenizer.from_pretrained(kore_ckpt)
-    # Dedicated scratch model for materialization so load_state_dict never touches
-    # the immutable sweep endpoints; base_model is no longer needed.
-    scratch = kore_model
-    del base_model
+    def eval_alpha(alpha: float) -> dict:
+        """Materialize/evaluate exactly one alpha, then release its checkpoint/model."""
+        import gc
 
-    def eval_fn(state_dict) -> dict:
-        """Score an interpolated state dict: kernel fast_p + general retention.
-
-        Writes into the scratch model only; the immutable ``base_sd``/``kore_sd``
-        endpoints are never mutated, so the sweep is order-independent.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            scratch.load_state_dict(state_dict)
-            scratch.save_pretrained(td)
-            tok.save_pretrained(td)
-            gen = load_generate(td)
-            scores = dict(run_retention_suite(gen)["scores"])
+        with tempfile.TemporaryDirectory(prefix="soup-alpha-", dir=temp_parent) as td:
+            build_soup(base, kore_ckpt, alpha, td)
+            gen = _load_generate_or_fail(ctx, td, stage="soup")
+            suite = _run_retention_suite_checked(
+                ctx, gen, stage="soup", role=f"alpha-{alpha:g}",
+                expected_sources=base_ret["sources"],
+            )
+            scores = dict(suite["scores"])
             pol = model_policy(td, generate=gen)
             kres = evaluate_policy(pol, tasks, env_factory=lambda t: KoreEnv(t), budget=budget)
-            scores[_SOUP_KERNEL_KEY] = float(kres["fast_p"].get(1.0, 0.0))
-            return scores
+            scores[_SOUP_KERNEL_KEY] = _fast_p_at(kres, 1.0)
+            del pol, gen
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:  # noqa: BLE001 - cleanup cannot weaken the gate
+                pass
+        return scores
 
-    sweep = soup_sweep(base_sd, kore_sd, cfg.alphas, eval_fn,
-                       kernel_key=_SOUP_KERNEL_KEY, general_keys=general_keys,
-                       base_scores=base_scores, epsilon=cfg.epsilon)
+    try:
+        sweep = soup_sweep_materialized(
+            cfg.alphas, eval_alpha,
+            kernel_key=_SOUP_KERNEL_KEY, general_keys=general_keys,
+            base_scores=base_scores, epsilon=cfg.epsilon,
+        )
+    except SoupPromotionError as exc:
+        failed = {
+            "gate_satisfied": False,
+            "nonzero_promoted": False,
+            "alpha_zero_included": any(r.get("alpha") == 0.0 for r in exc.sweep),
+            "error": str(exc),
+            "sweep": exc.sweep,
+        }
+        _atomic_json(ctx["data_root"] / "eval" / "soup_sweep.json", failed)
+        raise SystemExit(f"soup promotion aborted: {exc}") from exc
+    _atomic_json(ctx["data_root"] / "eval" / "soup_sweep.json", sweep)
     best_alpha = sweep["best_alpha"]
     _log("soup", f"alpha sweep over {list(cfg.alphas)} -> best_alpha={best_alpha} "
                  f"(gate_satisfied={sweep['gate_satisfied']}, "
@@ -1746,15 +2492,19 @@ def _stage_eval(ctx):
 
     if ctx["dry"]:
         _log("eval", "would run matched-budget fast_p bake-off (seed vs the TRAINED model) "
-                     "+ paired significance (bootstrap CI + Wilcoxon) + the KernelBench-AMD "
-                     "fast_p track on the held-out split")
+                     "+ a real StageGate requiring strict kernel improvement and full-source "
+                     "general retention; claim-profile-required frontier tracks are blocking")
         return
     from kore.env.kore_env import KoreEnv
     from kore.eval.policies import model_policy, seed_policy
 
     tasks = _eval_tasks(ctx)
+    if not tasks:
+        raise SystemExit("final eval has an empty held-out task split")
     kore_ckpt = ctx.get("final") or ctx.get("grpo_ckpt") or ctx.get("dpo_ckpt") \
         or ctx.get("sft_ckpt") or ctx["base"]
+    if str(kore_ckpt) == str(ctx["base"]):
+        raise SystemExit("final eval requires a trained checkpoint; refusing to promote the base")
     _log("eval", f"scoring seed vs KORE checkpoint={kore_ckpt} on tasks="
                  f"{[t.task_id for t in tasks]}")
 
@@ -1766,48 +2516,139 @@ def _stage_eval(ctx):
     paths = save_report(res, ctx["data_root"] / "eval" / "bakeoff")
     _log("eval", f"report -> {paths['json']}")
 
-    # --- Frontier eval track 1: paired significance (KORE vs seed) --------------
-    # A speedup table is not a result without a significance statement. Compute a
-    # paired bootstrap CI + Wilcoxon signed-rank + sign test on the per-task speedup
-    # ratio over tasks BOTH policies solved -- the publishable "is KORE really faster,
-    # and by how much (with CI)?" answer. Fail-safe: never breaks the core bake-off.
-    try:
-        _eval_paired_significance(ctx, res)
-    except Exception as e:  # noqa: BLE001 - reporting extra, never fatal
-        _log("eval", f"paired-significance track skipped: {e}")
+    # The model_policy closure owns a full served checkpoint. Release it before
+    # loading base + candidate sequentially for retention, otherwise final eval
+    # can hold two/three 14B/32B replicas and OOM despite each evaluation fitting.
+    del policies, kore_pol
+    _release_model_memory()
 
-    # --- Frontier eval track 2: KernelBench-AMD fast_p --------------------------
-    # Score the trained model on the recognized KernelBench problems (AMD/gfx950
-    # adapter) to report a community-comparable fast_p_1/1.5/2. Bundled offline specs
-    # by default; a real KernelBench checkout via --kernelbench-root. Fail-safe.
-    try:
-        _eval_kernelbench_amd(ctx, kore_pol, KoreEnv)
-    except Exception as e:  # noqa: BLE001 - extra benchmark track, never fatal
-        _log("eval", f"kernelbench-amd track skipped: {e}")
+    # Core promotion is conjunctive and blocking: KORE must strictly improve
+    # fast_p@1 over the seed AND retain every full-source general benchmark.
+    base_ret, candidate_ret = _evaluate_retention_pair(
+        ctx, stage="eval", base=ctx["base"], candidate=kore_ckpt,
+    )
+    gate = _evaluate_final_stage_gate(
+        res,
+        base_ret["scores"],
+        candidate_ret["scores"],
+        epsilon=float(getattr(ctx["args"], "retention_epsilon", 0.02)),
+    )
+    promotion = {
+        "contract": ctx["lineage"]["verifier_gate_contract"],
+        "passed": gate.passed,
+        "regressions": gate.regressions,
+        "improvements": gate.improvements,
+        "detail": gate.detail,
+        "base_sources": base_ret["sources"],
+        "candidate_sources": candidate_ret["sources"],
+        "candidate": str(kore_ckpt),
+    }
+    _atomic_json(ctx["data_root"] / "eval" / "promotion_gate.json", promotion)
+    if not gate.passed:
+        from kore.eval.gates import format_gate_report
+        raise SystemExit(format_gate_report(gate, title="KORE final promotion gate"))
 
-    # --- Frontier eval track 3: HEAD-TO-HEAD vs Opus 4.8 (paired significance) --
-    # The publishable "did the 14B beat the frontier model?" answer: run KORE AND
-    # Opus on the SAME held-out tasks under the SAME verified oracle + cold-cache
-    # timing + matched budget, then paired bootstrap CI + Wilcoxon + sign test on the
-    # KORE-minus-Opus per-task speedups. Fail-safe: with no API key it skips cleanly
-    # and the KORE-only fast_p above is untouched.
+    # Frontier tracks remain optional for the core profile, but a profile that
+    # claims them turns their execution + favorable verdict into a hard gate.
+    kore_pol = model_policy(kore_ckpt)
+    profile = str(getattr(ctx["args"], "claim_profile", "core"))
+    required = set(_CLAIM_PROFILE_TRACKS[profile])
+    tracks = {
+        "paired_significance": _run_claim_track(
+            ctx, "paired_significance", required,
+            lambda: _eval_paired_significance(ctx, res),
+        ),
+        "kernelbench_amd": _run_claim_track(
+            ctx, "kernelbench_amd", required,
+            lambda: _eval_kernelbench_amd(ctx, kore_pol, KoreEnv),
+        ),
+        "opus_head_to_head": _run_claim_track(
+            ctx, "opus_head_to_head", required,
+            lambda: _eval_opus_head_to_head(ctx, kore_pol, tasks, KoreEnv),
+        ),
+    }
+    failed_required = [
+        name for name in required if tracks.get(name, {}).get("passed") is not True
+    ]
+    claim = {
+        "version": 1,
+        "profile": profile,
+        "required_tracks": sorted(required),
+        "tracks": tracks,
+        "failed_required_tracks": sorted(failed_required),
+        "passed": not failed_required,
+    }
+    _atomic_json(ctx["data_root"] / "eval" / "claim_status.json", claim)
+    if failed_required:
+        raise SystemExit(
+            f"claim profile {profile!r} failed required frontier tracks: "
+            f"{sorted(failed_required)}; eval is not complete"
+        )
+
+
+def _fast_p_at(result: dict, p: float) -> float:
+    values = result.get("fast_p") if isinstance(result, dict) else None
+    if not isinstance(values, dict) or not values:
+        raise RuntimeError("kernel evaluation returned empty fast_p metrics")
+    raw = values.get(float(p), values.get(str(float(p)), values.get(p)))
     try:
-        from kore.eval.head_to_head import (format_head_to_head_report,
-                                            head_to_head_vs_opus)
-        h2h = head_to_head_vs_opus(
-            kore_pol, tasks, env_factory=lambda t: KoreEnv(t),
-            budget=ctx["args"].eval_budget, opus_kind="claude", temperature=0.0,
-            seed=getattr(ctx["args"], "split_seed", 0),
-            out=ctx["data_root"] / "eval" / "head_to_head_vs_opus")
-        _log("eval", "\n" + format_head_to_head_report(h2h))
-        if h2h.get("opus_skipped"):
-            _log("eval", f"head-to-head vs Opus SKIPPED: {h2h.get('skip_reason')}")
-        else:
-            _log("eval", f"head-to-head vs Opus -> "
-                         f"{ctx['data_root'] / 'eval' / 'head_to_head_vs_opus.json'} "
-                         f"(verdict: {h2h.get('verdict')})")
-    except Exception as e:  # noqa: BLE001 - extra track, never fatal
-        _log("eval", f"head-to-head vs Opus track skipped: {e}")
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError(f"fast_p@{p:g} is missing or non-numeric") from exc
+    if not math.isfinite(value):
+        raise RuntimeError(f"fast_p@{p:g} is non-finite: {value!r}")
+    return value
+
+
+def _release_model_memory() -> None:
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 - cleanup is best-effort, gates remain strict
+        pass
+
+
+def _evaluate_final_stage_gate(res, base_scores, candidate_scores, *, epsilon):
+    from kore.eval.gates import StageGate
+
+    policies = res.get("policies") if isinstance(res, dict) else None
+    if not isinstance(policies, dict) or not {"seed", "kore"} <= set(policies):
+        raise RuntimeError("final bakeoff is missing seed/kore policy results")
+    before = {
+        _SOUP_KERNEL_KEY: _fast_p_at(policies["seed"], 1.0),
+        **{key: base_scores.get(key) for key in _GENERAL_GATE_KEYS},
+    }
+    after = {
+        _SOUP_KERNEL_KEY: _fast_p_at(policies["kore"], 1.0),
+        **{key: candidate_scores.get(key) for key in _GENERAL_GATE_KEYS},
+    }
+    return StageGate(epsilon=epsilon, require_all_kernel=True).evaluate(
+        before, after, kernel_keys=[_SOUP_KERNEL_KEY],
+        general_keys=list(_GENERAL_GATE_KEYS),
+    )
+
+
+def _run_claim_track(ctx, name: str, required: set[str], fn) -> dict:
+    try:
+        result = fn()
+        if not isinstance(result, dict) or "passed" not in result:
+            raise RuntimeError("track returned no explicit pass verdict")
+        result = dict(result)
+        result["passed"] = result.get("passed") is True
+        result["status"] = "passed" if result["passed"] else "failed"
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - profile decides fatality
+        result = {
+            "passed": False,
+            "status": "failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        _log("eval", f"{name} track failed: {exc}")
+    result["required"] = name in required
+    return result
 
 
 def _eval_paired_significance(ctx, res):
@@ -1825,144 +2666,327 @@ def _eval_paired_significance(ctx, res):
         ks, ss = kt.get("best_speedup"), st.get("best_speedup")
         # both must be correct+timed for a valid paired comparison
         if kt.get("correct") and st.get("correct") and ks and ss and ks > 0 and ss > 0:
-            kore_su.append(float(ks))
-            seed_su.append(float(ss))
+            ksv, ssv = float(ks), float(ss)
+            if not math.isfinite(ksv) or not math.isfinite(ssv):
+                raise RuntimeError(f"paired speedup is non-finite for task {tid!r}")
+            kore_su.append(ksv)
+            seed_su.append(ssv)
     if len(kore_su) < 2:
-        _log("eval", f"paired-significance: only {len(kore_su)} matched-correct task(s); "
-                     "need >=2 -- skipped")
-        return
+        raise RuntimeError(
+            f"paired-significance has only {len(kore_su)} matched-correct task(s); need >=2"
+        )
     cmp = paired_speedup_comparison(kore_su, seed_su,
                                     seed=getattr(ctx["args"], "split_seed", 0))
     _log("eval", "\n" + format_paired_report(cmp, name_a="KORE", name_b="seed"))
     out = ctx["data_root"] / "eval" / "paired_seed_vs_kore.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(cmp.to_dict(), indent=2))
+    payload = cmp.to_dict()
+    _atomic_json(out, payload)
     _log("eval", f"paired report -> {out} (n={len(kore_su)}, significant={cmp.significant})")
+    from kore.campaign_lineage import file_digest
+    return {
+        "passed": bool(cmp.significant and cmp.direction == "kore_better"),
+        "n": len(kore_su),
+        "significant": bool(cmp.significant),
+        "direction": cmp.direction,
+        "effect_size": cmp.effect_size,
+        "report": str(out),
+        "report_digest": file_digest(out),
+    }
 
 
 def _eval_kernelbench_amd(ctx, kore_pol, KoreEnv):
     """KernelBench-AMD fast_p track for the trained model (bundled specs or real KB)."""
     from kore.eval.kernelbench_amd import (bundled_specs, format_kernelbench_report,
                                            load_real_kernelbench, run_kernelbench_amd)
+    from kore.tasks.registry import TRAIN_ARCH
 
     kb_root = getattr(ctx["args"], "kernelbench_root", None)
     if kb_root:
         specs = load_real_kernelbench(kb_root)
+        source = "full"
         _log("eval", f"kernelbench-amd: loaded {len(specs)} real KernelBench specs from {kb_root}")
     else:
         specs = bundled_specs()
+        source = "bundled-smoke"
         _log("eval", f"kernelbench-amd: {len(specs)} bundled offline specs "
                      "(pass --kernelbench-root for the full suite)")
     if not specs:
-        _log("eval", "kernelbench-amd: no specs available -- skipped")
-        return
-    kb = run_kernelbench_amd(kore_pol, specs, gpu_target="gfx950",
+        raise RuntimeError("kernelbench-amd has no specs")
+    kb = run_kernelbench_amd(kore_pol, specs, gpu_target=TRAIN_ARCH,
                              budget=ctx["args"].eval_budget,
                              env_factory=lambda t: KoreEnv(t))
-    _log("eval", "\n" + format_kernelbench_report(kb["report"]))
+    report = kb.get("report")
+    if not isinstance(report, dict) or int(report.get("n", 0)) <= 0:
+        raise RuntimeError("kernelbench-amd returned an empty report")
+    fast_p = report.get("fast_p")
+    if not isinstance(fast_p, dict) or not fast_p:
+        raise RuntimeError("kernelbench-amd returned no fast_p metrics")
+    for key, value in fast_p.items():
+        if not math.isfinite(float(value)):
+            raise RuntimeError(f"kernelbench-amd fast_p[{key!r}] is non-finite")
+    required = "kernelbench_amd" in _CLAIM_PROFILE_TRACKS[
+        str(getattr(ctx["args"], "claim_profile", "core"))
+    ]
+    source_ok = not (_production(ctx) and required) or source == "full"
+    _log("eval", "\n" + format_kernelbench_report(report))
     out = ctx["data_root"] / "eval" / "kernelbench_amd.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(kb["report"], indent=2, default=str))
+    _atomic_json(out, report)
     _log("eval", f"kernelbench-amd report -> {out}")
+    from kore.campaign_lineage import file_digest
+    return {
+        "passed": bool(source_ok),
+        "source": source,
+        "n": int(report["n"]),
+        "fast_p": fast_p,
+        "report": str(out),
+        "report_digest": file_digest(out),
+    }
+
+
+def _eval_opus_head_to_head(ctx, kore_pol, tasks, KoreEnv):
+    from kore.eval.head_to_head import format_head_to_head_report, head_to_head_vs_opus
+
+    out = ctx["data_root"] / "eval" / "head_to_head_vs_opus"
+    result = head_to_head_vs_opus(
+        kore_pol, tasks, env_factory=lambda t: KoreEnv(t),
+        budget=ctx["args"].eval_budget, opus_kind="claude", temperature=0.0,
+        seed=getattr(ctx["args"], "split_seed", 0), out=out,
+    )
+    _log("eval", "\n" + format_head_to_head_report(result))
+    if result.get("opus_skipped"):
+        return {
+            "passed": False,
+            "skipped": True,
+            "error": result.get("skip_reason") or "Opus unavailable",
+        }
+    paired = result.get("paired_delta")
+    if not isinstance(paired, dict):
+        raise RuntimeError("Opus head-to-head returned no paired verdict")
+    effect = float(paired.get("effect_size"))
+    if not math.isfinite(effect):
+        raise RuntimeError("Opus head-to-head effect size is non-finite")
+    report = out.with_suffix(".json")
+    from kore.campaign_lineage import file_digest
+    return {
+        "passed": bool(
+            paired.get("significant") is True and paired.get("direction") == "kore_better"
+        ),
+        "skipped": False,
+        "significant": bool(paired.get("significant")),
+        "direction": paired.get("direction"),
+        "effect_size": effect,
+        "verdict": result.get("verdict"),
+        "report": str(report),
+        "report_digest": file_digest(report),
+    }
+
+
+def _load_generate_or_fail(ctx, model, *, stage: str):
+    """Load serving or fail the stage; an unavailable backend is never a pass."""
+    try:
+        from kore.policy.serve import load_generate
+    except ImportError as exc:
+        raise SystemExit(
+            f"{stage} gate cannot run: serving backend import is unavailable: {exc}"
+        ) from exc
+    try:
+        return load_generate(model, gpu_ids=_gpu_ids(ctx) or None)
+    except ImportError as exc:
+        raise SystemExit(
+            f"{stage} gate cannot run: torch/vLLM serving is unavailable: {exc}"
+        ) from exc
+
+
+def _model_cache_tag(model) -> str:
+    from kore.campaign_lineage import file_digest, object_digest
+
+    path = Path(str(model)).expanduser()
+    identity = {"model": str(model)}
+    for name in ("config.json", "adapter_config.json"):
+        candidate = path / name
+        if candidate.is_file():
+            identity[name] = file_digest(candidate)
+    return object_digest(identity).split(":", 1)[1][:16]
+
+
+def _validate_retention_suite(
+    ctx,
+    suite: dict,
+    *,
+    stage: str,
+    role: str,
+    expected_sources: dict | None = None,
+) -> dict:
+    if not isinstance(suite, dict):
+        raise SystemExit(f"{stage} retention suite for {role} returned no result")
+    scores, sources = suite.get("scores"), suite.get("sources")
+    if not isinstance(scores, dict) or not isinstance(sources, dict):
+        raise SystemExit(f"{stage} retention suite for {role} is missing scores/sources")
+    missing = [key for key in _GENERAL_GATE_KEYS if key not in scores or key not in sources]
+    if missing:
+        raise SystemExit(f"{stage} retention suite for {role} misses metrics: {missing}")
+    for key in _GENERAL_GATE_KEYS:
+        try:
+            value = float(scores[key])
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise SystemExit(
+                f"{stage} retention metric {role}.{key} is non-numeric"
+            ) from exc
+        if not math.isfinite(value):
+            raise SystemExit(f"{stage} retention metric {role}.{key} is non-finite")
+    selected_sources = {key: sources.get(key) for key in _GENERAL_GATE_KEYS}
+    if expected_sources is not None:
+        expected = {key: expected_sources.get(key) for key in _GENERAL_GATE_KEYS}
+        if selected_sources != expected:
+            raise SystemExit(
+                f"{stage} retention source mismatch for {role}: "
+                f"expected={expected}, actual={selected_sources}"
+            )
+    if _production(ctx):
+        smoke = {
+            key: source for key, source in selected_sources.items()
+            if source != "full-hf"
+        }
+        if smoke or suite.get("full") is not True:
+            raise SystemExit(
+                f"{stage} production retention rejected smoke/fallback sources for "
+                f"{role}: {smoke or selected_sources}"
+            )
+    return suite
+
+
+def _run_retention_suite_checked(
+    ctx,
+    generate,
+    *,
+    stage: str,
+    role: str,
+    expected_sources: dict | None = None,
+    cache_tag: str | None = None,
+) -> dict:
+    from kore.eval.retention import run_retention_suite
+
+    full = bool(_production(ctx) or getattr(ctx["args"], "use_hf", False))
+    n = int(getattr(ctx["args"], "eval_n", 300))
+    suite = run_retention_suite(
+        generate,
+        benches=list(_GENERAL_GATE_KEYS),
+        full=full,
+        n=None if n == 0 else n,
+        cache_dir=ctx["data_root"] / "retention_cache",
+        cache_tag=cache_tag or f"{stage}_{role}",
+    )
+    return _validate_retention_suite(
+        ctx, suite, stage=stage, role=role, expected_sources=expected_sources,
+    )
+
+
+def _evaluate_model_retention(ctx, model, *, stage: str, role: str,
+                              expected_sources: dict | None = None) -> dict:
+    generate = _load_generate_or_fail(ctx, model, stage=stage)
+    return _run_retention_suite_checked(
+        ctx,
+        generate,
+        stage=stage,
+        role=role,
+        expected_sources=expected_sources,
+        cache_tag=f"{stage}_{role}_{_model_cache_tag(model)}",
+    )
+
+
+def _evaluate_retention_pair(ctx, *, stage: str, base, candidate) -> tuple[dict, dict]:
+    base_suite = _evaluate_model_retention(ctx, base, stage=stage, role="base")
+    _release_model_memory()
+    candidate_suite = _evaluate_model_retention(
+        ctx,
+        candidate,
+        stage=stage,
+        role="candidate",
+        expected_sources=base_suite["sources"],
+    )
+    _release_model_memory()
+    return base_suite, candidate_suite
+
+
+def _gate_result_dict(result) -> dict:
+    return {
+        "passed": bool(result.passed),
+        "regressions": list(result.regressions),
+        "improvements": list(result.improvements),
+        "detail": result.detail,
+    }
 
 
 def _retention_gate(ctx, *, stage, candidate, base):
-    """Hard-stop the campaign if a stage regresses general ability past epsilon.
-
-    Uses ``retention_gate`` on the retention-suite ``scores`` of base vs candidate;
-    a FAIL raises ``SystemExit`` with the formatted report (a real, enforced gate).
-    The ONLY swallowed case is an unprovisioned serving backend (no GPU / no
-    ``load_generate``), which is logged LOUDLY as "gate NOT enforced" - never a
-    blanket except.
-    """
+    """Hard-stop on serving, source, metric, or per-benchmark retention failure."""
     if ctx["dry"]:
-        _log(stage, "would run retention gate (no general-bench regression vs base)")
+        _log(stage, "would run full-source retention gate (no fallback allowed in production)")
         return
     if not getattr(ctx["args"], "retention_gate", True):
-        _log(stage, "retention gate SKIPPED (--no-retention-gate) - for fast "
-                    "smoke/debug only; a real run MUST enforce it")
+        if _production(ctx):
+            raise SystemExit("production cannot skip the retention gate")
+        receipt = {
+            "version": 1,
+            "stage": stage,
+            "status": "skipped",
+            "mode": _campaign_mode(ctx),
+            "reason": "explicit --no-retention-gate",
+            "result": {"passed": False},
+        }
+        _atomic_json(_gate_receipt_path(ctx, stage), receipt)
         _emit_event(ctx, stage, "gate_skipped", 0.0, None)
         return
 
     from kore.eval.gates import format_gate_report, retention_gate
-    from kore.eval.retention import run_retention_suite
 
-    # Serving backend provisioning is the ONLY thing we tolerate missing.
-    try:
-        from kore.policy.serve import load_generate
-    except ImportError as e:
-        _log(stage, f"WARNING: retention gate NOT enforced - serving backend not "
-                    f"provisioned (kore.policy.serve.load_generate unavailable: {e})")
-        _emit_event(ctx, stage, "gate_not_enforced", 0.0, None)
-        return
-    # Fix 5: the ONLY tolerated failure is the serving backend not being
-    # provisioned - i.e. an ImportError raised when load_generate tries to import
-    # vLLM/torch on a box without them. A CUDA OOM (RuntimeError /
-    # torch.cuda.OutOfMemoryError) or a corrupt-checkpoint load error (OSError)
-    # is a REAL failure and MUST propagate to fail the run - never swallow it, or
-    # the hard-stop retention gate silently disables itself.
-    # Pin the gate's model loads to the run's GPUs (free GPUs on a shared node),
-    # matching the FSDP training pinning, so device_map="auto" never grabs a busy
-    # co-tenant GPU.
-    _gate_gpus = _gpu_ids(ctx) or None
-    try:
-        base_gen = load_generate(base, gpu_ids=_gate_gpus)
-        cand_gen = load_generate(candidate, gpu_ids=_gate_gpus)
-    except ImportError as e:
-        _log(stage, f"WARNING: retention gate NOT enforced - serving backend not "
-                    f"provisioned (torch/vLLM unavailable: {e})")
-        _emit_event(ctx, stage, "gate_not_enforced", 0.0, None)
-        return
-
-    # From here on, failures are REAL and must propagate (no swallowing).
-    # Per-benchmark drop tolerance. 0.005 (0.5%) was far too strict for the
-    # high-variance LLM-judge benchmarks (e.g. mtbench swings ~±0.05 between runs),
-    # so a domain-shift continued-pretrain trips it on judge NOISE while the real
-    # capability benchmarks hold - and SFT's ~45% general-data mix recovers it
-    # downstream anyway. Use a principled default (2%) that still catches genuine
-    # catastrophic forgetting; overridable via --retention-epsilon.
-    epsilon = float(getattr(ctx["args"], "retention_epsilon", 0.02))
-    # Per-benchmark score cache so a SIGKILL mid-gate (contended/flaky node) resumes
-    # from the benches already scored instead of redoing the ~1.75h suite from
-    # scratch. Tag by stage + role + a model fingerprint (path + config mtime) so a
-    # changed checkpoint invalidates only its own cache; base + candidate are stable
-    # across restarts, so the cache is valid across relaunches.
-    from pathlib import Path as _Path
-    import hashlib as _hashlib
-    _cache_dir = _Path(str(candidate)).parent / "retention_cache"
-
-    def _model_fp(p):
-        pp = _Path(str(p))
-        try:
-            key = pp / "config.json"
-            mt = key.stat().st_mtime if key.exists() else pp.stat().st_mtime
-        except Exception:  # noqa: BLE001 - HF hub id / missing path -> stable 0
-            mt = 0.0
-        return _hashlib.sha1(f"{pp}|{mt:.0f}".encode()).hexdigest()[:12]
-
-    base_scores = run_retention_suite(
-        base_gen, cache_dir=_cache_dir, cache_tag=f"{stage}_base_{_model_fp(base)}")
-    cand_scores = run_retention_suite(
-        cand_gen, cache_dir=_cache_dir, cache_tag=f"{stage}_cand_{_model_fp(candidate)}")
-    # mtbench here is scored by the length/overlap STUB judge (no real LLM judge is
-    # injected), so it must not HARD-gate a multi-day run on verbosity noise - a
-    # more-direct post-SFT answer style depresses the proxy while true quality holds.
-    # Gate only on the capability benchmarks; keep mtbench advisory. (Inject a real
-    # judge via run_retention_suite(..., judge=...) to restore it to the hard gate.)
-    _GATE_KEYS = ("mmlu", "humaneval", "ifeval", "bfcl", "livecodebench")
-    _bscore = {k: v for k, v in base_scores["scores"].items() if k in _GATE_KEYS}
-    _cscore = {k: v for k, v in cand_scores["scores"].items() if k in _GATE_KEYS}
-    res = retention_gate(_bscore, _cscore, epsilon=epsilon)
-    if not res.passed:
+    base_suite, candidate_suite = _evaluate_retention_pair(
+        ctx, stage=stage, base=base, candidate=candidate,
+    )
+    base_scores = {key: base_suite["scores"].get(key) for key in _GENERAL_GATE_KEYS}
+    candidate_scores = {
+        key: candidate_suite["scores"].get(key) for key in _GENERAL_GATE_KEYS
+    }
+    result = retention_gate(
+        base_scores,
+        candidate_scores,
+        epsilon=float(getattr(ctx["args"], "retention_epsilon", 0.02)),
+    )
+    receipt = {
+        "version": 1,
+        "stage": stage,
+        "status": "passed" if result.passed else "failed",
+        "mode": _campaign_mode(ctx),
+        "base": str(base),
+        "candidate": str(candidate),
+        "base_sources": base_suite["sources"],
+        "candidate_sources": candidate_suite["sources"],
+        "result": _gate_result_dict(result),
+    }
+    _atomic_json(_gate_receipt_path(ctx, stage), receipt)
+    if not result.passed:
         _emit_event(ctx, stage, "gate_failed", 0.0, None)
-        raise SystemExit(format_gate_report(res, title=f"KORE retention gate [{stage}]"))
-    _log(stage, "retention gate PASSED (no general-bench regression)")
+        raise SystemExit(format_gate_report(result, title=f"KORE retention gate [{stage}]"))
+    _log(stage, "retention gate PASSED (all full-source general metrics retained)")
     _emit_event(ctx, stage, "gate_passed", 0.0, None)
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="KORE end-to-end campaign")
     p.add_argument("--model", default="Qwen/Qwen3-14B")
+    p.add_argument(
+        "--model-revision", default=None, dest="model_revision",
+        help="exact Hugging Face commit/tag to bind (resolved commit is persisted)",
+    )
+    p.add_argument(
+        "--campaign-mode", choices=["production", "development", "smoke"],
+        default="production", dest="campaign_mode",
+        help="production is fail-closed; weaker development/smoke behavior must be explicit",
+    )
+    p.add_argument(
+        "--claim-profile", choices=sorted(_CLAIM_PROFILE_TRACKS), default="core",
+        dest="claim_profile",
+        help="frontier tracks that must pass before final eval can complete",
+    )
     p.add_argument("--tasks", default=None)
     p.add_argument("--stages", default=None)
     p.add_argument("--dry-run", action="store_true", dest="dry_run")

@@ -375,6 +375,33 @@ def test_stagegate_require_all_kernel_flag():
     assert lenient.passed is True
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_stagegate_rejects_nonfinite_metrics(bad):
+    before = _base()
+    after = dict(before, **{"fast_p@1.0": bad})
+    res = G.StageGate().evaluate(
+        before, after, kernel_keys=_KERNEL, general_keys=_GENERAL,
+    )
+    assert res.passed is False
+    assert "fast_p@1.0" in res.regressions
+
+    after = dict(before, **{"fast_p@1.0": 0.5, "mmlu": bad})
+    res = G.StageGate().evaluate(
+        before, after, kernel_keys=_KERNEL, general_keys=_GENERAL,
+    )
+    assert res.passed is False
+    assert "mmlu" in res.regressions
+
+
+def test_stagegate_rejects_empty_general_metrics():
+    res = G.StageGate().evaluate(
+        {"kernel": 0.1}, {"kernel": 0.2},
+        kernel_keys=["kernel"], general_keys=[],
+    )
+    assert res.passed is False
+    assert any("no general_keys" in reason for reason in res.detail["reasons"])
+
+
 # ---------------------------------------------------------------------------
 # retention_gate + assert_gate_or_raise + report
 # ---------------------------------------------------------------------------
@@ -393,6 +420,13 @@ def test_retention_gate_fails_on_regression():
     res = G.retention_gate(base, cand, epsilon=0.005)
     assert res.passed is False
     assert "humaneval" in res.regressions
+
+
+def test_retention_gate_rejects_empty_and_nonfinite_metrics():
+    assert G.retention_gate({}, {}).passed is False
+    assert G.retention_gate({"mmlu": 0.7}, {"mmlu": float("nan")}).passed is False
+    assert G.retention_gate({"mmlu": float("inf")}, {"mmlu": 0.7}).passed is False
+    assert G.retention_gate({"mmlu": 0.7}, {"mmlu": 0.7}, epsilon=-0.1).passed is False
 
 
 def test_assert_gate_or_raise_returns_on_pass_and_raises_on_fail():

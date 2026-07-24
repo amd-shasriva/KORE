@@ -24,6 +24,7 @@ and directly testable.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Optional
 
@@ -37,9 +38,9 @@ class MetricDelta:
     """Per-key before/after delta with a regression/improvement verdict."""
 
     key: str
-    before: float
-    after: float
-    delta: float
+    before: Optional[float]
+    after: Optional[float]
+    delta: Optional[float]
     kind: str  # "kernel" | "general"
     regressed: bool = False
     improved: bool = False
@@ -65,9 +66,29 @@ class GateResult:
         return self.passed
 
 
-def _get(metrics: Mapping[str, float], key: str) -> Optional[float]:
-    v = metrics.get(key)
-    return None if v is None else float(v)
+def _get(metrics: Mapping[str, float], key: str) -> tuple[Optional[float], Optional[str]]:
+    """Return one finite metric, distinguishing missing from malformed values."""
+    try:
+        if key not in metrics or metrics.get(key) is None:
+            return None, "missing"
+        value = float(metrics[key])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None, "not numeric"
+    if not math.isfinite(value):
+        return None, "not finite"
+    return value, None
+
+
+def _epsilon_error(epsilon: float) -> Optional[str]:
+    try:
+        eps = float(epsilon)
+    except (TypeError, ValueError, OverflowError):
+        return "epsilon is not numeric"
+    if not math.isfinite(eps):
+        return "epsilon is not finite"
+    if eps < 0.0:
+        return "epsilon must be non-negative"
+    return None
 
 
 class GateError(AssertionError):
@@ -110,7 +131,11 @@ class StageGate:
         general_keys: Iterable[str],
         epsilon: Optional[float] = None,
     ) -> GateResult:
-        eps = self.epsilon if epsilon is None else float(epsilon)
+        raw_epsilon = self.epsilon if epsilon is None else epsilon
+        try:
+            eps = float(raw_epsilon)
+        except (TypeError, ValueError, OverflowError):
+            eps = float("nan")
         kernel_keys = list(kernel_keys)
         general_keys = list(general_keys)
 
@@ -119,19 +144,30 @@ class StageGate:
         improvements: list[str] = []
         reasons: list[str] = []
 
+        epsilon_error = _epsilon_error(raw_epsilon)
+        if epsilon_error:
+            reasons.append(epsilon_error)
+        if not general_keys:
+            reasons.append("no general_keys provided; stage gate requires full-source retention metrics")
+        overlap = sorted(set(kernel_keys) & set(general_keys))
+        if overlap:
+            reasons.append(f"metrics cannot be both kernel and general: {overlap}")
+
         # --- (a) kernel: must strictly improve ---
         kernel_improved_flags: list[bool] = []
         for k in kernel_keys:
-            b = _get(before, k)
-            a = _get(after, k)
-            if b is None or a is None:
-                reasons.append(f"kernel key '{k}' missing (before={b}, after={a})")
+            b, b_error = _get(before, k)
+            a, a_error = _get(after, k)
+            if b_error or a_error:
+                reasons.append(
+                    f"kernel key '{k}' invalid "
+                    f"(before={b_error or b}, after={a_error or a})"
+                )
                 regressions.append(k)
                 kernel_improved_flags.append(False)
-                deltas[k] = MetricDelta(k, b if b is not None else float("nan"),
-                                        a if a is not None else float("nan"),
-                                        float("nan"), "kernel", regressed=True)
+                deltas[k] = MetricDelta(k, b, a, None, "kernel", regressed=True)
                 continue
+            assert b is not None and a is not None
             d = a - b
             improved = d > 0.0
             md = MetricDelta(k, b, a, d, "kernel", improved=improved, regressed=not improved)
@@ -152,18 +188,20 @@ class StageGate:
             reasons.append("no kernel_keys provided; stage gate requires a kernel objective")
 
         # --- (b) general: none may drop by more than epsilon ---
-        general_ok = True
+        general_ok = bool(general_keys) and epsilon_error is None and not overlap
         for k in general_keys:
-            b = _get(before, k)
-            a = _get(after, k)
-            if b is None or a is None:
-                reasons.append(f"general key '{k}' missing (before={b}, after={a})")
+            b, b_error = _get(before, k)
+            a, a_error = _get(after, k)
+            if b_error or a_error:
+                reasons.append(
+                    f"general key '{k}' invalid "
+                    f"(before={b_error or b}, after={a_error or a})"
+                )
                 regressions.append(k)
                 general_ok = False
-                deltas[k] = MetricDelta(k, b if b is not None else float("nan"),
-                                        a if a is not None else float("nan"),
-                                        float("nan"), "general", regressed=True)
+                deltas[k] = MetricDelta(k, b, a, None, "general", regressed=True)
                 continue
+            assert b is not None and a is not None
             d = a - b
             regressed = d < -eps
             md = MetricDelta(k, b, a, d, "general", improved=d > 0.0, regressed=regressed)
@@ -177,7 +215,7 @@ class StageGate:
 
         passed = bool(kernel_ok and general_ok)
         detail = {
-            "epsilon": eps,
+            "epsilon": eps if math.isfinite(eps) else None,
             "require_all_kernel": self.require_all_kernel,
             "kernel_keys": kernel_keys,
             "general_keys": general_keys,
@@ -205,32 +243,45 @@ def retention_gate(
     :func:`kore.eval.retention.run_retention_suite`'s ``scores``). Only keys
     present in ``base_scores`` are checked; extra candidate keys are ignored.
     """
+    try:
+        eps = float(epsilon)
+    except (TypeError, ValueError, OverflowError):
+        eps = float("nan")
     keys = list(base_scores.keys())
     regressions: list[str] = []
     improvements: list[str] = []
     reasons: list[str] = []
     deltas: dict[str, dict] = {}
-    passed = True
+    epsilon_error = _epsilon_error(epsilon)
+    passed = bool(keys) and epsilon_error is None
+    if not keys:
+        reasons.append("base_scores is empty; retention gate cannot pass vacuously")
+    if epsilon_error:
+        reasons.append(epsilon_error)
     for k in keys:
-        b = _get(base_scores, k)
-        a = _get(candidate_scores, k)
-        if b is None or a is None:
-            reasons.append(f"general key '{k}' missing (base={b}, candidate={a})")
+        b, b_error = _get(base_scores, k)
+        a, a_error = _get(candidate_scores, k)
+        if b_error or a_error:
+            reasons.append(
+                f"general key '{k}' invalid "
+                f"(base={b_error or b}, candidate={a_error or a})"
+            )
             regressions.append(k)
             passed = False
             deltas[k] = {"key": k, "before": b, "after": a, "delta": None, "regressed": True}
             continue
+        assert b is not None and a is not None
         d = a - b
-        regressed = d < -float(epsilon)
+        regressed = False if epsilon_error else d < -eps
         if d > 0.0:
             improvements.append(k)
         if regressed:
             passed = False
             regressions.append(k)
-            reasons.append(f"general key '{k}' regressed beyond epsilon (Δ={d:+.4f}, eps={epsilon})")
+            reasons.append(f"general key '{k}' regressed beyond epsilon (Δ={d:+.4f}, eps={eps})")
         deltas[k] = {"key": k, "before": b, "after": a, "delta": d, "regressed": regressed}
     detail = {
-        "epsilon": float(epsilon),
+        "epsilon": eps if math.isfinite(eps) else None,
         "kind": "retention_only",
         "checked_keys": keys,
         "deltas": deltas,
@@ -264,7 +315,10 @@ def format_gate_report(result: GateResult, *, title: str = "KORE stage gate") ->
             delta = d.get("delta")
 
             def _f(x):
-                return "-" if x is None or (isinstance(x, float) and x != x) else f"{x:.4f}"
+                try:
+                    return "-" if x is None or not math.isfinite(float(x)) else f"{float(x):.4f}"
+                except (TypeError, ValueError, OverflowError):
+                    return "-"
 
             if d.get("regressed"):
                 verdict = "regressed"

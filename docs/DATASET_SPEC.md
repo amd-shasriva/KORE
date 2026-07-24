@@ -354,6 +354,12 @@ Before a candidate is even benchmarked, run a static scan (cheap, deterministic)
 - **Near-dup:** add a normalized-AST hash (strip comments/whitespace/rename locals) + MinHash/Jaccard over token-shingles; drop pairs with Jaccard > 0.9 within the same op-cell. Prevents the corpus from being dominated by trivially-perturbed clones (a real risk with mutator-generated repairs).
 - **Trajectory dedup:** two WinRecords whose `final_source` near-match collapse to one; keep the higher speedup.
 
+For Stage-0 midtrain, dedup is source-channel aware: duplicate origins within one
+channel collapse, but the same body in a weighted torch→Triton pair and a raw
+repository-code channel does not erase the pair channel. Merged origins remain
+in `source_metadata.origins`. See
+[`SOURCE_PROVENANCE.md`](SOURCE_PROVENANCE.md).
+
 ### 4.4 Leakage control (held-out ops / shapes / arch)
 
 Use `leakage_split(by=("operation","shape"))` (exists) so **no op×shape group crosses train/val/test**. Additionally hold out:
@@ -365,6 +371,13 @@ Use `leakage_split(by=("operation","shape"))` (exists) so **no op×shape group c
 ### 4.5 Labeling & provenance (schema additions)
 
 Extend each record with a metadata block (all cheap to compute, critical for curation and audits):
+
+Stage-0 JSONL uses the stricter, machine-validated source contract in
+[`source_metadata.schema.json`](source_metadata.schema.json): repository URL,
+immutable commit/dataset revision, path, license, upstream row ID, source and
+lineage IDs, source-root and admitted-content SHA-256, and derivation ancestry.
+Source-root holdouts are applied before pair/chunk derivation. `_drafts` and
+unverified roots are never admitted.
 
 ```
 meta = {

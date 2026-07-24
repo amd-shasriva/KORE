@@ -293,6 +293,17 @@ def test_vendored_third_party_path_dropped():
         assert code_quality_reason(src, p) == "vendored_path", part
 
 
+def test_drafts_and_unverified_sources_are_dropped():
+    src = "def kernel(x):\n    value = x + 1\n    return value * 2\n"
+    assert code_quality_reason(src, Path("tasks/_drafts/gemm/seed.py")) == "draft_path"
+    assert code_quality_reason(
+        src, Path("verified/path.py"), {"verified": False},
+    ) == "unverified_source"
+    assert doc_quality_reason(
+        PERF_DOC_MD, Path("docs/_drafts/tuning.md"),
+    ) == "draft_path"
+
+
 def test_lockfile_dropped():
     text = "\n".join(f'package-{i} = "1.2.{i}"' for i in range(60))
     assert code_quality_reason(text, Path("poetry.lock")) == "lockfile"

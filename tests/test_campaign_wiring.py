@@ -341,7 +341,8 @@ def test_grpo_trains_only_on_train_split(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 # 5. assemble folds on-policy / evolve / DAgger records
 # --------------------------------------------------------------------------- #
-def test_assemble_multicap_folds_extra_records(tmp_path):
+def test_assemble_multicap_folds_extra_records(tmp_path, monkeypatch):
+    monkeypatch.setenv("KORE_DECONTAM_DEVELOPMENT", "1")
     from kore.data import assemble
     from kore.data.schemas import WinRecord
     from kore.data.teacher import StubTeacher

@@ -1,0 +1,11 @@
+title = "KORE secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated replay history and one scanner false positive"
+paths = [
+  '''^runs/''',
+  '''^kore/tasks/_drafts/quant/_cpu_sanity_check\.py$''',
+]

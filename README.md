@@ -16,6 +16,7 @@ The result is a training pipeline in which correctness is non-negotiable and spe
 - [The training pipeline](#the-training-pipeline)
 - [Quick start](#quick-start)
 - [Installation](#installation)
+- [Release prerequisites](#release-prerequisites)
 - [Secrets (`.env.local`)](#secrets-envlocal)
 - [Running the full 14B campaign](#running-the-full-14b-campaign)
 - [Resume & recovery](#resume--recovery)
@@ -241,11 +242,23 @@ printf 'torch==2.10.0+rocm7.0\n' > /tmp/torch.txt
 pip install -c /tmp/torch.txt -r requirements-conductor.txt \
     --extra-index-url https://download.pytorch.org/whl/rocm7.0
 
-# 3) editable install (optional; pulls extras)
+# 3) editable campaign install (optional; pulls extras)
 pip install -e ".[train,teacher,value,dev]"
 ```
 
-Version caps (`transformers<5`, `trl<1`) keep the training APIs this code targets and avoid a torch upgrade to CUDA; do not `pip install -U`. `pyproject.toml` extras: `train` (torch/transformers/trl/peft/datasets/accelerate), `value` (xgboost/scikit-learn/numpy), `teacher` (anthropic/openai), `dev` (pytest).
+Version caps (`transformers<5`, `trl<1`) keep the training APIs this code targets and avoid a torch upgrade to CUDA; do not `pip install -U`. `pyproject.toml` extras: `train` (torch/transformers/trl/peft/datasets/accelerate), `value` (xgboost/scikit-learn/numpy), `teacher` (anthropic/openai), `test` (the reproducible CPU test stack), and `dev` (pytest/build tooling). In a CPU-only virtual environment, install the test stack with `pip install -e ".[test]"`; on ROCm, install the ROCm torch wheel first as shown above.
+
+---
+
+## Release prerequisites
+
+This repository does not yet contain owner-approved licensing, third-party attribution, or corresponding package metadata. Do not publish a wheel, sdist, container, dataset, or source release until an authorized owner has selected the license and supplied the required `LICENSE`/`COPYING`, attribution (`NOTICE`/`THIRD_PARTY`), and `[project]` metadata. The release workflow enforces this without guessing legal terms:
+
+```bash
+python -m pytest -o "addopts=-q --strict-markers --import-mode=importlib" -m release tests
+```
+
+That command also regenerates the breadth task tree and reports all generated-artifact and seed-scanner violations. A release is blocked until the complete report is clean.
 
 ---
 
@@ -350,14 +363,27 @@ Consolidated catalog (see subpackage READMEs for specifics):
 ## Testing
 
 ```bash
-# fast wiring/unit tests (CPU-safe)
-PYTHONPATH=. python -m pytest tests/test_campaign_wiring.py tests/test_distributed.py -q
+# install once in a CPU-only test environment
+pip install -e ".[test]"
 
-# whole suite
-PYTHONPATH=. python -m pytest -q
+# default CPU suite: top-level + every package-local test module
+python -m pytest
+
+# useful splits (the CI runs these independently)
+python -m pytest tests
+python -m pytest kore
+
+# inspect the live collection instead of relying on a checked-in count
+python -m pytest --collect-only -q
+
+# opt-in groups when their resources are provisioned
+python -m pytest -m gpu
+python -m pytest -m model
+python -m pytest -m network
+python -m pytest -m dependency
 ```
 
-Tests are CPU-safe by design (roofline formulas, reward gating, family split, campaign wiring). See [`tests/README.md`](tests/README.md).
+The default marker expression excludes GPU, model, network, optional-dependency, and release-only contracts. Release checks are deliberately separate because missing legal metadata and any generated seed-scanner finding must block publication. See [`tests/README.md`](tests/README.md).
 
 ---
 

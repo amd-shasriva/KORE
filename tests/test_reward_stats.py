@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from kore.config import CONFIG
 from kore.reward.reward import Observation, RewardResult, compute_reward, scan_for_hacks
 from kore.reward import stats
@@ -487,6 +489,7 @@ def test_full_lexicographic_ordering_with_shaping_on():
             <= max(incorrect_rewards) < correct_slow.reward < correct_fast.reward)
 
 
+@pytest.mark.release
 def test_all_task_seeds_stay_clean_and_rewardable():
     """Every task seed (hand-authored + generated) must never be flagged as a hack
     (anti-hack must not over-fire) and, when correct, must land in the correct tier."""

@@ -35,7 +35,13 @@ import statistics
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from kore.data.schemas import GPU_DEFAULT, WinRecord, read_jsonl, write_jsonl
+from kore.data.schemas import (
+    GPU_DEFAULT,
+    WinRecord,
+    read_jsonl,
+    stamp_production_record,
+    write_jsonl,
+)
 
 
 def _win_key(task_id: str, final_source: str) -> str:
@@ -112,7 +118,8 @@ class DistillationSink:
     def _load_existing(self) -> None:
         """Seed the dedup table from any pre-existing file so we append + dedup
         across prior contents instead of clobbering or double-writing them."""
-        for rec in read_jsonl(self.path):
+        for rec in read_jsonl(
+            self.path, mode="production_strict"):
             if not isinstance(rec, WinRecord) or not rec.final_source:
                 continue
             key = _win_key(rec.task_id, rec.final_source)
@@ -122,7 +129,14 @@ class DistillationSink:
 
     def _flush(self) -> None:
         """Rewrite the JSONL with the current best-per-hash set (creates parents)."""
-        write_jsonl(self.path, self._best.values())
+        rows = []
+        for key, record in self._best.items():
+            rows.append(stamp_production_record(
+                record,
+                provenance_id="coevolve_distillation_sink_v1",
+                evaluation_id=f"coevolve:{key}",
+            ))
+        write_jsonl(self.path, rows)
 
     # -- mapping ----------------------------------------------------------- #
     def _to_winrecord(self, win: Any) -> Optional[WinRecord]:

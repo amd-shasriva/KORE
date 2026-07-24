@@ -29,8 +29,11 @@ import math
 import os
 import tempfile
 from dataclasses import dataclass, asdict
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Iterable, Union
+
+from kore.data.generation_identity import DATA_LANE_VERSION
 
 if TYPE_CHECKING:
     from kore.agent.schema import AgenticTrajectoryRecord
@@ -40,6 +43,15 @@ _LOG = logging.getLogger(__name__)
 GPU_DEFAULT = "gfx950"  # KORE target = MI350X/CDNA4 (matches registry.TRAIN_ARCH)
 RECORD_SCHEMA_VERSION = 1
 SCHEMA_VERSION_FIELD = "schema_version"
+LEGACY_QUARANTINE_LANE = "kore-legacy-quarantine-v1"
+
+
+class JsonlReadMode(str, Enum):
+    """Every reader must state what kind of JSONL it is admitting."""
+
+    PRODUCTION_STRICT = "production_strict"
+    GENERIC_TRAINING_ROW = "generic_training_row"
+    LEGACY_QUARANTINE = "legacy_quarantine"
 
 
 @dataclass
@@ -182,6 +194,7 @@ _TYPE_TO_CLASS = {
 }
 _KNOWN_RECORD_TYPES = frozenset((*_TYPE_TO_CLASS, "agentic"))
 _MESSAGE_ROLES = frozenset(("system", "user", "assistant", "tool"))
+_CANDIDATE_OUTCOME_VALIDATORS: dict[tuple[str, int], Any] = {}
 
 
 class RecordValidationError(ValueError):
@@ -305,6 +318,22 @@ def _validate_messages(value: Any, path: str) -> None:
         _require_string(message, "content", message_path)
 
 
+def _validate_meaningful_transcript(value: Any, path: str, *,
+                                    agentic: bool = False) -> None:
+    _validate_messages(value, path)
+    messages = value
+    if not messages:
+        raise _validation_error(path, "must not be empty for trajectory records")
+    roles = {message["role"] for message in messages}
+    required = {"user", "assistant"}
+    if agentic:
+        required.add("tool")
+    missing = required - roles
+    if missing:
+        raise _validation_error(
+            path, f"trajectory is missing required roles {sorted(missing)}")
+
+
 def _validate_repair(d: dict) -> None:
     failure_class = _require_string(d, "failure_class", "record")
     if failure_class not in ("compile_fail", "snr_fail"):
@@ -372,6 +401,36 @@ def _validate_ranked_group(d: dict) -> None:
             raise _validation_error(
                 f"record.{optional_dict}", "must be an object or null")
     _validate_optional_number(d, "parent_wall_us", "record")
+    candidate_schema = d.get("candidate_outcome_schema")
+    if candidate_schema is not None:
+        candidate_schema = _require_dict(
+            candidate_schema, "record.candidate_outcome_schema")
+        _require_string(candidate_schema, "name", "record.candidate_outcome_schema")
+        _require_int(
+            candidate_schema.get("version"),
+            "record.candidate_outcome_schema.version",
+            minimum=1,
+        )
+        validity = _require_string(
+            candidate_schema,
+            "semantic_validity",
+            "record.candidate_outcome_schema",
+        )
+        if validity not in ("unknown", "explicit"):
+            raise _validation_error(
+                "record.candidate_outcome_schema.semantic_validity",
+                "must be 'unknown' or 'explicit'",
+            )
+        if validity == "explicit":
+            key = (candidate_schema["name"], candidate_schema["version"])
+            validator = _CANDIDATE_OUTCOME_VALIDATORS.get(key)
+            if validator is None:
+                raise _validation_error(
+                    "record.candidate_outcome_schema",
+                    f"no validator registered for explicit schema {key!r}",
+                )
+            for index, candidate in enumerate(candidates):
+                validator(candidate, f"record.candidates[{index}]")
 
 
 def _validate_win(d: dict) -> None:
@@ -409,12 +468,94 @@ def _validate_agentic(d: dict) -> None:
         raise _validation_error("record.provenance", "must be an object")
 
 
-_TYPE_VALIDATORS = {
-    "repair": _validate_repair,
-    "ranked_group": _validate_ranked_group,
-    "win": _validate_win,
-    "agentic": _validate_agentic,
+def _validate_production_envelope(d: dict) -> None:
+    if d.get("data_lane_version") != DATA_LANE_VERSION:
+        raise _validation_error(
+            "record.data_lane_version",
+            f"expected production lane {DATA_LANE_VERSION!r}")
+    semantic = _require_dict(d.get("semantic_schema"), "record.semantic_schema")
+    _require_string(semantic, "name", "record.semantic_schema")
+    _require_int(
+        semantic.get("version"), "record.semantic_schema.version", minimum=1)
+    validity = _require_string(
+        semantic, "semantic_validity", "record.semantic_schema")
+    if validity == "unknown":
+        raise _validation_error(
+            "record.semantic_schema.semantic_validity",
+            "legacy/unknown semantics are quarantine-only")
+    _require_string(d, "provenance_id", "record")
+    _require_string(d, "evaluation_id", "record")
+    subtype = _require_string(d, "record_subtype", "record")
+    record_type = d["type"]
+
+    if subtype == "source_only":
+        if record_type != "win":
+            raise _validation_error(
+                "record.record_subtype", "source_only is supported only for win records")
+        _require_string(d, "source_status", "record")
+        return
+    expected_subtype = {
+        "repair": "trajectory",
+        "ranked_group": "ranked_evaluation",
+        "win": "trajectory",
+        "agentic": "agentic_trajectory",
+    }[record_type]
+    if subtype != expected_subtype:
+        raise _validation_error(
+            "record.record_subtype",
+            f"expected {expected_subtype!r}, got {subtype!r}")
+    if record_type == "repair":
+        _validate_meaningful_transcript(d["messages"], "record.messages")
+    elif record_type == "win":
+        _validate_meaningful_transcript(d["trajectory"], "record.trajectory")
+    elif record_type == "agentic":
+        _validate_meaningful_transcript(
+            d["messages"], "record.messages", agentic=True)
+        if not d["provenance"]:
+            raise _validation_error(
+                "record.provenance", "must not be empty for policy training")
+
+
+_RECORD_VERSION_VALIDATORS = {
+    ("repair", 1): _validate_repair,
+    ("ranked_group", 1): _validate_ranked_group,
+    ("win", 1): _validate_win,
+    ("agentic", 1): _validate_agentic,
 }
+
+
+def register_record_schema(
+    record_type: str,
+    version: int,
+    validator,
+) -> None:
+    """Register an explicit future record-version validator.
+
+    CandidateOutcomeV2 or a speedup-baseline-aware schema can be added without
+    changing legacy-v1 interpretation or guessing missing semantic fields.
+    """
+    if record_type not in _KNOWN_RECORD_TYPES:
+        raise ValueError(f"unknown record type {record_type!r}")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError("record schema version must be a positive integer")
+    if not callable(validator):
+        raise TypeError("record schema validator must be callable")
+    _RECORD_VERSION_VALIDATORS[(record_type, version)] = validator
+
+
+def register_candidate_outcome_schema(
+    name: str,
+    version: int,
+    validator,
+) -> None:
+    """Register CandidateOutcomeV2 or another explicit candidate schema."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("candidate outcome schema name must be non-empty")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError("candidate outcome schema version must be positive")
+    if not callable(validator):
+        raise TypeError("candidate outcome validator must be callable")
+    _CANDIDATE_OUTCOME_VALIDATORS[(name, version)] = validator
 
 
 def validate_record_dict(
@@ -422,6 +563,7 @@ def validate_record_dict(
     *,
     expected_task_id: str | None = None,
     expected_type: str | None = None,
+    production: bool = False,
 ) -> dict:
     """Strictly validate one current-version KORE record.
 
@@ -433,14 +575,10 @@ def validate_record_dict(
     d = _require_dict(d, "record")
     _validate_json_tree(d)
     version = d.get(SCHEMA_VERSION_FIELD)
-    if (
-        isinstance(version, bool)
-        or not isinstance(version, int)
-        or version != RECORD_SCHEMA_VERSION
-    ):
+    if isinstance(version, bool) or not isinstance(version, int):
         raise _validation_error(
             f"record.{SCHEMA_VERSION_FIELD}",
-            f"expected {RECORD_SCHEMA_VERSION}, got {version!r}")
+            f"must be an integer, got {version!r}")
     record_type = d.get("type")
     if record_type not in _KNOWN_RECORD_TYPES:
         raise _validation_error("record.type", f"unknown record type {record_type!r}")
@@ -451,7 +589,14 @@ def validate_record_dict(
     if expected_task_id is not None and task_id != expected_task_id:
         raise _validation_error(
             "record.task_id", f"expected {expected_task_id!r}, got {task_id!r}")
-    _TYPE_VALIDATORS[record_type](d)
+    validator = _RECORD_VERSION_VALIDATORS.get((record_type, version))
+    if validator is None:
+        raise _validation_error(
+            f"record.{SCHEMA_VERSION_FIELD}",
+            f"unsupported {record_type!r} schema version {version!r}")
+    validator(d)
+    if production:
+        _validate_production_envelope(d)
     return d
 
 
@@ -461,6 +606,7 @@ def record_from_dict(
     expected_task_id: str | None = None,
     expected_type: str | None = None,
     validate: bool = True,
+    production: bool = False,
 ) -> Record:
     """Dispatch a raw dict to its typed record class.
 
@@ -469,7 +615,11 @@ def record_from_dict(
     """
     if validate:
         validate_record_dict(
-            d, expected_task_id=expected_task_id, expected_type=expected_type)
+            d,
+            expected_task_id=expected_task_id,
+            expected_type=expected_type,
+            production=production,
+        )
     elif not isinstance(d, dict):
         raise TypeError(f"record must be a dict, got {type(d)!r}")
     record_type = d.get("type")
@@ -497,6 +647,115 @@ def record_to_dict(rec: Any) -> dict:
     d = dict(raw)
     if d.get("type") in _KNOWN_RECORD_TYPES:
         d.setdefault(SCHEMA_VERSION_FIELD, RECORD_SCHEMA_VERSION)
+    return d
+
+
+def stamp_production_record(
+    rec: Any,
+    *,
+    provenance_id: str,
+    evaluation_id: str,
+) -> dict:
+    """Attach contract-derived envelope fields without inventing outcomes."""
+    d = record_to_dict(rec)
+    record_type = d.get("type")
+    if record_type not in _KNOWN_RECORD_TYPES:
+        raise RecordValidationError(
+            f"cannot stamp unknown record type {record_type!r}")
+    subtype = {
+        "repair": "trajectory",
+        "ranked_group": "ranked_evaluation",
+        "win": "trajectory",
+        "agentic": "agentic_trajectory",
+    }[record_type]
+    d.update({
+        "data_lane_version": DATA_LANE_VERSION,
+        "record_subtype": subtype,
+        "provenance_id": provenance_id,
+        "evaluation_id": evaluation_id,
+        "semantic_schema": {
+            "name": f"{record_type}_legacy_shape",
+            "version": int(d[SCHEMA_VERSION_FIELD]),
+            # Contract-bound means the generator/evaluator identity is known. It
+            # does not assert candidate compile/correctness/speedup truth.
+            "semantic_validity": "contract_bound",
+        },
+    })
+    if record_type == "ranked_group":
+        d.setdefault("candidate_outcome_schema", {
+            "name": "candidate_outcome_legacy_v1",
+            "version": 1,
+            "semantic_validity": "unknown",
+        })
+    return d
+
+
+def stamp_source_only_record(
+    rec: Any,
+    *,
+    provenance_id: str,
+    evaluation_id: str,
+    source_status: str,
+) -> dict:
+    """Explicitly mark a non-trajectory win used for champion/source storage."""
+    d = record_to_dict(rec)
+    if d.get("type") != "win":
+        raise RecordValidationError("source_only records must have type 'win'")
+    d.update({
+        "data_lane_version": DATA_LANE_VERSION,
+        "record_subtype": "source_only",
+        "source_status": str(source_status),
+        "provenance_id": provenance_id,
+        "evaluation_id": evaluation_id,
+        "semantic_schema": {
+            "name": "win_source_only_v1",
+            "version": int(d[SCHEMA_VERSION_FIELD]),
+            "semantic_validity": "explicit_source_status",
+        },
+    })
+    validate_record_dict(d, production=True)
+    return d
+
+
+def stamp_legacy_record_unknown(rec: Any) -> dict:
+    """Stamp only structural facts derivable from legacy bytes.
+
+    No compile, correctness, speedup-baseline, provenance, or evaluation truth is
+    inferred. The quarantine lane remains ineligible for production admission.
+    """
+    d = record_to_dict(rec)
+    record_type = d.get("type")
+    if record_type not in _KNOWN_RECORD_TYPES:
+        raise RecordValidationError(
+            f"cannot migrate unknown record type {record_type!r}")
+    transcript_key = {
+        "repair": "messages",
+        "win": "trajectory",
+        "agentic": "messages",
+    }.get(record_type)
+    if record_type == "ranked_group":
+        subtype = "ranked_evaluation"
+    elif transcript_key and d.get(transcript_key):
+        subtype = "trajectory" if record_type != "agentic" else "agentic_trajectory"
+    else:
+        subtype = "source_only"
+    d.update({
+        "data_lane_version": LEGACY_QUARANTINE_LANE,
+        "record_subtype": subtype,
+        "semantic_schema": {
+            "name": f"{record_type}_legacy_shape",
+            "version": int(d[SCHEMA_VERSION_FIELD]),
+            "semantic_validity": "unknown",
+        },
+    })
+    if subtype == "source_only":
+        d["source_status"] = "legacy_validity_unknown"
+    if record_type == "ranked_group":
+        d.setdefault("candidate_outcome_schema", {
+            "name": "candidate_outcome_legacy_v1",
+            "version": 1,
+            "semantic_validity": "unknown",
+        })
     return d
 
 
@@ -704,15 +963,22 @@ def read_jsonl(
     path: Union[str, Path],
     typed: bool = True,
     *,
+    mode: JsonlReadMode | str,
     expected_task_id: str | None = None,
     expected_type: str | None = None,
 ) -> list:
-    """Strictly read a JSONL file.
+    """Read JSONL under an explicit admission mode.
 
-    Bad JSON, non-object lines, non-finite values, unknown/unversioned record
-    types and schema violations fail closed. Use ``read_jsonl_legacy`` only in
-    quarantine or migration code that deliberately skips bad legacy rows.
+    ``production_strict`` requires the contract-bound production envelope;
+    ``generic_training_row`` validates finite dict-shaped JSON without claiming a
+    KORE record contract; ``legacy_quarantine`` is the only tolerant mode.
     """
+    try:
+        mode = JsonlReadMode(mode)
+    except ValueError as exc:
+        raise ValueError(f"unknown JSONL read mode {mode!r}") from exc
+    if mode is JsonlReadMode.LEGACY_QUARANTINE:
+        return read_jsonl_legacy(path, typed=typed)
     path = Path(path)
     if not path.exists():
         return []
@@ -726,13 +992,15 @@ def read_jsonl(
                         d,
                         expected_task_id=expected_task_id,
                         expected_type=expected_type,
+                        production=(mode is JsonlReadMode.PRODUCTION_STRICT),
                     ))
                 else:
-                    if expected_task_id is not None or expected_type is not None:
+                    if mode is JsonlReadMode.PRODUCTION_STRICT:
                         validate_record_dict(
                             d,
                             expected_task_id=expected_task_id,
                             expected_type=expected_type,
+                            production=True,
                         )
                     out.append(d)
             except (KeyError, TypeError, ValueError) as exc:
@@ -746,6 +1014,7 @@ def validate_jsonl_shard(
     *,
     expected_task_id: str,
     expected_type: str,
+    production: bool = True,
 ) -> ShardValidation:
     """Validate every line and hash the exact bytes from one file descriptor."""
     path = Path(path)
@@ -763,6 +1032,7 @@ def validate_jsonl_shard(
                     d,
                     expected_task_id=expected_task_id,
                     expected_type=expected_type,
+                    production=production,
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 raise JsonlValidationError(
@@ -812,6 +1082,8 @@ def read_jsonl_legacy(
 __all__ = [
     "GPU_DEFAULT",
     "JsonlValidationError",
+    "JsonlReadMode",
+    "LEGACY_QUARANTINE_LANE",
     "RECORD_SCHEMA_VERSION",
     "RecordValidationError",
     "RepairRecord",
@@ -825,6 +1097,11 @@ __all__ = [
     "read_jsonl_legacy",
     "record_from_dict",
     "record_to_dict",
+    "register_candidate_outcome_schema",
+    "register_record_schema",
+    "stamp_legacy_record_unknown",
+    "stamp_production_record",
+    "stamp_source_only_record",
     "validate_jsonl_shard",
     "validate_record_dict",
     "write_jsonl",

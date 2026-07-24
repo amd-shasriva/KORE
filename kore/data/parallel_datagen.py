@@ -29,23 +29,32 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from kore.data.generation_identity import (
+    DATA_LANE_VERSION,
+    build_generation_identity,
+    validate_generation_identity,
+)
 from kore.data.schemas import (
     RECORD_SCHEMA_VERSION,
     _commit_prepared_jsonl,
     _durable_replace,
     _prepare_jsonl,
     atomic_write_json,
+    stamp_production_record,
     validate_jsonl_shard,
+    validate_record_dict,
 )
 
 DATAGEN_KINDS = ("repair", "groups", "wins")
 AGENTIC_KINDS = ("agentic",)
 ALL_KINDS = frozenset((*DATAGEN_KINDS, *AGENTIC_KINDS))
 
-RECEIPT_VERSION = 1
+RECEIPT_VERSION = 2
 _RECORD_TYPE_BY_KIND = {
     "repair": "repair",
     "groups": "ranked_group",
@@ -65,8 +74,8 @@ _COUNT_KEYS_BY_KIND = {
     "agentic": ("n_agentic", "max_tool_turns"),
 }
 _FIXED_PARAMETERS_BY_KIND = {
-    "repair": {"seed": 0, "natural_fraction": 0.3, "diagnostic": True},
-    "groups": {"seed": 0},
+    "repair": {"natural_fraction": 0.3, "diagnostic": True},
+    "groups": {},
     "wins": {"include_regression_lesson": True},
     "agentic": {"keep_only_useful": True, "thinking": True},
 }
@@ -86,6 +95,65 @@ class ShardCompletionError(RuntimeError):
 
 class ShardContractConflict(ShardCompletionError):
     """A valid shard exists, but was generated under another contract."""
+
+
+class ShardIncompleteError(ShardCompletionError):
+    """A valid receipt exists but the caller's operational gate rejects it."""
+
+
+class CompletionStatus(str, Enum):
+    QUOTA_SATISFIED = "quota_satisfied"
+    BOUNDED_ATTEMPTS_EXHAUSTED = "bounded_attempts_exhausted"
+    PARTIAL_CHECKPOINT = "partial_checkpoint"
+    EMPTY_FAILURE = "empty_failure"
+
+
+class CompletionGate(str, Enum):
+    """Caller-selected operational interpretation of a valid receipt."""
+
+    QUOTA_ONLY = "quota_only"
+    TERMINAL_NONEMPTY = "terminal_nonempty"
+    INCLUDE_PARTIAL_CHECKPOINT = "include_partial_checkpoint"
+    AUDIT_ANY_STATUS = "audit_any_status"
+
+    def accepts(self, status: CompletionStatus) -> bool:
+        accepted = {
+            CompletionGate.QUOTA_ONLY: {CompletionStatus.QUOTA_SATISFIED},
+            CompletionGate.TERMINAL_NONEMPTY: {
+                CompletionStatus.QUOTA_SATISFIED,
+                CompletionStatus.BOUNDED_ATTEMPTS_EXHAUSTED,
+            },
+            CompletionGate.INCLUDE_PARTIAL_CHECKPOINT: {
+                CompletionStatus.QUOTA_SATISFIED,
+                CompletionStatus.BOUNDED_ATTEMPTS_EXHAUSTED,
+                CompletionStatus.PARTIAL_CHECKPOINT,
+            },
+            CompletionGate.AUDIT_ANY_STATUS: set(CompletionStatus),
+        }
+        return status in accepted[self]
+
+
+@dataclass(frozen=True)
+class CompletionPolicy:
+    kind: str
+    requested_parameter: str | None
+    fixed_requested_count: int | None = None
+    require_nonempty: bool = True
+
+    def requested_count(self, contract: dict) -> int:
+        if self.fixed_requested_count is not None:
+            return self.fixed_requested_count
+        assert self.requested_parameter is not None
+        return int(contract["parameters"][self.requested_parameter])
+
+
+COMPLETION_POLICIES = {
+    "repair": CompletionPolicy("repair", "n_repair"),
+    "groups": CompletionPolicy("groups", "n_parents"),
+    # wins_gens is an attempt budget; a task shard asks for one accepted win.
+    "wins": CompletionPolicy("wins", None, fixed_requested_count=1),
+    "agentic": CompletionPolicy("agentic", "n_agentic"),
+}
 
 
 class DatagenRunError(RuntimeError):
@@ -137,13 +205,18 @@ def _count_parameter(counts: dict, key: str, *, positive: bool = False) -> int:
     return value
 
 
-def _validate_generator_contract(contract: Any, kind: str) -> dict:
+def _validate_generator_contract(
+    contract: Any,
+    kind: str,
+    *,
+    task_id: str | None = None,
+) -> dict:
     if not isinstance(contract, dict):
         raise ShardCompletionError("generator contract must be an object")
     _canonical_json(contract)
     for key, expected in (
-        ("contract_version", 1),
-        ("generator_revision", 1),
+        ("contract_version", 2),
+        ("generator_revision", 2),
         ("record_schema_version", RECORD_SCHEMA_VERSION),
     ):
         value = contract.get(key)
@@ -158,19 +231,28 @@ def _validate_generator_contract(contract: Any, kind: str) -> dict:
         raise ShardCompletionError(
             f"generator contract has unknown generator "
             f"{contract.get('generator')!r}")
+    if contract.get("data_lane_version") != DATA_LANE_VERSION:
+        raise ShardCompletionError("generator contract data-lane version mismatch")
+    contract_task_id = contract.get("task_id")
+    if not isinstance(contract_task_id, str) or not contract_task_id:
+        raise ShardCompletionError("generator contract requires task_id")
+    if task_id is not None and contract_task_id != task_id:
+        raise ShardCompletionError(
+            f"generator contract task expected {task_id!r}, got {contract_task_id!r}")
     parameters = contract.get("parameters")
     if not isinstance(parameters, dict):
         raise ShardCompletionError("generator contract parameters must be an object")
     expected_parameter_keys = (
         set(_COUNT_KEYS_BY_KIND[kind])
         | set(_FIXED_PARAMETERS_BY_KIND[kind])
+        | {"generator_seed"}
     )
     if set(parameters) != expected_parameter_keys:
         raise ShardCompletionError(
             "generator contract parameter keys do not match the generator")
     for key in _COUNT_KEYS_BY_KIND[kind]:
         value = parameters[key]
-        minimum = 1 if key == "k" else 0
+        minimum = 1
         if (
             isinstance(value, bool)
             or not isinstance(value, int)
@@ -182,26 +264,17 @@ def _validate_generator_contract(contract: Any, kind: str) -> dict:
         if parameters[key] != expected or type(parameters[key]) is not type(expected):
             raise ShardCompletionError(
                 f"generator contract parameter {key!r} expected {expected!r}")
-    teacher = contract.get("teacher")
-    if not isinstance(teacher, dict):
-        raise ShardCompletionError("generator contract teacher must be an object")
-    teacher_kind = teacher.get("kind")
-    if not isinstance(teacher_kind, str) or not teacher_kind.strip():
-        raise ShardCompletionError("generator contract teacher kind must be non-empty")
-    model = teacher.get("model")
-    if model is not None and not isinstance(model, str):
-        raise ShardCompletionError(
-            "generator contract teacher model must be a string or null")
-    if teacher.get("resilient") is not True:
-        raise ShardCompletionError(
-            "generator contract must use resilient teacher calls")
-    flags = contract.get("behavior_flags")
-    if not isinstance(flags, dict) or not all(
-        isinstance(key, str) and isinstance(value, str)
-        for key, value in flags.items()
-    ):
-        raise ShardCompletionError(
-            "generator contract behavior_flags must map strings to strings")
+    seed = parameters.get("generator_seed")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ShardCompletionError("generator_seed must be an integer")
+    try:
+        validate_generation_identity(
+            contract.get("generation_identity"),
+            task_id=contract_task_id,
+            kind=kind,
+        )
+    except ValueError as exc:
+        raise ShardCompletionError(str(exc)) from exc
     return contract
 
 
@@ -211,6 +284,10 @@ def build_generator_contract(
     *,
     teacher_kind: str,
     model_teacher: Any = None,
+    model_teacher_revision: str | None = None,
+    task: Any | None = None,
+    generation_identity: dict | None = None,
+    seed: int = 0,
 ) -> dict:
     """Build the generation inputs that make a completed shard reusable."""
     if kind not in ALL_KINDS:
@@ -220,32 +297,35 @@ def build_generator_contract(
     if not isinstance(teacher_kind, str) or not teacher_kind.strip():
         raise ValueError("teacher_kind must be a non-empty string")
     parameters = {
-        key: _count_parameter(counts, key, positive=(key == "k"))
+        key: _count_parameter(counts, key, positive=True)
         for key in _COUNT_KEYS_BY_KIND[kind]
     }
     parameters.update(_FIXED_PARAMETERS_BY_KIND[kind])
-    behavior_flags: dict[str, str] = {}
-    if kind == "groups":
-        behavior_flags["KORE_GROUND_REASONING"] = os.environ.get(
-            "KORE_GROUND_REASONING", "0")
-    if kind == "wins":
-        behavior_flags["KORE_WINS_PMC"] = os.environ.get("KORE_WINS_PMC", "1")
-        behavior_flags["KORE_WINS_PMC_MAX"] = os.environ.get("KORE_WINS_PMC_MAX", "4")
+    parameters["generator_seed"] = int(seed)
+    if generation_identity is None:
+        if task is None:
+            raise ValueError("task or generation_identity is required")
+        generation_identity = build_generation_identity(
+            kind=kind,
+            task=task,
+            teacher_kind=teacher_kind,
+            model_teacher=model_teacher,
+            model_teacher_revision=model_teacher_revision,
+            seed=seed,
+        )
+    task_id = generation_identity.get("task", {}).get("task_id")
     contract = {
-        "contract_version": 1,
-        "generator_revision": 1,
+        "contract_version": 2,
+        "generator_revision": 2,
         "record_schema_version": RECORD_SCHEMA_VERSION,
+        "data_lane_version": DATA_LANE_VERSION,
+        "task_id": task_id,
         "kind": kind,
         "generator": _GENERATOR_BY_KIND[kind],
         "parameters": parameters,
-        "teacher": {
-            "kind": str(teacher_kind),
-            "model": None if model_teacher is None else str(model_teacher),
-            "resilient": True,
-        },
-        "behavior_flags": behavior_flags,
+        "generation_identity": generation_identity,
     }
-    return _validate_generator_contract(contract, kind)
+    return _validate_generator_contract(contract, kind, task_id=task_id)
 
 
 def shard_path(data_root: Any, task_id: str, kind: str) -> Path:
@@ -278,6 +358,49 @@ def _load_json_object(path: Path) -> dict:
     return value
 
 
+def _completion_gate(value: CompletionGate | str) -> CompletionGate:
+    try:
+        return CompletionGate(value)
+    except ValueError as exc:
+        raise ValueError(f"unknown completion gate {value!r}") from exc
+
+
+def classify_completion(
+    kind: str,
+    *,
+    accepted_count: int,
+    requested_count: int,
+    status: CompletionStatus | str | None = None,
+) -> CompletionStatus:
+    if kind not in COMPLETION_POLICIES:
+        raise ShardCompletionError(f"unknown completion policy for {kind!r}")
+    if accepted_count < 0 or requested_count < 1:
+        raise ShardCompletionError("completion counts are invalid")
+    if status is None:
+        if accepted_count >= requested_count:
+            return CompletionStatus.QUOTA_SATISFIED
+        if accepted_count == 0:
+            return CompletionStatus.EMPTY_FAILURE
+        return CompletionStatus.BOUNDED_ATTEMPTS_EXHAUSTED
+    try:
+        status = CompletionStatus(status)
+    except ValueError as exc:
+        raise ShardCompletionError(f"unknown completion status {status!r}") from exc
+    valid = {
+        CompletionStatus.QUOTA_SATISFIED: accepted_count >= requested_count,
+        CompletionStatus.BOUNDED_ATTEMPTS_EXHAUSTED:
+            0 < accepted_count < requested_count,
+        CompletionStatus.PARTIAL_CHECKPOINT:
+            0 < accepted_count < requested_count,
+        CompletionStatus.EMPTY_FAILURE: accepted_count == 0,
+    }[status]
+    if not valid:
+        raise ShardCompletionError(
+            f"status {status.value!r} contradicts accepted={accepted_count}, "
+            f"requested={requested_count}")
+    return status
+
+
 def _validate_receipt(
     path: Path,
     receipt_path: Path,
@@ -285,6 +408,7 @@ def _validate_receipt(
     task_id: str,
     kind: str,
     contract: dict | None,
+    gate: CompletionGate | str | None = None,
 ) -> dict:
     if kind not in _RECORD_TYPE_BY_KIND:
         raise ShardCompletionError(f"unknown shard kind {kind!r}")
@@ -306,6 +430,9 @@ def _validate_receipt(
     ):
         raise ShardCompletionError(
             f"{receipt_path}: record schema version mismatch")
+    if receipt.get("data_lane_version") != DATA_LANE_VERSION:
+        raise ShardCompletionError(
+            f"{receipt_path}: data-lane version mismatch")
     bindings = {
         "data_file": path.name,
         "task_id": task_id,
@@ -328,7 +455,7 @@ def _validate_receipt(
     ):
         raise ShardCompletionError(f"{receipt_path}: invalid sha256")
     stored_contract = receipt.get("generator_contract")
-    _validate_generator_contract(stored_contract, kind)
+    _validate_generator_contract(stored_contract, kind, task_id=task_id)
     stored_contract_digest = _canonical_digest(stored_contract)
     if receipt.get("generator_contract_sha256") != stored_contract_digest:
         raise ShardCompletionError(
@@ -336,6 +463,37 @@ def _validate_receipt(
     if contract is not None and _canonical_json(stored_contract) != _canonical_json(contract):
         raise ShardContractConflict(
             f"{path}: completed under a different generator contract")
+
+    accepted_count = receipt.get("accepted_count")
+    requested_count = receipt.get("requested_count")
+    if (
+        isinstance(accepted_count, bool)
+        or not isinstance(accepted_count, int)
+        or accepted_count < 0
+    ):
+        raise ShardCompletionError(f"{receipt_path}: invalid accepted_count")
+    expected_requested = COMPLETION_POLICIES[kind].requested_count(stored_contract)
+    if (
+        isinstance(requested_count, bool)
+        or not isinstance(requested_count, int)
+        or requested_count != expected_requested
+    ):
+        raise ShardCompletionError(
+            f"{receipt_path}: requested_count expected {expected_requested}, "
+            f"got {requested_count!r}")
+    status = classify_completion(
+        kind,
+        accepted_count=accepted_count,
+        requested_count=requested_count,
+        status=receipt.get("completion_status"),
+    )
+    if count != accepted_count:
+        raise ShardCompletionError(
+            f"{receipt_path}: record_count must equal accepted_count")
+    if gate is not None and not _completion_gate(gate).accepts(status):
+        raise ShardIncompleteError(
+            f"{path}: status {status.value!r} rejected by gate "
+            f"{_completion_gate(gate).value!r}")
 
     validation = validate_jsonl_shard(
         path,
@@ -357,6 +515,7 @@ def validate_completed_shard(
     kind: str,
     *,
     contract: dict | None = None,
+    gate: CompletionGate | str,
 ) -> dict:
     """Fail closed unless data and its final completion receipt agree."""
     path = shard_path(data_root, task_id, kind)
@@ -366,6 +525,7 @@ def validate_completed_shard(
         task_id=task_id,
         kind=kind,
         contract=contract,
+        gate=gate,
     )
 
 
@@ -375,11 +535,11 @@ def _recover_pending_receipt(
     task_id: str,
     kind: str,
     contract: dict | None,
-) -> bool:
+) -> dict | None:
     """Promote a pre-commit receipt after a crash between the two replaces."""
     pending = _pending_receipt_path(path)
     if not pending.exists():
-        return False
+        return None
     try:
         _validate_receipt(
             path,
@@ -387,9 +547,10 @@ def _recover_pending_receipt(
             task_id=task_id,
             kind=kind,
             contract=contract,
+            gate=None,
         )
     except (OSError, ValueError, ShardCompletionError):
-        return False
+        return None
     final = shard_receipt_path(path)
     try:
         _durable_replace(pending, final)
@@ -402,8 +563,9 @@ def _recover_pending_receipt(
         task_id=task_id,
         kind=kind,
         contract=contract,
+        gate=None,
     )
-    return True
+    return _load_json_object(final)
 
 
 def shard_done(
@@ -412,6 +574,7 @@ def shard_done(
     kind: str,
     *,
     contract: dict | None = None,
+    gate: CompletionGate | str,
 ) -> bool:
     """True only for a strict shard with a matching durable completion receipt."""
     path = shard_path(data_root, task_id, kind)
@@ -422,16 +585,21 @@ def shard_done(
             task_id=task_id,
             kind=kind,
             contract=contract,
+            gate=gate,
         )
         return True
     except (OSError, ValueError, ShardCompletionError):
         try:
-            return _recover_pending_receipt(
+            recovered = _recover_pending_receipt(
                 path,
                 task_id=task_id,
                 kind=kind,
                 contract=contract,
             )
+            if recovered is None:
+                return False
+            status = CompletionStatus(recovered["completion_status"])
+            return _completion_gate(gate).accepts(status)
         except (OSError, ValueError, ShardCompletionError):
             return False
 
@@ -465,6 +633,7 @@ def claim_shard(
     kind: str,
     *,
     contract: dict,
+    gate: CompletionGate | str,
 ) -> Iterator[bool]:
     """Hold exclusive ownership; yield False for an already-complete shard.
 
@@ -473,12 +642,58 @@ def claim_shard(
     """
     path = shard_path(data_root, task_id, kind)
     with _exclusive_shard_lock(path):
-        if shard_done(data_root, task_id, kind, contract=contract):
-            yield False
+        _recover_pending_receipt(
+            path, task_id=task_id, kind=kind, contract=contract)
+        try:
+            receipt = _validate_receipt(
+                path,
+                shard_receipt_path(path),
+                task_id=task_id,
+                kind=kind,
+                contract=contract,
+                gate=None,
+            )
+        except ShardContractConflict:
+            raise
+        except (OSError, ValueError, ShardCompletionError):
+            receipt = None
+        if receipt is not None:
+            status = CompletionStatus(receipt["completion_status"])
+            if _completion_gate(gate).accepts(status):
+                yield False
+                return
+            if receipt["accepted_count"] > 0:
+                raise ShardIncompleteError(
+                    f"{path}: preserves {receipt['accepted_count']} accepted records "
+                    f"with status {status.value!r}; choose a compatible gate or "
+                    "use an explicit resume/migration path")
+            # Empty failure contains no accepted work and may be retried under
+            # the identical contract while the old receipt remains recoverable.
+            yield True
             return
-        if shard_done(data_root, task_id, kind):
+        try:
+            any_receipt = _validate_receipt(
+                path,
+                shard_receipt_path(path),
+                task_id=task_id,
+                kind=kind,
+                contract=None,
+                gate=None,
+            )
+        except (OSError, ValueError, ShardCompletionError):
+            any_receipt = None
+        if any_receipt is not None:
             raise ShardContractConflict(
                 f"{path}: refusing to replace valid work from another contract")
+        if shard_done(
+            data_root,
+            task_id,
+            kind,
+            contract=contract,
+            gate=gate,
+        ):
+            yield False
+            return
         yield True
 
 
@@ -505,15 +720,21 @@ def _completion_receipt(
     record_count: int,
     digest: str,
     contract: dict,
+    requested_count: int,
+    completion_status: CompletionStatus,
 ) -> dict:
     return {
         "receipt_version": RECEIPT_VERSION,
         "record_schema_version": RECORD_SCHEMA_VERSION,
+        "data_lane_version": DATA_LANE_VERSION,
         "data_file": path.name,
         "task_id": task_id,
         "kind": kind,
         "record_type": _RECORD_TYPE_BY_KIND[kind],
         "record_count": record_count,
+        "accepted_count": record_count,
+        "requested_count": requested_count,
+        "completion_status": completion_status.value,
         "sha256": digest,
         "generator_contract": contract,
         "generator_contract_sha256": _canonical_digest(contract),
@@ -527,6 +748,7 @@ def write_completed_shard(
     records: Iterable[Any],
     *,
     contract: dict,
+    completion_status: CompletionStatus | str | None = None,
 ) -> int:
     """Publish strict data first and its receipt last.
 
@@ -537,10 +759,29 @@ def write_completed_shard(
     """
     if kind not in _RECORD_TYPE_BY_KIND:
         raise ValueError(f"unknown datagen kind {kind!r}")
+    _validate_generator_contract(contract, kind, task_id=task_id)
     path = shard_path(data_root, task_id, kind)
+    contract_digest = _canonical_digest(contract)
+    evaluation_id = contract["generation_identity"]["evaluation"]["digest"]
+
+    def stamped_records():
+        for record in records:
+            stamped = stamp_production_record(
+                record,
+                provenance_id=contract_digest,
+                evaluation_id=evaluation_id,
+            )
+            validate_record_dict(
+                stamped,
+                expected_task_id=task_id,
+                expected_type=_RECORD_TYPE_BY_KIND[kind],
+                production=True,
+            )
+            yield stamped
+
     prepared = _prepare_jsonl(
         path,
-        records,
+        stamped_records(),
         validate_records=True,
         expected_task_id=task_id,
         expected_type=_RECORD_TYPE_BY_KIND[kind],
@@ -549,6 +790,13 @@ def write_completed_shard(
     data_published = False
     pending_written = False
     try:
+        requested_count = COMPLETION_POLICIES[kind].requested_count(contract)
+        resolved_status = classify_completion(
+            kind,
+            accepted_count=prepared.record_count,
+            requested_count=requested_count,
+            status=completion_status,
+        )
         receipt = _completion_receipt(
             path,
             task_id=task_id,
@@ -556,6 +804,8 @@ def write_completed_shard(
             record_count=prepared.record_count,
             digest=prepared.sha256,
             contract=contract,
+            requested_count=requested_count,
+            completion_status=resolved_status,
         )
         atomic_write_json(pending, receipt)
         pending_written = True
@@ -567,6 +817,7 @@ def write_completed_shard(
             task_id=task_id,
             kind=kind,
             contract=contract,
+            gate=None,
         )
         _durable_replace(pending, shard_receipt_path(path))
         validate_completed_shard(
@@ -574,6 +825,7 @@ def write_completed_shard(
             task_id,
             kind,
             contract=contract,
+            gate=CompletionGate.AUDIT_ANY_STATUS,
         )
         return prepared.record_count
     finally:
@@ -588,16 +840,72 @@ def write_completed_shard(
                 pass
 
 
+def write_receipt_for_existing_shard(
+    data_root: Any,
+    task_id: str,
+    kind: str,
+    *,
+    contract: dict,
+    completion_status: CompletionStatus | str | None = None,
+) -> dict:
+    """Receipt an existing file only after full production validation.
+
+    This is intended for migration of already-current bytes when the complete
+    historical generation contract is available. It never rewrites data.
+    """
+    _validate_generator_contract(contract, kind, task_id=task_id)
+    path = shard_path(data_root, task_id, kind)
+    validation = validate_jsonl_shard(
+        path,
+        expected_task_id=task_id,
+        expected_type=_RECORD_TYPE_BY_KIND[kind],
+        production=True,
+    )
+    requested_count = COMPLETION_POLICIES[kind].requested_count(contract)
+    status = classify_completion(
+        kind,
+        accepted_count=validation.record_count,
+        requested_count=requested_count,
+        status=completion_status,
+    )
+    receipt = _completion_receipt(
+        path,
+        task_id=task_id,
+        kind=kind,
+        record_count=validation.record_count,
+        digest=validation.sha256,
+        contract=contract,
+        requested_count=requested_count,
+        completion_status=status,
+    )
+    atomic_write_json(shard_receipt_path(path), receipt)
+    return validate_completed_shard(
+        data_root,
+        task_id,
+        kind,
+        contract=contract,
+        gate=CompletionGate.AUDIT_ANY_STATUS,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Worker (runs in a spawned process, pinned to one GPU)
 # --------------------------------------------------------------------------- #
-def _generate(kind: str, task, teacher, env, counts: dict):
+def _generate(kind: str, task, teacher, env, counts: dict, *, seed: int):
     if kind == "repair":
         from kore.data.gen_repair import generate_repairs
-        return generate_repairs(task, teacher, env, n=counts["n_repair"])
+        return generate_repairs(
+            task, teacher, env, n=counts["n_repair"], seed=seed)
     if kind == "groups":
         from kore.data.gen_groups import generate_groups
-        return generate_groups(task, teacher, env, n_parents=counts["n_parents"], k=counts["k"])
+        return generate_groups(
+            task,
+            teacher,
+            env,
+            n_parents=counts["n_parents"],
+            k=counts["k"],
+            seed=seed,
+        )
     if kind == "wins":
         from kore.data.gen_wins import generate_wins
         return generate_wins(task, teacher, env, gens=counts["wins_gens"])
@@ -621,28 +929,43 @@ def _run_owned_shard(
     counts: dict,
     teacher_kind: str,
     model_teacher: Any,
+    model_teacher_revision: str | None,
+    seed: int,
+    completion_gate: CompletionGate | str,
 ) -> tuple[str, int]:
     contract = build_generator_contract(
         kind,
         counts,
         teacher_kind=teacher_kind,
         model_teacher=model_teacher,
+        model_teacher_revision=model_teacher_revision,
+        task=task,
+        seed=seed,
     )
     with claim_shard(
         data_root,
         task_id,
         kind,
         contract=contract,
+        gate=completion_gate,
     ) as claimed:
         if not claimed:
             return "skip", 0
-        records = _generate(kind, task, teacher, env, counts)
+        records = _generate(
+            kind, task, teacher, env, counts, seed=seed)
         count = write_completed_shard(
             data_root,
             task_id,
             kind,
             records,
             contract=contract,
+        )
+        validate_completed_shard(
+            data_root,
+            task_id,
+            kind,
+            contract=contract,
+            gate=completion_gate,
         )
         return "done", count
 
@@ -676,6 +999,9 @@ def _worker(payload: dict) -> list[tuple]:
                 counts=payload["counts"],
                 teacher_kind=payload["teacher_kind"],
                 model_teacher=payload.get("model_teacher"),
+                model_teacher_revision=payload.get("model_teacher_revision"),
+                seed=int(payload.get("seed", 0)),
+                completion_gate=payload["completion_gate"],
             )
             results.append((task_id, kind, status, count))
     return results
@@ -685,7 +1011,8 @@ def _worker(payload: dict) -> list[tuple]:
 # Orchestrator
 # --------------------------------------------------------------------------- #
 def _queue_worker(worker_id, gpu, task_q, result_q, kinds, data_root, counts,
-                  teacher_kind, model_teacher):
+                  teacher_kind, model_teacher, model_teacher_revision, seed,
+                  completion_gate):
     """Persistent GPU-pinned datagen worker: pull tasks from a shared queue until
     drained. DYNAMIC load balancing so no worker idles at the tail while a few grind
     the heavy shards. The teacher client + GPU pin are set up ONCE per worker."""
@@ -708,7 +1035,7 @@ def _queue_worker(worker_id, gpu, task_q, result_q, kinds, data_root, counts,
                 break
             if task_id is None:
                 break
-            task = None
+            task = get_task(task_id)
             env = None
             for kind in kinds:
                 try:
@@ -717,12 +1044,16 @@ def _queue_worker(worker_id, gpu, task_q, result_q, kinds, data_root, counts,
                         counts,
                         teacher_kind=teacher_kind,
                         model_teacher=model_teacher,
+                        model_teacher_revision=model_teacher_revision,
+                        task=task,
+                        seed=seed,
                     )
                     with claim_shard(
                         data_root,
                         task_id,
                         kind,
                         contract=contract,
+                        gate=completion_gate,
                     ) as claimed:
                         if not claimed:
                             status, count = "skip", 0
@@ -732,17 +1063,23 @@ def _queue_worker(worker_id, gpu, task_q, result_q, kinds, data_root, counts,
                                 tkw = {"model": model_teacher} if model_teacher else {}
                                 teacher = make_teacher(
                                     teacher_kind, resilient=True, **tkw)
-                            if task is None:
-                                task = get_task(task_id)
+                            if env is None:
                                 env = KoreEnv(task)
                             records = _generate(
-                                kind, task, teacher, env, counts)
+                                kind, task, teacher, env, counts, seed=seed)
                             count = write_completed_shard(
                                 data_root,
                                 task_id,
                                 kind,
                                 records,
                                 contract=contract,
+                            )
+                            validate_completed_shard(
+                                data_root,
+                                task_id,
+                                kind,
+                                contract=contract,
+                                gate=completion_gate,
                             )
                             status = "done"
                     if status == "skip":
@@ -945,7 +1282,9 @@ def _collect_worker_results(
 
 def run_parallel_datagen(task_ids, kinds, data_root, counts, *, n_workers: int,
                          n_gpus: int, teacher_kind: str = "claude",
-                         model_teacher=None, gpu_ids=None, log=print) -> dict:
+                         model_teacher=None, model_teacher_revision=None,
+                         seed: int = 0, completion_gate: CompletionGate | str,
+                         gpu_ids=None, log=print) -> dict:
     """Run datagen for ``kinds`` over ``task_ids`` across GPU-pinned worker processes.
     Resumable (existing shards skipped). Uses a SHARED task queue so every worker
     stays busy pulling the next task until all are done (no tail draining).
@@ -974,13 +1313,10 @@ def run_parallel_datagen(task_ids, kinds, data_root, counts, *, n_workers: int,
     unknown_kinds = [kind for kind in kinds if kind not in ALL_KINDS]
     if unknown_kinds:
         raise ValueError(f"unknown datagen kinds: {unknown_kinds}")
+    completion_gate = _completion_gate(completion_gate)
     for kind in kinds:
-        build_generator_contract(
-            kind,
-            counts,
-            teacher_kind=teacher_kind,
-            model_teacher=model_teacher,
-        )
+        for key in _COUNT_KEYS_BY_KIND[kind]:
+            _count_parameter(counts, key, positive=True)
 
     n_gpus = max(1, int(n_gpus))
     if gpu_ids:
@@ -1026,6 +1362,9 @@ def run_parallel_datagen(task_ids, kinds, data_root, counts, *, n_workers: int,
                 counts,
                 teacher_kind,
                 model_teacher,
+                model_teacher_revision,
+                int(seed),
+                completion_gate.value,
             ),
         )
         for worker_id in range(nw)

@@ -106,7 +106,8 @@ def cmd_build_datasets(args) -> int:
 
     records = []
     for p in _expand(args.inputs):
-        records += read_jsonl(p, typed=True)
+        records += read_jsonl(
+            p, typed=True, mode="production_strict")
     fn = {"sft": build_sft, "dpo": build_dpo, "rft": build_rft}[args.kind]
     rows = fn(records)
     out = Path(args.out)

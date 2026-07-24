@@ -137,13 +137,13 @@ Code changes must land **before** the build and training stages, which shell out
 ```mermaid
 flowchart LR
   SUP[kore_supervise.py<br/>datagen running] --> PAUSE[kore_pause_after_datagen.py]
-  PAUSE -->|"282 shards OR 'stage start: build'"| STOP["stop supervisor, then campaign<br/>write /tmp/kore_paused_after_datagen"]
+  PAUSE -->|"configured shard target OR 'stage start: build'"| STOP["stop supervisor, then campaign<br/>write /tmp/kore_paused_after_datagen"]
   STOP --> RES[kore_resume_supervise.py]
   RES -->|sentinel seen| RELAUNCH["run_campaign.py --force<br/>--stages build,midtrain,sft,dpo,grpo,soup,eval"]
   RELAUNCH --> EVAL[build → … → eval on updated code]
 ```
 
-- **`kore_pause_after_datagen.py`** polls every 30s for the boundary — trigger = all 282 group shards present in `data/full14b/groups/` **or** the log shows `stage start: build`. On trigger it stops the supervisor first (so it cannot relaunch into build), then the campaign and its datagen workers, and writes the sentinel `/tmp/kore_paused_after_datagen`. Datagen shards are on disk, so nothing is lost; build re-runs fresh on resume.
+- **`kore_pause_after_datagen.py`** polls every 30s for the boundary — trigger = its configured `TARGET_GROUPS` group shards present in `data/full14b/groups/` **or** the log shows `stage start: build`. Compare that configuration with the live registry using `python -c "from kore.tasks.registry import train_tasks; print(len(train_tasks()))"` before a campaign. On trigger it stops the supervisor first (so it cannot relaunch into build), then the campaign and its datagen workers, and writes the sentinel `/tmp/kore_paused_after_datagen`. Datagen shards are on disk, so nothing is lost; build re-runs fresh on resume.
 - **`kore_resume_supervise.py`** waits for that sentinel, reaps stale processes, then relaunches with `--stages build,midtrain,sft,dpo,grpo,soup,eval --force` (datagen is done and skipped; `--force` re-runs `build` on the updated code, which a fresh process picks up via the editable install) and supervises `build → eval` with the same bounded-retry and `ALERT` machinery as `kore_supervise.py`. It writes its log path to `/tmp/kore_resume_logpath.txt`.
 
 ---

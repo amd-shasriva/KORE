@@ -409,7 +409,11 @@ class ToolExecutor:
         # NOT shift here or the potential will be double-shifted. Fail-safe: the
         # physics/roofline module may be unavailable -> None, a shaping boundary.
         self.candidate_phi = None
-        if rr.correct and do_bench:
+        # Do not import/invoke the physics module for a disabled shaping feature.
+        # GRPO rebuilds this bridge from config on every run, so a stale parent
+        # process environment cannot make the disabled module execute.
+        _physics_shaping = os.environ.get("KORE_PHYSICS_SHAPING", "0") == "1"
+        if rr.correct and do_bench and _physics_shaping:
             try:
                 from kore.reward.whitebox import phi_potential
                 # Paradigm-v3 LIVE rho: when KORE_PHYSICS_LIVE_COUNTERS=1, profile the

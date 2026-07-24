@@ -8,6 +8,39 @@ snr_threshold: 30.0
 op_family: breadth_attn_decode_gqa
 baseline_tier: breadth
 generated: true
+shape_policy:
+  schema_version: 2
+  policy_id: attention_context
+  status: eligible
+  enabled: true
+  source: generator:breadth_attn_decode_gqa
+  reason: explicit attention_context transform with frozen non-target dimensions
+  transforms:
+  - name: context
+    dims:
+    - SK
+    relation: independent
+    multiple: 1
+    minimum: 128
+    regimes:
+    - small
+    - large
+    - non_power_of_two
+    - attention_tail
+    misalign_to: 8
+    misalign_dim: null
+    preserve_singleton: true
+  constraints:
+  - kind: divides
+    dims:
+    - H
+    - HKV
+  - kind: le
+    dims:
+    - SQ
+    - SK
+  authored_hidden_shapes: []
+  max_elements: 2147483648
 shapes:
   minimal: {B: 1, H: 8, HKV: 2, SQ: 1, SK: 128, D: 128}
   primary: {B: 4, H: 32, HKV: 8, SQ: 1, SK: 4096, D: 128}

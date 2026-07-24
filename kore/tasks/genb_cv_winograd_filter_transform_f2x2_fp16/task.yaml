@@ -8,6 +8,31 @@ snr_threshold: 30.0
 op_family: breadth_cv_winograd_filter_transform_f2x2
 baseline_tier: breadth
 generated: true
+shape_policy:
+  schema_version: 2
+  policy_id: winograd_filters
+  status: eligible
+  enabled: true
+  source: generator:breadth_cv_winograd_filter_transform_f2x2
+  reason: explicit winograd_filters transform with frozen non-target dimensions
+  transforms:
+  - name: output_channels
+    dims:
+    - Cout
+    relation: independent
+    multiple: 1
+    minimum: 64
+    regimes:
+    - small
+    - large
+    - non_power_of_two
+    - tail
+    misalign_to: 8
+    misalign_dim: null
+    preserve_singleton: true
+  constraints: []
+  authored_hidden_shapes: []
+  max_elements: 524288
 shapes:
   minimal: {Cout: 64, Cin: 64}
   primary: {Cout: 256, Cin: 128}

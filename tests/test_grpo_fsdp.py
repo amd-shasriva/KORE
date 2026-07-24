@@ -27,6 +27,26 @@ from pathlib import Path
 import pytest
 
 from kore.policy import grpo
+
+
+def _accelerator_available() -> bool:
+    """True only when a live GPU/accelerator is visible to torch."""
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+_REQUIRES_ACCELERATOR = pytest.mark.skipif(
+    not _accelerator_available(),
+    reason=(
+        "Requires a live accelerator: accelerate>=1.14 "
+        "FullyShardedDataParallelPlugin.__post_init__ and transformers' bf16 check "
+        "probe a device at construction, so a CPU-only host cannot build them. "
+        "Runs/validated on GPU (Crusoe gfx950)."
+    ),
+)
 from kore.policy.configs import (
     GRPOConfig,
     build_deepspeed_config,
@@ -117,6 +137,7 @@ def test_build_deepspeed_config_zero2_omits_stage3_keys():
 # --------------------------------------------------------------------------- #
 # accelerate plugin wiring (needs accelerate; CPU only, no GPU / no launch)
 # --------------------------------------------------------------------------- #
+@_REQUIRES_ACCELERATOR
 def test_build_fsdp_plugin_full_shard():
     pytest.importorskip("accelerate")
     plug = grpo.build_fsdp_plugin(GRPOConfig(model_id="Qwen/Qwen3-14B", use_lora=False,
@@ -124,6 +145,7 @@ def test_build_fsdp_plugin_full_shard():
     assert plug.transformer_cls_names_to_wrap == ["Qwen3DecoderLayer"]
 
 
+@_REQUIRES_ACCELERATOR
 def test_build_fsdp_plugin_autodetects_llama_layer():
     pytest.importorskip("accelerate")
     plug = grpo.build_fsdp_plugin(GRPOConfig(

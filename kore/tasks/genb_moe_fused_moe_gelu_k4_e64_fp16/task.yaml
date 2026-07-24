@@ -8,6 +8,35 @@ snr_threshold: 30.0
 op_family: breadth_moe_fused_moe_gelu_k4_e64
 baseline_tier: breadth
 generated: true
+shape_policy:
+  schema_version: 2
+  policy_id: outer_rows
+  status: eligible
+  enabled: true
+  source: generator:breadth_moe_fused_moe_gelu_k4_e64
+  reason: explicit outer_rows transform with frozen non-target dimensions
+  transforms:
+  - name: outer_rows
+    dims:
+    - M
+    relation: independent
+    multiple: 1
+    minimum: 64
+    regimes:
+    - small
+    - large
+    - non_power_of_two
+    - row_tail
+    misalign_to: 8
+    misalign_dim: null
+    preserve_singleton: true
+  constraints:
+  - kind: le
+    dims:
+    - topk
+    - E
+  authored_hidden_shapes: []
+  max_elements: 985162418487296
 shapes:
   minimal: {M: 64, E: 64, topk: 4, D: 128, I: 256}
   primary: {M: 4096, E: 64, topk: 4, D: 4096, I: 14336}

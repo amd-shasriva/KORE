@@ -8,6 +8,31 @@ snr_threshold: 25.0
 op_family: breadth_cv_conv2d_nhwc_1x1_s1
 baseline_tier: breadth
 generated: true
+shape_policy:
+  schema_version: 2
+  policy_id: spatial_width
+  status: eligible
+  enabled: true
+  source: generator:breadth_cv_conv2d_nhwc_1x1_s1
+  reason: explicit spatial_width transform with frozen non-target dimensions
+  transforms:
+  - name: spatial_width
+    dims:
+    - W
+    relation: independent
+    multiple: 1
+    minimum: 14
+    regimes:
+    - small
+    - large
+    - non_power_of_two
+    - spatial_tail
+    misalign_to: 8
+    misalign_dim: null
+    preserve_singleton: true
+  constraints: []
+  authored_hidden_shapes: []
+  max_elements: 1644167168
 shapes:
   minimal: {N: 1, Cin: 64, H: 32, W: 32, Cout: 64}
   primary: {N: 8, Cin: 128, H: 56, W: 56, Cout: 128}

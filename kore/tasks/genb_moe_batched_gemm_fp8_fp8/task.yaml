@@ -8,6 +8,31 @@ snr_threshold: 25.0
 op_family: breadth_moe_batched_gemm_fp8
 baseline_tier: breadth
 generated: true
+shape_policy:
+  schema_version: 2
+  policy_id: expert_rows
+  status: eligible
+  enabled: true
+  source: generator:breadth_moe_batched_gemm_fp8
+  reason: explicit expert_rows transform with frozen non-target dimensions
+  transforms:
+  - name: expert_rows
+    dims:
+    - m
+    relation: independent
+    multiple: 1
+    minimum: 16
+    regimes:
+    - small
+    - large
+    - non_power_of_two
+    - tail
+    misalign_to: 8
+    misalign_dim: null
+    preserve_singleton: true
+  constraints: []
+  authored_hidden_shapes: []
+  max_elements: 962072674304
 shapes:
   minimal: {E: 4, m: 16, N: 64, K: 64}
   primary: {E: 8, m: 512, N: 4096, K: 4096}

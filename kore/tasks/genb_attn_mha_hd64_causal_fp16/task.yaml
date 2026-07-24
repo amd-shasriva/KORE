@@ -8,6 +8,44 @@ snr_threshold: 30.0
 op_family: breadth_attn_mha_hd64_causal
 baseline_tier: breadth
 generated: true
+shape_policy:
+  schema_version: 2
+  policy_id: self_attention_equal_qk
+  status: eligible
+  enabled: true
+  source: generator:breadth_attn_mha_hd64_causal
+  reason: explicit self_attention_equal_qk transform with frozen non-target dimensions
+  transforms:
+  - name: self_sequence
+    dims:
+    - SQ
+    - SK
+    relation: equal
+    multiple: 1
+    minimum: 64
+    regimes:
+    - small
+    - large
+    - non_power_of_two
+    - attention_tail
+    misalign_to: 8
+    misalign_dim: null
+    preserve_singleton: true
+  constraints:
+  - kind: divides
+    dims:
+    - H
+    - HKV
+  - kind: le
+    dims:
+    - SQ
+    - SK
+  - kind: equal
+    dims:
+    - SQ
+    - SK
+  authored_hidden_shapes: []
+  max_elements: 4398046511104
 shapes:
   minimal: {B: 1, H: 8, HKV: 8, SQ: 64, SK: 64, D: 64}
   primary: {B: 2, H: 32, HKV: 32, SQ: 2048, SK: 2048, D: 64}

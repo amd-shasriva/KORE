@@ -45,10 +45,11 @@ from kore.tasks import taxonomy
 # _genops families whose op specs are torch-free to inspect for fusion-depth.
 _SIMPLE_GENOPS_FAMILIES = ("unary", "binary", "reduce")
 
-# vendor op -> family (matches generate_vendor_ops.py `op_family: vendor_<op>`).
-_VENDOR_OPS = ("rmsnorm", "layernorm", "silu_mul", "gelu_mul", "softmax", "gemm_a8w8",
-               "fused_add_rmsnorm", "rope", "topk_softmax", "batched_gemm",
-               "gemm_a8w8_blockscale")
+# vendor op list is the authoritative registry, NOT a local copy, so the open-ended
+# space never drifts from kore.tasks.vendor_ops (e.g. rope_gptj/rope_partial ->
+# positional, embedding_gather -> data_movement). Matches generate_vendor_ops.py.
+from kore.tasks.vendor_ops import VENDOR_OPS as _VENDOR_OPS_REGISTRY
+_VENDOR_OPS = tuple(_VENDOR_OPS_REGISTRY)
 
 # per-op fusion depth for vendor ops (reduction/affine/gated chains).
 _VENDOR_FUSION_DEPTH = {"rmsnorm": 2, "layernorm": 3, "silu_mul": 2, "gelu_mul": 2,

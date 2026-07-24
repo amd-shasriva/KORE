@@ -265,6 +265,18 @@
       "lifecycle": "deprecated",
       "replacement": "isolated scheduler test job",
       "deletes_artifacts": true
+    },
+    {
+      "path": "scripts/preflight_qwen3_32b.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "offline fail-closed Qwen3-32B model/resource preflight (read-only)"
+    },
+    {
+      "path": "scripts/migrate_jsonl_shards.py",
+      "classification": "destructive",
+      "lifecycle": "active",
+      "role": "dry-run-first JSONL shard migration CLI (writes gated behind --apply)"
     }
   ]
 }

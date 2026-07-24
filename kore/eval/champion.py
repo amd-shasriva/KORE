@@ -10,8 +10,8 @@ a run - the "robust-kbench" bar.
 This gate re-benchmarks each champion (the best kernel discovered per task) under
 strictly harder conditions than training and only certifies the ones that survive:
 
-  * HELD-OUT shapes - scaled + non-power-of-two "odd" variants the kernel was never
-    benchmarked on (catches shape-overfit / tile-memorization).
+  * HELD-OUT shapes - semantics-preserving, non-power-of-two "odd" variants from
+    a lane frozen away from every training augmentation (catches shape overfit).
   * VERIFIED correctness - the enumerated adversarial gate + determinism re-check
     (KORE_VERIFIED_CORRECTNESS=1) + more reseeded trials.
   * HONEST baseline - the compiler-fused bar (KORE_COMPILE_BASELINE=1) so a
@@ -116,19 +116,16 @@ def champion_verdict(
 # --------------------------------------------------------------------------- #
 # Held-out shapes
 # --------------------------------------------------------------------------- #
-def held_out_shapes(task, max_shapes: int = 8):
-    """Shapes the champion was NEVER benchmarked on: scaled + odd variants of the
-    task's base shapes (via :func:`kore.tasks.augment.augment_shapes`), with any
-    dims identical to a base training shape removed so the set is genuinely held-out."""
-    from kore.tasks.augment import augment_shapes
+def held_out_shapes(task, max_shapes: int = 8, *, frozen_split=None):
+    """Build hidden shapes only after freezing every possible training shape.
 
-    base = task.shapes or []
-    if not base:
-        return []
-    base_keys = {tuple(sorted(s.dims.items())) for s in base}
-    aug = augment_shapes(base, max_shapes=max_shapes * 2)
-    held = [s for s in aug if tuple(sorted(s.dims.items())) not in base_keys]
-    return (held or aug)[:max_shapes]
+    Unknown/unsafe operation families return no hidden shapes; falling back to a
+    declared or training shape would invalidate the held-out claim.
+    """
+    from kore.tasks.augment import freeze_shape_split, generate_hidden_shapes
+
+    split = frozen_split or freeze_shape_split(task)
+    return generate_hidden_shapes(task, split, max_shapes=max_shapes)
 
 
 # --------------------------------------------------------------------------- #

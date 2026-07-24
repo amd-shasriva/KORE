@@ -175,12 +175,29 @@ class GRPOConfig(DistributedMixin):
     ``fsdp_transformer_layer_cls`` / ``fsdp_cpu_offload``) so a campaign can
     request full-FT GRPO under the FSDP launcher, exactly like SFT/DPO. The
     native single-process loop honors ``distributed`` by skipping
-    ``device_map="auto"`` (accelerate/FSDP owns placement); LoRA / single-GPU /
-    CPU runs keep the legacy ``device_map`` path untouched.
+    ``device_map="auto"`` (accelerate/FSDP owns placement); single-GPU / CPU
+    full-parameter runs keep the legacy ``device_map`` path untouched. GRPO
+    LoRA is unsupported and rejected before training.
     """
 
     model_id: str = MODEL_32B              # GRPO primary
     output_dir: str = "runs/grpo"
+
+    # --- Trustworthy profile contract -----------------------------------------
+    # Legacy configs remain constructible for checkpoint/config inspection.  A
+    # strict profile is validated at JSON parse + train startup by
+    # ``kore.policy.capabilities`` and fails if any requested feature is inert.
+    production_profile: Optional[str] = None
+    strict_feature_validation: bool = False
+    curriculum_mode: str = "legacy"        # "legacy" | "registered_stratified"
+    curriculum_state_path: Optional[str] = None
+    resume_state_required: bool = False
+    provisional_features: list[str] = field(default_factory=list)
+    require_canary_counters: bool = False
+    required_feature_canaries: dict[str, int] = field(default_factory=dict)
+    # Optional hard caps for BudgetLedgerV1.  Empty means observed but uncapped;
+    # launch materialization may install measured, run-specific limits.
+    budget_limits: dict[str, Optional[float]] = field(default_factory=dict)
 
     # --- Rollout shape (Kevin: m=16 trajectories x n=4 turns) ---
     num_trajectories: int = 16             # m: group size per task
@@ -261,8 +278,8 @@ class GRPOConfig(DistributedMixin):
     # --- Sharded FULL-PARAMETER distributed training (best-in-world RL) ---
     # These take effect ONLY for full-FT (``use_lora=False``) launched as a
     # multi-process job (``distributed=True`` via ``accelerate launch`` /
-    # ``scripts/launch_distributed.sh grpo``). A single-process run (CPU tests,
-    # single-GPU LoRA) ignores them entirely and keeps the legacy in-process path.
+    # ``scripts/launch_distributed.sh grpo``). A single-process full-parameter
+    # run (including CPU tests) ignores them and keeps the in-process path.
     #
     # ``sharding_backend`` selects how the POLICY is sharded across ranks so the
     # dominant full-FT memory (gradients + optimizer state) is split, not replicated:
@@ -455,6 +472,29 @@ class GRPOConfig(DistributedMixin):
     save_steps: int = 50                    # WIRED: write a periodic checkpoint every N steps
     report_to: str = "none"
 
+    def validate(self, *, tasks=None, runtime=None, require_tasks: bool = False):
+        """Validate without making dataclass construction backward-incompatible.
+
+        Old tools may still instantiate legacy configs (including stale LoRA
+        configs) to inspect or migrate them.  Parsing a launch JSON and entering
+        training call this method, where unsupported LoRA and malformed budgets
+        are rejected.  Strict profiles additionally resolve an immutable feature
+        manifest and, at startup, require an explicit registered train-task set.
+        """
+
+        from kore.policy.capabilities import (
+            validate_grpo_config,
+            validate_grpo_startup,
+        )
+
+        validate_grpo_config(self)
+        strict = bool(self.strict_feature_validation)
+        if strict and (require_tasks or tasks is not None):
+            return validate_grpo_startup(self, tasks, runtime=runtime)
+        if require_tasks and not tasks:
+            raise ValueError("GRPO startup requires a non-empty task list")
+        return None
+
 
 @dataclass
 class MidTrainConfig(DistributedMixin):
@@ -598,8 +638,9 @@ def build_fsdp_kwargs(config) -> dict:
         saved-tensor-count check that non-reentrant enforces and would otherwise
         raise on that swap. (This is the single source of truth for the choice; the
         stage entrypoints match it.)
-      * ``cpu_ram_efficient_loading`` + ``sync_module_states`` let rank-0 stream
-        the checkpoint and broadcast, which is what makes 32B/70B fit.
+      * ``cpu_ram_efficient_loading`` + ``sync_module_states`` let rank 0 stream
+        the checkpoint and broadcast, reducing host load. Model/topology fit still
+        requires measured preflight.
       * fp32 MASTER weights are automatic: the model is loaded in bf16 (compute
         dtype), but with accelerate ``mixed_precision: bf16`` the FSDP prepare step
         UPCASTS every trainable flat-parameter to fp32 (accelerate mimics
@@ -710,8 +751,8 @@ def grpo_distributed_enabled(config) -> bool:
 
     Identical gate to :func:`fsdp_enabled`: the sharded path is used ONLY for full
     fine-tuning (``use_lora=False``) launched as a multi-process job
-    (``distributed=True``). LoRA and single-process runs keep the legacy
-    in-process ``device_map`` loop unchanged, so every CPU/LoRA test is untouched.
+    (``distributed=True``). Single-process full-parameter runs keep the
+    in-process ``device_map`` loop; GRPO LoRA is rejected at the training entry.
     """
     return fsdp_enabled(config)
 

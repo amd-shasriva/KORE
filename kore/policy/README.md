@@ -27,6 +27,9 @@ flowchart LR
 | `grpo.py` | Stage 3 | Multi-turn agentic GRPO (see below) |
 | `soup.py` | Stage 4 | WiSE-FT interpolation `θ = (1-α)·θ_base + α·θ_kore`, α-swept under a retention gate |
 | `configs.py` | — | All stage config dataclasses + FSDP/DeepSpeed helpers (no torch import) |
+| `capabilities.py` | — | Strict feature resolution, stable manifest, environment clearing, and liveness |
+| `curriculum.py` | — | Rank-0-broadcast registered stratified scheduler and exact state |
+| `budget.py` | — | Versioned non-overlapping token/verifier/profiler budget ledger |
 | `format.py` | — | `SYSTEM_PROMPT`, transcript assembly, `parse_response`, turn feedback |
 | `anticollapse.py` | — | Anti-collapse math (RC-GRPO, AVSPO, SC-GRPO, GTPO) |
 | `dynamic.py` | — | `DynamicStepController` plateau early-stop |
@@ -38,6 +41,15 @@ flowchart LR
 ## GRPO in depth
 
 `grpo.py` is a native, in-process, multi-turn GRPO implementation (no external rollout server). It has a single-GPU fallback (`_train_grpo_fallback`) and an FSDP/DeepSpeed distributed path (`_train_grpo_distributed`).
+
+The strict `minimum_32b_v1` canary profile adds a fail-closed layer before
+either path: explicit registered tasks, `requested_features ==
+effective_features`, rank-0-only stratified selection, stable feature/task
+digests, first-rollout/update liveness canaries, and a versioned budget receipt.
+It intentionally disables search, value prefiltering, minting, branch-and-bound,
+Opus regret, coevolution, and distillation. See
+[`docs/GRPO_MIN_TRUSTWORTHY.md`](../../docs/GRPO_MIN_TRUSTWORTHY.md). This
+profile does not establish a 32B memory topology or authorize a launch.
 
 ```mermaid
 sequenceDiagram

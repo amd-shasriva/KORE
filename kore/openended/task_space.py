@@ -7,13 +7,10 @@ existing parametric op registries:
     ``reduce`` / ``fusion`` / ``gemm_fusion`` families, torch-eager / hipBLASLt
     baselines).
   * ``kore.tasks.vendor_ops`` - the vendor-baselined ops (graded vs real AITER
-    kernels), family ``vendor_<op>`` to match ``registry.operator_family`` /
-    the generated ``op_family`` yaml field.
+    kernels), carrying generator-native ``vendor_<op>`` source metadata.
 
-Both source registries are trainable-only: the held-out generalization families
-(``mla`` / ``paged_attention``, see :mod:`kore.tasks.registry`) are absent from
-this space by construction, so a descriptor can never name a held-out task and the
-proposer built on top of it cannot leak one into training.
+The versioned task taxonomy maps source metadata to canonical product families;
+the held-out MLA/paged leaves are absent by construction.
 
 A descriptor = ``(source, family, op, dtype, shape_regime)``; its *difficulty
 features* are derived (not stored) via :func:`descriptor_features`. Those
@@ -39,6 +36,8 @@ import functools
 import random
 from dataclasses import dataclass, replace
 from typing import Iterable, Optional
+
+from kore.tasks import taxonomy
 
 # --------------------------------------------------------------------------- #
 # Lazy views onto the existing KORE registries (torch imported only on demand)
@@ -101,6 +100,7 @@ def _regime_dims(shapes: dict) -> dict:
 
 
 def vendor_family(op: str) -> str:
+    """Generator-native source family stored in generated task metadata."""
     return f"vendor_{op}"
 
 
@@ -171,8 +171,23 @@ def enumerate_descriptors(include_vendor: bool = True) -> list[TaskDescriptor]:
 
 
 def families(include_vendor: bool = True) -> list[str]:
-    """Sorted list of operator families present in the space."""
-    return sorted({d.family for d in _enumerate_cached(include_vendor)})
+    """Sorted canonical product families present in the space."""
+    return sorted({product_family(d) for d in _enumerate_cached(include_vendor)})
+
+
+def product_family(desc: TaskDescriptor) -> str:
+    """Canonical product family for a generator-native descriptor."""
+    if desc.source == "genops":
+        return taxonomy.product_family_for_source(
+            "genops", desc.op, desc.family
+        )
+    if desc.source == "vendor":
+        return taxonomy.product_family_for_source(
+            "vendor", desc.op, desc.family
+        )
+    if desc.source == "minted":
+        return taxonomy.canonical_product_family(desc.family)
+    raise taxonomy.TaxonomyError(f"unknown descriptor source {desc.source!r}")
 
 
 def sample_descriptor(rng: random.Random, include_vendor: bool = True) -> TaskDescriptor:
@@ -214,7 +229,6 @@ def _problem_volume(desc: TaskDescriptor) -> int:
 # --------------------------------------------------------------------------- #
 # Behavior / difficulty features
 # --------------------------------------------------------------------------- #
-_COMPUTE_BOUND_FAMILIES = frozenset({"gemm_fusion"})
 _PRECISION_CLASS = {"bf16": "16b", "fp16": "16b", "fp32": "32b", "fp8": "8b", "int8": "8b"}
 # problem-volume thresholds (elements, or M*N*K work for gemm) -> scale class.
 _SCALE_SMALL = 1_000_000
@@ -223,7 +237,7 @@ _SCALE_LARGE = 1_000_000_000
 
 def arithmetic_intensity(desc: TaskDescriptor) -> str:
     """``compute-bound`` (matmul-class) vs ``memory-bound`` (elementwise/reduce)."""
-    if desc.family in _COMPUTE_BOUND_FAMILIES or desc.op in _VENDOR_COMPUTE_BOUND:
+    if product_family(desc) == "gemm" or desc.op in _VENDOR_COMPUTE_BOUND:
         return "compute-bound"
     return "memory-bound"
 
@@ -261,7 +275,8 @@ def shape_scale(desc: TaskDescriptor) -> str:
 def descriptor_features(desc: TaskDescriptor) -> dict:
     """MAP-Elites behavior dimensions + difficulty features for ``desc``."""
     return {
-        "family": desc.family,
+        "family": product_family(desc),
+        "source_family": desc.family,
         "arithmetic_intensity": arithmetic_intensity(desc),
         "fusion_depth": fusion_depth(desc),
         "dtype_precision": _PRECISION_CLASS[desc.dtype],
@@ -357,6 +372,7 @@ def mutate(desc: TaskDescriptor, rng: random.Random,
 def describe(desc: TaskDescriptor) -> dict:
     """A compact JSON-friendly view (task_id + regime + behavior features)."""
     out = {"task_id": desc.task_id, "source": desc.source,
+           "source_family": desc.family,
            "shape_regime": desc.shape_regime, "shape": descriptor_shape(desc)}
     out.update(descriptor_features(desc))
     out["static_difficulty"] = static_difficulty(desc)

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import math
 import os
 from dataclasses import dataclass
@@ -476,6 +477,7 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
         "entry_name": op,
         "dtype_name": dtype,
         "family": family,
+        "mutates_input": False,
     }
     ns[f"{op}_ref"] = ref_fn   # conventional alias
     return ns
@@ -768,6 +770,55 @@ def seed_source(op: str, family: str, dtype: str) -> str:
 # --------------------------------------------------------------------------- #
 # Generic driver (correctness + cold-cache bench + post-timing anti-hack)
 # --------------------------------------------------------------------------- #
+DRIVER_CAPABILITY_PROTOCOL = 2
+DRIVER_PROTOCOL_ID = "kore-paired-v2"
+PUBLICATION_GUARANTEES = {
+    "bench_both": True,
+    "multi_shape": True,
+    "paired_samples": True,
+    "raw_samples": True,
+    "fresh_inputs_per_pair": True,
+    "balanced_ab_ba": True,
+    "mutation_semantics": True,
+    "postcheck_all_shapes": True,
+}
+_CAPABILITY_DEFAULTS = {
+    "protocol": DRIVER_CAPABILITY_PROTOCOL,
+    "protocol_id": DRIVER_PROTOCOL_ID,
+    "performance_eligible": False,
+    "bench_both": False,
+    "multi_shape": False,
+    "paired_samples": False,
+    "raw_samples": False,
+    "fresh_inputs_per_pair": False,
+    "balanced_ab_ba": False,
+    "mutation_semantics": False,
+    "postcheck_all_shapes": False,
+}
+
+
+def publication_driver_capabilities() -> dict:
+    return {
+        "protocol": DRIVER_CAPABILITY_PROTOCOL,
+        "protocol_id": DRIVER_PROTOCOL_ID,
+        "performance_eligible": True,
+        **PUBLICATION_GUARANTEES,
+    }
+
+
+def emit_driver_capabilities(overrides: Optional[dict] = None) -> None:
+    """Emit the versioned verifier/driver capability handshake.
+
+    Drivers must opt in to every batched-timing guarantee.  The environment
+    accepts this exact machine-readable line only; merely mentioning a helper or
+    CLI flag in driver source is never treated as evidence of support.
+    """
+    caps = dict(_CAPABILITY_DEFAULTS)
+    caps.update(overrides or {})
+    print("KORE_DRIVER_CAPABILITIES: "
+          + json.dumps(caps, sort_keys=True, separators=(",", ":")))
+
+
 def _snr_db(out, ref_out) -> float:
     o, r = out.float(), ref_out.float()
     noise = (o - r).norm().item()
@@ -896,14 +947,71 @@ def _as_tuple(x):
     return x if isinstance(x, (tuple, list)) else (x,)
 
 
-def _clone_inputs(inputs):
-    """Clone tensor inputs so an IN-PLACE candidate/oracle (e.g. fused_add_rmsnorm)
-    can't corrupt the shared inputs between the reference and candidate calls."""
+def _output_pairs(out, ref_out, expected_dtypes=None):
+    """Return contract-checked output pairs, or ``None`` on any ABI mismatch.
+
+    Tuple/list structure and arity are exact.  Every leaf must be a tensor with
+    the oracle's shape and its declared dtype (the oracle dtype by default).
+    """
     import torch
-    return tuple(t.clone() if torch.is_tensor(t) else t for t in inputs)
+
+    out_seq = isinstance(out, (tuple, list))
+    ref_seq = isinstance(ref_out, (tuple, list))
+    if out_seq != ref_seq:
+        return None
+    outs, refs = _as_tuple(out), _as_tuple(ref_out)
+    if len(outs) != len(refs):
+        return None
+    dtypes = list(expected_dtypes) if expected_dtypes is not None else [
+        r.dtype if torch.is_tensor(r) else None for r in refs
+    ]
+    if len(dtypes) != len(refs):
+        return None
+    pairs = []
+    for o, r, dtype in zip(outs, refs, dtypes):
+        if not torch.is_tensor(o) or not torch.is_tensor(r):
+            return None
+        if tuple(o.shape) != tuple(r.shape) or o.dtype != dtype:
+            return None
+        pairs.append((o, r))
+    return pairs
 
 
-def _compare_outputs(out, ref_out):
+def _clone_value(value):
+    """Recursively clone tensor storage while preserving container structure."""
+    import torch
+    if torch.is_tensor(value):
+        return value.clone()
+    if isinstance(value, tuple):
+        return tuple(_clone_value(v) for v in value)
+    if isinstance(value, list):
+        return [_clone_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _clone_value(v) for k, v in value.items()}
+    return value
+
+
+def _clone_inputs(inputs):
+    """Clone all nested tensor storage for isolated candidate/reference calls."""
+    return tuple(_clone_value(t) for t in inputs)
+
+
+def _make_paired_invokers(inputs, candidate_call, baseline_call,
+                          mutates_input: bool):
+    """Build value-identical, storage-disjoint callables for one timing pair."""
+    candidate_inputs = _clone_inputs(inputs)
+    baseline_inputs = _clone_inputs(inputs)
+
+    def _args(seed):
+        return _clone_inputs(seed) if mutates_input else seed
+
+    return (
+        lambda: candidate_call(_args(candidate_inputs)),
+        lambda: baseline_call(_args(baseline_inputs)),
+    )
+
+
+def _compare_outputs(out, ref_out, atol=1e-2, rtol=1e-2, expected_dtypes=None):
     """SNR/max_diff/allclose over single-tensor OR multi-output (tuple) results.
 
     Returns ``(worst_snr_db, max_abs_diff, allclose_all)`` - the worst SNR and the
@@ -920,19 +1028,24 @@ def _compare_outputs(out, ref_out):
     kernel that is wrong anywhere still fails on the finite elements or the
     structure check, and on the many finite adversarial regimes."""
     import torch
-    outs, refs = _as_tuple(out), _as_tuple(ref_out)
+    pairs = _output_pairs(out, ref_out, expected_dtypes=expected_dtypes)
+    if pairs is None:
+        return -999.0, float("inf"), False
     worst, maxd, ok = 999.0, 0.0, True
-    for o, r in zip(outs, refs):
+    for o, r in pairs:
         of, rf = o.float(), r.float()
-        rfin, ofin = torch.isfinite(rf), torch.isfinite(of)
-        # (1) non-finite positions must match exactly (NaN/Inf where ref has them).
-        if not torch.equal(rfin, ofin):
+        rnan, onan = torch.isnan(rf), torch.isnan(of)
+        rpos, opos = torch.isposinf(rf), torch.isposinf(of)
+        rneg, oneg = torch.isneginf(rf), torch.isneginf(of)
+        # NaN, +Inf, and -Inf are distinct semantic values.  Their masks must
+        # match independently; a candidate cannot substitute NaN for either Inf
+        # sign (or vice versa) merely because both are "non-finite".
+        if not (torch.equal(rnan, onan)
+                and torch.equal(rpos, opos)
+                and torch.equal(rneg, oneg)):
             return -999.0, float("inf"), False
-        # (2) where both are inf, the sign must agree (+inf vs -inf is a real error).
-        rinf = torch.isinf(rf)
-        if bool(rinf.any()) and not torch.equal(torch.sign(rf[rinf]), torch.sign(of[rinf])):
-            return -999.0, float("inf"), False
-        # (3) compare magnitudes on the FINITE subset only.
+        rfin = ~(rnan | rpos | rneg)
+        # Compare magnitudes on the finite subset only.
         if bool(rfin.all()):
             of_c, rf_c = of, rf
         else:
@@ -941,7 +1054,7 @@ def _compare_outputs(out, ref_out):
             continue  # entirely non-finite and structurally matched -> agreement
         worst = min(worst, _snr_db(of_c, rf_c))
         maxd = max(maxd, (of_c - rf_c).abs().max().item())
-        ok = ok and bool(torch.allclose(of_c, rf_c, atol=1e-2, rtol=1e-2))
+        ok = ok and bool(torch.allclose(of_c, rf_c, atol=atol, rtol=rtol))
     return worst, maxd, ok
 
 
@@ -992,10 +1105,12 @@ def _run_correctness(ref, task_dir, shape) -> int:
 def _build_bench_fn(ref, task_dir, shape, impl):
     """Build the no-arg callable timed for ``impl`` (candidate|reference).
 
-    Inputs are drawn once (seed=0) and shared, so candidate and reference are timed
-    on the SAME data. In-place ops (``mutates_input``) get a fresh clone per call,
-    applied identically to both impls so the speedup ratio stays fair."""
-    inputs = ref.get_inputs(shape, device="cuda", seed=0)
+    Each call to this builder draws an independent seed-0 input set.  Thus the
+    candidate and reference see value-identical but storage-disjoint tensors: an
+    in-place or malicious candidate cannot poison the reference's timed inputs.
+    In-place contract ops (``mutates_input``) additionally get a fresh clone per
+    invocation, applied identically to both implementations."""
+    inputs = _clone_inputs(ref.get_inputs(shape, device="cuda", seed=0))
     base = ref.baseline_fn if impl in ("reference", "torch") else \
         _load_candidate(task_dir, ref.entry_name)
     if getattr(ref, "mutates_input", False):
@@ -1003,57 +1118,90 @@ def _build_bench_fn(ref, task_dir, shape, impl):
     return lambda: base(*inputs)
 
 
+def _build_bench_pair(ref, task_dir, shape, _pair_index):
+    """Fresh, storage-isolated candidate/reference callables for one pair."""
+    if not hasattr(ref, "mutates_input"):
+        raise RuntimeError("reference must declare mutates_input for paired timing")
+    inputs = ref.get_inputs(shape, device="cuda", seed=0)
+    candidate = _load_candidate(task_dir, ref.entry_name)
+    return _make_paired_invokers(
+        inputs,
+        lambda xs: candidate(*xs),
+        lambda xs: ref.baseline_fn(*xs),
+        bool(ref.mutates_input),
+    )
+
+
 def _run_bench(ref, task_dir, shape, impl, warmup, iters) -> int:
     return _time_fn(_build_bench_fn(ref, task_dir, shape, impl), warmup, iters)
 
 
-def _run_bench_both(ref, task_dir, shape, warmup, iters, repeat) -> int:
-    """Time candidate AND reference in ONE process, ``repeat`` runs, interleaved.
+def _time_pair(cand, refr, warmup, iters, candidate_first):
+    """Time one candidate/reference pair in the requested order."""
+    if candidate_first:
+        return (_time_median(cand, warmup, iters),
+                _time_median(refr, warmup, iters))
+    rm = _time_median(refr, warmup, iters)
+    cm = _time_median(cand, warmup, iters)
+    return cm, rm
 
-    This is the fast + rigorous timing path: a single ``python driver.py`` invocation
-    (one torch import) does all ``repeat`` timed runs for BOTH impls, printing
-    ``CAND_median_ms:`` / ``REF_median_ms:`` per run. Because candidate and reference
-    are timed BACK-TO-BACK within each run, any machine load (GPU oversubscription)
-    hits both equally, so the speedup RATIO stays fair even under heavy concurrency -
-    unlike separate per-impl processes whose windows can see different contention.
-    Warmup/iters are randomized per run (same window for both impls in a run) to
-    defeat fixed-call-index bench sniffing. Median-of-medians + CV are computed by
-    the caller from the emitted samples."""
+
+def _run_paired_samples(ref, task_dir, shape, warmup, iters, repeat,
+                        build_pair) -> int:
+    """Emit raw repeat-level candidate/reference pairs in balanced AB/BA order."""
     import random
-    cand = _build_bench_fn(ref, task_dir, shape, "candidate")
-    refr = _build_bench_fn(ref, task_dir, shape, "reference")
-    for _ in range(max(1, repeat)):
+    candidate_first = bool(random.getrandbits(1))
+    for run in range(max(1, repeat)):
+        # Build from a fresh canonical input allocation for EVERY pair.  The
+        # builder clones it independently for candidate/reference and applies
+        # the task-declared mutation policy to every timed invocation.
+        cand, refr = build_pair(ref, task_dir, shape, run)
         w = random.randint(max(4, warmup - 3), warmup + 4)
         it = random.randint(max(8, iters - 5), iters + 6)
-        cm = _time_median(cand, w, it)
-        rm = _time_median(refr, w, it)
-        print(f"CAND_median_ms: {cm:.4f}")
-        print(f"REF_median_ms: {rm:.4f}")
+        first = candidate_first if run % 2 == 0 else not candidate_first
+        cm, rm = _time_pair(cand, refr, w, it, first)
+        if not (math.isfinite(cm) and cm > 0.0
+                and math.isfinite(rm) and rm > 0.0):
+            raise RuntimeError("timing pair produced a non-finite/non-positive sample")
+        ratio = rm / cm
+        payload = {
+            "pair": run,
+            "order": "AB" if first else "BA",
+            "candidate_ms": cm,
+            "baseline_ms": rm,
+            "ratio": ratio,
+            "log_speedup": math.log(ratio),
+        }
+        print("KORE_TIMING_PAIR: "
+              + json.dumps(payload, sort_keys=True, separators=(",", ":")))
     return 0
+
+
+def _run_paired_bench_all_shapes(
+        ref, task_dir, shape_specs, warmup, iters, repeat,
+        build_pair=_build_bench_pair, postcheck=None) -> int:
+    """Run the complete publication-grade paired protocol for every shape."""
+    postcheck = postcheck or _run_correctness
+    for spec in shape_specs:
+        shape = ref.parse_shape(spec)
+        print(f"SHAPE_BEGIN {spec}")
+        _run_paired_samples(
+            ref, task_dir, shape, warmup, iters, repeat, build_pair)
+        # Every requested shape is re-verified on late invocations of the same
+        # cached candidate module.  The environment validates each shape block,
+        # so one early failing postcheck cannot be hidden by a later passing one.
+        postcheck(ref, task_dir, shape)
+    return 0
+
+
+def _run_bench_both(ref, task_dir, shape, warmup, iters, repeat) -> int:
+    return _run_paired_samples(
+        ref, task_dir, shape, warmup, iters, repeat, _build_bench_pair)
 
 
 def _run_bench_all_shapes(ref, task_dir, shape_specs, warmup, iters, repeat) -> int:
-    """Time candidate+reference for ALL shapes in ONE process (one torch import).
-
-    Emits a ``SHAPE_BEGIN <spec>`` marker before each shape's CAND_/REF_median_ms
-    block (blocks are in the given order). This collapses the per-shape process
-    spawns into one, so under the per-GPU timing lock the exclusive window shrinks to
-    a single import + the tiny GPU timing - max throughput with clean, honest
-    measurements. Timing math per shape is identical to :func:`_run_bench_both`."""
-    import random
-    for spec in shape_specs:
-        shape = ref.parse_shape(spec)
-        cand = _build_bench_fn(ref, task_dir, shape, "candidate")
-        refr = _build_bench_fn(ref, task_dir, shape, "reference")
-        print(f"SHAPE_BEGIN {spec}")
-        for _ in range(max(1, repeat)):
-            w = random.randint(max(4, warmup - 3), warmup + 4)
-            it = random.randint(max(8, iters - 5), iters + 6)
-            cm = _time_median(cand, w, it)
-            rm = _time_median(refr, w, it)
-            print(f"CAND_median_ms: {cm:.4f}")
-            print(f"REF_median_ms: {rm:.4f}")
-    return 0
+    return _run_paired_bench_all_shapes(
+        ref, task_dir, shape_specs, warmup, iters, repeat)
 
 
 def driver_main(ref, task_dir: str, argv=None) -> int:
@@ -1070,7 +1218,17 @@ def driver_main(ref, task_dir: str, argv=None) -> int:
     p.add_argument("--repeat", type=int, default=1,
                    help="in-process timed runs (used with --bench-both)")
     p.add_argument("--impl", default="candidate", choices=["candidate", "reference", "torch"])
+    p.add_argument("--kore-driver-capabilities", action="store_true",
+                   help=argparse.SUPPRESS)
     a = p.parse_args(argv)
+    if a.kore_driver_capabilities:
+        if hasattr(ref, "mutates_input"):
+            emit_driver_capabilities(publication_driver_capabilities())
+        else:
+            emit_driver_capabilities({
+                "ineligible_reason": "reference does not declare mutates_input",
+            })
+        return 0
     shape = ref.parse_shape(a.shape)
     if a.bench_both:
         # fast + contention-fair timing of BOTH impls in one process, then the
@@ -1078,7 +1236,6 @@ def driver_main(ref, task_dir: str, argv=None) -> int:
         if a.shapes:
             specs = [s for s in a.shapes.split(";") if s != ""] or [a.shape]
             rc = _run_bench_all_shapes(ref, task_dir, specs, a.warmup, a.iters, a.repeat)
-            _run_correctness(ref, task_dir, ref.parse_shape(specs[0]))
         else:
             rc = _run_bench_both(ref, task_dir, shape, a.warmup, a.iters, a.repeat)
             _run_correctness(ref, task_dir, shape)

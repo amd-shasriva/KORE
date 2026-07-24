@@ -1,348 +1,439 @@
-"""Physics residual-descent reward (KORE P0 -> reward, Phase 5).
+"""Unified physics bridge for analysis, integrity, reward, and GRPO.
 
-Scores a CORRECT kernel by how much of the *named* runtime residual it has
-removed relative to the roofline lower bound ``T_min`` -- an ABSOLUTE,
-arch-normalized, physics-grounded signal, NOT a relative speedup versus a vendor
-baseline. It is built directly on the validated check-(b) decomposition
-(``kore.analysis.p0_sol``), which fits the residual to counter-derived stall /
-occupancy-deficit time with R^2 ~ 0.98 on gfx950 (calibrated peaks; see
-``docs/P0_RESULTS.md``):
+Integrity and shaping are intentionally separate:
 
-    T_meas = T_min + R ,   R = residual (removable, in principle, down to T_min)
-    named residual  N = (stall_frac + occupancy_deficit) * T_meas
-                      = MemUnitStalled/100 * T_meas + (1 - OccupancyPercent/100) * T_meas
+* integrity uses conservative vendor upper bounds and may reject a physically
+  impossible measurement without any empirical evidence;
+* residual/counter shaping requires passing family-specific held-out evidence.
 
-The residual-descent credit is the physics floor as a fraction of the floor plus
-the *named* residual that is still present:
-
-    rho_phys = T_min / (T_min + N)   in (0, 1]      [PMC available]
-
-``rho_phys -> 1`` as the kernel drives the named residual ``N -> 0`` (it
-approaches the roofline). When PMC counters are unavailable we cannot attribute
-the residual to named terms, so we degrade gracefully to the timing-only SOL
-attainment
-
-    eta = T_min / T_meas             in (0, 1]      [PMC-free fallback, flagged]
-
-which uses the *full* residual ``R`` instead of the named part ``N`` (note
-``eta <= rho_phys`` since ``N <= R``). The fallback is flagged ``no_pmc``.
-
-Anti-hack lexicographic ordering is preserved ABSOLUTELY: every gate
-(hack < compile_fail < incorrect) is delegated verbatim to
-:func:`kore.reward.reward.compute_reward`; only the tier-3 (correct) speed term
-is replaced with the physics credit. A kernel can therefore never trade
-correctness for residual credit, and a reward hack is still the unique floor.
+Unsupported operations, dtypes, calibration, or counters return unavailable
+signals.  They never receive fabricated attainment.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Optional
 
+from kore.analysis.roofline import (
+    ModelError,
+    PhysicalModel,
+    attainment,
+    estimate_work,
+    evaluate_roofline,
+    make_physical_model,
+)
 from kore.config import CONFIG
-from kore.reward.reward import (  # noqa: F401 - Observation re-exported for callers
+from kore.reward.reward import (
     DEFAULT_ROOFLINE_TOL,
     Observation,
     RewardResult,
     _format_component,
     compute_reward,
     roofline_ceiling_violation,
+    validate_reward_config,
 )
+from kore.reward.shaping import FamilyShapingEvidence, evidence_for_task
 
-# Default weight on the physics credit (rho in (0,1]) for a correct kernel, so a
-# correct kernel scores in [correctness_weight, correctness_weight + physics_weight].
-# Kept O(1) like the speedup term it replaces; correctness_weight alone already
-# dominates the shaped-incorrect ceiling (eps_shape + format_weight), so
-# lexicographic dominance of the correct tier holds for any physics_weight >= 0.
 DEFAULT_PHYSICS_WEIGHT = 1.0
 
 
-@dataclass
-class PhysicsSignal:
-    """Physics inputs for one kernel at one shape.
+def _finite(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
 
-    ``t_min_ms`` is the roofline lower bound (:func:`kore.analysis.rooflines.roofline`).
-    ``stall_frac`` and ``occupancy`` are rocprofv3 gfx950 derived metrics normalized
-    to ``[0, 1]`` (``MemUnitStalled/100`` and ``OccupancyPercent/100``); either may be
-    None when PMC is unavailable, which triggers the eta fallback. ``measured_ms``
-    overrides the candidate wall time (else taken from the Observation).
-    """
+
+def _fraction(name: str, value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    if not _finite(value) or not 0.0 <= float(value) <= 1.0:
+        raise ModelError(f"{name} must be finite and in [0, 1]")
+    return float(value)
+
+
+@dataclass(frozen=True)
+class PhysicsSignal:
+    """One timed kernel under one fingerprinted physical model."""
 
     t_min_ms: float
+    model_fingerprint: str
     measured_ms: Optional[float] = None
+    family: Optional[str] = None
     stall_frac: Optional[float] = None
     occupancy: Optional[float] = None
 
+    def __post_init__(self) -> None:
+        if not _finite(self.t_min_ms) or float(self.t_min_ms) <= 0.0:
+            raise ModelError("t_min_ms must be finite and positive")
+        object.__setattr__(self, "t_min_ms", float(self.t_min_ms))
+        if not self.model_fingerprint:
+            raise ModelError("model_fingerprint is required")
+        if self.measured_ms is not None:
+            if not _finite(self.measured_ms) or float(self.measured_ms) <= 0.0:
+                raise ModelError("measured_ms must be finite and positive")
+            object.__setattr__(self, "measured_ms", float(self.measured_ms))
+        object.__setattr__(self, "stall_frac", _fraction("stall_frac", self.stall_frac))
+        object.__setattr__(self, "occupancy", _fraction("occupancy", self.occupancy))
 
-def named_residual_ms(measured_ms: float, sig: PhysicsSignal) -> Optional[float]:
-    """Named residual time ``N = (stall + occupancy_deficit) * T_meas``.
 
-    Returns None when NO PMC counter is present (neither stall nor occupancy), so
-    the caller can fall back to the timing-only eta. The named residual is a PART
-    of the total residual ``R = T_meas - T_min`` (raw derived counters overlap and
-    can double-count a cycle as both stalled and low-occupancy), so it is clamped
-    to ``[0, R]``. This guarantees ``eta <= rho_phys <= 1``: crediting the named
-    residual is never harsher than the timing-only fallback.
-    """
-    if sig.stall_frac is None and sig.occupancy is None:
+def model_from_config(
+    cfg=CONFIG, *, integrity: bool = False
+) -> PhysicalModel:
+    """Resolve the explicit SKU/calibration fields on a runtime config."""
+    sku = str(getattr(cfg, "physics_sku", "") or "")
+    if not sku:
+        raise ModelError("physics_sku must be configured explicitly")
+    calibration = getattr(cfg, "physics_calibration_path", None)
+    expected = getattr(cfg, "physics_model_fingerprint", None)
+    model = make_physical_model(
+        sku,
+        Path(calibration) if calibration else None,
+        expected_fingerprint=expected,
+    )
+    return model.for_integrity() if integrity else model
+
+
+def _evidence_matches(
+    signal: PhysicsSignal, evidence: Optional[FamilyShapingEvidence]
+) -> bool:
+    return bool(
+        evidence
+        and evidence.passes()
+        and evidence.model_fingerprint == signal.model_fingerprint
+        and signal.family == evidence.family
+        and signal.stall_frac is not None
+        and signal.occupancy is not None
+    )
+
+
+def named_residual_ms(
+    measured_ms: float,
+    signal: PhysicsSignal,
+    evidence: Optional[FamilyShapingEvidence] = None,
+) -> Optional[float]:
+    """Evidence-backed predicted residual; unavailable without passing evidence."""
+    if not _finite(measured_ms) or float(measured_ms) <= 0.0:
         return None
-    stall = max(0.0, sig.stall_frac or 0.0)
-    occ_deficit = max(0.0, 1.0 - (sig.occupancy if sig.occupancy is not None else 1.0))
-    n_raw = (stall + occ_deficit) * measured_ms
-    t_min = sig.t_min_ms
-    residual = (max(measured_ms - t_min, 0.0) if (t_min is not None and t_min == t_min)
-                else measured_ms)
-    return min(max(n_raw, 0.0), residual)
+    if not _evidence_matches(signal, evidence):
+        return None
+    gap = evidence.predict_gap_fraction(signal.stall_frac, signal.occupancy)
+    full_residual = max(float(measured_ms) - signal.t_min_ms, 0.0)
+    return min(gap * float(measured_ms), full_residual)
 
 
-def residual_descent_frac(sig: PhysicsSignal,
-                          measured_ms: Optional[float] = None) -> tuple[Optional[float], bool]:
-    """Return ``(rho, pmc_used)``: the residual-descent credit in ``(0, 1]``.
+def residual_descent_frac(
+    signal: PhysicsSignal,
+    measured_ms: Optional[float] = None,
+    evidence: Optional[FamilyShapingEvidence] = None,
+) -> tuple[Optional[float], bool]:
+    """Return bounded diagnostic eta or evidence-backed residual credit.
 
-    PMC path: ``rho = T_min / (T_min + N)`` (rewards removing the NAMED residual).
-    Fallback: ``eta = T_min / T_meas`` (uses the full residual; ``pmc_used=False``).
-    Returns ``(None, False)`` when neither ``T_min`` nor a positive wall time exists.
+    ``pmc_used`` is true only when validated coefficients—not an unvalidated
+    hand-written sum of overlapping counter fractions—produced the score.
     """
-    t_meas = sig.measured_ms if sig.measured_ms is not None else measured_ms
-    t_min = sig.t_min_ms
-    if not t_meas or t_meas <= 0 or t_min is None or not (t_min > 0):
+    measured = signal.measured_ms if signal.measured_ms is not None else measured_ms
+    if not _finite(measured) or float(measured) <= 0.0:
         return None, False
-    n = named_residual_ms(t_meas, sig)
-    if n is None:
-        return min(t_min / t_meas, 1.0), False
-    return min(t_min / (t_min + n), 1.0), True
+    eta = max(0.0, min(1.0, signal.t_min_ms / float(measured)))
+    if not _evidence_matches(signal, evidence):
+        return eta, False
+    gap = evidence.predict_gap_fraction(signal.stall_frac, signal.occupancy)
+    return max(0.0, min(1.0, 1.0 - gap)), True
 
 
-def compute_residual_reward(obs: Observation, physics: PhysicsSignal, source: str = "",
-                            dtype: str = "fp32", cfg=CONFIG,
-                            physics_weight: float = DEFAULT_PHYSICS_WEIGHT,
-                            snr_threshold: Optional[float] = None,
-                            response: Optional[str] = None,
-                            phase: Optional[str] = None) -> RewardResult:
-    """Residual-descent reward with the exact :class:`RewardResult` ABI.
+def compute_residual_reward(
+    obs: Observation,
+    physics: PhysicsSignal,
+    source: str = "",
+    dtype: str = "fp32",
+    cfg=CONFIG,
+    physics_weight: float = DEFAULT_PHYSICS_WEIGHT,
+    snr_threshold: Optional[float] = None,
+    response: Optional[str] = None,
+    phase: Optional[str] = None,
+    evidence: Optional[FamilyShapingEvidence] = None,
+) -> RewardResult:
+    """Family-evidence-gated residual reward.
 
-    Delegates hack / compile / incorrect gating verbatim to
-    :func:`kore.reward.reward.compute_reward` (so anti-hack ordering is
-    byte-identical) and, only for a CORRECT kernel, replaces the tier-3 relative
-    speedup with the absolute physics credit ``physics_weight * rho``.
+    Without passing evidence this returns the ordinary verified speedup reward;
+    eta remains diagnostic and cannot silently become a shaping surface.
     """
-    base = compute_reward(obs, source=source, dtype=dtype, cfg=cfg,
-                          snr_threshold=snr_threshold, response=response, phase=phase)
-    if not base.correct:
-        # hack / compile_fail / incorrect (incl. shaping) tiers dominate, unchanged.
+    validate_reward_config(cfg)
+    if not _finite(physics_weight) or float(physics_weight) < 0.0:
+        raise ValueError("physics_weight must be finite and non-negative")
+    base = compute_reward(
+        obs,
+        source=source,
+        dtype=dtype,
+        cfg=cfg,
+        snr_threshold=snr_threshold,
+        response=response,
+        phase=phase,
+    )
+    if not base.correct or not _evidence_matches(physics, evidence):
+        if base.correct:
+            base.flags.append("physics_shaping_disabled")
+            if physics.stall_frac is None or physics.occupancy is None:
+                base.flags.append("no_pmc")
+            base.detail += " | no passing family-held-out physics evidence"
         return base
 
-    measured = obs.wall_ms
+    measured = physics.measured_ms or obs.wall_ms
     if measured is None and obs.wall_by_shape:
-        # worst (largest) candidate time -> matches the reward's worst-shape discipline.
-        measured = max(obs.wall_by_shape.values())
-    rho, pmc_used = residual_descent_frac(physics, measured)
-    flags = list(base.flags)
+        valid = [v for v in obs.wall_by_shape.values() if _finite(v) and float(v) > 0.0]
+        measured = max(valid) if valid else None
+    rho, used = residual_descent_frac(physics, measured, evidence)
+    if rho is None or not used:
+        base.flags.append("physics_shaping_disabled")
+        return base
     fmt = _format_component(response, cfg)
+    reward = float(cfg.correctness_weight) + float(physics_weight) * rho + fmt
+    if not math.isfinite(reward):
+        raise ValueError("residual reward became non-finite")
+    return RewardResult(
+        reward,
+        True,
+        base.speedup,
+        "correct_residual",
+        list(base.flags) + ["physics_evidence_passed"],
+        f"held-out residual credit={rho:.3f}; evidence={evidence.report_fingerprint}",
+    )
 
-    if rho is None:
-        return RewardResult(cfg.correctness_weight + fmt, True, base.speedup,
-                            "correct_no_physics", flags + ["no_physics"],
-                            "correct; no roofline/timing for residual credit")
-    if not pmc_used:
-        flags.append("no_pmc")  # eta fallback -- clearly flagged
-    reward = cfg.correctness_weight + physics_weight * max(rho, 0.0) + fmt
-    kind = "named-residual" if pmc_used else "eta-fallback"
-    return RewardResult(reward, True, base.speedup, "correct_residual", flags,
-                        f"residual-descent rho={rho:.3f} ({kind}); "
-                        f"credit={physics_weight * rho:.3f}")
 
-
-# --------------------------------------------------------------------------- #
-# Convenience: build reward inputs straight from a p0_sol KernelMeasure (the PMC
-# pass already implemented there). Duck-typed (reads attributes) to avoid any
-# import cycle with kore.analysis.p0_sol.
-# --------------------------------------------------------------------------- #
-def observation_from_measure(m, dtype: str = "bf16") -> Observation:
-    """Build an :class:`Observation` from a ``KernelMeasure``-like object.
-
-    Occupancy is carried by the :class:`PhysicsSignal` (see
-    :func:`physics_from_measure`), not the Observation - the Observation only needs
-    the correctness-gate inputs that :func:`compute_reward` consumes.
-    """
+def observation_from_measure(measure, dtype: str = "bf16") -> Observation:
     return Observation(
         compiled=True,
-        snr_db=getattr(m, "snr_db", None),
-        wall_ms=getattr(m, "cand_ms", None),
-        baseline_ms=getattr(m, "vendor_ms", None),
-        validation_passed=bool(getattr(m, "correct", False)),
+        snr_db=getattr(measure, "snr_db", None),
+        wall_ms=getattr(measure, "cand_ms", None),
+        baseline_ms=getattr(measure, "vendor_ms", None),
+        validation_passed=bool(getattr(measure, "correct", False)),
         dtype=dtype,
     )
 
 
-def physics_from_measure(m) -> PhysicsSignal:
-    """Build a :class:`PhysicsSignal` from a ``KernelMeasure``-like object."""
+def physics_from_measure(
+    measure, model: Optional[PhysicalModel] = None
+) -> Optional[PhysicsSignal]:
+    try:
+        from kore.eval.generalization import family_of
+
+        return PhysicsSignal(
+            t_min_ms=getattr(measure, "t_min_ms"),
+            measured_ms=getattr(measure, "cand_ms", None),
+            model_fingerprint=str(
+                getattr(measure, "model_fingerprint", None)
+                or (model.fingerprint if model is not None else "legacy-unfingerprinted")
+            ),
+            family=family_of(getattr(measure, "task_id", "")),
+            stall_frac=getattr(measure, "stall_frac", None),
+            occupancy=getattr(measure, "occupancy", None),
+        )
+    except (ModelError, TypeError, ValueError):
+        return None
+
+
+def _shape_walls(task, obs) -> list[tuple[str, float, object]]:
+    walls = dict(getattr(obs, "wall_by_shape", None) or {})
+    if not walls and _finite(getattr(obs, "wall_ms", None)) and obs.wall_ms > 0.0:
+        primary = task.shape("primary") if hasattr(task, "shape") else None
+        walls = {(primary.name if primary else "primary"): obs.wall_ms}
+    out = []
+    for name, wall in walls.items():
+        if not _finite(wall) or float(wall) <= 0.0:
+            continue
+        shape = task.shape(name) if hasattr(task, "shape") else None
+        if shape is None and name == "primary" and hasattr(task, "shape"):
+            shape = task.shape("primary")
+        out.append((str(name), float(wall), shape))
+    return out
+
+
+def physics_signal_from_obs(
+    task,
+    obs,
+    model: Optional[PhysicalModel] = None,
+    arch: Optional[str] = None,
+) -> Optional[PhysicsSignal]:
+    """Worst-shape timing signal under one explicit model."""
+    if model is None:
+        if arch not in {"gfx950", "gfx942"}:
+            return None
+        model = make_physical_model("mi350x" if arch == "gfx950" else "mi300x")
+    worst: Optional[tuple[float, float, float]] = None
+    for _, wall, shape in _shape_walls(task, obs):
+        dims = getattr(shape, "dims", None)
+        work = estimate_work(
+            getattr(task, "operation", ""),
+            dims or {},
+            getattr(task, "dtype", ""),
+        )
+        result = evaluate_roofline(work, model) if work else None
+        if result is None:
+            continue
+        eta = attainment(wall, result)
+        if eta is not None and (worst is None or eta < worst[0]):
+            worst = (eta, result.t_min_ms, wall)
+    if worst is None:
+        return None
+    try:
+        from kore.eval.generalization import family_of
+
+        family = family_of(getattr(task, "task_id", ""))
+    except Exception:
+        family = None
     return PhysicsSignal(
-        t_min_ms=getattr(m, "t_min_ms", float("nan")),
-        measured_ms=getattr(m, "cand_ms", None),
-        stall_frac=getattr(m, "stall_frac", None),
-        occupancy=getattr(m, "occupancy", None),
+        t_min_ms=worst[1],
+        measured_ms=worst[2],
+        model_fingerprint=model.fingerprint,
+        family=family,
     )
 
 
-# --------------------------------------------------------------------------- #
-# Live-training bridge: build a PhysicsSignal from a KoreEnv Observation using the
-# task's roofline T_min (eta-based, PMC-free), and a single dispatch entry point so
-# the GRPO/agentic reward path can select the physics residual reward via config.
-# --------------------------------------------------------------------------- #
-def physics_signal_from_obs(task, obs, arch: Optional[str] = None) -> Optional[PhysicsSignal]:
-    """Worst-shape :class:`PhysicsSignal` (eta-based, PMC-free) from a KoreEnv
-    Observation + the task's roofline ``T_min``.
+def roofline_ceiling_violation_from_obs(
+    task,
+    obs,
+    tol: float = DEFAULT_ROOFLINE_TOL,
+    arch: Optional[str] = None,
+    *,
+    model: Optional[PhysicalModel] = None,
+) -> tuple[bool, str]:
+    """Integrity-only super-SOL check.
 
-    Iterates the benched shapes (``obs.wall_by_shape``; falls back to ``obs.wall_ms``
-    on the task's primary shape), computes the roofline lower bound per shape, and
-    keeps the WORST (min eta) shape -- matching the reward's worst-shape discipline.
-    Returns None if no shape is roofline-modelable (caller then uses the speedup
-    reward). Uses only T_min + measured wall time, so it needs no PMC pass.
+    Compute work is always mandatory.  The HBM floor is included only when the
+    observation explicitly records verified cold-cache timing.
     """
-    try:
-        from kore.analysis.rooflines import (
-            detect_arch, resolve_peaks, roofline, shape_to_str,
+    if model is None:
+        if arch not in {"gfx950", "gfx942"}:
+            return False, "physical model unavailable"
+        model = make_physical_model("mi350x" if arch == "gfx950" else "mi300x")
+    integrity_model = model.for_integrity()
+    cold_cache = bool(getattr(obs, "cold_cache_verified", False))
+    for name, wall, shape in _shape_walls(task, obs):
+        work = estimate_work(
+            getattr(task, "operation", ""),
+            getattr(shape, "dims", {}) if shape is not None else {},
+            getattr(task, "dtype", ""),
         )
-    except Exception:  # noqa: BLE001 - analysis deps unavailable -> no physics signal
-        return None
-    a = arch or detect_arch()
-    peaks = resolve_peaks(a)
-    walls = dict(getattr(obs, "wall_by_shape", None) or {})
-    if not walls and getattr(obs, "wall_ms", None):
-        prim = task.shape("primary") if hasattr(task, "shape") else None
-        walls = {(prim.name if prim else "primary"): obs.wall_ms}
-    worst = None  # (eta, t_min_ms, wall_ms)
-    for name, wall in walls.items():
-        if not wall or wall <= 0:
+        result = evaluate_roofline(work, integrity_model) if work else None
+        if result is None:
             continue
-        sh = task.shape(name) if hasattr(task, "shape") else None
-        dims = getattr(sh, "dims", None)
-        if not dims:
-            continue
-        rf = roofline(task.task_id, task.operation, task.dtype, shape_to_str(dims), dims, peaks, a)
-        if rf is None or not (rf.t_min_ms > 0):
-            continue
-        eta = rf.t_min_ms / wall
-        if worst is None or eta < worst[0]:
-            worst = (eta, rf.t_min_ms, wall)
-    if worst is None:
-        return None
-    return PhysicsSignal(t_min_ms=worst[1], measured_ms=worst[2])
-
-
-def roofline_ceiling_violation_from_obs(task, obs, tol: float = DEFAULT_ROOFLINE_TOL,
-                                        arch: Optional[str] = None) -> tuple[bool, str]:
-    """Detect a physically-impossible SUPER-ROOFLINE measured time on ANY benched shape.
-
-    For each shape with a positive measured wall, computes that shape's roofline
-    speed-of-light ``T_min`` and flags a ceiling violation
-    (``measured < T_min*(1 - tol)``) via
-    :func:`kore.reward.reward.roofline_ceiling_violation`. Returns ``(True, reason)`` on
-    the FIRST violating shape -- you cannot beat the speed of light on any shape, so one
-    impossible shape is enough to condemn the candidate -- else ``(False, "")``.
-
-    This mirrors the per-shape roofline iteration of :func:`physics_signal_from_obs` but
-    checks the CEILING (maximum attainment) rather than the worst-shape floor. FAIL-OPEN:
-    any op that is not roofline-modelable, has no positive timing, or an analysis import
-    failure yields ``(False, "")`` so the gate never rejects a candidate it cannot
-    physically adjudicate. Uses only ``T_min`` + measured wall time -- no PMC pass.
-    """
-    try:
-        from kore.analysis.rooflines import (
-            detect_arch, resolve_peaks, roofline, shape_to_str,
+        floor = (
+            result.t_min_ms
+            if cold_cache
+            else result.t_compute_ms
         )
-    except Exception:  # noqa: BLE001 - analysis deps unavailable -> cannot adjudicate
-        return False, ""
-    a = arch or detect_arch()
-    peaks = resolve_peaks(a)
-    walls = dict(getattr(obs, "wall_by_shape", None) or {})
-    if not walls and getattr(obs, "wall_ms", None):
-        prim = task.shape("primary") if hasattr(task, "shape") else None
-        walls = {(prim.name if prim else "primary"): obs.wall_ms}
-    for name, wall in walls.items():
-        if not wall or wall <= 0:
-            continue
-        sh = task.shape(name) if hasattr(task, "shape") else None
-        dims = getattr(sh, "dims", None)
-        if not dims:
-            continue
-        rf = roofline(task.task_id, task.operation, task.dtype, shape_to_str(dims), dims, peaks, a)
-        if rf is None or not (rf.t_min_ms > 0):
-            continue
-        if roofline_ceiling_violation(wall, rf.t_min_ms, tol):
-            return True, (f"shape {name}: measured {wall:.4g} ms is below the roofline "
-                          f"speed-of-light T_min {rf.t_min_ms:.4g} ms (tol {tol:.2f}) -- "
-                          "physically impossible throughput; measurement exploit")
+        if roofline_ceiling_violation(wall, floor, tol):
+            basis = "compute+HBM cold-cache" if cold_cache else "mandatory compute"
+            return True, (
+                f"shape {name}: measured {wall:.6g} ms < integrity floor "
+                f"{floor:.6g} ms ({basis}, tol={tol:.3f}, "
+                f"model={integrity_model.fingerprint})"
+            )
     return False, ""
 
 
-def mask_reward_phase(rr: RewardResult, phase: str,
-                      correctness_weight: float) -> RewardResult:
-    """Correctness->latency curriculum mask (item 8), shared by the serial
-    (``grpo.apply_reward_phase``) and agentic (``compute_kernel_reward``) paths so the
-    curriculum is IDENTICAL on both. In the ``"correctness"`` phase a correct kernel is
-    credited exactly the correctness base (speed term removed) so phase-1 trains
-    correctness only; ``"latency"``/``"all"`` keep the full reward. Incorrect / compile-
-    fail / hack tiers are untouched (their signal is already correctness)."""
-    from dataclasses import replace
+def mask_reward_phase(
+    reward_result: RewardResult, phase: str, correctness_weight: float
+) -> RewardResult:
+    if str(phase).lower() == "correctness" and reward_result.correct:
+        if not _finite(correctness_weight):
+            raise ValueError("correctness_weight must be finite")
+        return replace(
+            reward_result,
+            reward=float(correctness_weight),
+            speedup=None,
+            tier="correct_masked",
+        )
+    return reward_result
 
-    if str(phase).lower() == "correctness" and getattr(rr, "correct", False):
-        return replace(rr, reward=float(correctness_weight), speedup=None,
-                       tier="correct_masked")
-    return rr
 
-
-def compute_kernel_reward(obs: Observation, source: str, task, *, mode: str = "speedup",
-                          dtype: str = "fp32", cfg=CONFIG, snr_threshold: Optional[float] = None,
-                          physics_weight: float = DEFAULT_PHYSICS_WEIGHT,
-                          response: Optional[str] = None,
-                          reward_phase: str = "all",
-                          roofline_gate: bool = False,
-                          roofline_tol: float = DEFAULT_ROOFLINE_TOL,
-                          arch: Optional[str] = None) -> RewardResult:
-    """Single dispatch point for the kernel reward used by the live training loop.
-
-    ``mode="residual"`` scores with the physics residual-descent reward (roofline
-    ``T_min``-grounded, PMC-free eta), transparently falling back to the classic
-    speedup reward when the operator is not roofline-modelable. ``mode="speedup"``
-    (default) is the vendor-relative reward. BOTH share identical anti-hack /
-    compile / correctness gating (``compute_residual_reward`` delegates to
-    ``compute_reward``), so the tier ordering is byte-identical either way.
-
-    ``reward_phase`` applies the correctness->latency curriculum mask (item 8) INSIDE
-    the dispatch, so the AGENTIC tool path (which routes every candidate through here)
-    honors the same phase curriculum as the serial GRPO path -- previously the mask
-    was serial-only and the agentic reward always included the speed term, making the
-    correctness phase a no-op agentically (audit R2 grpo C1/C2).
-
-    ``roofline_gate`` (default OFF) enables the anti-reward-hack roofline SPEED-OF-LIGHT
-    ceiling BEFORE dispatch and UNIFORMLY for both modes: if the candidate's measured
-    time on any benched shape is physically impossible below that shape's ``T_min``
-    (see :func:`roofline_ceiling_violation_from_obs`, tolerance ``roofline_tol``), it is
-    rejected to the hack tier (``cfg.reward_hack``) -- a measurement exploit (warm-cache
-    / do-less / forged-timer speedup) can never be rewarded, preserving the
-    lexicographic ordering (hack < compile < incorrect < correct). With
-    ``roofline_gate=False`` the dispatch is byte-identical to the pre-gate behavior.
-    """
-    # Anti-reward-hack ROOFLINE CEILING (opt-in). A super-speed-of-light measured time
-    # is a timing exploit, not a faster kernel; drop it to the hack floor uniformly
-    # across modes. Inert (and byte-identical) unless ``roofline_gate`` is set.
-    if roofline_gate:
-        violated, why = roofline_ceiling_violation_from_obs(task, obs, roofline_tol, arch)
+def compute_kernel_reward(
+    obs: Observation,
+    source: str,
+    task,
+    *,
+    mode: str = "speedup",
+    dtype: str = "fp32",
+    cfg=CONFIG,
+    snr_threshold: Optional[float] = None,
+    physics_weight: float = DEFAULT_PHYSICS_WEIGHT,
+    response: Optional[str] = None,
+    reward_phase: str = "all",
+    roofline_gate: bool = False,
+    roofline_tol: float = DEFAULT_ROOFLINE_TOL,
+    arch: Optional[str] = None,
+    model: Optional[PhysicalModel] = None,
+    physics_config=None,
+) -> RewardResult:
+    """Single online dispatch using the same model as reports and P0."""
+    validate_reward_config(cfg)
+    physics_cfg = physics_config or cfg
+    selected = model
+    if selected is None:
+        try:
+            selected = model_from_config(physics_cfg)
+        except (ModelError, OSError):
+            if arch in {"gfx950", "gfx942"}:
+                selected = make_physical_model("mi350x" if arch == "gfx950" else "mi300x")
+    if roofline_gate and selected is not None:
+        violated, reason = roofline_ceiling_violation_from_obs(
+            task, obs, roofline_tol, model=selected
+        )
         if violated:
-            return RewardResult(cfg.reward_hack, False, None, "hack",
-                                ["hack", "roofline_ceiling"], why)
-    if mode == "residual":
-        # arch defaults to None -> physics_signal_from_obs runs detect_arch() exactly as
-        # before (behavior-preserving); an explicit arch (e.g. from the ceiling gate)
-        # keeps the residual reward and the gate on the SAME roofline.
-        sig = physics_signal_from_obs(task, obs, arch)
-        if sig is not None:
-            rr = compute_residual_reward(
-                obs, sig, source=source, dtype=dtype, cfg=cfg,
-                physics_weight=physics_weight, snr_threshold=snr_threshold, response=response)
-            return mask_reward_phase(rr, reward_phase, cfg.correctness_weight)
-    rr = compute_reward(obs, source, dtype=dtype, cfg=cfg,
-                        snr_threshold=snr_threshold, response=response)
-    return mask_reward_phase(rr, reward_phase, cfg.correctness_weight)
+            return RewardResult(
+                cfg.reward_hack,
+                False,
+                None,
+                "hack",
+                ["hack", "roofline_ceiling"],
+                reason,
+            )
+
+    evidence = (
+        evidence_for_task(task, physics_cfg, selected.fingerprint)
+        if selected is not None
+        else None
+    )
+    if mode == "residual" and selected is not None and evidence is not None:
+        signal = physics_signal_from_obs(task, obs, selected)
+        if signal is not None:
+            reward = compute_residual_reward(
+                obs,
+                signal,
+                source=source,
+                dtype=dtype,
+                cfg=cfg,
+                physics_weight=physics_weight,
+                snr_threshold=snr_threshold,
+                response=response,
+                evidence=evidence,
+            )
+            return mask_reward_phase(reward, reward_phase, cfg.correctness_weight)
+    reward = compute_reward(
+        obs,
+        source,
+        dtype=dtype,
+        cfg=cfg,
+        snr_threshold=snr_threshold,
+        response=response,
+    )
+    if mode == "residual" and reward.correct:
+        reward.flags.append("physics_shaping_disabled")
+    return mask_reward_phase(reward, reward_phase, cfg.correctness_weight)
+
+
+__all__ = [
+    "DEFAULT_PHYSICS_WEIGHT",
+    "PhysicsSignal",
+    "compute_kernel_reward",
+    "compute_residual_reward",
+    "mask_reward_phase",
+    "model_from_config",
+    "named_residual_ms",
+    "observation_from_measure",
+    "physics_from_measure",
+    "physics_signal_from_obs",
+    "residual_descent_frac",
+    "roofline_ceiling_violation_from_obs",
+]

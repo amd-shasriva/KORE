@@ -169,13 +169,32 @@ def _is_heldout_concept(path: Any) -> bool:
 
 
 def _is_heldout_task_dir(dir_name: str) -> bool:
-    try:
-        from kore.data.decontam import _family_of, heldout_families, heldout_task_ids
+    """True if ``kore/tasks/<dir_name>`` is a held-out eval task (or family).
 
+    Fail-closed split (taxonomy): the authoritative ``kore.tasks.registry`` is the
+    source of truth (whole-family MLA/paged plus exact stratified near probes must
+    never enter training as source text; core attention prefill/decode/sliding/
+    varlen/fp8 trains, so it is intentionally not excluded). Registry validation
+    errors PROPAGATE -- silently ingesting tasks under a broken split would be
+    unsafe. Only a genuinely absent registry module (minimal import env) falls back
+    to the decontam holdout sets, and finally to the explicit MLA/paged concept
+    backstop, so the fail-closed behaviour survives even without the registry.
+    """
+    try:
+        from kore.tasks.registry import find_task, is_heldout
+    except ImportError:
+        # Registry module unavailable (minimal import env): fall back to the
+        # decontam holdout sets, then the explicit concept backstop -- still
+        # fail-closed for the known held-out MLA/paged names.
+        try:
+            from kore.data.decontam import _family_of, heldout_families, heldout_task_ids
+        except ImportError:
+            return _is_heldout_concept(dir_name)
         return dir_name in heldout_task_ids() or _family_of(dir_name) in heldout_families()
-    except Exception:  # noqa: BLE001
-        # Fail closed for the explicit held-out names even in a minimal import env.
-        return _is_heldout_concept(dir_name)
+    # Registry present: authoritative + fail-closed. Any registry validation error
+    # (TaskRegistryError from find_task's discovery) propagates by design.
+    task = find_task(dir_name)
+    return is_heldout(task) if task is not None else False
 
 
 def _read_text_info(path: Path, max_chars: int) -> Optional[tuple[str, str, bool]]:

@@ -1,133 +1,174 @@
-"""CPU-only tests for the P0 roofline/SOL analysis (no GPU, no torch)."""
+"""CPU-only tests for leakage-controlled P0 validation."""
 
 from __future__ import annotations
 
-import os
+import json
+import random
 from pathlib import Path
 
 import pytest
 
 from kore.analysis import p0_sol as P
-from kore.analysis import rooflines as R
+from kore.analysis.residual_transfer import run as residual_run
 
 
-# ---------------- roofline model ---------------- #
-def test_flops_bytes_gemm():
-    flops, by = R.flops_bytes("gemm", {"M": 4096, "N": 4096, "K": 4096}, "bf16")
-    assert flops == 2 * 4096 ** 3
-    assert by == 3 * 4096 ** 2 * 2  # A+B+C, bf16=2B
+def _measure(
+    *,
+    task: str,
+    label: str,
+    cand: float,
+    t_min: float,
+    stall: float | None = None,
+    occ: float | None = None,
+    speedup: float | None = None,
+    family: str | None = None,
+) -> P.KernelMeasure:
+    return P.KernelMeasure(
+        task_id=task,
+        label=label,
+        correct=True,
+        snr_db=40.0,
+        cand_ms=cand,
+        vendor_ms=(speedup * cand if speedup is not None else None),
+        t_min_ms=t_min,
+        eta=t_min / cand,
+        speedup=speedup,
+        residual_ms=cand - t_min,
+        stall_frac=stall,
+        occupancy=occ,
+        family=family,
+    )
 
 
-def test_flops_bytes_gemm_fp8():
-    flops, by = R.flops_bytes("gemm_fp8", {"M": 4096, "N": 4096, "K": 4096}, "fp8_e4m3fnuz")
-    assert flops == 2 * 4096 ** 3
-    assert by == (4096 ** 2 + 4096 ** 2) * 1 + 4096 ** 2 * 2  # fp8 in, bf16 out
+def test_spearman_basic():
+    assert P.spearman([1, 2, 3], [2, 4, 8]) == pytest.approx(1.0)
+    assert P.spearman([1, 2, 3], [8, 4, 2]) == pytest.approx(-1.0)
 
 
-def test_flops_bytes_unmodeled_returns_none_without_dims():
-    # ops with no usable dims are unmodelable; ops WITH dims now get a generic
-    # memory-bound elementwise lower bound (see test_rooflines).
-    assert R.flops_bytes("totally_unknown_op", {}, "bf16") is None
+def test_decompose_rejects_malformed_percentages():
+    assert P._decompose(
+        {"MemUnitStalled": 40.0, "OccupancyPercent": 75.0}) == (0.4, 0.75)
+    assert P._decompose(
+        {"MemUnitStalled": 140.0, "OccupancyPercent": -1.0}) == (None, None)
 
 
-def test_roofline_gemm_compute_bound_gfx950():
-    peaks = R.resolve_peaks("gfx950")
-    rf = R.roofline("gemm_bf16", "gemm", "bf16", "M=4096,N=4096,K=4096",
-                    {"M": 4096, "N": 4096, "K": 4096}, peaks, "gfx950")
-    assert rf.bound == "compute"
-    assert abs(rf.arithmetic_intensity - 1365.3) < 1.0
-    # 2*4096^3 / 2.5e15 s -> ~0.055 ms
-    assert 0.04 < rf.t_min_ms < 0.07
+def test_check_a_shared_denominator_control_defeats_tautology():
+    measures = []
+    for task_index in range(6):
+        for point in range(6):
+            cand = 1.0 + task_index + point / 10
+            # Both eta and speedup are exactly proportional to 1/T_candidate.
+            measures.append(_measure(
+                task=f"task{task_index}",
+                label=str(point),
+                cand=cand,
+                t_min=0.5,
+                speedup=2.0 / cand,
+            ))
+    result = P.check_a_rigorous(
+        measures, permutations=100, bootstrap=100, seed=7)
+    assert result["rho"] > 0.99
+    assert result["tcand_only_rho"] > 0.99
+    assert result["increment_over_tcand"] == pytest.approx(0.0)
+    assert result["verdict"] == "FAIL"
 
 
-def test_roofline_rmsnorm_memory_bound():
-    peaks = R.resolve_peaks("gfx950")
-    rf = R.roofline("rmsnorm", "rmsnorm", "bf16", "M=4096,N=4096",
-                    {"M": 4096, "N": 4096}, peaks, "gfx950")
-    assert rf.bound == "memory"
+def test_check_b_recovers_true_normalized_held_task_signal():
+    rng = random.Random(4)
+    measures = []
+    for task_index in range(8):
+        for point in range(12):
+            stall = 0.05 + 0.8 * rng.random()
+            occ_deficit = 0.05 + 0.8 * rng.random()
+            gap = 0.10 + 0.45 * stall + 0.25 * occ_deficit
+            cand = 0.5 + 2.0 * rng.random()
+            t_min = cand * (1.0 - gap)
+            measures.append(_measure(
+                task=f"norm_task_{task_index}",
+                label=str(point),
+                cand=cand,
+                t_min=t_min,
+                stall=stall,
+                occ=1.0 - occ_deficit,
+                family="norm",
+            ))
+    result = P.check_b(
+        measures, permutations=100, bootstrap=100, seed=11)
+    primary = result["normalized_primary"]
+    assert primary["task_cluster_cv_r2"] > 0.95
+    assert primary["increment_over_tcand"] > 0.5
+    assert primary["ci95_task_bootstrap"][0] > 0.9
+    assert result["_eligible"] is True
 
 
-def test_resolve_peaks_env_override(monkeypatch):
-    monkeypatch.setenv("KORE_PEAK_HBM_BW", "1.0e13")
-    monkeypatch.setenv("KORE_PEAK_BF16", "3.3e15")
-    p = R.resolve_peaks("gfx950")
-    assert p["hbm_bytes_per_s"] == 1.0e13
-    assert p["bf16_flops_per_s"] == 3.3e15
+def test_stored_report_negative_controls_invalidate_raw_headline():
+    source = json.loads((P.REPO_ROOT / "data" / "p0_study_final.json").read_text())
+    report = P.reanalyze_report(
+        source, permutations=100, bootstrap=100, seed=20260723)
+    a, b = report["checks"]["a"], report["checks"]["b"]
+    raw = b["raw_in_sample"]
+    primary = b["normalized_primary"]
+    assert raw["named_r2"] > 0.97
+    assert raw["tcand_only_r2"] > raw["named_r2"]
+    assert raw["denominator_preserving_null"]["null_median"] > raw["named_r2"]
+    assert primary["task_cluster_cv_r2"] < 0.0
+    assert primary["increment_over_tcand"] < 0.0
+    assert a["increment_over_tcand"] < 0.0
+    assert report["decision"] == "INTEGRITY_ONLY"
+    assert report["shaping_evidence"]["families"] == {}
+    assert report["model_fingerprint_status"] == "legacy-unfingerprinted"
 
 
-def test_default_arch_is_gfx950():
-    assert R.DEFAULT_ARCH == "gfx950"
+def test_residual_transfer_is_exact_canonical_wrapper(tmp_path):
+    source_path = P.REPO_ROOT / "data" / "p0_study_final.json"
+    source = json.loads(source_path.read_text())
+    canonical = P.reanalyze_report(
+        source, permutations=50, bootstrap=50, seed=20260723)
+    wrapped = residual_run(
+        source_path, permutations=50, bootstrap=50, seed=20260723)
+    assert wrapped["canonical_check"] == canonical["checks"]["b"]
+    assert wrapped["analysis_fingerprint"] == canonical["analysis_fingerprint"]
 
 
-# ---------------- stats ---------------- #
-def test_spearman_monotonic():
-    rho = P.spearman([1, 2, 3, 4, 5], [2, 4, 6, 8, 10])
-    assert rho is not None and rho > 0.99
+def test_collection_order_is_not_eta_sorted():
+    # In collection order the dominant residual rises; sorting by eta would
+    # reverse these records and fabricate improvement.
+    trajectory = []
+    for index, dominant in enumerate([0.1, 0.2, 0.3, 0.4]):
+        trajectory.append(_measure(
+            task="t",
+            label=str(index),
+            cand=1.0,
+            t_min=0.2 + index * 0.1,
+            stall=dominant,
+            occ=1.0,
+        ))
+    result = P.check_c({"t@shape": trajectory}, bootstrap=0)
+    assert result["frac"] == 0.0
 
 
-def test_spearman_anti_monotonic():
-    rho = P.spearman([1, 2, 3, 4, 5], [5, 4, 3, 2, 1])
-    assert rho is not None and rho < -0.99
+def test_bh_adjustment_is_monotone_and_conservative():
+    adjusted = P._bh_adjust([("a", 0.01), ("b", 0.03), ("c", 0.20)])
+    assert adjusted["a"] >= 0.01
+    assert adjusted["b"] >= 0.03
+    assert adjusted["c"] >= 0.20
+    assert adjusted["a"] <= adjusted["b"] <= adjusted["c"]
 
 
-def test_ols_r2_perfect_linear():
-    X = [[1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [0.0, 1.0], [0.0, 2.0], [0.0, 3.0]]
-    y = [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
-    r2 = P.ols_r2(X, y)
-    assert r2 is None or r2 > 0.99  # None only if numpy missing
+def test_decision_is_conservative():
+    passed = {"verdict": "PASS"}
+    failed = {"verdict": "FAIL"}
+    skipped = {"verdict": "SKIP"}
+    assert P.decide(passed, passed, passed, False) == "GO"
+    assert P.decide(passed, passed, failed, False) == "EVIDENCE_PARTIAL"
+    assert P.decide(passed, failed, failed, False) == "INTEGRITY_ONLY"
+    assert P.decide(skipped, failed, failed, False) == "INSUFFICIENT_DATA"
+    assert P.decide(skipped, skipped, skipped, True) == "DRY_RUN"
 
 
-# ---------------- decomposition ---------------- #
-def test_decompose_counters():
-    stall, occ = P._decompose({"MemUnitStalled": 40.0, "OccupancyPercent": 75.0})
-    assert abs(stall - 0.40) < 1e-6   # MemUnitStalled/100
-    assert abs(occ - 0.75) < 1e-6     # OccupancyPercent/100
-
-
-def test_decompose_empty():
-    assert P._decompose({}) == (None, None)
-
-
-# ---------------- checks + decision ---------------- #
-def _mk(eta=None, speedup=None, stall=None, occ=None, resid=None, correct=True, cand=1.0):
-    return P.KernelMeasure(task_id="t", label="l", correct=correct, snr_db=40.0,
-                           cand_ms=cand, vendor_ms=None, t_min_ms=0.5, eta=eta,
-                           speedup=speedup, residual_ms=resid, stall_frac=stall, occupancy=occ)
-
-
-def test_check_a_pass():
-    ms = [_mk(eta=e, speedup=s) for e, s in
-          [(0.1, 0.5), (0.2, 0.7), (0.3, 0.9), (0.4, 1.1), (0.5, 1.4)]]
-    res = P.check_a(ms)
-    assert res["verdict"] == "PASS" and res["rho"] > 0.9
-
-
-def test_check_a_skip_too_few():
-    assert P.check_a([_mk(eta=0.1, speedup=0.5)])["verdict"] == "SKIP"
-
-
-def test_check_b_skip_without_counters():
-    assert P.check_b([_mk(eta=0.1, speedup=0.5)])["verdict"] == "SKIP"
-
-
-def test_decide_branches():
-    P_ = {"verdict": "PASS"}
-    W_ = {"verdict": "WEAK"}
-    S_ = {"verdict": "SKIP"}
-    assert P.decide(P_, P_, P_, False) == "GO"
-    assert P.decide(P_, P_, W_, False) == "PARTIAL"
-    assert P.decide(P_, W_, W_, False) == "FALLBACK"
-    assert P.decide(W_, W_, W_, False) == "PIVOT?"
-    assert P.decide(S_, S_, S_, True) == "DRY_RUN"
-
-
-# ---------------- dry-run end-to-end (CPU, uses registry + replay caches) ------ #
-def test_dry_run_smoke():
-    peaks = R.resolve_peaks("gfx950")
-    rep = P.run(["gemm_bf16", "rmsnorm_aiter"], "gfx950", peaks, warmup=1, iters=1,
-                max_kernels=4, device="0", dry_run=True, do_pmc=False,
-                replay_dir=P.REPO_ROOT / "runs")
-    assert rep["decision"] == "DRY_RUN"
-    assert len(rep["rooflines"]) == 2
-    # rendering must not crash
-    assert "P0 roofline" in P.render(rep)
+def test_report_fingerprint_is_deterministic():
+    source = json.loads((P.REPO_ROOT / "data" / "p0_study_final.json").read_text())
+    first = P.reanalyze_report(source, permutations=20, bootstrap=20, seed=9)
+    second = P.reanalyze_report(source, permutations=20, bootstrap=20, seed=9)
+    assert first["analysis_fingerprint"] == second["analysis_fingerprint"]
+    assert first["evidence_fingerprint"] == second["evidence_fingerprint"]

@@ -7,10 +7,15 @@ that returns a reward :class:`Observation`. Hardening (see audits):
   and could print fake ``SNR:``/``median_ms:`` lines. We parse the *last* match
   (the driver prints its verdict after calling the candidate) AND the anti-hack
   scanner rejects any candidate that prints a verdict literal.
-* **Isolation.** Each eval runs in a throwaway workdir; the copied task sources
-  (incl. reference.py oracle) are made read-only so a kernel can't corrupt them.
-  The subprocess runs in its own session with a process limit; on timeout the
-  whole process group is killed (no leaked grandchildren / GPU holders).
+* **Execution boundary.** Each eval runs in a throwaway workdir; the copied task
+  sources (incl. reference.py oracle) are made read-only so a kernel can't
+  corrupt them. The default backend is the in-process ``trusted-code-only``
+  subprocess path: its own session with a process limit; on timeout the whole
+  process group is killed (no leaked grandchildren / GPU holders). These controls
+  do not isolate hostile same-UID code. An OPTIONAL, config/env-GATED sandbox
+  broker path (default OFF) routes execution through an approved external broker
+  with a signed verdict; when no broker is configured the verifier behaves
+  exactly as the default subprocess path.
 * **Infra vs kernel.** Timeouts, OOM-kills, segfaults, and missing-dependency
   imports are classified as ``infra_error`` - never cached, never fed to the
   policy as a kernel-correctness signal.
@@ -25,7 +30,10 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
+import math
 import os
+import platform
 import re
 import resource
 import shutil
@@ -35,6 +43,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -50,9 +59,76 @@ from kore.reward.reward import Observation, scan_for_hacks
 from kore.reward.reward import _worst_speedup
 from kore.reward.stats import cv_pct as _cv_pct
 from kore.reward.stats import median as _median
+from kore.reward.stats import paired_timing_stats as _paired_timing_stats
+from kore.reward.stats import publication_admission_error as _publication_admission_error
+from kore.tasks._genops import (
+    DRIVER_CAPABILITY_PROTOCOL,
+    DRIVER_PROTOCOL_ID,
+    PUBLICATION_GUARANTEES,
+)
 from kore.tasks.base import Shape, Task
 
 _LOG = get_logger("env")
+
+
+# --------------------------------------------------------------------------- #
+# OPTIONAL sandbox/isolation backend.
+#
+# The fail-closed broker/isolation execution boundary lives in ``kore.sandbox``.
+# That package is NOT present in the default deployment (the broker backend does
+# not exist yet), so importing it eagerly at module import would break EVERY
+# consumer of ``kore_env`` (all training). We therefore import it LAZILY and
+# treat its absence as "sandbox unavailable". Combined with the default-OFF gate
+# in :class:`KoreEnv`, this guarantees that when no broker is configured the
+# verifier behaves EXACTLY as the default subprocess + paired-timing path.
+# --------------------------------------------------------------------------- #
+_SANDBOX_AVAILABLE = False
+try:  # pragma: no cover - exercised only where kore.sandbox is deployed
+    from kore.sandbox.config import SandboxConfig  # noqa: F401
+    from kore.sandbox.controller import (  # noqa: F401
+        IsolationController,
+        create_isolation_controller,
+    )
+    from kore.sandbox.environment import build_candidate_environment  # noqa: F401
+    from kore.sandbox.errors import PolicyViolation, SandboxError  # noqa: F401
+    from kore.sandbox.models import (  # noqa: F401
+        ExecutionKind,
+        ExecutionStatus,
+        SandboxRequest,
+        SandboxResponse,
+    )
+    from kore.sandbox.signing import VerdictSignatureVerifier  # noqa: F401
+
+    _SANDBOX_AVAILABLE = True
+except Exception:  # noqa: BLE001 - any import failure => sandbox unavailable
+    SandboxConfig = None  # type: ignore[assignment]
+    IsolationController = None  # type: ignore[assignment]
+    create_isolation_controller = None  # type: ignore[assignment]
+    build_candidate_environment = None  # type: ignore[assignment]
+    PolicyViolation = None  # type: ignore[assignment]
+    SandboxError = None  # type: ignore[assignment]
+    ExecutionKind = None  # type: ignore[assignment]
+    ExecutionStatus = None  # type: ignore[assignment]
+    SandboxRequest = None  # type: ignore[assignment]
+    SandboxResponse = None  # type: ignore[assignment]
+    VerdictSignatureVerifier = None  # type: ignore[assignment]
+
+
+def _sandbox_requested(config) -> bool:
+    """True only when the sandbox execution path is explicitly opted into.
+
+    Default OFF. The gate is honored ONLY if ``kore.sandbox`` is importable; when
+    the broker backend is absent this always returns False and the default
+    frontier+verifier subprocess path runs unchanged.
+    """
+    if not _SANDBOX_AVAILABLE:
+        return False
+    env_flag = os.environ.get("KORE_SANDBOX_ENABLED", "").strip().lower()
+    if env_flag in ("1", "true", "yes", "on"):
+        return True
+    if env_flag in ("0", "false", "no", "off"):
+        return False
+    return bool(getattr(config, "sandbox_enabled", False))
 
 
 def _ev(level: str, name: str, **fields) -> None:
@@ -72,9 +148,16 @@ def _sha12(source: str) -> str:
 _SNR = re.compile(r"SNR:\s*([-\d.eE]+)")
 _ALLCLOSE = re.compile(r"allclose:\s*(True|False)", re.IGNORECASE)
 _MEDIAN = re.compile(r"median_ms:\s*([-\d.eE]+)")
-# Batched (--bench-both) per-impl medians: candidate + reference timed in ONE process.
-_CAND_MED = re.compile(r"CAND_median_ms:\s*([-\d.eE]+)")
-_REF_MED = re.compile(r"REF_median_ms:\s*([-\d.eE]+)")
+_TIMING_PAIR = re.compile(r"^KORE_TIMING_PAIR:\s*(\{[^\n]+\})\s*$",
+                          re.MULTILINE)
+_DRIVER_CAPS = re.compile(r"^KORE_DRIVER_CAPABILITIES:\s*(\{[^\n]+\})\s*$",
+                          re.MULTILINE)
+_BATCH_CAPABILITIES = {
+    "protocol": DRIVER_CAPABILITY_PROTOCOL,
+    "protocol_id": DRIVER_PROTOCOL_ID,
+    "performance_eligible": True,
+    **PUBLICATION_GUARANTEES,
+}
 # Candidate import/compile failure (the kernel's fault).
 _COMPILE_ERR = re.compile(
     r"(SyntaxError|CompilationError|triton\..*Error|IndentationError|"
@@ -94,6 +177,93 @@ _INFRA_ERR = re.compile(
 def _last(pattern: re.Pattern, text: str):
     ms = list(pattern.finditer(text))
     return ms[-1] if ms else None
+
+
+def _parse_driver_capabilities(text: str) -> dict:
+    """Parse the strict, versioned driver handshake from subprocess output."""
+    matches = list(_DRIVER_CAPS.finditer(text or ""))
+    if len(matches) != 1:
+        return {}
+    try:
+        caps = json.loads(matches[0].group(1))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(caps, dict) or not isinstance(caps.get("protocol"), int):
+        return {}
+    return caps
+
+
+def _supports_batch_bench(caps: dict) -> bool:
+    return all(caps.get(k) == v for k, v in _BATCH_CAPABILITIES.items())
+
+
+def _parse_timing_pairs(block: str, expected_count: int) -> tuple[list[dict], Optional[str]]:
+    """Parse and validate exact-count, balanced raw timing pairs."""
+    matches = list(_TIMING_PAIR.finditer(block or ""))
+    if len(matches) != expected_count:
+        return [], (
+            f"paired sample count {len(matches)} != requested {expected_count}")
+    pairs: list[dict] = []
+    for expected_index, match in enumerate(matches):
+        try:
+            pair = json.loads(match.group(1))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return [], f"pair {expected_index} is not valid JSON"
+        if not isinstance(pair, dict) or pair.get("pair") != expected_index:
+            return [], f"pair index mismatch at {expected_index}"
+        order = pair.get("order")
+        if order not in ("AB", "BA"):
+            return [], f"pair {expected_index} has invalid order {order!r}"
+        try:
+            cand = float(pair["candidate_ms"])
+            base = float(pair["baseline_ms"])
+            ratio = float(pair["ratio"])
+            log_su = float(pair["log_speedup"])
+        except (KeyError, TypeError, ValueError):
+            return [], f"pair {expected_index} has missing/invalid numeric fields"
+        if not all(math.isfinite(v) for v in (cand, base, ratio, log_su)):
+            return [], f"pair {expected_index} contains non-finite values"
+        if not (cand > 0.0 and base > 0.0 and ratio > 0.0):
+            return [], f"pair {expected_index} contains non-positive values"
+        expected_ratio = base / cand
+        if not math.isclose(ratio, expected_ratio, rel_tol=1e-9, abs_tol=1e-12):
+            return [], f"pair {expected_index} ratio does not match raw times"
+        if not math.isclose(log_su, math.log(expected_ratio),
+                            rel_tol=1e-9, abs_tol=1e-12):
+            return [], f"pair {expected_index} log speedup does not match ratio"
+        pairs.append({
+            "pair": expected_index, "order": order,
+            "candidate_ms": cand, "baseline_ms": base,
+            "ratio": expected_ratio, "log_speedup": math.log(expected_ratio),
+        })
+    orders = [p["order"] for p in pairs]
+    if any(a == b for a, b in zip(orders, orders[1:])):
+        return [], "pair order is not alternating AB/BA"
+    if abs(orders.count("AB") - orders.count("BA")) > 1:
+        return [], "pair order is not balanced AB/BA"
+    return pairs, None
+
+
+def _timing_completeness_error(expected_names, candidate, baseline) -> Optional[str]:
+    """Return why per-shape timing is incomplete, else ``None``."""
+    expected_list = list(expected_names)
+    expected = set(expected_list)
+    if len(expected) != len(expected_list):
+        return "requested shape names are not unique"
+    for label, values in (("candidate", candidate), ("baseline", baseline)):
+        keys = set(values)
+        if keys != expected:
+            missing = sorted(expected - keys)
+            extra = sorted(keys - expected)
+            return f"{label} timing keys mismatch (missing={missing}, extra={extra})"
+        for name, value in values.items():
+            try:
+                valid = math.isfinite(float(value)) and float(value) > 0.0
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                return f"{label} timing for {name!r} is not finite and positive"
+    return None
 
 
 def _preexec():  # pragma: no cover - runs in child only
@@ -123,6 +293,9 @@ class KoreEnv:
     def __init__(self, task: Task, config=CONFIG, use_replay: bool = True,
                  correctness_timeout: int = 300, bench_timeout: int = 300,
                  gpu: Optional[str] = None,
+                 isolation_controller: Optional["IsolationController"] = None,
+                 sandbox_config: Optional["SandboxConfig"] = None,
+                 verdict_verifier: Optional["VerdictSignatureVerifier"] = None,
                  runtime_identity: Optional[Mapping[str, Any]] = None):
         self.task = task
         self.cfg = config
@@ -134,6 +307,46 @@ class KoreEnv:
         # all ranks default to GPU 0, contend/OOM there, one stalls, and the
         # cross-rank all_gather deadlocks. None => inherit/legacy default "0".
         self._gpu = gpu
+
+        # ---- sandbox gate (default OFF) --------------------------------- #
+        # The fail-closed broker/isolation path is opt-in. When it is not
+        # explicitly enabled (the default, and the only possibility when
+        # kore.sandbox is not deployed) the environment runs the standard
+        # subprocess + paired-timing path with NONE of the sandbox policy
+        # checks, exactly as the frontier+verifier build does.
+        self._sandbox_enabled = _sandbox_requested(config) or (
+            isolation_controller is not None
+            or sandbox_config is not None
+            or verdict_verifier is not None
+        )
+        if self._sandbox_enabled and not _SANDBOX_AVAILABLE:
+            raise RuntimeError(
+                "sandbox execution requested but kore.sandbox is not available")
+        self.isolation_policy = None
+        self.isolation_controller = None
+        self.sandbox_config = None
+        self._last_execution_status = None
+        self._active_source: Optional[str] = None
+        self._active_task: Optional[Task] = None
+        self._task_descriptor_cache: dict[str, dict] = {}
+        if self._sandbox_enabled:
+            self.sandbox_config = (
+                sandbox_config
+                or getattr(config, "sandbox", None)
+                or SandboxConfig()
+            )
+            self.isolation_policy = self.sandbox_config.policy()
+            self.isolation_controller = (
+                isolation_controller
+                or create_isolation_controller(
+                    self.sandbox_config,
+                    verifier=verdict_verifier,
+                )
+            )
+            if self.isolation_controller.policy != self.isolation_policy:
+                raise PolicyViolation(
+                    "isolation controller policy does not match KoreEnv policy")
+
         # A preflight-produced, validated identity for the selected physical GPU.
         # Without it replay fails closed (evaluation still runs normally).
         self._runtime_identity = (
@@ -151,6 +364,15 @@ class KoreEnv:
     def _snr_threshold_for(self, task: Task) -> float:
         t = getattr(task, "snr_threshold", None)
         return float(t) if t else self.cfg.snr_threshold_for(task.dtype)
+
+    @property
+    def last_execution_status(self):
+        """Typed status from the most recent sandbox-controlled subprocess.
+
+        ``None`` on the default (non-sandbox) path, which does not produce a
+        typed execution status.
+        """
+        return self._last_execution_status
 
     # ------------------------------------------------------------------ #
     def step(self, source: str, full_validation: bool = True,
@@ -187,6 +409,22 @@ class KoreEnv:
         _ev("INFO", "eval_start", task=task.task_id, n_shapes=n_shapes,
             source_sha=source_sha, do_bench=do_bench)
 
+        # Sandbox-only source-budget gate (skipped entirely on the default path).
+        if self._sandbox_enabled:
+            source_bytes = len(source.encode("utf-8"))
+            if source_bytes > self.isolation_policy.budget.max_source_bytes:
+                self._last_execution_status = ExecutionStatus.POLICY_VIOLATION
+                return Observation(
+                    compiled=False,
+                    dtype=task.dtype,
+                    validation_passed=False,
+                    infra_error=True,
+                    error_text=(
+                        f"sandbox policy: candidate source is {source_bytes} bytes; "
+                        f"limit is {self.isolation_policy.budget.max_source_bytes}"
+                    ),
+                )
+
         hack = scan_for_hacks(source)
         if hack:
             _ev("WARN", "eval_hack", task=task.task_id, reason=hack, source_sha=source_sha)
@@ -214,9 +452,12 @@ class KoreEnv:
                 return cached
 
         workdir = Path(tempfile.mkdtemp(prefix=f"kore_{task.task_id}_"))
+        previous_source, previous_task = self._active_source, self._active_task
+        self._active_source, self._active_task = source, task
         try:
             obs = self._run(task, source, shapes, workdir, do_bench)
         finally:
+            self._active_source, self._active_task = previous_source, previous_task
             shutil.rmtree(workdir, ignore_errors=True)
 
         # Only cache DETERMINISTIC terminal verdicts - never transient infra errors.
@@ -290,7 +531,34 @@ class KoreEnv:
             "effective_gpu_target": target,
         }
 
-    def _env(self, task: Optional[Task] = None) -> dict:
+    def _env(self, task: Optional[Task] = None,
+             private_root: Optional[Path] = None) -> dict:
+        """Environment for a candidate-bearing subprocess.
+
+        Default path: the standard allowlist-augmented copy of ``os.environ``
+        (frontier behavior). When the sandbox gate is on, delegates to the
+        sandbox's fresh-allowlisted ``build_candidate_environment``.
+        """
+        if self._sandbox_enabled:
+            root = private_root or (
+                Path(tempfile.gettempdir()) / f"kore_env_{os.getpid()}_{id(self):x}"
+            )
+            active_task = task or self._active_task or self.task
+            selection = self._gpu_selection(active_task)
+            selected_gpu = (
+                str(selection["child_visibility"]["HIP_VISIBLE_DEVICES"])
+                if self._gpu is not None
+                else None
+            )
+            return build_candidate_environment(
+                base_environment=os.environ,
+                private_root=Path(root),
+                project_root=Path(__file__).resolve().parents[2],
+                gpu_target=str(selection["effective_gpu_target"]),
+                gpu=selected_gpu,
+                rocm_path=getattr(self.cfg, "rocm_path", None),
+            )
+
         env = os.environ.copy()
         # Repo root (the parent of the kore/ package). Prepended to PYTHONPATH so the
         # compile/bench driver subprocess can ``import kore.*`` (e.g. _genops.driver_main).
@@ -346,8 +614,14 @@ class KoreEnv:
         return env
 
     def _exec(self, cmd, workdir, env, timeout):
-        """Run cmd in its own session; kill the whole group on timeout.
-        Returns (returncode, combined_output, timed_out)."""
+        """Execute ``cmd``. Default path: own session, killpg on timeout.
+
+        When the sandbox gate is on, execution is routed through the configured
+        fail-closed isolation controller instead. Returns
+        ``(returncode, combined_output, timed_out)``.
+        """
+        if self._sandbox_enabled:
+            return self._exec_sandbox(cmd, workdir, env, timeout)
         p = subprocess.Popen(cmd, cwd=str(workdir), env=env, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, start_new_session=True,
                              preexec_fn=_preexec)
@@ -365,8 +639,128 @@ class KoreEnv:
                 out, err = "", ""
             return -9, (out or "") + "\n" + (err or ""), True
 
+    def _exec_sandbox(self, cmd, workdir, env, timeout):
+        """Execute through the configured isolation controller (gated path)."""
+        task = self._active_task or self.task
+        source = self._active_source
+        if source is None:
+            try:
+                source = (Path(workdir) / "kernel.py").read_text()
+            except OSError:
+                source = ""
+        try:
+            request = SandboxRequest.create(
+                task_id=task.task_id,
+                task_descriptor=self._task_descriptor(task),
+                source=source,
+                policy=self.isolation_policy,
+                toolchain_descriptor={
+                    "python_implementation": platform.python_implementation(),
+                    "python_version": platform.python_version(),
+                    "python_executable": Path(sys.executable).name,
+                    "rocm_path": str(getattr(self.cfg, "rocm_path", "")),
+                    "packages": {
+                        name: _distribution_version(name)
+                        for name in ("kore", "torch", "triton")
+                    },
+                },
+                runtime_descriptor={
+                    "system": platform.system(),
+                    "kernel_release": platform.release(),
+                    "machine": platform.machine(),
+                    "gpu_target": (
+                        getattr(task, "gpu_target", None)
+                        or getattr(self.cfg, "gpu_target", "gfx950")
+                    ),
+                    "gpu": str(self._gpu) if self._gpu is not None else "inherited-or-0",
+                    "backend": self.isolation_controller.backend_label,
+                },
+                execution_kind=ExecutionKind.LEGACY_PYTHON,
+                argv=tuple(str(part) for part in cmd),
+                working_directory=str(workdir),
+                environment=env,
+                timeout_seconds=min(
+                    float(timeout),
+                    self.isolation_policy.budget.wall_time_seconds,
+                ),
+            )
+        except (SandboxError, TypeError, ValueError) as exc:
+            self._last_execution_status = ExecutionStatus.POLICY_VIOLATION
+            return 126, f"sandbox policy: {exc}", False
+
+        try:
+            response = self.isolation_controller.execute(request)
+        except Exception as exc:  # noqa: BLE001 - isolation failures must fail closed
+            self._last_execution_status = ExecutionStatus.INFRA_ERROR
+            return 125, f"sandbox controller failure: {exc}", False
+        if not isinstance(response, SandboxResponse):
+            self._last_execution_status = ExecutionStatus.INVALID_VERDICT
+            return 125, "sandbox controller returned an invalid response", False
+        self._last_execution_status = response.status
+        out = response.stdout or ""
+        err = response.stderr or ""
+        if response.verdict.message:
+            err = f"{err}\n[sandbox:{response.status.value}] {response.verdict.message}"
+        returncode = response.verdict.exit_code
+        if returncode is None:
+            if response.status is ExecutionStatus.OK:
+                returncode = 0
+            elif response.status is ExecutionStatus.TIMEOUT:
+                returncode = -9
+            elif response.status is ExecutionStatus.POLICY_VIOLATION:
+                returncode = 126
+            else:
+                returncode = 125
+        return returncode, out + "\n" + err, response.status is ExecutionStatus.TIMEOUT
+
+    def _task_descriptor(self, task: Task) -> dict:
+        cache_key = str(getattr(task, "task_id", "unknown"))
+        cached = self._task_descriptor_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        files: dict[str, str] = {}
+        task_dir = getattr(task, "dir", None)
+        if task_dir is not None:
+            for path in sorted(Path(task_dir).glob("*.py")):
+                try:
+                    files[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    files[path.name] = "unreadable"
+        descriptor = {
+            "task_id": cache_key,
+            "dtype": str(getattr(task, "dtype", "")),
+            "gpu_target": str(getattr(task, "gpu_target", "")),
+            "shapes": [
+                {
+                    "name": str(getattr(shape, "name", "")),
+                    "dims": dict(getattr(shape, "dims", {})),
+                }
+                for shape in (getattr(task, "shapes", None) or [])
+            ],
+            "python_files": files,
+        }
+        self._task_descriptor_cache[cache_key] = descriptor
+        return descriptor
+
     def _classify(self, out: str, returncode: int, timed_out: bool):
         """-> ('ok'|'compile'|'infra', message)."""
+        # Sandbox-typed status classification (gated path only).
+        if self._sandbox_enabled:
+            status = self._last_execution_status
+            if timed_out:
+                return "infra", "timeout"
+            if status in {
+                ExecutionStatus.INFRA_ERROR,
+                ExecutionStatus.POLICY_VIOLATION,
+                ExecutionStatus.GPU_FAULT,
+                ExecutionStatus.GPU_QUARANTINED,
+                ExecutionStatus.BROKER_UNAVAILABLE,
+                ExecutionStatus.UNSUPPORTED_ISOLATION,
+                ExecutionStatus.INVALID_VERDICT,
+            }:
+                return "infra", f"{status.value}: {_tail(out)}"
+            if status is ExecutionStatus.CANDIDATE_ERROR:
+                return "compile", _tail(out)
         if timed_out:
             return "infra", "timeout"
         if _INFRA_ERR.search(out):
@@ -383,15 +777,33 @@ class KoreEnv:
              do_bench: bool) -> Observation:
         # stage isolated sources; make the oracle/driver READ-ONLY so a kernel
         # cannot corrupt reference.py for future evals.
-        for p in task.dir.glob("*.py"):
+        task_sources = list(task.dir.glob("*.py"))
+        # Sandbox-only task-source budget gate (skipped on the default path).
+        if self._sandbox_enabled:
+            task_bytes = sum(p.stat().st_size for p in task_sources)
+            if task_bytes > self.isolation_policy.budget.max_task_bytes:
+                self._last_execution_status = ExecutionStatus.POLICY_VIOLATION
+                return Observation(
+                    compiled=False,
+                    dtype=task.dtype,
+                    validation_passed=False,
+                    infra_error=True,
+                    error_text=(
+                        f"sandbox policy: task sources are {task_bytes} bytes; "
+                        f"limit is {self.isolation_policy.budget.max_task_bytes}"
+                    ),
+                )
+        for p in task_sources:
             dst = workdir / p.name
             shutil.copy(p, dst)
             os.chmod(dst, 0o444)
         (workdir / "kernel.py").write_text(source)
         os.chmod(workdir / "kernel.py", 0o444)
         driver = workdir / "driver.py"
-        env = self._env(task)
+        env = (self._env(task=task, private_root=workdir / ".sandbox")
+               if self._sandbox_enabled else self._env(task))
 
+        requested_names = [sh.name for sh in shapes]
         snr_by_shape: dict[str, float] = {}
         compiled = True
         validation_passed = True
@@ -428,8 +840,17 @@ class KoreEnv:
                 validation_passed = False
                 last_err = _tail(out)
 
+        # Verifier stricter correctness gate: validation passed AND the benchmarked
+        # shape set EXACTLY covers the requested shapes (no dupes, no missing/extra)
+        # AND every per-shape SNR clears the per-task threshold.
         thr = self._snr_threshold_for(task)
-        correct = validation_passed and bool(snr_by_shape) and all(v >= thr for v in snr_by_shape.values())
+        requested_set = set(requested_names)
+        correct = (
+            validation_passed
+            and len(requested_set) == len(requested_names)
+            and set(snr_by_shape) == requested_set
+            and all(v >= thr for v in snr_by_shape.values())
+        )
 
         # Anti-hack determinism re-check: re-run the primary shape once and require
         # a stable verdict, so a kernel cannot be rewarded for passing the SNR gate
@@ -470,17 +891,42 @@ class KoreEnv:
             snr_by_shape=snr_by_shape,
             snr_db=min(snr_by_shape.values()) if snr_by_shape else None,
             validation_passed=correct, error_text=last_err if not correct else None,
+            requested_shapes=list(requested_names),
+            timing_requested=bool(correct and do_bench),
         )
         if not (correct and do_bench):
             return obs
 
+        caps = self._driver_capabilities(driver, workdir, env)
+        publication_capable = _supports_batch_bench(caps)
+        force_screening = os.environ.get(
+            "KORE_NO_BENCH_BOTH", "").strip().lower() in ("1", "true", "yes")
+        obs.timing_protocol = caps.get("protocol_id") or "unknown"
+        obs.timing_protocol_version = caps.get("protocol")
+        obs.timing_guarantees = {
+            k: bool(caps.get(k, False)) for k in PUBLICATION_GUARANTEES
+        }
+        obs.performance_eligible = publication_capable and not force_screening
+        if not publication_capable and not force_screening:
+            obs.timing_grade = "ineligible"
+            reason = caps.get("ineligible_reason") or (
+                "driver lacks the complete paired-v2 publication guarantees")
+            obs.error_text = f"performance-ineligible: {reason}"
+            _ev("WARN", "eval_performance_ineligible", task=task.task_id,
+                source_sha=_sha12(source), reason=reason,
+                protocol=obs.timing_protocol_version)
+            return obs
+
         wall_by_shape: dict[str, float] = {}
         base_by_shape: dict[str, float] = {}
-        cvs: list[float] = []
-        if self._batch_bench_ok(driver):
-            # Fast + accurate: ALL shapes timed (both impls, n_max repeats) in ONE
-            # process under a single per-GPU timing-lock hold. Contention-fair ratio +
-            # minimal exclusive window -> honest speedups at high throughput.
+        candidate_cvs: list[float] = []
+        baseline_cvs: list[float] = []
+        ratio_cvs: list[float] = []
+        ci_widths: list[float] = []
+        admission_errors: list[str] = []
+        if publication_capable and not force_screening:
+            obs.timing_grade = "publication"
+            obs.timing_pair_count = max(1, int(self.cfg.max_variance_runs))
             per_shape, poisoned = self._bench_all(
                 driver, shapes, workdir, env, snr_threshold=thr)
             if poisoned:
@@ -490,13 +936,62 @@ class KoreEnv:
                                    flagged_hack=True, hack_reason="bench-time output mismatch",
                                    error_text="reward-hack: kernel incorrect under timing")
             for sh in shapes:
-                cand_s, ref_s = per_shape.get(sh.name, ([], []))
-                if cand_s:
-                    wall_by_shape[sh.name] = _median(cand_s)
-                    cvs.append(_cv_pct(cand_s))
-                if ref_s:
-                    base_by_shape[sh.name] = _median(ref_s)
+                pairs = per_shape.get(sh.name, [])
+                if not pairs:
+                    continue
+                cand_s = [p["candidate_ms"] for p in pairs]
+                ref_s = [p["baseline_ms"] for p in pairs]
+                try:
+                    stats = _paired_timing_stats(
+                        cand_s, ref_s,
+                        noise_floor_pct=float(getattr(
+                            self.cfg, "noise_floor_pct", 2.0)),
+                        z=float(getattr(self.cfg, "paired_confidence_z", 1.96)),
+                    )
+                except ValueError as exc:
+                    admission_errors.append(f"{sh.name}: {exc}")
+                    continue
+                obs.candidate_samples_by_shape[sh.name] = cand_s
+                obs.baseline_samples_by_shape[sh.name] = ref_s
+                obs.paired_ratio_samples_by_shape[sh.name] = stats["paired_ratios"]
+                obs.paired_log_speedup_samples_by_shape[sh.name] = \
+                    stats["paired_log_speedups"]
+                obs.candidate_cv_by_shape[sh.name] = stats["candidate_cv_pct"]
+                obs.baseline_cv_by_shape[sh.name] = stats["baseline_cv_pct"]
+                obs.paired_ratio_cv_by_shape[sh.name] = stats["paired_ratio_cv_pct"]
+                obs.paired_log_ci_by_shape[sh.name] = [
+                    stats["log_ci_lo"], stats["log_ci_hi"]]
+                obs.timing_classification_by_shape[sh.name] = stats["classification"]
+                wall_by_shape[sh.name] = _median(cand_s)
+                base_by_shape[sh.name] = _median(ref_s)
+                candidate_cvs.append(stats["candidate_cv_pct"])
+                baseline_cvs.append(stats["baseline_cv_pct"])
+                ratio_cvs.append(stats["paired_ratio_cv_pct"])
+                ci_widths.append(stats["ci_half_width_pct"])
+                err = _publication_admission_error(
+                    stats,
+                    min_pairs=max(2, int(self.cfg.min_variance_runs)),
+                    candidate_cv_threshold_pct=float(self.cfg.cv_threshold_pct),
+                    baseline_cv_threshold_pct=float(getattr(
+                        self.cfg, "baseline_cv_threshold_pct",
+                        self.cfg.cv_threshold_pct)),
+                    paired_ratio_cv_threshold_pct=float(getattr(
+                        self.cfg, "paired_ratio_cv_threshold_pct",
+                        self.cfg.cv_threshold_pct)),
+                    paired_ci_threshold_pct=float(getattr(
+                        self.cfg, "paired_ci_threshold_pct",
+                        self.cfg.cv_threshold_pct)),
+                )
+                if err:
+                    admission_errors.append(f"{sh.name}: {err}")
         else:
+            # Explicit operator-requested screening only.  This path is useful
+            # for debugging/parity but can never earn vendor-grade speed credit.
+            obs.timing_protocol = "legacy-unpaired-v0"
+            obs.timing_protocol_version = 0
+            obs.timing_guarantees = {}
+            obs.timing_grade = "screening"
+            obs.performance_eligible = False
             for sh in shapes:
                 cand, cand_cv, poisoned = self._bench_multi(
                     driver, sh, "candidate", workdir, env, snr_threshold=thr)
@@ -514,16 +1009,32 @@ class KoreEnv:
                     driver, sh, "reference", workdir, env, snr_threshold=thr)[0]
                 if cand is not None:
                     wall_by_shape[sh.name] = cand
-                    cvs.append(cand_cv)
+                    candidate_cvs.append(cand_cv)
                 if ref is not None:
                     base_by_shape[sh.name] = ref
+
+        # Retain raw/summary evidence even when admission subsequently fails.
         obs.wall_by_shape = wall_by_shape
         obs.baseline_by_shape = base_by_shape
-        obs.cv_pct = max(cvs) if cvs else None
+        obs.cv_pct = max(candidate_cvs) if candidate_cvs else None
+        obs.baseline_cv_pct = max(baseline_cvs) if baseline_cvs else None
+        obs.paired_ratio_cv_pct = max(ratio_cvs) if ratio_cvs else None
+        obs.paired_ci_half_width_pct = max(ci_widths) if ci_widths else None
         if wall_by_shape:
             obs.wall_ms = max(wall_by_shape.values())
         if base_by_shape:
             obs.baseline_ms = max(base_by_shape.values())
+
+        timing_error = _timing_completeness_error(
+            requested_names, wall_by_shape, base_by_shape)
+        if timing_error or admission_errors:
+            reason = timing_error or "; ".join(admission_errors)
+            _ev("WARN", "eval_bench_incomplete", task=task.task_id,
+                source_sha=_sha12(source), reason=reason)
+            obs.timing_grade = "rejected"
+            obs.infra_error = True
+            obs.error_text = f"infra: timing admission failed: {reason}"
+            return obs
 
         # P5 (flagship novelty): dense hardware-counter efficiency, baseline-relative.
         # Feature-flagged (profile_reward_weight>0) and fully fail-safe: any profiler
@@ -557,18 +1068,32 @@ class KoreEnv:
                 passes = [COUNTER_SETS["full"]]
         except Exception:  # noqa: BLE001
             return None
+        # Sandbox-only source-budget gate (skipped on the default path).
+        if self._sandbox_enabled and (
+                len(source.encode("utf-8")) > self.isolation_policy.budget.max_source_bytes):
+            self._last_execution_status = ExecutionStatus.POLICY_VIOLATION
+            return None
         sh = shape or self.task.shape("primary") or self.task.shape("minimal") or (
             self.task.shapes[0] if self.task.shapes else Shape("default", {}))
         workdir = Path(tempfile.mkdtemp(prefix=f"pmc_{self.task.task_id}_"))
+        previous_source, previous_task = self._active_source, self._active_task
+        self._active_source, self._active_task = source, self.task
         try:
-            for p in self.task.dir.glob("*.py"):
+            task_sources = list(self.task.dir.glob("*.py"))
+            if self._sandbox_enabled and (
+                    sum(p.stat().st_size for p in task_sources)
+                    > self.isolation_policy.budget.max_task_bytes):
+                self._last_execution_status = ExecutionStatus.POLICY_VIOLATION
+                return None
+            for p in task_sources:
                 dst = workdir / p.name
                 shutil.copy(p, dst)
                 os.chmod(dst, 0o444)
             (workdir / "kernel.py").write_text(source)
             os.chmod(workdir / "kernel.py", 0o444)
             driver = workdir / "driver.py"
-            env = self._env()
+            env = (self._env(private_root=workdir / ".sandbox")
+                   if self._sandbox_enabled else self._env())
             agg: dict = {}
             # The grounding set spans SQ+GRBM+TCC and cannot be one --pmc pass, so run
             # one rocprofv3 invocation per pass and merge the disjoint counter dicts.
@@ -602,6 +1127,7 @@ class KoreEnv:
         except Exception:  # noqa: BLE001
             return None
         finally:
+            self._active_source, self._active_task = previous_source, previous_task
             shutil.rmtree(workdir, ignore_errors=True)
 
     def _collect_profile(self, driver: Path, sh: Shape, workdir: Path,
@@ -692,23 +1218,47 @@ class KoreEnv:
             finally:
                 f.close()
 
-    def _batch_bench_ok(self, driver: Path) -> bool:
-        """True iff this task uses the shared genops driver (supports ``--bench-both``).
+    def _driver_capabilities(self, driver: Path, workdir: Path, env: dict) -> dict:
+        """Probe and cache the driver's explicit versioned capability handshake."""
+        cached = getattr(self, "_driver_caps_cache", None)
+        if cached is not None:
+            return cached
+        timeout = min(max(int(self.correctness_timeout), 1), 30)
+        rc, out, timed = self._exec(
+            [sys.executable, str(driver), "--kore-driver-capabilities"],
+            workdir, env, timeout)
+        caps = _parse_driver_capabilities(out) if (not timed and rc == 0) else {}
+        if not caps:
+            caps = {
+                "protocol": 0,
+                "protocol_id": "unknown",
+                "performance_eligible": False,
+                "ineligible_reason": (
+                    "driver did not advertise a recognized timing protocol"),
+            }
+        elif not _supports_batch_bench(caps):
+            caps = dict(caps)
+            caps["performance_eligible"] = False
+            caps.setdefault(
+                "ineligible_reason",
+                "driver advertised only partial publication guarantees")
+        self._driver_caps_cache = caps
+        _ev("DEBUG", "driver_capabilities", task=self.task.task_id,
+            protocol=caps.get("protocol"), batch=_supports_batch_bench(caps),
+            probe_rc=rc, timed_out=timed)
+        return caps
 
-        Detected once by scanning the driver for ``driver_main`` (all generated
-        ``gen_*``/``genv_*`` tasks route through it). Bespoke drivers fall back to the
-        proven per-impl path. Set ``KORE_NO_BENCH_BOTH=1`` to force the legacy path
-        (used for the head-to-head timing-parity validation)."""
+    def _batch_bench_ok(self, driver: Path, workdir: Path, env: dict) -> bool:
+        """True only for a driver that explicitly promises the full batch protocol.
+
+        Unsupported and older drivers safely fall back to their per-implementation
+        ``--bench-mode`` path.  Set ``KORE_NO_BENCH_BOTH=1`` to force that path for
+        timing-parity validation.
+        """
         if os.environ.get("KORE_NO_BENCH_BOTH", "").strip().lower() in ("1", "true", "yes"):
             return False
-        v = getattr(self, "_batch_ok_cache", None)
-        if v is None:
-            try:
-                v = "driver_main" in Path(driver).read_text()
-            except Exception:  # noqa: BLE001
-                v = False
-            self._batch_ok_cache = v
-        return v
+        return _supports_batch_bench(
+            self._driver_capabilities(driver, workdir, env))
 
     def _bench_pair(self, driver: Path, sh: Shape, workdir: Path, env: dict,
                     snr_threshold: Optional[float] = None):
@@ -732,11 +1282,16 @@ class KoreEnv:
         ac = _last(_ALLCLOSE, out)
         snr = _last(_SNR, out)
         threshold = self._snr_threshold if snr_threshold is None else snr_threshold
+        if ac is None and snr is None:
+            return [], [], False
         if (ac and ac.group(1).lower() == "false") or \
            (snr and float(snr.group(1)) < threshold):
             return None, None, True
-        cand = [float(m.group(1)) for m in _CAND_MED.finditer(out)]
-        ref = [float(m.group(1)) for m in _REF_MED.finditer(out)]
+        pairs, pair_error = _parse_timing_pairs(out, n_max)
+        if pair_error:
+            return [], [], False
+        cand = [p["candidate_ms"] for p in pairs]
+        ref = [p["baseline_ms"] for p in pairs]
         _ev("DEBUG", "bench_pair", task=self.task.task_id, shape=sh.name,
             cand_runs=len(cand), ref_runs=len(ref),
             cand_med=round(_median(cand), 4) if cand else None,
@@ -755,7 +1310,7 @@ class KoreEnv:
         Collapsing the per-shape spawns to one import means the exclusive (locked)
         window is ~one torch import + the tiny GPU timing, so oversubscribed workers
         barely wait -> max throughput with clean, contention-free measurements.
-        Returns ``({shape_name: (cand_samples, ref_samples)}, poisoned)``."""
+        Returns ``({shape_name: [validated_pair_dict, ...]}, poisoned)``."""
         n_max = max(1, self.cfg.max_variance_runs)
         specs = [self._shape_spec(sh) for sh in shapes]
         cmd = [sys.executable, str(driver), "--bench-both", "--shapes", ";".join(specs),
@@ -767,18 +1322,31 @@ class KoreEnv:
         if timed or rc != 0:
             _ev("DEBUG", "bench_all", task=self.task.task_id, ok=False, rc=rc)
             return {}, False
-        ac = _last(_ALLCLOSE, out)
-        snr = _last(_SNR, out)
-        threshold = self._snr_threshold if snr_threshold is None else snr_threshold
-        if (ac and ac.group(1).lower() == "false") or \
-           (snr and float(snr.group(1)) < threshold):
-            return {}, True
         blocks = out.split("SHAPE_BEGIN")[1:]  # per-shape, in the order we passed them
+        if len(blocks) != len(shapes):
+            return {}, False
+        threshold = self._snr_threshold if snr_threshold is None else snr_threshold
         result: dict[str, tuple] = {}
-        for sh, block in zip(shapes, blocks):
-            cand = [float(m.group(1)) for m in _CAND_MED.finditer(block)]
-            ref = [float(m.group(1)) for m in _REF_MED.finditer(block)]
-            result[sh.name] = (cand, ref)
+        for sh, spec, block in zip(shapes, specs, blocks):
+            marker, _, _body = block.partition("\n")
+            if marker.strip() != spec:
+                return {}, False
+            # The shared driver emits one late correctness verdict in EVERY
+            # shape block.  Validate per block; looking only at the final global
+            # verdict would let an earlier failing shape hide behind a later pass.
+            ac = _last(_ALLCLOSE, block)
+            snr = _last(_SNR, block)
+            if ac is None and snr is None:
+                return {}, False
+            if (ac and ac.group(1).lower() == "false") or \
+               (snr and float(snr.group(1)) < threshold):
+                return {}, True
+            pairs, pair_error = _parse_timing_pairs(block, n_max)
+            if pair_error:
+                _ev("DEBUG", "bench_all_pair_error", task=self.task.task_id,
+                    shape=sh.name, error=pair_error)
+                return {}, False
+            result[sh.name] = pairs
         return result, False
 
     def _bench_multi(self, driver: Path, sh: Shape, impl: str, workdir: Path, env: dict,
@@ -814,6 +1382,9 @@ class KoreEnv:
             if impl == "candidate":
                 ac = _last(_ALLCLOSE, out)
                 snr = _last(_SNR, out)
+                if ac is None and snr is None:
+                    samples = []
+                    break
                 if (ac and ac.group(1).lower() == "false") or \
                    (snr and float(snr.group(1)) < threshold):
                     poisoned = True
@@ -855,3 +1426,10 @@ def _determinism_stable(snr1: Optional[float], snr2: Optional[float],
 def _tail(s: str, n: int = 800) -> str:
     s = s.strip()
     return s[-n:] if len(s) > n else s
+
+
+def _distribution_version(name: str) -> str:
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return "not-installed"

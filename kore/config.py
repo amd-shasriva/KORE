@@ -4,7 +4,7 @@ Single source of truth for the target arch, correctness and benchmark
 thresholds, reward weights, and paths. Everything that touches the GPU or the
 verifier reads from here, so retargeting the hardware (default ``gfx950`` /
 MI350X / CDNA4) or retuning a reward weight happens in exactly one place. The
-lexicographic reward-ladder dominance invariants are asserted in
+lexicographic reward-ladder dominance invariants are checked explicitly in
 ``__post_init__`` (see :meth:`KoreConfig._check_reward_invariants`), so an env
 override or a stray edit can never silently invert a reward tier.
 """
@@ -14,6 +14,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
+
+from kore.sandbox.config import SandboxConfig
 
 KORE_ROOT = Path(__file__).resolve().parent.parent          # repo root (the kore/ package's parent)
 WORKSPACE_ROOT = KORE_ROOT.parent                            # umbrella workspace (repo root's parent)
@@ -29,6 +32,25 @@ class KoreConfig:
 
     gpu_target: str = field(default_factory=lambda: os.environ.get("GPU_TARGET", "gfx950"))  # KORE target = MI350X/CDNA4
     rocm_path: str = field(default_factory=lambda: os.environ.get("ROCM_PATH", "/opt/rocm"))
+    # Candidate execution boundary. Defaults to the compatibility subprocess,
+    # which is explicitly trusted-code-only; untrusted/production settings fail
+    # closed unless an approved external broker and verdict verifier are supplied.
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig.from_env)
+    # Physical-model identity is explicit and is resolved/fingerprinted at runtime.
+    # A calibration file must use kore.runtime-calibration.v1 (SKU + runtime metadata);
+    # legacy KORE_PEAK_* process-global overrides are intentionally unsupported.
+    physics_sku: str = field(default_factory=lambda: os.environ.get("KORE_PHYSICS_SKU", "mi350x"))
+    physics_calibration_path: Optional[str] = field(
+        default_factory=lambda: os.environ.get("KORE_PHYSICS_CALIBRATION") or None)
+    physics_model_fingerprint: Optional[str] = field(
+        default_factory=lambda: os.environ.get("KORE_PHYSICS_MODEL_FINGERPRINT") or None)
+    # Empirical physics/counter shaping is unavailable unless both an evidence
+    # artifact and its expected fingerprint are supplied; family gates are read
+    # from that artifact and revalidated by kore.reward.shaping.
+    physics_shaping_evidence_path: Optional[str] = field(
+        default_factory=lambda: os.environ.get("KORE_PHYSICS_EVIDENCE") or None)
+    physics_shaping_evidence_fingerprint: Optional[str] = field(
+        default_factory=lambda: os.environ.get("KORE_PHYSICS_EVIDENCE_FINGERPRINT") or None)
 
     # correctness gate
     snr_threshold_fp32: float = 30.0
@@ -42,6 +64,10 @@ class KoreConfig:
     min_variance_runs: int = 3
     max_variance_runs: int = 5
     cv_threshold_pct: float = 3.0
+    baseline_cv_threshold_pct: float = 3.0
+    paired_ratio_cv_threshold_pct: float = 3.0
+    paired_ci_threshold_pct: float = 3.0
+    paired_confidence_z: float = 1.96
     noise_floor_pct: float = 2.0
 
     # anti-hack: determinism re-check on the RL correctness path. A reward-hacking
@@ -190,24 +216,33 @@ class KoreConfig:
         enforced - a bad KORE_PROFILE_REWARD_WEIGHT or an edited weight could
         silently invert tiers or let the profiler bonus outweigh a real speed win.
         """
-        assert self.speed_aggregation.lower() in ("worst", "mean", "cvar"), (
-            f"speed_aggregation must be worst|mean|cvar (got {self.speed_aggregation!r})")
-        assert 0.0 < self.cvar_alpha <= 1.0, "cvar_alpha must be in (0, 1]"
+        if self.speed_aggregation.lower() not in ("worst", "mean", "cvar"):
+            raise ValueError(
+                f"speed_aggregation must be worst|mean|cvar (got {self.speed_aggregation!r})")
+        if not 0.0 < self.cvar_alpha <= 1.0:
+            raise ValueError("cvar_alpha must be in (0, 1]")
         # anti-hack floor is the unique minimum: hack < compile_fail < incorrect.
-        assert self.reward_hack < self.reward_compile_fail < self.reward_incorrect, (
-            "reward tiers must satisfy reward_hack < reward_compile_fail < reward_incorrect")
+        if not self.reward_hack < self.reward_compile_fail < self.reward_incorrect:
+            raise ValueError(
+                "reward tiers must satisfy reward_hack < reward_compile_fail < reward_incorrect")
         # a shaped-incorrect kernel (<= eps_shape + format_weight) can never reach
         # the correct tier (>= correctness_weight).
-        assert self.eps_shape + self.format_weight < self.correctness_weight, (
-            "eps_shape + format_weight must stay below correctness_weight "
-            "(else an incorrect kernel could reach the correct tier)")
+        incorrect_ceiling = self.reward_incorrect + self.eps_shape + self.format_weight
+        correct_floor = self.correctness_weight - self.format_weight
+        if not incorrect_ceiling < correct_floor:
+            raise ValueError(
+                "best incorrect reward must stay below worst correct reward")
+        if not self.reward_compile_fail < self.reward_incorrect - self.format_weight:
+            raise ValueError(
+                "compile-fail reward must stay below malformed-incorrect reward")
         # the profiler dense bonus SHAPES, never LEADS: it must be strictly below the
         # smallest fast_p threshold bonus so a genuinely faster kernel always wins.
         if self.profile_reward_weight and self.fast_p_bonus:
             min_bonus = min(b for _, b in self.fast_p_bonus)
-            assert self.profile_reward_weight < min_bonus, (
-                f"profile_reward_weight ({self.profile_reward_weight}) must be < the "
-                f"smallest fast_p bonus ({min_bonus}) so the profiler never leads")
+            if not self.profile_reward_weight < min_bonus:
+                raise ValueError(
+                    f"profile_reward_weight ({self.profile_reward_weight}) must be < the "
+                    f"smallest fast_p bonus ({min_bonus}) so the profiler never leads")
 
 
 CONFIG = KoreConfig()

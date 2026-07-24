@@ -32,6 +32,7 @@ from pathlib import Path
 import kore.tasks.breadth as _breadth_pkg
 from kore.reward.reward import scan_for_hacks
 from kore.tasks._genops import DTYPES
+from kore.tasks.shape_policy import shape_policy_yaml_lines
 
 TASKS_DIR = Path(__file__).resolve().parent
 
@@ -115,6 +116,10 @@ def _yaml(mod, op: str, dtype: str, snr: float) -> str:
         f"op_family: breadth_{op}",
         "baseline_tier: breadth",
         "generated: true",
+    ]
+    lines += shape_policy_yaml_lines(
+        op, shp, source=f"generator:breadth_{op}")
+    lines += [
         "shapes:",
         f"  minimal: {_shape_str(shp['minimal'])}",
         f"  primary: {_shape_str(shp['primary'])}",

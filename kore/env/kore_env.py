@@ -164,8 +164,11 @@ class KoreEnv:
             # data-scale: optionally expand to a diverse shape set (shape-robust RL).
             if getattr(self.cfg, "shape_augment", False):
                 from kore.tasks.augment import augment_shapes
-                aug = augment_shapes(shapes, max_shapes=int(getattr(
-                    self.cfg, "shape_augment_max", 6)))
+                aug = augment_shapes(
+                    shapes,
+                    task=self.task,
+                    max_shapes=int(getattr(self.cfg, "shape_augment_max", 6)),
+                )
                 if aug:
                     return aug
             return shapes

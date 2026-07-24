@@ -13,6 +13,7 @@ Each task lives in ``kore/tasks/<task_id>/`` with:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -46,6 +47,7 @@ class Task:
     comparison_baseline: str
     shapes: list[Shape] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    task_file_digest: str = ""
 
     @property
     def driver_path(self) -> Path:
@@ -71,7 +73,8 @@ class Task:
 
     @classmethod
     def from_dir(cls, d: Path) -> "Task":
-        meta = yaml.safe_load((d / "task.yaml").read_text())
+        task_file = (d / "task.yaml").read_bytes()
+        meta = yaml.safe_load(task_file)
         shapes: list[Shape] = []
         raw_shapes = meta.get("shapes", {}) or {}
         for key, val in raw_shapes.items():
@@ -93,4 +96,5 @@ class Task:
             comparison_baseline=targets.get("comparison_baseline", "torch"),
             shapes=shapes,
             raw=meta,
+            task_file_digest=hashlib.sha256(task_file).hexdigest(),
         )

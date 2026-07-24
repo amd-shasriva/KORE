@@ -161,7 +161,9 @@ class VLLMTeacher:
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.model = model
         self.temperature = temperature
-        self.max_tokens = max_tokens
+        # Env override lets a datagen run raise the ceiling to cut truncation
+        # waste (Claude dropping a 60-90s completion that hit stop_reason=max_tokens).
+        self.max_tokens = int(os.environ.get("KORE_TEACHER_MAX_TOKENS", max_tokens))
         self.system = system
 
     def generate(self, messages: list[dict]) -> str:
@@ -287,7 +289,9 @@ class ClaudeTeacher:
         )
         self.model = os.environ.get("KORE_TEACHER_MODEL", model)
         self.temperature = temperature
-        self.max_tokens = max_tokens
+        # Env override lets a datagen run raise the ceiling to cut truncation
+        # waste (Claude dropping a 60-90s completion that hit stop_reason=max_tokens).
+        self.max_tokens = int(os.environ.get("KORE_TEACHER_MAX_TOKENS", max_tokens))
         self.system = system
 
     @staticmethod

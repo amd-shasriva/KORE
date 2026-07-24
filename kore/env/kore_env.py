@@ -39,6 +39,11 @@ from pathlib import Path
 from typing import Optional
 
 from kore.config import CONFIG
+from kore.env.evaluation_contract import (
+    build_evaluation_contract,
+    contract_is_cacheable,
+    observation_satisfies_contract,
+)
 from kore.env.replay import ReplayCache
 from kore.obs import get_logger
 from kore.reward.reward import Observation, scan_for_hacks
@@ -133,8 +138,11 @@ class KoreEnv:
 
     @property
     def _snr_threshold(self) -> float:
-        t = getattr(self.task, "snr_threshold", None)
-        return float(t) if t else self.cfg.snr_threshold_for(self.task.dtype)
+        return self._snr_threshold_for(self.task)
+
+    def _snr_threshold_for(self, task: Task) -> float:
+        t = getattr(task, "snr_threshold", None)
+        return float(t) if t else self.cfg.snr_threshold_for(task.dtype)
 
     # ------------------------------------------------------------------ #
     def step(self, source: str, full_validation: bool = True,
@@ -159,8 +167,12 @@ class KoreEnv:
     # ------------------------------------------------------------------ #
     def evaluate(self, task: Task, source: str, shapes: Optional[list[Shape]] = None,
                  do_bench: bool = True) -> Observation:
+        # Resolve the request exactly once. The concrete ordered shape list is a
+        # first-class part of replay identity; ``None`` can never alias a later
+        # task/augmentation change.
+        shapes = list(shapes or task.shapes or [Shape("default", {})])
         source_sha = _sha12(source)
-        n_shapes = len(shapes or task.shapes or [Shape("default", {})])
+        n_shapes = len(shapes)
         _ev("INFO", "eval_start", task=task.task_id, n_shapes=n_shapes,
             source_sha=source_sha, do_bench=do_bench)
 
@@ -170,15 +182,24 @@ class KoreEnv:
             return Observation(compiled=False, dtype=task.dtype, flagged_hack=True,
                                hack_reason=hack, error_text=f"reward-hack: {hack}")
 
-        if self.use_replay and self._cache_obj is not None:
-            cached = self._cache_obj.get(task.task_id, source)
+        contract = build_evaluation_contract(
+            task=task,
+            shapes=shapes,
+            do_bench=do_bench,
+            config=self.cfg,
+            snr_threshold=self._snr_threshold_for(task),
+            correctness_timeout=self.correctness_timeout,
+            bench_timeout=self.bench_timeout,
+        )
+        replay_ready = contract_is_cacheable(contract)
+        if self.use_replay and self._cache_obj is not None and replay_ready:
+            cached = self._cache_obj.get(task.task_id, source, context=contract)
             if cached is not None:
                 _LOG.debug("cache hit", task=task.task_id, source_sha=source_sha,
                            compiled=cached.compiled, correct=cached.validation_passed)
                 self._log_eval_done(task, cached, cached=True)
                 return cached
 
-        shapes = shapes or task.shapes or [Shape("default", {})]
         workdir = Path(tempfile.mkdtemp(prefix=f"kore_{task.task_id}_"))
         try:
             obs = self._run(task, source, shapes, workdir, do_bench)
@@ -187,8 +208,22 @@ class KoreEnv:
 
         # Only cache DETERMINISTIC terminal verdicts - never transient infra errors.
         cacheable = (obs.compiled or obs.error_text) and not obs.infra_error
-        if self.use_replay and self._cache_obj is not None and cacheable:
-            self._cache_obj.put(task.task_id, source, obs)
+        cacheable = cacheable and observation_satisfies_contract(obs, contract)
+        if (self.use_replay and self._cache_obj is not None and replay_ready
+                and cacheable):
+            # A task/config/env mutation during a long GPU evaluation must not
+            # label the resulting observation with stale pre-run provenance.
+            final_contract = build_evaluation_contract(
+                task=task,
+                shapes=shapes,
+                do_bench=do_bench,
+                config=self.cfg,
+                snr_threshold=self._snr_threshold_for(task),
+                correctness_timeout=self.correctness_timeout,
+                bench_timeout=self.bench_timeout,
+            )
+            if final_contract == contract and contract_is_cacheable(final_contract):
+                self._cache_obj.put(task.task_id, source, obs, context=contract)
         self._log_eval_done(task, obs, cached=False)
         return obs
 
@@ -200,7 +235,7 @@ class KoreEnv:
             infra_error=obs.infra_error, cached=cached)
 
     # ------------------------------------------------------------------ #
-    def _env(self) -> dict:
+    def _env(self, task: Optional[Task] = None) -> dict:
         env = os.environ.copy()
         # Repo root (the parent of the kore/ package). Prepended to PYTHONPATH so the
         # compile/bench driver subprocess can ``import kore.*`` (e.g. _genops.driver_main).
@@ -221,7 +256,8 @@ class KoreEnv:
         # Prefer the TASK's declared arch over the global default so the driver
         # subprocess compiles/benches + selects the fp8 encoding for the arch the
         # task actually targets (a gfx950 task must not be built as gfx942/FNUZ).
-        env["GPU_TARGET"] = getattr(self.task, "gpu_target", None) or self.cfg.gpu_target
+        active_task = task or self.task
+        env["GPU_TARGET"] = getattr(active_task, "gpu_target", None) or self.cfg.gpu_target
         env["HOME"] = str(Path(env.get("TMPDIR", "/tmp")))
         # Shared, persistent Triton/inductor compile caches (audit R2 perf M3). Pinned
         # to a STABLE dir -- NOT the per-eval HOME/TMPDIR above -- so the FIRST worker to
@@ -298,7 +334,7 @@ class KoreEnv:
         (workdir / "kernel.py").write_text(source)
         os.chmod(workdir / "kernel.py", 0o444)
         driver = workdir / "driver.py"
-        env = self._env()
+        env = self._env(task)
 
         snr_by_shape: dict[str, float] = {}
         compiled = True
@@ -336,7 +372,7 @@ class KoreEnv:
                 validation_passed = False
                 last_err = _tail(out)
 
-        thr = self._snr_threshold
+        thr = self._snr_threshold_for(task)
         correct = validation_passed and bool(snr_by_shape) and all(v >= thr for v in snr_by_shape.values())
 
         # Anti-hack determinism re-check: re-run the primary shape once and require
@@ -389,7 +425,8 @@ class KoreEnv:
             # Fast + accurate: ALL shapes timed (both impls, n_max repeats) in ONE
             # process under a single per-GPU timing-lock hold. Contention-fair ratio +
             # minimal exclusive window -> honest speedups at high throughput.
-            per_shape, poisoned = self._bench_all(driver, shapes, workdir, env)
+            per_shape, poisoned = self._bench_all(
+                driver, shapes, workdir, env, snr_threshold=thr)
             if poisoned:
                 _ev("WARN", "eval_bench_hack", task=task.task_id, source_sha=_sha12(source),
                     reason="post-timing correctness failed (bench-time reward hack)")
@@ -405,7 +442,8 @@ class KoreEnv:
                     base_by_shape[sh.name] = _median(ref_s)
         else:
             for sh in shapes:
-                cand, cand_cv, poisoned = self._bench_multi(driver, sh, "candidate", workdir, env)
+                cand, cand_cv, poisoned = self._bench_multi(
+                    driver, sh, "candidate", workdir, env, snr_threshold=thr)
                 # Anti-hack: candidate bench re-verifies correctness AFTER timing. A False
                 # post-timing verdict => correct during checks but garbage while timed
                 # (invocation-count hack) -> reject the whole eval, never reward it.
@@ -416,7 +454,8 @@ class KoreEnv:
                     return Observation(compiled=False, dtype=task.dtype, validation_passed=False,
                                        flagged_hack=True, hack_reason="bench-time output mismatch",
                                        error_text="reward-hack: kernel incorrect under timing")
-                ref = self._bench_multi(driver, sh, "reference", workdir, env)[0]
+                ref = self._bench_multi(
+                    driver, sh, "reference", workdir, env, snr_threshold=thr)[0]
                 if cand is not None:
                     wall_by_shape[sh.name] = cand
                     cvs.append(cand_cv)
@@ -615,7 +654,8 @@ class KoreEnv:
             self._batch_ok_cache = v
         return v
 
-    def _bench_pair(self, driver: Path, sh: Shape, workdir: Path, env: dict):
+    def _bench_pair(self, driver: Path, sh: Shape, workdir: Path, env: dict,
+                    snr_threshold: Optional[float] = None):
         """Time candidate AND reference in ONE ``--bench-both`` process (``max_variance_runs``
         in-process repeats). Returns ``(cand_samples, ref_samples, poisoned)``.
 
@@ -635,8 +675,9 @@ class KoreEnv:
             return [], [], False
         ac = _last(_ALLCLOSE, out)
         snr = _last(_SNR, out)
+        threshold = self._snr_threshold if snr_threshold is None else snr_threshold
         if (ac and ac.group(1).lower() == "false") or \
-           (snr and float(snr.group(1)) < self._snr_threshold):
+           (snr and float(snr.group(1)) < threshold):
             return None, None, True
         cand = [float(m.group(1)) for m in _CAND_MED.finditer(out)]
         ref = [float(m.group(1)) for m in _REF_MED.finditer(out)]
@@ -650,7 +691,8 @@ class KoreEnv:
     def _shape_spec(sh: Shape) -> str:
         return ",".join(f"{k}={v}" for k, v in sh.dims.items()) if sh.dims else "default"
 
-    def _bench_all(self, driver: Path, shapes, workdir: Path, env: dict):
+    def _bench_all(self, driver: Path, shapes, workdir: Path, env: dict,
+                   snr_threshold: Optional[float] = None):
         """Time ALL shapes (candidate+reference, ``max_variance_runs`` repeats each) in
         ONE ``--bench-both --shapes`` process, under a SINGLE per-GPU timing-lock hold.
 
@@ -671,8 +713,9 @@ class KoreEnv:
             return {}, False
         ac = _last(_ALLCLOSE, out)
         snr = _last(_SNR, out)
+        threshold = self._snr_threshold if snr_threshold is None else snr_threshold
         if (ac and ac.group(1).lower() == "false") or \
-           (snr and float(snr.group(1)) < self._snr_threshold):
+           (snr and float(snr.group(1)) < threshold):
             return {}, True
         blocks = out.split("SHAPE_BEGIN")[1:]  # per-shape, in the order we passed them
         result: dict[str, tuple] = {}
@@ -682,7 +725,8 @@ class KoreEnv:
             result[sh.name] = (cand, ref)
         return result, False
 
-    def _bench_multi(self, driver: Path, sh: Shape, impl: str, workdir: Path, env: dict):
+    def _bench_multi(self, driver: Path, sh: Shape, impl: str, workdir: Path, env: dict,
+                     snr_threshold: Optional[float] = None):
         """Bench a (shape, impl) ``min..max_variance_runs`` times; return
         (median-of-medians, CV%, poisoned).
 
@@ -693,6 +737,7 @@ class KoreEnv:
         stateful kernel cannot know which call indices are timed vs verified.
         """
         import random as _random
+        threshold = self._snr_threshold if snr_threshold is None else snr_threshold
         samples: list[float] = []
         n_min = max(1, self.cfg.min_variance_runs)
         n_max = max(n_min, self.cfg.max_variance_runs)
@@ -714,7 +759,7 @@ class KoreEnv:
                 ac = _last(_ALLCLOSE, out)
                 snr = _last(_SNR, out)
                 if (ac and ac.group(1).lower() == "false") or \
-                   (snr and float(snr.group(1)) < self._snr_threshold):
+                   (snr and float(snr.group(1)) < threshold):
                     poisoned = True
                     break
             m = _last(_MEDIAN, out)

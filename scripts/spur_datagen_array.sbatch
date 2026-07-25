@@ -5,7 +5,7 @@
 #SBATCH --job-name=kore-factory
 #SBATCH --account=amd-general
 #SBATCH --partition=amd-spur
-#SBATCH --qos=amd-burst-qos
+#SBATCH --qos=amd-general-qos
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:mi355x:8
 #SBATCH --cpus-per-task=128

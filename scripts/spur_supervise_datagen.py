@@ -118,14 +118,27 @@ class Supervisor:
         return summary
 
     def queue(self) -> str:
-        result = self.run(
-            ["squeue", "-u", self.args.user],
-            check=False,
-            timeout=self.args.queue_timeout_seconds,
+        # The spur controller intermittently returns transient errors ("no leader
+        # elected yet" / rc=1). Retry a few times before giving up so a scheduler
+        # hiccup cannot kill a multi-hour supervisor.
+        last = None
+        for attempt in range(6):
+            result = self.run(
+                ["squeue", "-u", self.args.user],
+                check=False,
+                timeout=self.args.queue_timeout_seconds,
+            )
+            if not result.returncode:
+                return result.stdout
+            last = result
+            self.log(
+                f"WARN squeue transient rc={result.returncode} "
+                f"(attempt {attempt + 1}/6); retrying"
+            )
+            time.sleep(min(30, 5 * (attempt + 1)))
+        raise RuntimeError(
+            f"squeue failed rc={last.returncode if last else '?'} after retries"
         )
-        if result.returncode:
-            raise RuntimeError(f"squeue failed rc={result.returncode}")
-        return result.stdout
 
     def wait_for_wave(self) -> None:
         time.sleep(self.args.submission_grace_seconds)

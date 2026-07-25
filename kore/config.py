@@ -76,6 +76,13 @@ class KoreConfig:
         default_factory=lambda: float(os.environ.get("KORE_CV_THRESHOLD_PCT", "3.0")))
     paired_ci_threshold_pct: float = field(
         default_factory=lambda: float(os.environ.get("KORE_CV_THRESHOLD_PCT", "3.0")))
+    # Stored-win ADMISSION CV gate. Deliberately a SEPARATE knob from the
+    # exploration gates above: raising KORE_CV_THRESHOLD_PCT (e.g. to 8 on
+    # noisy burst nodes) relaxes what datagen will *explore*, but a win only
+    # earns a place in the durable dataset if its measurement is vendor-grade.
+    # Stays 3.0 unless KORE_WIN_ADMIT_CV_PCT is set explicitly.
+    win_admit_cv_threshold_pct: float = field(
+        default_factory=lambda: float(os.environ.get("KORE_WIN_ADMIT_CV_PCT", "3.0")))
     paired_confidence_z: float = 1.96
     noise_floor_pct: float = 2.0
 

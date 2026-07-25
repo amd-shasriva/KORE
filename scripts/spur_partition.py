@@ -20,7 +20,17 @@ import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Iterable
+
+# Frontier / compute-bound bias. Hard vendor-baseline kernels (aiter, hipBLAS,
+# rocBLAS, CK, dequant matmul) and low-precision GEMM/attention/MoE ops are the
+# scarce, high-value targets. Multiply their deepen cost so LPT packing devotes
+# proportionally more of the fixed trajectory budget to them.
+DEFAULT_FRONTIER_WEIGHT = 4.0
+_FRONTIER_BASELINE_RE = re.compile(r"aiter|hipblas|rocblas|ck_|dequant_matmul", re.I)
+_FRONTIER_DTYPES = ("fp8", "int8", "int4", "mxfp4", "w4a16")
+_FRONTIER_FAMILIES = frozenset({"gemm", "attention", "moe"})
 
 
 @dataclass(frozen=True)
@@ -38,6 +48,58 @@ def _canonical_hash(record: dict) -> str:
     source = str(record.get("final_source", "") or "").strip()
     payload = source or json.dumps(record, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(payload.encode("utf-8", "ignore")).hexdigest()
+
+
+def _frontier_weight() -> float:
+    """Multiplier applied to deepen cost for hard compute-bound tasks.
+
+    Controlled by ``KORE_FRONTIER_WEIGHT`` (default ``DEFAULT_FRONTIER_WEIGHT``).
+    A value <= 1 disables the bias. Invalid values fall back to the default.
+    """
+    raw = os.environ.get("KORE_FRONTIER_WEIGHT")
+    if raw is None or not raw.strip():
+        return DEFAULT_FRONTIER_WEIGHT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_FRONTIER_WEIGHT
+    return value if value > 0 else DEFAULT_FRONTIER_WEIGHT
+
+
+def _operator_family(operation: str) -> str | None:
+    """Coarse operator family from a Task.operation string.
+
+    Maps the fine-grained operation name onto the frontier families
+    ``gemm`` / ``attention`` / ``moe`` used for cost biasing.
+    """
+    op = (operation or "").lower()
+    if "moe" in op:
+        return "moe"
+    if "attn" in op or "attention" in op:
+        return "attention"
+    if "gemm" in op or "matmul" in op:
+        return "gemm"
+    return None
+
+
+def is_frontier_task(
+    comparison_baseline: str | None,
+    dtype: str | None,
+    operation: str | None,
+) -> bool:
+    """True if the task targets a hard compute-bound frontier kernel.
+
+    Matches when the comparison baseline is a vendor library (aiter/hipBLAS/
+    rocBLAS/CK/dequant matmul), OR the dtype is low precision (fp8/int8/int4/
+    mxfp4/w4a16), OR the operator family is gemm/attention/moe.
+    """
+    baseline = comparison_baseline or ""
+    if _FRONTIER_BASELINE_RE.search(baseline):
+        return True
+    dt = (dtype or "").lower()
+    if any(token in dt for token in _FRONTIER_DTYPES):
+        return True
+    return _operator_family(operation) in _FRONTIER_FAMILIES
 
 
 def jsonl_record_count(path: Path) -> int:
@@ -90,7 +152,16 @@ def shard_present(data_root: Path, kind: str, task_id: str) -> bool:
     return not marker.exists() and jsonl_record_count(path) > 0
 
 
-def work_item(data_root: Path, task_id: str, target: int) -> WorkItem | None:
+def work_item(
+    data_root: Path,
+    task_id: str,
+    target: int,
+    *,
+    comparison_baseline: str | None = None,
+    dtype: str | None = None,
+    operation: str | None = None,
+    frontier_weight: float | None = None,
+) -> WorkItem | None:
     wins = distinct_wins(data_root / "wins" / f"{task_id}.jsonl")
     need = max(0, target - wins)
     missing_repair = not shard_present(data_root, "repair", task_id)
@@ -100,6 +171,12 @@ def work_item(data_root: Path, task_id: str, target: int) -> WorkItem | None:
 
     # deepen_wins bounds attempts at max(need*3, need+2): 9/6/3 for 0/1/2 wins.
     deepen_cost = max(need * 3, need + 2) if need else 0
+    # Bias budget toward hard compute-bound frontier kernels so LPT packing
+    # assigns them proportionally more of the fixed trajectory budget.
+    frontier = is_frontier_task(comparison_baseline, dtype, operation)
+    if frontier and deepen_cost:
+        weight = _frontier_weight() if frontier_weight is None else frontier_weight
+        deepen_cost = int(round(deepen_cost * weight))
     # Repair can make up to 175 teacher/eval attempts; groups evaluates 120
     # candidates. Relative weights spread these expensive gaps across nodes.
     cost = deepen_cost + (9 if missing_repair else 0) + (6 if missing_groups else 0)
@@ -150,21 +227,78 @@ def main() -> int:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--shards", type=int, required=True)
     ap.add_argument("--target", type=int, default=3)
-    ap.add_argument("--prefix", default="genb_")
+    # Comma-separated list of task-id prefixes to include. The default now
+    # includes both generated (genb_) tasks AND the hand-authored frontier
+    # compute-bound families (flash_attn_, gemm, moe, fused_) that carry no
+    # genb_ prefix (flash_attn_, gemm, moe, fused_), plus the genv_ vendor-
+    # baseline and gen_ epilogue-fusion families, so vendor-baseline compute-
+    # bound tasks are reachable in the manifest.
+    # Use an empty prefix (e.g. --prefix '') to include every train task.
+    ap.add_argument(
+        "--prefix",
+        default="genb_,genv_,gen_,flash_attn_,gemm,moe_,fused_moe,fused_",
+        help="comma-separated task-id prefixes to include (empty string = all)",
+    )
+    # Optional explicit allowlist: one task id per line. When set it takes
+    # precedence over --prefix, giving fully deterministic selection.
+    ap.add_argument(
+        "--task-file",
+        default=None,
+        help="file of explicit task ids (one per line); overrides --prefix",
+    )
+    # Attempt cap so a permanently-failing hard task cannot absorb the whole
+    # budget. Recorded in the manifest for the datagen workers to honor.
+    ap.add_argument(
+        "--max-attempts-per-task",
+        type=int,
+        default=0,
+        help="per-task attempt cap for downstream datagen (0 = unbounded)",
+    )
     args = ap.parse_args()
 
     from kore.tasks.registry import train_tasks
 
     data_root = Path(args.data_root).resolve()
     out_dir = Path(args.out_dir).resolve()
-    task_ids = sorted(
-        task.task_id for task in train_tasks() if task.task_id.startswith(args.prefix)
-    )
-    items = [
-        item
-        for task_id in task_ids
-        if (item := work_item(data_root, task_id, args.target)) is not None
-    ]
+
+    tasks_by_id = {task.task_id: task for task in train_tasks()}
+    if args.task_file:
+        wanted = [
+            line.strip()
+            for line in Path(args.task_file).read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        missing = [tid for tid in wanted if tid not in tasks_by_id]
+        if missing:
+            raise SystemExit(
+                f"--task-file lists unknown task ids: {sorted(set(missing))}"
+            )
+        selected = sorted(set(wanted))
+    else:
+        prefixes = tuple(p.strip() for p in args.prefix.split(","))
+        # An empty prefix matches everything (str.startswith('') is True).
+        selected = sorted(
+            tid
+            for tid in tasks_by_id
+            if any(tid.startswith(pfx) for pfx in prefixes)
+        )
+    task_ids = selected
+
+    frontier_weight = _frontier_weight()
+    items = []
+    for task_id in task_ids:
+        task = tasks_by_id[task_id]
+        item = work_item(
+            data_root,
+            task_id,
+            args.target,
+            comparison_baseline=task.comparison_baseline,
+            dtype=task.dtype,
+            operation=task.operation,
+            frontier_weight=frontier_weight,
+        )
+        if item is not None:
+            items.append(item)
     shards = balanced_partition(items, args.shards)
 
     manifest_shards = []
@@ -191,6 +325,8 @@ def main() -> int:
         "repo_commit": _git_head(Path(__file__).resolve().parents[1]),
         "data_root": str(data_root),
         "target_wins": args.target,
+        "max_attempts_per_task": args.max_attempts_per_task,
+        "frontier_weight": frontier_weight,
         "n_train_tasks": len(task_ids),
         "n_work_items": len(items),
         "n_shards": args.shards,

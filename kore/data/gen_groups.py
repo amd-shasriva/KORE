@@ -139,6 +139,26 @@ def _evaluate(env, task, source: str, cfg) -> dict:
         }
     rr = compute_reward(obs, source, dtype=task.dtype, cfg=cfg)
     wall_us = obs.wall_ms * 1000.0 if obs.wall_ms is not None else None
+    # Baseline-relative classification for the group's primary shape (used by
+    # the significance gate in gold_wins). Fail-safe: absent -> None.
+    _tc_by_shape = getattr(obs, "timing_classification_by_shape", None) or {}
+    _primary = None
+    for _probe in ("primary", "minimal"):
+        try:
+            _sh = task.shape(_probe)
+        except Exception:  # noqa: BLE001 - stub tasks may lack shape()
+            _sh = None
+        if _sh is not None:
+            _primary = getattr(_sh, "name", None)
+            break
+    if _primary is not None and _primary in _tc_by_shape:
+        _classification = _tc_by_shape.get(_primary)
+    elif _tc_by_shape:
+        _vals = list(_tc_by_shape.values())
+        _classification = "faster" if all(v == "faster" for v in _vals) else (
+            _vals[0] if _vals else None)
+    else:
+        _classification = None
     return {
         "source": source,
         "compiled": bool(obs.compiled),
@@ -146,6 +166,16 @@ def _evaluate(env, task, source: str, cfg) -> dict:
         "speedup": rr.speedup,
         "snr_db": obs.snr_db,
         "wall_us": wall_us,
+        # Timing-rigor provenance (frontier upgrade): keep the measurement
+        # variance figures + baseline-relative classification instead of
+        # discarding them, so the significance-gated stored-win path can use
+        # them downstream (gold_wins). All optional / fail-safe.
+        "cv_pct": getattr(obs, "cv_pct", None),
+        "baseline_cv_pct": getattr(obs, "baseline_cv_pct", None),
+        "paired_ratio_cv_pct": getattr(obs, "paired_ratio_cv_pct", None),
+        "paired_ci_half_width_pct": getattr(obs, "paired_ci_half_width_pct", None),
+        "timing_classification": _classification,
+        "baseline_type": getattr(task, "comparison_baseline", None),
         # Surface OOM/timeout/profiler crashes so re-verification never treats a
         # transient failure as a real "no longer correct" verdict and drops data.
         "infra_error": bool(getattr(obs, "infra_error", False)),

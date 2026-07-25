@@ -223,6 +223,121 @@ def aiter_gemm_a8w8(
     return out
 
 
+def aiter_gemm_a8w8_blockscale(
+    xq: torch.Tensor,
+    wq: torch.Tensor,
+    x_scale: torch.Tensor,
+    w_scale: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """AITER block-scaled fp8 GEMM: ``aiter.gemm_a8w8_blockscale(XQ, WQ, x_scale,
+    w_scale, dtype=...)`` (the DeepSeek-style 1x128 / 128x128 block-quant path).
+
+    Layout (CK): XQ [M, K] fp8, WQ [N, K] fp8 (computes ``X @ W^T``); x_scale is
+    the per-(1x128)-block activation scale [M, K//128] and w_scale the
+    per-(128x128)-block weight scale [N//128, K//128], both fp32. Returns [M, N]
+    in ``out_dtype``. Falls back to a torch block-dequant matmul (framework) when
+    AITER's block-scale kernel is unavailable.
+
+    fp8 codes are the arch-selected OCP e4m3 (``FP8_DTYPE``) on gfx950/CDNA4.
+    """
+    try:
+        out = _aiter_fn("gemm_a8w8_blockscale")(xq, wq, x_scale, w_scale, dtype=out_dtype)
+        _mark_baseline("aiter_vendor")
+        return out
+    except Exception:  # noqa: BLE001 - block-scale kernel absent -> torch dequant
+        _mark_baseline("framework")
+        # Generic block-dequant fallback: broadcast each block scale back over its
+        # 128-wide tile, dequantize, then a hipBLASLt bf16 matmul of X @ W^T.
+        block = 128
+        xf = xq.float()
+        wf = wq.float()
+        xs = x_scale.float().repeat_interleave(block, dim=1)[:, : xf.shape[1]]
+        ws = w_scale.float()
+        ws = ws.repeat_interleave(block, dim=0)[: wf.shape[0], :]
+        ws = ws.repeat_interleave(block, dim=1)[:, : wf.shape[1]]
+        x_deq = xf * xs
+        w_deq = wf * ws
+        return torch.matmul(x_deq, w_deq.t()).to(out_dtype)
+
+
+def aiter_gemm_int8_a8w8(
+    xq: torch.Tensor,
+    wq: torch.Tensor,
+    x_scale: torch.Tensor,
+    w_scale: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """AITER int8 W8A8 GEMM: reuses the ``gemm_a8w8`` CK path with **int8** XQ/WQ
+    and fp32 per-row / per-col scales (the classic SmoothQuant / W8A8 int8 serving
+    path, distinct from the fp8 :func:`aiter_gemm_a8w8`).
+
+    Layout (CK): XQ [M, K] int8, WQ [N, K] int8 (computes ``X @ W^T``), x_scale
+    [M, 1], w_scale [1, N], both fp32; int32 accumulation. Returns [M, N] in
+    ``out_dtype``. Falls back to a torch int8-dequant matmul (framework) when the
+    AITER int8 kernel is unavailable.
+    """
+    try:
+        out = _aiter_fn("gemm_a8w8")(xq, wq, x_scale, w_scale, dtype=out_dtype)
+        _mark_baseline("aiter_vendor")
+        return out
+    except Exception:  # noqa: BLE001 - int8 gemm_a8w8 unavailable -> torch dequant
+        _mark_baseline("framework")
+        # int32 accumulate on the integer codes, then apply row/col fp32 scales.
+        acc = torch.matmul(xq.to(torch.int32).float(), wq.to(torch.int32).float().t())
+        out = acc * x_scale.float().reshape(-1, 1) * w_scale.float().reshape(1, -1)
+        return out.to(out_dtype)
+
+
+def aiter_gemm_a4w4(
+    xq: torch.Tensor,
+    wq: torch.Tensor,
+    x_scale: torch.Tensor,
+    w_scale: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """AITER fp4 (MXFP4/NVFP4) GEMM: ``aiter.gemm_a4w4`` (or the block-scale
+    variant ``aiter.gemm_a4w4_blockscale``) -- the 4-bit weight+activation path.
+
+    Layout (CK): A [M, K//2] f4x2 (two fp4 codes packed per byte), B [N, K//2]
+    f4x2 (computes ``A @ B^T``); A_scale [M, K//block_size] and B_scale
+    [N, K//block_size] are the microscale block scales (MXFP4: block_size=32
+    e8m0-padded; NVFP4: block_size=16 e4m3-padded). Returns [M, N] in
+    ``out_dtype``.
+
+    ``gemm_a4w4`` returns a padded output ``(out, out_padded)`` on some builds;
+    we normalize to the [M, N] tensor. Falls back to ``gemm_a4w4_blockscale``
+    (out-param form) and finally, if neither 4-bit kernel is available, tags
+    ``framework`` and raises -- there is no torch fp4 dtype to dequantize packed
+    f4x2 codes without the kernel's exact packing, so no numeric torch reference
+    is offered for the 4-bit path (documented blocker).
+    """
+    M = xq.shape[0]
+    N = wq.shape[0]
+    # Preferred: the high-level gemm_a4w4 dispatcher.
+    try:
+        out = _aiter_fn("gemm_a4w4")(xq, wq, x_scale, w_scale, dtype=out_dtype)
+        if isinstance(out, (tuple, list)):
+            out = out[0]
+        _mark_baseline("aiter_vendor")
+        return out[:M, :N] if out.dim() == 2 else out
+    except Exception:  # noqa: BLE001 - try the explicit block-scale out-param form
+        pass
+    try:
+        out = torch.empty((M, N), dtype=out_dtype, device=xq.device)
+        _aiter_fn("gemm_a4w4_blockscale")(xq, wq, x_scale, w_scale, out)
+        _mark_baseline("aiter_vendor")
+        return out
+    except Exception as e:  # noqa: BLE001 - no 4-bit kernel + no torch fp4 dtype
+        _mark_baseline("framework")
+        raise NotImplementedError(
+            "aiter_gemm_a4w4: neither aiter.gemm_a4w4 nor "
+            "aiter.gemm_a4w4_blockscale is available, and packed f4x2 codes have "
+            "no torch dtype to dequantize -- no framework fallback for the 4-bit "
+            "path."
+        ) from e
+
+
 # --- Batched / grouped GEMM ----------------------------------------------
 def aiter_batched_gemm_bf16(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """AITER batched bf16 GEMM: ``aiter.batched_gemm_bf16(A, B, out)`` (in-place).
@@ -284,15 +399,27 @@ def aiter_layer_norm_noaffine_ok(x, weight, bias, eps: float) -> torch.Tensor:
 
 # --- Softmax --------------------------------------------------------------
 def torch_softmax_lastdim(x: torch.Tensor) -> torch.Tensor:
-    """Production row-softmax baseline: ``torch.softmax(x, dim=-1)``.
+    """Production row-softmax baseline.
 
-    AITER exposes no standalone dense row-softmax (only ``topk_softmax`` for MoE
-    routing), so the honest production op is the framework path: on ROCm
-    ``torch.softmax`` lowers to a fused MIOpen/rocm softmax kernel. Documented as
-    the framework production baseline per the KORE ABI.
+    Newer AITER ships a standalone Triton row-softmax
+    (``aiter.ops.triton.softmax.softmax``), which is the honest vendor production
+    op when available (2D ``[n_rows, n_cols]`` row-softmax over the last dim). We
+    try it first and tag ``aiter_vendor``. When it is unavailable (older AITER,
+    triton mismatch, or a >2D input the Triton kernel does not accept) we fall
+    back to the torch framework path: on ROCm ``torch.softmax`` lowers to a fused
+    MIOpen/rocm softmax kernel -- the documented framework production baseline.
     """
-    _mark_baseline("framework")
-    return torch.softmax(x, dim=-1)
+    try:
+        if x.dim() != 2:
+            raise ValueError("aiter triton softmax expects a 2D [rows, cols] input")
+        import importlib
+        _sm = importlib.import_module("aiter.ops.triton.softmax")
+        out = _sm.softmax(x)
+        _mark_baseline("aiter_vendor")
+        return out
+    except Exception:  # noqa: BLE001 - aiter/triton unavailable or non-2D input
+        _mark_baseline("framework")
+        return torch.softmax(x, dim=-1)
 
 
 # --- GELU (tanh approximation) -------------------------------------------

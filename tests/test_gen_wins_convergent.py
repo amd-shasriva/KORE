@@ -214,11 +214,26 @@ class _MarkerEnv:
         wall = _meta(source, "wall")
         snr = _meta(source, "snr") or 999.0
         correct = _meta(source, "correct") != 0.0
-        return Observation(
+        wall_ms = (wall / 1000.0 if wall is not None else None)
+        baseline_ms = 1.0
+        obs = Observation(
             compiled=True, validation_passed=correct, snr_db=snr,
             snr_by_shape={"s": snr},
-            wall_ms=(wall / 1000.0 if wall is not None else None),
-            baseline_ms=1.0, dtype="bf16")
+            wall_ms=wall_ms,
+            baseline_ms=baseline_ms, dtype="bf16")
+        # New admission contract (baseline-relative + variance-gated): a kernel is a
+        # win only if it is measured 'faster' than the baseline with low CV. Emit the
+        # per-shape timing classification + tight CVs the real verifier now produces.
+        faster = wall_ms is not None and wall_ms < baseline_ms
+        obs.timing_classification_by_shape = {"s": "faster" if faster else "tie"}
+        obs.candidate_cv_by_shape = {"s": 1.0}
+        obs.baseline_cv_by_shape = {"s": 1.0}
+        obs.paired_ratio_cv_by_shape = {"s": 1.0}
+        obs.cv_pct = 1.0
+        obs.baseline_cv_pct = 1.0
+        obs.paired_ratio_cv_pct = 1.0
+        obs.paired_ci_half_width_pct = 1.0
+        return obs
 
 
 class _SeqTeacher:

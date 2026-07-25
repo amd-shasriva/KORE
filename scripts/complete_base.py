@@ -261,6 +261,23 @@ def main():
     if not tasks:
         print("[base] COMPLETE: no tasks", flush=True)
         return 0
+    # Defense-in-depth: never generate for held-out/eval tasks even if an explicit
+    # --tasks list (e.g. from the partition) includes one (prevents eval leakage).
+    from kore.tasks.registry import is_heldout as _is_heldout, get_task as _get_task, task_ids as _task_ids
+    _known_ids = set(_task_ids())
+    _kept = []
+    for _t in tasks:
+        try:
+            if _t in _known_ids and _is_heldout(_get_task(_t)):
+                print(f"[base] SKIP held-out task {_t}", flush=True)
+                continue
+        except Exception:
+            pass
+        _kept.append(_t)
+    tasks = _kept
+    if not tasks:
+        print("[base] COMPLETE: no train tasks after held-out filter", flush=True)
+        return 0
     n_workers = min(a.workers or (len(gpu_ids) * 4), len(tasks))
     if n_workers < 1:
         ap.error("--workers must be non-negative")

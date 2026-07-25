@@ -283,6 +283,12 @@
       "classification": "diagnostic",
       "lifecycle": "active",
       "role": "one-node gfx950 GPU smoke validating the merged verifier/reward + genb seeds + accelerator-gated tests"
+    },
+    {
+      "path": "scripts/quarantine_heldout_wins.py",
+      "classification": "destructive",
+      "lifecycle": "active",
+      "role": "move held-out/eval-leaked win/repair/groups shards to _quarantine (dry-run default, --apply to move)"
     }
   ]
 }

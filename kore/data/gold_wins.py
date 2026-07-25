@@ -42,7 +42,7 @@ from kore.obs import get_logger
 log = get_logger("data.gold_wins")
 
 DEFAULT_SNR_GATE = 40.0      # dB; group candidates sit at 76-999 dB, so this keeps clearly-correct only
-DEFAULT_MIN_SPEEDUP = 1.02   # only demonstrate a REAL improvement over the parent
+DEFAULT_MIN_SPEEDUP = 1.05   # only demonstrate a REAL improvement over the parent (raised 1.02->1.05: frontier gate)
 DEFAULT_ARCH = "gfx950"  # KORE target = MI350X/CDNA4 (matches registry.TRAIN_ARCH)
 
 
@@ -113,7 +113,19 @@ def mint_gold_win(group: dict, arch: Optional[str] = None,
     # never cherry-picks the worst variant to inflate the demonstrated gain).
     baseline = sorted(slower, key=lambda c: c["wall_us"])[(len(slower) - 1) // 2]
     speedup = baseline["wall_us"] / best["wall_us"]
-    if speedup < min_speedup:
+    # Significance gate (frontier upgrade): the demonstrated gain must clear
+    # min_speedup by ~2 sigma of the paired-ratio measurement noise, not just
+    # tie it. When the group carries no paired-ratio CV, sigma defaults to 0
+    # and this reduces to a strict speedup > min_speedup threshold.
+    _prc = best.get("paired_ratio_cv_pct")
+    try:
+        paired_ratio_cv_pct = float(_prc)
+    except (TypeError, ValueError):
+        paired_ratio_cv_pct = 0.0
+    import math as _math
+    if not _math.isfinite(paired_ratio_cv_pct):
+        paired_ratio_cv_pct = 0.0
+    if not (speedup - 1.96 * paired_ratio_cv_pct / 100.0 > min_speedup):
         return None
 
     a = str(arch or group.get("arch") or group.get("gpu") or DEFAULT_ARCH)
@@ -156,6 +168,16 @@ def mint_gold_win(group: dict, arch: Optional[str] = None,
         operation=op,
         arch=a,
         shape=group.get("shape"),
+        baseline_type=(group.get("baseline_type")
+                       or baseline.get("baseline_type")),
+        baseline_wall_us=round(float(baseline["wall_us"]), 3),
+        final_cv_pct=best.get("cv_pct"),
+        baseline_cv_pct=(best.get("baseline_cv_pct")
+                         or baseline.get("baseline_cv_pct")),
+        paired_ratio_cv_pct=(paired_ratio_cv_pct or None),
+        paired_ci_half_width_pct=best.get("paired_ci_half_width_pct"),
+        admit_cv_threshold_pct=None,
+        timing_classification=best.get("timing_classification"),
     )
 
 
@@ -193,11 +215,20 @@ def mint_gold_wins(
                     groups.append(g)
     rng.shuffle(groups)
 
+    # Fail-closed held-out guard: never mint a gold GENERATION target from a
+    # group whose (task/FAMILY/arch/dtype) is reserved for eval - that would
+    # leak an eval kernel into the SFT wins pool (KORE Sec 4.4).
+    from kore.tasks.registry import is_heldout_record
     per_task: dict[str, int] = {}
     out: list[WinRecord] = []
     for g in groups:
         if len(out) >= cap:
             break
+        try:
+            if is_heldout_record(g):
+                continue
+        except Exception:  # noqa: BLE001 - a classifier hiccup must not abort
+            pass
         tid = str(g.get("task_id", "?"))
         if per_task.get(tid, 0) >= per_task_cap:
             continue

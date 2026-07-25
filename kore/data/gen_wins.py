@@ -367,6 +367,96 @@ def build_convergent_trajectory(
     }
 
 
+def _primary_shape_name(env) -> Optional[str]:
+    """Name of the shape the win is admitted on (primary -> minimal -> first).
+
+    Mirrors :meth:`KoreEnv._shapes`/``evaluate`` primary selection so the
+    admission gate reads the SAME shape the verifier keys its per-shape timing
+    maps under. Fully fail-safe: any missing attribute yields ``None`` and the
+    caller degrades to the obs' top-level (max-across-shape) fields.
+    """
+    task = getattr(env, "task", None)
+    if task is None:
+        return None
+    for probe in ("primary", "minimal"):
+        try:
+            sh = task.shape(probe)
+        except Exception:  # noqa: BLE001 - stub tasks may not implement shape()
+            sh = None
+        if sh is not None:
+            return getattr(sh, "name", None)
+    shapes = getattr(task, "shapes", None) or []
+    if shapes:
+        return getattr(shapes[0], "name", None)
+    return None
+
+
+def _win_admissible(obs, env, cfg) -> tuple[bool, dict]:
+    """Baseline-relative, variance-gated stored-win admission (frontier upgrade).
+
+    A trajectory earns a place in the durable dataset ONLY when, on the primary
+    shape versus the task's DECLARED comparison_baseline, the winning kernel is
+    classified ``faster`` (baseline-relative, NOT self-speedup) AND every FINITE
+    measurement-variance figure is vendor-grade (<= ``cfg.win_admit_cv_threshold_pct``):
+    candidate CV, baseline CV, paired-ratio CV and the paired-ratio CI half-width.
+    Missing figures (``None``/non-finite) never *earn* admission on their own but
+    also never block it - the classification is the mandatory baseline-relative
+    gate. Returns ``(admit, fields)`` where ``fields`` are the WinRecord timing
+    provenance columns populated from ``obs`` (empty when ``obs`` is None).
+    """
+    if obs is None:
+        return False, {}
+    thr = float(getattr(cfg, "win_admit_cv_threshold_pct", 3.0))
+    sh_name = _primary_shape_name(env)
+    tc_by_shape = getattr(obs, "timing_classification_by_shape", None) or {}
+    if sh_name is not None and sh_name in tc_by_shape:
+        classification = tc_by_shape.get(sh_name)
+    elif tc_by_shape:
+        # No resolvable primary key: require EVERY measured shape to be faster
+        # (strictly conservative - never admits on a partial "faster").
+        vals = list(tc_by_shape.values())
+        classification = "faster" if all(v == "faster" for v in vals) else (
+            vals[0] if vals else None)
+    else:
+        classification = None
+
+    cvs = (
+        getattr(obs, "cv_pct", None),
+        getattr(obs, "baseline_cv_pct", None),
+        getattr(obs, "paired_ratio_cv_pct", None),
+        getattr(obs, "paired_ci_half_width_pct", None),
+    )
+
+    def _cv_ok(v) -> bool:
+        # Only FINITE figures are gated; absent/non-finite figures do not block.
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return True
+        import math as _math
+        return (not _math.isfinite(fv)) or fv <= thr
+
+    cv_gate = all(_cv_ok(v) for v in cvs)
+    admit = (classification == "faster") and cv_gate
+
+    baseline_type = getattr(getattr(env, "task", None), "comparison_baseline", None)
+    baseline_wall_us = None
+    base_ms = getattr(obs, "baseline_ms", None)
+    if base_ms is not None:
+        baseline_wall_us = float(base_ms) * 1000.0
+    fields = {
+        "baseline_type": baseline_type,
+        "baseline_wall_us": baseline_wall_us,
+        "final_cv_pct": getattr(obs, "cv_pct", None),
+        "baseline_cv_pct": getattr(obs, "baseline_cv_pct", None),
+        "paired_ratio_cv_pct": getattr(obs, "paired_ratio_cv_pct", None),
+        "paired_ci_half_width_pct": getattr(obs, "paired_ci_half_width_pct", None),
+        "admit_cv_threshold_pct": thr,
+        "timing_classification": classification,
+    }
+    return admit, fields
+
+
 def generate_wins(
     task,
     teacher,
@@ -415,6 +505,11 @@ def generate_wins(
         initial_snr = obs.snr_db
         best_wall = initial_wall
         best_snr = obs.snr_db
+        # Retain the verifier obs per correct candidate so admission can read
+        # baseline-relative timing_classification + measurement CVs off the
+        # EXACT kernel the reconstructed trajectory ends on (map by source).
+        best_obs = obs
+        obs_by_src: dict[str, object] = {seed_src: obs}
         # Tier 2: profile the seed so turn 1 already targets the real bottleneck.
         seed_counters = _counters(seed_src) if rr.correct else None
 
@@ -472,6 +567,8 @@ def generate_wins(
             turns.append(WinTurn(response=response, cand_src=cand_src,
                                  correct=bool(c_rr.correct), wall_us=cand_wall,
                                  snr_db=c_obs.snr_db, mode=turn_mode))
+            if c_rr.correct:
+                obs_by_src[cand_src] = c_obs
 
             if not c_rr.correct:
                 feedback = _feedback(c_obs, c_rr)
@@ -490,6 +587,7 @@ def generate_wins(
                 best_src = cand_src
                 best_wall = cand_wall
                 best_snr = c_obs.snr_db
+                best_obs = c_obs
                 mode = "exploit"
                 # Tier 2: re-profile the new best so the next turn targets its bottleneck.
                 feedback = _feedback(c_obs, c_rr, counters=_counters(cand_src))
@@ -505,7 +603,17 @@ def generate_wins(
             improve_factor=_IMPROVE_FACTOR,
             include_regression_lesson=include_regression_lesson,
         )
-        is_win = built is not None
+        # A convergent reconstruction is NECESSARY but no longer SUFFICIENT:
+        # the frontier gate admits a stored win only if the winning kernel is
+        # baseline-relative FASTER on the primary shape AND every finite
+        # measurement CV is vendor-grade. Self-speedup is kept as telemetry.
+        self_speedup = built["speedup"] if built is not None else None
+        admit_obs = obs_by_src.get(built["final_source"], best_obs) \
+            if built is not None else best_obs
+        admissible, _admit_fields = (
+            _win_admissible(admit_obs, env, cfg) if built is not None
+            else (False, {}))
+        is_win = (built is not None) and admissible
         log.metric(
             "wins_summary", task=task.task_id, turns=gens, is_win=is_win,
             speedup=(built["speedup"] if is_win else None),
@@ -513,7 +621,10 @@ def generate_wins(
             final_wall_us=(built["final_wall_us"] if is_win else best_wall),
             best_snr=(built["snr_db"] if is_win else best_snr),
             kept_turns=(sum(1 for m in built["messages"] if m["role"] == "assistant")
-                        if is_win else 0),
+                        if built is not None else 0),
+            self_speedup=self_speedup,
+            admissible=admissible,
+            timing_classification=_admit_fields.get("timing_classification"),
         )
         if not is_win:
             return []
@@ -530,5 +641,13 @@ def generate_wins(
                 gpu=task.gpu_target,
                 operation=getattr(task, "operation", None),
                 arch=getattr(task, "gpu_target", None),
+                baseline_type=_admit_fields.get("baseline_type"),
+                baseline_wall_us=_admit_fields.get("baseline_wall_us"),
+                final_cv_pct=_admit_fields.get("final_cv_pct"),
+                baseline_cv_pct=_admit_fields.get("baseline_cv_pct"),
+                paired_ratio_cv_pct=_admit_fields.get("paired_ratio_cv_pct"),
+                paired_ci_half_width_pct=_admit_fields.get("paired_ci_half_width_pct"),
+                admit_cv_threshold_pct=_admit_fields.get("admit_cv_threshold_pct"),
+                timing_classification=_admit_fields.get("timing_classification"),
             )
         ]

@@ -61,6 +61,139 @@ def aiter_flash_attn(
     return out
 
 
+# --- fp8 flash attention (per-tensor descale), CK/ASM FMHA fwd -----------
+def aiter_flash_attn_fp8(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
+    causal: bool = False,
+    softmax_scale: Optional[float] = None,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_k: Optional[torch.Tensor] = None,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
+) -> torch.Tensor:
+    """AITER fp8 flash attention fwd (per-tensor descale).
+
+    Dense form ``aiter.flash_attn_fp8_pertensor_func(q, k, v, q_descale,
+    k_descale, v_descale, causal=, softmax_scale=)`` with q/k/v in the
+    arch-selected **OCP** fp8 e4m3 (``FP8_DTYPE`` -- e4m3fn on gfx950/CDNA4, NOT
+    FNUZ) and scalar fp32 descales; layout ``(B, S, H, D)``. When the varlen
+    packing args (``cu_seqlens_*`` + ``max_seqlen_*``) are supplied we call
+    ``aiter.flash_attn_varlen_fp8_pertensor_func`` instead (q/k/v packed
+    ``(total_tokens, H, D)``). Returns attention output in the fp8-fwd dtype.
+
+    Falls back to the bf16 CK FMHA path (:func:`aiter_flash_attn`, dequantizing
+    q/k/v via the descales) when the fp8 kernel is unavailable, and finally to
+    torch SDPA (framework).
+    """
+    import aiter
+
+    varlen = cu_seqlens_q is not None and cu_seqlens_k is not None
+    try:
+        if varlen:
+            out = aiter.flash_attn_varlen_fp8_pertensor_func(
+                q, k, v, q_descale, k_descale, v_descale,
+                cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                causal=causal, softmax_scale=softmax_scale,
+            )
+        else:
+            out = aiter.flash_attn_fp8_pertensor_func(
+                q, k, v, q_descale, k_descale, v_descale,
+                causal=causal, softmax_scale=softmax_scale,
+            )
+        _mark_baseline("aiter_vendor")
+        return out
+    except Exception:  # noqa: BLE001 - fp8 fmha kernel unavailable
+        # Dequantize with the per-tensor descales and run the bf16 CK FMHA path.
+        try:
+            qd = (q.float() * q_descale.float()).to(torch.bfloat16)
+            kd = (k.float() * k_descale.float()).to(torch.bfloat16)
+            vd = (v.float() * v_descale.float()).to(torch.bfloat16)
+            out = aiter.flash_attn_func(
+                qd, kd, vd, causal=causal, softmax_scale=softmax_scale
+            )
+            _mark_baseline("aiter_vendor")
+            return out
+        except Exception:  # noqa: BLE001 - no CK fmha at all -> torch SDPA
+            _mark_baseline("framework")
+            import torch.nn.functional as F
+            qd = (q.float() * q_descale.float()).to(torch.bfloat16)
+            kd = (k.float() * k_descale.float()).to(torch.bfloat16)
+            vd = (v.float() * v_descale.float()).to(torch.bfloat16)
+            # (B, S, H, D) -> (B, H, S, D) for SDPA.
+            o = F.scaled_dot_product_attention(
+                qd.transpose(1, 2), kd.transpose(1, 2), vd.transpose(1, 2),
+                is_causal=causal, scale=softmax_scale,
+            )
+            return o.transpose(1, 2)
+
+
+# --- Flash attention BACKWARD (CK/ASM FMHA bwd) --------------------------
+def aiter_flash_attn_backward_prepare(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    causal: bool = False,
+    softmax_scale: Optional[float] = None,
+):
+    """Build the autograd graph for one FMHA fwd and return a **zero-arg closure**
+    that runs ONLY the backward pass, so a caller can time the bwd in isolation.
+
+    This uses ``aiter.ops.mha.FlashAttnFunc`` (via ``aiter.flash_attn_func``,
+    which requires ``return_lse``/grad bookkeeping): the forward is executed here
+    (OUTSIDE the timed region) to populate the saved tensors + a random ``dout``;
+    the returned ``run_backward()`` invokes ``out.backward(dout, retain_graph=True)``
+    which dispatches into ``FlashAttnFunc.backward`` -> ``_flash_attn_backward``
+    (the CK/ASM FMHA bwd kernel producing dq/dk/dv). ``retain_graph=True`` lets
+    the harness call it repeatedly for a stable median.
+
+    q/k/v are ``(B, S, H, D)`` bf16 and MUST have ``requires_grad=True`` (the
+    caller sets this before building inputs). Returns ``run_backward`` plus the
+    leaf tensors so the caller can read/zero their ``.grad``.
+    """
+    import aiter
+
+    out = aiter.flash_attn_func(
+        q, k, v, causal=causal, softmax_scale=softmax_scale
+    )
+    dout = torch.randn_like(out)
+
+    def run_backward():
+        # ONLY this region is what a caller would time: the FMHA backward kernel.
+        for t in (q, k, v):
+            if t.grad is not None:
+                t.grad = None
+        out.backward(dout, retain_graph=True)
+        _mark_baseline("aiter_vendor")
+        return q.grad, k.grad, v.grad
+
+    return run_backward, (q, k, v), out, dout
+
+
+def aiter_flash_attn_backward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    causal: bool = False,
+    softmax_scale: Optional[float] = None,
+):
+    """Convenience one-shot FMHA backward baseline (fwd + a single bwd).
+
+    Prefer :func:`aiter_flash_attn_backward_prepare` in a benchmark so the
+    forward is excluded from timing; this helper runs the fwd then a single
+    backward and returns ``(dq, dk, dv)``. Uses ``aiter.ops.mha.FlashAttnFunc``
+    via ``aiter.flash_attn_func``.
+    """
+    run_backward, _leaves, _out, _dout = aiter_flash_attn_backward_prepare(
+        q, k, v, causal=causal, softmax_scale=softmax_scale
+    )
+    return run_backward()
+
+
 # --- Paged-KV decode attention (ROCm custom PA) --------------------------
 def aiter_paged_attention_decode(
     query: torch.Tensor,          # [num_seqs, num_q_heads, head_dim]

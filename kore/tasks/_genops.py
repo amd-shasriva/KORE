@@ -350,6 +350,126 @@ def _parse_shape(shape_str: str) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Vendor-baseline resolution (Wave1 aiter_ref wrappers)
+# --------------------------------------------------------------------------- #
+# The honest performance bar for a generated op is the kernel the production
+# serving stack actually calls, when one exists for this (family, dtype).  Where
+# AITER/hipBLASLt ship a real fused kernel we point ``baseline_fn`` at the thin
+# wrapper in ``kore.tasks.aiter_ref``; families with NO vendor kernel (plain
+# elementwise unary/binary, row reductions, non-gated fusions, w4a16/int4, and
+# norm/softmax BACKWARD which is not generated here) keep the torch baseline and
+# are labeled ``eager``/``framework``.  The whole vendor path is gated behind
+# ``KORE_USE_VENDOR_BASELINE`` (default ON, toggleable) so a torch-only bar can be
+# forced.  ALL vendor imports are lazy (inside the returned closures) so CPU
+# ``kore tasks`` discovery never needs a GPU or the aiter runtime.
+
+# Generated FUSION ops that ARE the LLM gated activations AITER ships as fused
+# kernels: the generated op takes two [M,N] operands (a, b) and computes
+# ``act(a) * b`` -- identical to AITER ``<act>_and_mul`` on ``cat([a, b], -1)``.
+_VENDOR_GATED_FUSION = {
+    "silu_mul": "aiter_silu_and_mul",
+    "gelu_mul": "aiter_gelu_tanh_and_mul",
+}
+
+
+def _use_vendor_baseline() -> bool:
+    """Whether to resolve generated baselines to vendor kernels (default ON)."""
+    return os.environ.get("KORE_USE_VENDOR_BASELINE", "1").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _vendor_baseline_kind(op: str, family: str, dtype: str) -> str:
+    """Static label for the baseline this (op, family, dtype) will use:
+    ``vendor`` (an AITER/hipBLASLt production kernel), ``torch_compile``
+    (compiler-fused torch bar for fusion/gemm_fusion when KORE_COMPILE_BASELINE
+    is on), or ``eager`` (plain torch multi-kernel).  Independent of GPU: it
+    reflects which code path ``_vendor_baseline`` selects."""
+    if _use_vendor_baseline():
+        if family == "gemm_fusion":
+            return "vendor"           # hipBLASLt dense GEMM / torch._scaled_mm fp8
+        if family == "fusion" and op in _VENDOR_GATED_FUSION:
+            return "vendor"           # AITER fused gated activation
+    # No vendor kernel for this family/op -> the torch bar.
+    if family in ("fusion", "gemm_fusion"):
+        return "torch_compile" if _compile_baseline_enabled() else "eager"
+    return "eager"
+
+
+def _vendor_baseline(op: str, family: str, dtype: str, torch_baseline):
+    """Return the baseline callable for a generated op.
+
+    When ``KORE_USE_VENDOR_BASELINE`` is on AND a production kernel exists for
+    this (family, dtype), return a closure that calls the vendor wrapper (imports
+    lazily; any failure degrades to ``torch_baseline`` so a missing aiter runtime
+    never breaks a bench).  Otherwise return ``torch_baseline`` unchanged."""
+    if not _use_vendor_baseline():
+        return torch_baseline
+
+    # --- FUSION: AITER fused gated activations (silu_mul / gelu_mul) ----------
+    if family == "fusion" and op in _VENDOR_GATED_FUSION:
+        wrapper_name = _VENDOR_GATED_FUSION[op]
+
+        def _vendor_gated(a, b):
+            import torch  # noqa: F401 - keep torch import lazy/local
+            from kore.tasks import aiter_ref
+            wrapper = getattr(aiter_ref, wrapper_name)
+            # AITER <act>_and_mul consumes one [M, 2*inter] tensor and returns
+            # act(first_half) * second_half -> identical to the generated op's
+            # act(a) * b on cat([a, b], -1).
+            return wrapper(torch.cat([a, b], dim=-1))
+
+        return _vendor_gated
+
+    # --- GEMM_FUSION: hipBLASLt fused-epilogue GEMM / torch._scaled_mm (fp8) --
+    if family == "gemm_fusion":
+        spec: GemmFusionSpec = _registry()[op][1]
+        act = _torch_act(spec.act)
+        has_bias = spec.has_bias
+
+        if dtype == "fp8":
+            def _vendor_scaled_mm(*xs):
+                # OCP-fp8 (e4m3fn) fused GEMM via torch._scaled_mm -> hipBLASLt.
+                # Per-tensor descales recovered from the fp8 operands; bias fused
+                # in the scaled_mm epilogue, activation applied on the bf16 out.
+                import torch
+                from kore.tasks.aiter_ref import _mark_baseline
+                a, b = xs[0], xs[1]
+                one = torch.tensor(1.0, dtype=torch.float32, device=a.device)
+                bias = xs[2].to(torch.bfloat16) if has_bias else None
+                try:
+                    y = torch._scaled_mm(
+                        a, b, scale_a=one, scale_b=one,
+                        bias=bias, out_dtype=torch.bfloat16,
+                    )
+                    _mark_baseline("hipblaslt_vendor")
+                except Exception:  # noqa: BLE001 - scaled_mm unsupported -> hipBLASLt bf16
+                    _mark_baseline("hipblaslt_vendor")
+                    y = torch.matmul(a.to(torch.bfloat16), b.to(torch.bfloat16))
+                    if has_bias:
+                        y = y + xs[2].to(torch.bfloat16)
+                return act(y)
+
+            return _vendor_scaled_mm
+
+        def _vendor_hipblaslt_epilogue(*xs):
+            # bf16/fp16: torch.matmul dispatches to the hipBLASLt tuned GEMM (the
+            # production dense-GEMM library); the bias+activation epilogue is the
+            # fused-epilogue bar.  torch.compile fuses the epilogue INTO the GEMM
+            # when KORE_COMPILE_BASELINE is on (still hipBLASLt underneath).
+            from kore.tasks.aiter_ref import _mark_baseline
+            _mark_baseline("hipblaslt_vendor")
+            return _fused_baseline(torch_baseline_gemm, f"gemm_fusion:{op}:{dtype}")(*xs)
+
+        # torch_baseline_gemm is the eager matmul+bias+act epilogue captured by the
+        # caller (identical math to the torch bar), reused so compile still fuses it.
+        torch_baseline_gemm = torch_baseline
+        return _vendor_hipblaslt_epilogue
+
+    # No vendor kernel: keep the torch baseline (eager/torch_compile).
+    return torch_baseline
+
+
 def make_reference(op: str, family: str, dtype: str) -> dict:
     """Build the reference.py module namespace for a generated op."""
     import torch
@@ -381,6 +501,7 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
             return s.torch_fn(x)
 
         arity = 1
+        baseline_kind = _vendor_baseline_kind(op, family, dtype)
     elif family == "binary":
         s: BinarySpec = spec
         ga = _mk("signed")
@@ -396,6 +517,7 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
             return s.torch_fn(x, y)
 
         arity = 2
+        baseline_kind = _vendor_baseline_kind(op, family, dtype)
     elif family == "reduce":
         s: ReduceSpec = spec
         gx = _mk("signed")
@@ -410,6 +532,7 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
             return s.torch_fn(x)
 
         arity = 1
+        baseline_kind = _vendor_baseline_kind(op, family, dtype)
     elif family == "fusion":
         s: FusionSpec = spec
         gen = _mk("signed")
@@ -427,6 +550,8 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
             # back to eager multi-kernel when compile is off/unavailable.
             return _fused_baseline(s.torch_fn, f"fusion:{op}:{dtype}")(*xs)
 
+        baseline_fn = _vendor_baseline(op, family, dtype, baseline_fn)
+        baseline_kind = _vendor_baseline_kind(op, family, dtype)
         arity = s.arity
     elif family == "gemm_fusion":
         s: GemmFusionSpec = spec
@@ -464,6 +589,8 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
             # chain (which would inflate the speedup). Falls back to eager otherwise.
             return _fused_baseline(_eager_gemm_epilogue, f"gemm_fusion:{op}:{dtype}")(*xs)
 
+        baseline_fn = _vendor_baseline(op, family, dtype, baseline_fn)
+        baseline_kind = _vendor_baseline_kind(op, family, dtype)
         arity = 3 if s.has_bias else 2
     else:
         raise ValueError(f"unknown family {family!r}")
@@ -477,6 +604,7 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
         "entry_name": op,
         "dtype_name": dtype,
         "family": family,
+        "baseline_kind": baseline_kind,
         "mutates_input": False,
     }
     ns[f"{op}_ref"] = ref_fn   # conventional alias
@@ -1167,6 +1295,7 @@ def _run_paired_samples(ref, task_dir, shape, warmup, iters, repeat,
         payload = {
             "pair": run,
             "order": "AB" if first else "BA",
+            "baseline_kind": getattr(ref, "baseline_kind", None),
             "candidate_ms": cm,
             "baseline_ms": rm,
             "ratio": ratio,

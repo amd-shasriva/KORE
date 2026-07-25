@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger(__name__)
 
 GPU_DEFAULT = "gfx950"  # KORE target = MI350X/CDNA4 (matches registry.TRAIN_ARCH)
-RECORD_SCHEMA_VERSION = 1
+RECORD_SCHEMA_VERSION = 2
 SCHEMA_VERSION_FIELD = "schema_version"
 LEGACY_QUARANTINE_LANE = "kore-legacy-quarantine-v1"
 
@@ -157,6 +157,16 @@ class WinRecord:
     operation: str | None = None
     arch: str | None = None
     shape: str | None = None
+    # Timing-rigor provenance (frontier-baselines upgrade). All optional so
+    # existing v1 shards round-trip unchanged (defaults None on read).
+    baseline_type: str | None = None
+    baseline_wall_us: float | None = None
+    final_cv_pct: float | None = None
+    baseline_cv_pct: float | None = None
+    paired_ratio_cv_pct: float | None = None
+    paired_ci_half_width_pct: float | None = None
+    admit_cv_threshold_pct: float | None = None
+    timing_classification: str | None = None
     schema_version: ClassVar[int] = RECORD_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
@@ -177,6 +187,15 @@ class WinRecord:
             operation=d.get("operation"),
             arch=d.get("arch"),
             shape=d.get("shape"),
+            # v1->v2 timing-rigor fields; absent in v1 shards -> default None.
+            baseline_type=d.get("baseline_type"),
+            baseline_wall_us=d.get("baseline_wall_us"),
+            final_cv_pct=d.get("final_cv_pct"),
+            baseline_cv_pct=d.get("baseline_cv_pct"),
+            paired_ratio_cv_pct=d.get("paired_ratio_cv_pct"),
+            paired_ci_half_width_pct=d.get("paired_ci_half_width_pct"),
+            admit_cv_threshold_pct=d.get("admit_cv_threshold_pct"),
+            timing_classification=d.get("timing_classification"),
         )
 
 
@@ -444,6 +463,23 @@ def _validate_win(d: dict) -> None:
         _validate_optional_number(d, numeric_key, "record")
 
 
+def _validate_win_v2(d: dict) -> None:
+    # v2 keeps every v1 rule and additionally validates the optional
+    # timing-rigor fields (all default null; present values must be well-formed).
+    _validate_win(d)
+    for numeric_key in (
+        "baseline_wall_us", "final_cv_pct", "baseline_cv_pct",
+        "paired_ratio_cv_pct", "paired_ci_half_width_pct",
+        "admit_cv_threshold_pct",
+    ):
+        _validate_optional_number(d, numeric_key, "record")
+    for string_key in ("baseline_type", "timing_classification"):
+        value = d.get(string_key)
+        if value is not None and not isinstance(value, str):
+            raise _validation_error(
+                f"record.{string_key}", "must be a string or null")
+
+
 def _validate_agentic(d: dict) -> None:
     if "messages" not in d:
         raise _validation_error("record", "missing required field 'messages'")
@@ -517,10 +553,17 @@ def _validate_production_envelope(d: dict) -> None:
 
 
 _RECORD_VERSION_VALIDATORS = {
+    # v1 validators are retained so existing v1 shards still read/validate.
     ("repair", 1): _validate_repair,
     ("ranked_group", 1): _validate_ranked_group,
     ("win", 1): _validate_win,
     ("agentic", 1): _validate_agentic,
+    # v2 (frontier-baselines): only WinRecord gained fields; other record
+    # types are structurally unchanged and reuse their v1 validators.
+    ("repair", 2): _validate_repair,
+    ("ranked_group", 2): _validate_ranked_group,
+    ("win", 2): _validate_win_v2,
+    ("agentic", 2): _validate_agentic,
 }
 
 

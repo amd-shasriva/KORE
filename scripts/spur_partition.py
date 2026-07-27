@@ -191,6 +191,87 @@ def work_item(
     )
 
 
+def reverify_item(
+    data_root: Path,
+    task_id: str,
+    *,
+    comparison_baseline: str | None = None,
+    dtype: str | None = None,
+    operation: str | None = None,
+    frontier_weight: float | None = None,
+) -> WorkItem | None:
+    """Cost-weighted work item for the REVERIFY stage.
+
+    Selects any train task that already has a non-derived wins/groups/repair shard
+    (reverify re-measures EXISTING kernels; it never generates). Cost models the
+    re-evaluation budget: every ranked-groups candidate + every distinct win + every
+    repair record is re-benched, so cost scales with the record volume, biased up for
+    hard compute-bound frontier families (their benches dominate wall time).
+    """
+    wins = distinct_wins(data_root / "wins" / f"{task_id}.jsonl")
+    n_groups = jsonl_record_count(data_root / "groups" / f"{task_id}.jsonl")
+    n_repair = jsonl_record_count(data_root / "repair" / f"{task_id}.jsonl")
+    if not (wins or n_groups or n_repair):
+        return None
+    # Groups candidates dominate (each is compiled + benched); wins/repair re-verify
+    # once each. Base cost is the total records touched.
+    base = n_groups + wins + n_repair
+    frontier = is_frontier_task(comparison_baseline, dtype, operation)
+    if frontier:
+        weight = _frontier_weight() if frontier_weight is None else frontier_weight
+        base = int(round(base * weight))
+    return WorkItem(
+        task_id=task_id,
+        cost=max(1, base),
+        needs_deepen=False,
+        needs_base=False,
+        wins=wins,
+        missing_repair=not n_repair,
+        missing_groups=not n_groups,
+    )
+
+
+def evolve_item(
+    data_root: Path,
+    task_id: str,
+    target: int,
+    *,
+    comparison_baseline: str | None = None,
+    dtype: str | None = None,
+    operation: str | None = None,
+    frontier_weight: float | None = None,
+) -> WorkItem | None:
+    """Cost-weighted work item for the EVOLVE stage.
+
+    Selects tasks that are UNDER target distinct wins (need to be topped up) OR are
+    hard compute-bound frontier families (re-pushed from 'beats eager' toward
+    'beats vendor' even when already at target). Cost is the evolutionary search
+    budget, biased up for frontier families.
+    """
+    wins = distinct_wins(data_root / "wins" / f"{task_id}.jsonl")
+    n_evolve = distinct_wins(data_root / "wins" / f"{task_id}.evolve.jsonl")
+    have = wins + n_evolve
+    need = max(0, target - have)
+    frontier = is_frontier_task(comparison_baseline, dtype, operation)
+    if not (need or frontier):
+        return None
+    # Each evolve_task run is an island search (generations x candidates); budget a
+    # few runs per under-target win plus a floor for frontier re-push.
+    base = max(need * 4, 3 if frontier else 0)
+    if frontier:
+        weight = _frontier_weight() if frontier_weight is None else frontier_weight
+        base = int(round(base * weight))
+    return WorkItem(
+        task_id=task_id,
+        cost=max(1, base),
+        needs_deepen=bool(need),
+        needs_base=False,
+        wins=have,
+        missing_repair=False,
+        missing_groups=False,
+    )
+
+
 def balanced_partition(items: Iterable[WorkItem], n_shards: int) -> list[list[WorkItem]]:
     """Deterministic LPT partition with disjoint, complete assignment."""
     if n_shards < 1:
@@ -227,6 +308,13 @@ def main() -> int:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--shards", type=int, required=True)
     ap.add_argument("--target", type=int, default=3)
+    ap.add_argument(
+        "--mode",
+        choices=("datagen", "reverify", "evolve"),
+        default="datagen",
+        help="datagen: deep_/base_ lists (default). reverify/evolve: single "
+             "shard_NNN.txt list per node for the frontier stages.",
+    )
     # Comma-separated list of task-id prefixes to include. The default now
     # includes both generated (genb_) tasks AND the hand-authored frontier
     # compute-bound families (flash_attn_, gemm, moe, fused_) that carry no
@@ -288,42 +376,69 @@ def main() -> int:
     items = []
     for task_id in task_ids:
         task = tasks_by_id[task_id]
-        item = work_item(
-            data_root,
-            task_id,
-            args.target,
-            comparison_baseline=task.comparison_baseline,
-            dtype=task.dtype,
-            operation=task.operation,
-            frontier_weight=frontier_weight,
-        )
+        if args.mode == "reverify":
+            item = reverify_item(
+                data_root, task_id,
+                comparison_baseline=task.comparison_baseline,
+                dtype=task.dtype, operation=task.operation,
+                frontier_weight=frontier_weight,
+            )
+        elif args.mode == "evolve":
+            item = evolve_item(
+                data_root, task_id, args.target,
+                comparison_baseline=task.comparison_baseline,
+                dtype=task.dtype, operation=task.operation,
+                frontier_weight=frontier_weight,
+            )
+        else:
+            item = work_item(
+                data_root, task_id, args.target,
+                comparison_baseline=task.comparison_baseline,
+                dtype=task.dtype, operation=task.operation,
+                frontier_weight=frontier_weight,
+            )
         if item is not None:
             items.append(item)
     shards = balanced_partition(items, args.shards)
 
     manifest_shards = []
     for idx, shard in enumerate(shards):
-        deep = [item.task_id for item in shard if item.needs_deepen]
-        base = [item.task_id for item in shard if item.needs_base]
-        _atomic_text(out_dir / f"deep_{idx:03d}.txt", ",".join(deep))
-        _atomic_text(out_dir / f"base_{idx:03d}.txt", ",".join(base))
-        summary = {
-            "index": idx,
-            "cost": sum(item.cost for item in shard),
-            "tasks": len(shard),
-            "deepen": len(deep),
-            "base": len(base),
-        }
+        if args.mode in ("reverify", "evolve"):
+            # Single per-node task list; the stage worker does dynamic in-node load
+            # balancing across its 8 GPUs, so one list is all it needs.
+            ids = [item.task_id for item in shard]
+            _atomic_text(out_dir / f"shard_{idx:03d}.txt", ",".join(ids))
+            summary = {
+                "index": idx,
+                "cost": sum(item.cost for item in shard),
+                "tasks": len(shard),
+                "deepen": sum(item.needs_deepen for item in shard),
+                "base": 0,
+            }
+            print(f"shard={idx:03d} cost={summary['cost']} tasks={len(shard)}")
+        else:
+            deep = [item.task_id for item in shard if item.needs_deepen]
+            base = [item.task_id for item in shard if item.needs_base]
+            _atomic_text(out_dir / f"deep_{idx:03d}.txt", ",".join(deep))
+            _atomic_text(out_dir / f"base_{idx:03d}.txt", ",".join(base))
+            summary = {
+                "index": idx,
+                "cost": sum(item.cost for item in shard),
+                "tasks": len(shard),
+                "deepen": len(deep),
+                "base": len(base),
+            }
+            print(
+                f"shard={idx:03d} cost={summary['cost']} tasks={len(shard)} "
+                f"deepen={len(deep)} base={len(base)}"
+            )
         manifest_shards.append(summary)
-        print(
-            f"shard={idx:03d} cost={summary['cost']} tasks={len(shard)} "
-            f"deepen={len(deep)} base={len(base)}"
-        )
 
     manifest = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "repo_commit": _git_head(Path(__file__).resolve().parents[1]),
         "data_root": str(data_root),
+        "mode": args.mode,
         "target_wins": args.target,
         "max_attempts_per_task": args.max_attempts_per_task,
         "frontier_weight": frontier_weight,

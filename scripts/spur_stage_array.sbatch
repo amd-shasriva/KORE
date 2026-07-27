@@ -25,8 +25,6 @@ STAGE="${1:?arg1 must be the stage: reverify|evolve}"
 SHARD_DIR="${2:?arg2 must be the absolute shard directory}"
 DATA_ROOT="${3:-$REPO/data/b05factory}"
 TARGET="${4:-3}"
-WORKERS_PER_GPU="${KORE_STAGE_WORKERS_PER_GPU:-4}"
-GENS="${KORE_EVOLVE_GENERATIONS:-8}"
 ARRAY_ID="${SLURM_ARRAY_TASK_ID:?must be submitted as a Slurm array}"
 
 case "$STAGE" in
@@ -49,6 +47,13 @@ source /home/shasriva/kore-venv/bin/activate
 set -a
 source "$REPO/.env.local"
 set +a
+
+# Read tuning knobs AFTER .env.local so it can override them. reverify is
+# compile/CPU-bound with bursty GPU use (measured: 32 workers => ~14% of 236 cores,
+# 6/8 GPUs idle), and nodes have ~2.7TB RAM, so oversubscribe hard: ~80 workers/node
+# (10/GPU) puts roughly one worker per task and keeps all 8 GPUs fed.
+WORKERS_PER_GPU="${KORE_STAGE_WORKERS_PER_GPU:-10}"
+GENS="${KORE_EVOLVE_GENERATIONS:-8}"
 
 # Manifest preflight: the committed source deployed here must match the manifest.
 "$PY" - "$SHARD_DIR/manifest.json" "$REPO" "$DATA_ROOT" "$TARGET" "$ARRAY_ID" <<'PY'

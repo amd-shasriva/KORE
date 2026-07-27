@@ -89,7 +89,12 @@ fi
 # masks makes verifier children report hipErrorNoDevice.
 unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
 
-export PYTHONPATH=.
+# aiter (production vendor baselines) is a source checkout at repos/aiter; put it
+# on the path. AITER_USE_SYSTEM_TRITON=1 lets aiter run on the system triton (its
+# gluon kernels are gfx1250-only, irrelevant to mi355x/gfx950); wrappers fall back
+# to torch if any aiter op is unavailable.
+export PYTHONPATH=.:/home/shasriva/Kore-RL/KORE/repos/aiter
+export AITER_USE_SYSTEM_TRITON=1
 export KORE_VERIFIED_CORRECTNESS=1
 export KORE_COMPILE_BASELINE=1
 export KORE_BENCH_COLD=1

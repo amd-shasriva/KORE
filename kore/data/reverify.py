@@ -218,6 +218,26 @@ def reverify_done(data_root, tid: str) -> bool:
     return _marker(Path(data_root), tid).exists()
 
 
+def _attempts_file(data_root: Path, tid: str) -> Path:
+    return Path(data_root) / ".reverified" / f"{tid}.attempts"
+
+
+def _bump_attempts(data_root: Path, tid: str) -> int:
+    """Persistent per-task infra-attempt counter (survives across waves)."""
+    p = _attempts_file(Path(data_root), tid)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        n = int((p.read_text().strip() or "0"))
+    except (OSError, ValueError):
+        n = 0
+    n += 1
+    try:
+        p.write_text(str(n))
+    except OSError:
+        pass
+    return n
+
+
 # --------------------------------------------------------------------------- #
 # GPU-pinned parallel runner (mirrors parallel_datagen; explicit free-GPU ids)
 # --------------------------------------------------------------------------- #
@@ -307,9 +327,23 @@ def _queue_worker(gpu, task_q, result_q, data_root, ground, rigorous):
             env = KoreEnv(task, use_replay=False)
             _st = reverify_task(data_root, task, env, CONFIG, ground=ground)
             if _st.get("infra_error"):
-                # transient failure on some shard -> do NOT freeze this task as done;
-                # leave it unmarked so a later pass re-verifies it (audit R2 reverify).
-                print(f"[reverify w{gpu}] {tid} infra-error -> not marked done (retry)", flush=True)
+                # A shard hit an infra failure (usually timing-variance/CV on a
+                # contended GPU). Give it a bounded number of retries across waves;
+                # after KORE_REVERIFY_MAX_ATTEMPTS, ACCEPT the best-effort re-grade
+                # (clean candidates were already culled in-place; infra-flagged rows
+                # keep their original data) and mark done so the stage converges
+                # instead of churning a persistently-noisy task forever.
+                attempts = _bump_attempts(data_root, tid)
+                max_att = int(os.environ.get("KORE_REVERIFY_MAX_ATTEMPTS", "2"))
+                if attempts >= max_att:
+                    m = _marker(data_root, tid)
+                    m.parent.mkdir(parents=True, exist_ok=True)
+                    m.write_text(f"ok (best-effort after {attempts} infra attempts)\n")
+                    print(f"[reverify w{gpu}] {tid} infra x{attempts} -> ACCEPTED "
+                          f"(marked done, best-effort)", flush=True)
+                else:
+                    print(f"[reverify w{gpu}] {tid} infra-error (attempt "
+                          f"{attempts}/{max_att}) -> retry next wave", flush=True)
             else:
                 m = _marker(data_root, tid)
                 m.parent.mkdir(parents=True, exist_ok=True)

@@ -48,11 +48,20 @@ set -a
 source "$REPO/.env.local"
 set +a
 
-# Read tuning knobs AFTER .env.local so it can override them. reverify is
-# compile/CPU-bound with bursty GPU use (measured: 32 workers => ~14% of 236 cores,
-# 6/8 GPUs idle), and nodes have ~2.7TB RAM, so oversubscribe hard: ~80 workers/node
-# (10/GPU) puts roughly one worker per task and keeps all 8 GPUs fed.
-WORKERS_PER_GPU="${KORE_STAGE_WORKERS_PER_GPU:-10}"
+# Read tuning knobs AFTER .env.local so it can override them.
+#
+# CRITICAL: reverify is a TIMING-MEASUREMENT stage, not a compile-throughput one.
+# GPU oversubscription inflates per-bench timing variance (CV); the admission gate
+# then rejects the bench as unreliable (infra_error) and the task never converges.
+# Measured: 10 workers/GPU => ~55% of benches rejected on 'CV% exceeds threshold'.
+# So reverify runs FEW workers/GPU (quiet GPUs => clean CV => benches admitted).
+# evolve tolerates a little more: its teacher calls (~40s, GPU idle) naturally
+# stagger the short bench windows, so a few workers/GPU rarely collide.
+if [[ "$STAGE" == "reverify" ]]; then
+    WORKERS_PER_GPU="${KORE_REVERIFY_WPG:-2}"
+else
+    WORKERS_PER_GPU="${KORE_EVOLVE_WPG:-3}"
+fi
 GENS="${KORE_EVOLVE_GENERATIONS:-8}"
 
 # Manifest preflight: the committed source deployed here must match the manifest.

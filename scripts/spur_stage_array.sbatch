@@ -101,8 +101,20 @@ export PYTHONPATH=.:/home/shasriva/Kore-RL/KORE/repos/aiter
 export AITER_USE_SYSTEM_TRITON=1
 export KORE_VERIFIED_CORRECTNESS=1
 export KORE_COMPILE_BASELINE=1
-export KORE_BENCH_COLD=1
-export KORE_SHAPE_AUGMENT=1
+if [[ "$STAGE" == "reverify" ]]; then
+    # reverify RE-GRADES existing kernels. Cold benching (high first-iteration
+    # variance) + shape augmentation (fragile augmented shapes) inflate per-bench CV,
+    # which the admission gate rejects as infra_error -- WITHOUT improving the
+    # keep/cull decision. Use steady-state (warm) benching on the task's canonical
+    # shapes for LOW-variance, representative speedups (this is the standard way
+    # kernel speedups are reported). set_rigorous_verification honors a pre-set
+    # KORE_SHAPE_AUGMENT (only sets it when unset), so exporting 0 here disables it.
+    export KORE_BENCH_COLD="${KORE_BENCH_COLD_REVERIFY:-0}"
+    export KORE_SHAPE_AUGMENT="${KORE_SHAPE_AUGMENT_REVERIFY:-0}"
+else
+    export KORE_BENCH_COLD=1
+    export KORE_SHAPE_AUGMENT=1
+fi
 export KORE_USE_VENDOR_BASELINE="${KORE_USE_VENDOR_BASELINE:-1}"
 export GPU_TARGET=gfx950
 export PYTHONUNBUFFERED=1

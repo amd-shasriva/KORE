@@ -198,15 +198,32 @@ class EvolveCoordinator:
     (``max_runs``) per task so one impossible task cannot absorb the whole pool.
     """
 
-    def __init__(self, manager, tasks_have: dict, target: int, max_runs: int, inflight_cap: int):
+    def __init__(self, manager, tasks_have: dict, target: int, run_multiplier: int,
+                inflight_cap: int, min_runs: int = 3, max_runs_cap: int = 16):
+        """``max_runs`` is scaled PER TASK by its initial need, not a flat cap.
+
+        Each evolve_task run yields AT MOST one win (like datagen's generate_wins),
+        so a task needing N wins needs >=N SUCCESSFUL runs out of some larger
+        attempt budget (not every run improves on the seed). Budget per task is
+        ``max(need * run_multiplier, min_runs)``, capped at ``max_runs_cap`` so a
+        genuinely-impossible frontier task cannot absorb the whole pool -- mirrors
+        deepen_wins.py's ``max(need*3, need+2)`` oversample-attempt-budget model,
+        scaled up because evolve is a harder search (lower per-run hit rate) than a
+        single one-shot teacher trajectory. Frontier-at-target tasks (need=0, one
+        push run) get ``min_runs`` so a slow start still gets a few real attempts.
+        """
         self.target = int(target)
-        self.max_runs = max(1, int(max_runs))
         self.inflight_cap = max(1, int(inflight_cap))
         self._order = list(tasks_have)
         self.lock = manager.Lock()
         self.have = manager.dict({t: int(h) for t, h in tasks_have.items()})
         self.runs = manager.dict({t: 0 for t in tasks_have})
         self.inflight = manager.dict({t: 0 for t in tasks_have})
+        mult = max(1, int(run_multiplier))
+        self.max_runs = manager.dict({
+            t: min(max_runs_cap, max(min_runs, (self.target - int(h)) * mult))
+            for t, h in tasks_have.items()
+        })
 
     def _satisfied(self, t) -> bool:
         return self.have[t] >= self.target and self.runs[t] >= 1
@@ -224,7 +241,7 @@ class EvolveCoordinator:
                 any_incomplete = True
                 if self.inflight[t] > 0:
                     any_inflight = True
-                if self.runs[t] >= self.max_runs:
+                if self.runs[t] >= self.max_runs[t]:
                     continue  # budget exhausted; only awaiting in-flight results
                 if self.inflight[t] >= self.inflight_cap:
                     continue
@@ -334,9 +351,15 @@ def main():
                     default=int(os.environ.get("KORE_EVOLVE_GENERATIONS", "8")))
     ap.add_argument("--teacher", default="claude")
     ap.add_argument("--model-teacher", default=None)
-    ap.add_argument("--max-runs", type=int,
-                    default=int(os.environ.get("KORE_EVOLVE_MAX_RUNS", "4")),
-                    help="max island runs per task before giving up")
+    ap.add_argument("--run-multiplier", type=int,
+                    default=int(os.environ.get("KORE_EVOLVE_RUN_MULTIPLIER", "4")),
+                    help="per-task attempt budget = max(need*multiplier, --min-runs)")
+    ap.add_argument("--min-runs", type=int,
+                    default=int(os.environ.get("KORE_EVOLVE_MIN_RUNS", "3")),
+                    help="attempt budget floor (matters for at-target frontier pushes)")
+    ap.add_argument("--max-runs-cap", type=int,
+                    default=int(os.environ.get("KORE_EVOLVE_MAX_RUNS_CAP", "16")),
+                    help="hard per-task attempt ceiling (bounds impossible tasks)")
     ap.add_argument("--inflight", type=int,
                     default=int(os.environ.get("KORE_EVOLVE_INFLIGHT", "2")),
                     help="max concurrent island runs per task")
@@ -385,12 +408,14 @@ def main():
         ap.error("--workers must be positive")
 
     print(f"[evolve] START tasks={len(tasks)} target={a.target} gens={a.generations} "
-          f"gpus={gpu_ids} workers={n_workers} max_runs={a.max_runs} inflight={a.inflight} "
+          f"gpus={gpu_ids} workers={n_workers} run_multiplier={a.run_multiplier} "
+          f"min_runs={a.min_runs} max_runs_cap={a.max_runs_cap} inflight={a.inflight} "
           f"data_root={a.data_root}", flush=True)
 
     ctx = mp.get_context("spawn")
     manager = mp.Manager()
-    coord = EvolveCoordinator(manager, tasks_have, a.target, a.max_runs, a.inflight)
+    coord = EvolveCoordinator(manager, tasks_have, a.target, a.run_multiplier, a.inflight,
+                              min_runs=a.min_runs, max_runs_cap=a.max_runs_cap)
     result_q = manager.Queue()
 
     procs = []

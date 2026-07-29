@@ -282,6 +282,14 @@ class EvolveConfig:
     ph_delta: float = 0.05
     ph_lambda: float = 8.0
     model: Any = None                  # value model for prefilter (None -> heuristic)
+    # Frontier gate: emit a WinRecord only when the evolved kernel beats the
+    # COMPARISON (vendor) baseline the env measures against, not merely the seed.
+    # env.step runs under KORE_USE_VENDOR_BASELINE, so rr.speedup is baseline-relative;
+    # requiring it > vendor_win_min_speedup keeps evolve wins as honest as the reverify
+    # pass (a seed-beating-but-vendor-losing kernel is exactly a "fake win"). Set
+    # require_vendor_win=False only for stub-env tests that have no real baseline timing.
+    require_vendor_win: bool = True
+    vendor_win_min_speedup: float = 1.0
 
 
 @dataclass
@@ -385,6 +393,10 @@ def evolve_task(
         best_wall = seed_wall
         best_snr = seed_obs.snr_db
         best_correct = seed_rr.correct
+        # Baseline-relative speedup of the current best (vendor baseline via env cfg).
+        # Tracks best_wall because a fixed baseline means fastest wall == highest
+        # vendor speedup; used as the frontier admission gate for the emitted win.
+        best_vendor_speedup = seed_rr.speedup
 
         groups: list[RankedGroupRecord] = []
         trajectory: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -451,6 +463,7 @@ def evolve_task(
                     or (cand_wall is not None and cand_wall < best_wall * cfg.improve_factor)
                 ):
                     best_src, best_wall, best_snr, best_correct = src, cand_wall, obs.snr_db, True
+                    best_vendor_speedup = rr.speedup
                     gen_improved = True
                 feedback = _feedback(obs, rr)
 
@@ -492,12 +505,28 @@ def evolve_task(
             for rec in isl.elites():
                 merged.add(rec)
 
-        # ----- emit a WinRecord if we netted a speedup over the seed -----
+        # ----- emit a WinRecord only for a VENDOR-beating kernel (frontier gate) -----
+        # seed_rel is retained for reporting (improvement over the task's seed), but
+        # admission and the persisted speedup are BASELINE-relative so an evolve win is
+        # exactly as honest as a reverified win: a kernel that beats the seed but loses
+        # to the vendor kernel (aiter/hipBLASLt/CK/rocBLAS) is a fake win and is dropped.
         wins: list[WinRecord] = []
-        speedup = None
+        seed_rel = None
         if seed_wall and best_wall and best_wall > 0:
-            speedup = seed_wall / best_wall
-        is_win = best_correct and best_src != seed_src and speedup is not None and speedup > 1.0
+            seed_rel = seed_wall / best_wall
+        speedup = best_vendor_speedup  # baseline-relative; persisted on the WinRecord
+        if cfg.require_vendor_win:
+            is_win = (
+                best_correct and best_src != seed_src
+                and speedup is not None and speedup > cfg.vendor_win_min_speedup
+            )
+        else:
+            # Stub-env fallback (no real baseline timing): seed-relative gate.
+            is_win = (
+                best_correct and best_src != seed_src
+                and seed_rel is not None and seed_rel > 1.0
+            )
+            speedup = seed_rel
         if is_win:
             # CONVERGENT transcript (audit R2 datagen C2): a WinRecord must teach the
             # clean seed -> VERIFIED-winning-kernel demo in the canonical contract, NOT
@@ -509,11 +538,12 @@ def evolve_task(
             _op = str(getattr(task, "operation", None) or task.task_id or "kernel")
             _dt = task.dtype if getattr(task, "dtype", "") in (
                 "bf16", "fp16", "fp32", "fp8", "int8", "int4") else None
+            _ref = "the vendor baseline" if cfg.require_vendor_win else "the seed"
             _win_asst = format_assistant_turn(
                 _win_analysis(_op, float(best_wall), float(best_snr or 0.0),
                               float(speedup), dtype=_dt),
                 f"Adopt the fastest verified implementation for `{_op}` "
-                f"({speedup:.2f}x over the seed).",
+                f"({speedup:.2f}x vs {_ref}).",
                 best_src)
             win_trajectory = [
                 {"role": "system", "content": SYSTEM_PROMPT},

@@ -287,3 +287,53 @@ def test_evolve_task_deterministic_with_seed():
     assert r1.stats["n_benched"] == r2.stats["n_benched"]
     assert r1.stats["operator_pulls"] == r2.stats["operator_pulls"]
     assert (r1.stats["best_speedup"] or 0) == (r2.stats["best_speedup"] or 0)
+
+
+class _SlowVendorEnv:
+    """Every candidate beats the SEED (varied walls) but ALL lose to a very fast
+    vendor baseline (0.05 ms). A frontier-honest evolve must emit ZERO wins here:
+    a seed-beating-but-vendor-losing kernel is exactly the 'fake win' reverify culls."""
+
+    def __init__(self, task):
+        self.task = task
+
+    def step(self, source, full_validation=True, multi_shape=True):
+        h = int(hashlib.sha256(source.encode()).hexdigest(), 16)
+        wall = 2.0 - 0.05 * source.count("TUNE") - (h % 100) / 400.0
+        wall = max(0.15, wall)  # always >> the 0.05 ms vendor baseline -> speedup < 1
+        return Observation(
+            compiled=True, dtype=self.task.dtype, validation_passed=True,
+            snr_db=40.0, snr_by_shape={"s": 40.0},
+            wall_ms=wall, baseline_ms=0.05,
+            wall_by_shape={"s": wall}, baseline_by_shape={"s": 0.05},
+        )
+
+
+def test_evolve_frontier_gate_drops_vendor_losing_wins():
+    """The default (require_vendor_win=True) must NOT admit a kernel that beats the
+    seed but loses to the vendor baseline; the seed-relative fallback WOULD -- which
+    is precisely the fake-win path we disabled by default."""
+    task = _fake_task()
+    res = evolve_task(task, _teacher(), _SlowVendorEnv(task), generations=6,
+                      cfg=EvolveConfig(seed=0, islands=2))  # require_vendor_win=True default
+    assert res.wins == []  # vendor-losing candidates are not frontier wins
+
+    # Prove the gate is what suppressed them: the old seed-relative rule admits one.
+    res2 = evolve_task(task, _teacher(), _SlowVendorEnv(task), generations=6,
+                       cfg=EvolveConfig(seed=0, islands=2, require_vendor_win=False))
+    assert len(res2.wins) >= 1
+
+
+def test_evolve_win_speedup_is_vendor_relative():
+    """A win's persisted speedup must be baseline-relative (matches reverified wins),
+    not seed-relative -- with baseline 3.0 ms and sub-ms candidate walls it is > 1
+    and clearly larger than the modest seed-over-best ratio."""
+    task = _fake_task()
+    res = evolve_task(task, _teacher(), _FakeEnv(task), generations=6,
+                      cfg=EvolveConfig(seed=0, islands=2))
+    assert len(res.wins) >= 1
+    w = res.wins[0]
+    # baseline_ms=3.0, best wall is sub-2ms -> vendor speedup > 1 and equals baseline/final
+    assert w.speedup is not None and w.speedup > 1.0
+    assert w.final_wall_us is not None
+    assert abs(w.speedup - (3000.0 / w.final_wall_us)) < 0.05  # baseline(3ms)/final, us

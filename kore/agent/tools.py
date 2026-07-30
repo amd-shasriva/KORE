@@ -549,19 +549,54 @@ class ToolExecutor:
         # profiling is enabled (KORE_PROFILE_REWARD_WEIGHT>0), else honest stub.
         eff = getattr(obs, "profile_efficiency", None)
         available = eff is not None and not infra
-        return {
+        # FRONTIER GROUNDING: collect REAL rocprofv3 counters and return a
+        # PROFILE->DIAGNOSE->TRANSFORM chain so the agent reasons from measured
+        # hardware signal (bottleneck + the specific highest-impact fix), and the
+        # grounded reasoning is stored in the trajectory. Fail-safe: degrades to
+        # the efficiency scalar when counters can't be collected.
+        grounded = None
+        counters = None
+        if not infra and os.environ.get("KORE_AGENTIC_GROUND") == "1":
+            try:
+                from kore.data.grounded_reasoning import (
+                    collect_counters as _collect_counters,
+                    diagnose_bottleneck_rich as _diag_rich,
+                    _transform_hint as _tfx_hint,
+                )
+                counters = _collect_counters(self.env, src)
+                if counters:
+                    _label, _evidence = _diag_rich(counters)
+                    grounded = {
+                        "bottleneck": _label,
+                        "evidence": _evidence,
+                        "recommended_transform": _tfx_hint(_label),
+                    }
+            except Exception:  # noqa: BLE001 - profiling is advisory, never fatal
+                counters = None
+                grounded = None
+        result = {
             "ok": bool(obs.compiled) and not infra,
             "tool": "pmc",
             "infra_error": infra,
-            "available": bool(available),
+            "available": bool(available or grounded),
             "profile_efficiency": _round(eff, 3),
             "diagnosis": ("infrastructure error; retry this measurement" if infra else
-                          (f"roofline efficiency vs baseline: {eff:.2f} "
+                          (f"PROFILE->DIAGNOSE->TRANSFORM: {grounded['bottleneck']} "
+                           f"({grounded['evidence']}). Highest-impact fix: "
+                           f"{grounded['recommended_transform']}." if grounded
+                          else (f"roofline efficiency vs baseline: {eff:.2f} "
                           "(1.0 = as efficient as the vendor kernel)" if available
                           else "hardware-counter profiling disabled on this env "
-                               "(set KORE_PROFILE_REWARD_WEIGHT>0 to enable)")),
+                               "(set KORE_PROFILE_REWARD_WEIGHT>0 to enable)"))),
             "error": (obs.error_text or "infrastructure error") if infra else None,
         }
+        if grounded:
+            result["bottleneck"] = grounded["bottleneck"]
+            result["evidence"] = grounded["evidence"]
+            result["recommended_transform"] = grounded["recommended_transform"]
+            if isinstance(counters, dict):
+                result["counters"] = {k: counters[k] for k in list(counters)[:12]}
+        return result
 
     def _tool_keep(self, args: dict) -> dict:
         if self.candidate_src is None:

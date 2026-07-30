@@ -1853,7 +1853,8 @@ def _stage_build(ctx):
         if d.exists():
             for p in sorted(d.glob("*.jsonl")):
                 raw += read_jsonl(
-                    p, typed=True, mode="production_strict")
+                    p, typed=True,
+                    mode=("production_strict" if _production(ctx) else "legacy_quarantine"))
     raw = dedup_by_source_hash(raw)
     _log("build", f"gathered {len(raw)} deduped raw records")
 

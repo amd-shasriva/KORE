@@ -1,0 +1,276 @@
+{
+ "schema_version": "1.0",
+ "sources": [
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/FlagGems",
+   "repository_url": "https://github.com/FlagOpen/FlagGems",
+   "commit": "de8d0e9dd7886a4f8f2cde0044daadf58824505c",
+   "license": "Apache-2.0",
+   "source_id": "FlagGems",
+   "lineage_id": "https://github.com/FlagOpen/FlagGems@de8d0e9dd7886a4f8f2cde0044daadf58824505c",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/GEAK",
+   "repository_url": "https://github.com/AMD-AGI/GEAK",
+   "commit": "4965d5b2ccde927925c8c5501a25c1233daa52eb",
+   "license": "MIT",
+   "source_id": "GEAK",
+   "lineage_id": "https://github.com/AMD-AGI/GEAK@4965d5b2ccde927925c8c5501a25c1233daa52eb",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/HIP",
+   "repository_url": "https://github.com/ROCm/HIP",
+   "commit": "1377114f8220724206f1f5a770501fda11d8d1e1",
+   "license": "SEE-REPO",
+   "source_id": "HIP",
+   "lineage_id": "https://github.com/ROCm/HIP@1377114f8220724206f1f5a770501fda11d8d1e1",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/Liger-Kernel",
+   "repository_url": "https://github.com/linkedin/Liger-Kernel",
+   "commit": "e1eeb997701bd1196d532037cb628036875175fa",
+   "license": "BSD-2-Clause",
+   "source_id": "Liger-Kernel",
+   "lineage_id": "https://github.com/linkedin/Liger-Kernel@e1eeb997701bd1196d532037cb628036875175fa",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/MIOpen",
+   "repository_url": "https://github.com/ROCm/MIOpen",
+   "commit": "06977176afd94476c18d5290f21cb40745bb73a9",
+   "license": "SEE-REPO",
+   "source_id": "MIOpen",
+   "lineage_id": "https://github.com/ROCm/MIOpen@06977176afd94476c18d5290f21cb40745bb73a9",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/ROCmKernelWiki",
+   "repository_url": "https://github.com/jhinpan/ROCmKernelWiki",
+   "commit": "9252153f81b4e2e861d412b85033e79c3256c37d",
+   "license": "SEE-REPO",
+   "source_id": "ROCmKernelWiki",
+   "lineage_id": "https://github.com/jhinpan/ROCmKernelWiki@9252153f81b4e2e861d412b85033e79c3256c37d",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/Tensile",
+   "repository_url": "https://github.com/ROCm/Tensile",
+   "commit": "e8a8999e0e7374aaae546a6d7cb703d9e06b0ebf",
+   "license": "SEE-REPO",
+   "source_id": "Tensile",
+   "lineage_id": "https://github.com/ROCm/Tensile@e8a8999e0e7374aaae546a6d7cb703d9e06b0ebf",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/TransformerEngine",
+   "repository_url": "https://github.com/NVIDIA/TransformerEngine",
+   "commit": "aef96db0c0ee959f8197007e4ffad13bd4074003",
+   "license": "Apache-2.0",
+   "source_id": "TransformerEngine",
+   "lineage_id": "https://github.com/NVIDIA/TransformerEngine@aef96db0c0ee959f8197007e4ffad13bd4074003",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/aiter",
+   "repository_url": "https://github.com/ROCm/aiter",
+   "commit": "028756633e4192785217838f4924dc16516f5780",
+   "license": "MIT",
+   "source_id": "aiter",
+   "lineage_id": "https://github.com/ROCm/aiter@028756633e4192785217838f4924dc16516f5780",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/composable_kernel",
+   "repository_url": "https://github.com/ROCm/composable_kernel",
+   "commit": "8c5870f962db354cc175e9dd915be37615d79518",
+   "license": "MIT",
+   "source_id": "composable_kernel",
+   "lineage_id": "https://github.com/ROCm/composable_kernel@8c5870f962db354cc175e9dd915be37615d79518",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/cutlass",
+   "repository_url": "https://github.com/NVIDIA/cutlass",
+   "commit": "f94ec46f4f63f96003d6cfdf2014731e7672c281",
+   "license": "SEE-REPO",
+   "source_id": "cutlass",
+   "lineage_id": "https://github.com/NVIDIA/cutlass@f94ec46f4f63f96003d6cfdf2014731e7672c281",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/flash-attention",
+   "repository_url": "https://github.com/Dao-AILab/flash-attention",
+   "commit": "2402cb0bed7a2185cb9ddbe88fb998656cf73066",
+   "license": "BSD-3-Clause",
+   "source_id": "flash-attention",
+   "lineage_id": "https://github.com/Dao-AILab/flash-attention@2402cb0bed7a2185cb9ddbe88fb998656cf73066",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/hipCUB",
+   "repository_url": "https://github.com/ROCm/hipCUB",
+   "commit": "3d8584c373d96989bebf2b3305f311c1283aeb91",
+   "license": "SEE-REPO",
+   "source_id": "hipCUB",
+   "lineage_id": "https://github.com/ROCm/hipCUB@3d8584c373d96989bebf2b3305f311c1283aeb91",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/kernels",
+   "repository_url": "https://github.com/triton-lang/kernels",
+   "commit": "4f3d31f009ef6a113b44803194ac3412360e882a",
+   "license": "MIT",
+   "source_id": "kernels",
+   "lineage_id": "https://github.com/triton-lang/kernels@4f3d31f009ef6a113b44803194ac3412360e882a",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/pytorch",
+   "repository_url": "https://github.com/pytorch/pytorch",
+   "commit": "0dc2beb6f35031bfadcb72a01ea2573e22f97d46",
+   "license": "SEE-REPO",
+   "source_id": "pytorch",
+   "lineage_id": "https://github.com/pytorch/pytorch@0dc2beb6f35031bfadcb72a01ea2573e22f97d46",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/rccl",
+   "repository_url": "https://github.com/ROCm/rccl",
+   "commit": "57e58688f44c77076ad536ef1f6b68741fc6e694",
+   "license": "SEE-REPO",
+   "source_id": "rccl",
+   "lineage_id": "https://github.com/ROCm/rccl@57e58688f44c77076ad536ef1f6b68741fc6e694",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/rocFFT",
+   "repository_url": "https://github.com/ROCm/rocFFT",
+   "commit": "ce6b8be358024b4d4246db8317895ff16388cf9d",
+   "license": "SEE-REPO",
+   "source_id": "rocFFT",
+   "lineage_id": "https://github.com/ROCm/rocFFT@ce6b8be358024b4d4246db8317895ff16388cf9d",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/rocPRIM",
+   "repository_url": "https://github.com/ROCm/rocPRIM",
+   "commit": "14cd5e3c27a4b9ae7d510823a450723a03985ac0",
+   "license": "MIT",
+   "source_id": "rocPRIM",
+   "lineage_id": "https://github.com/ROCm/rocPRIM@14cd5e3c27a4b9ae7d510823a450723a03985ac0",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/rocRAND",
+   "repository_url": "https://github.com/ROCm/rocRAND",
+   "commit": "9a2aab8643f1e2390e202fc6a71e0e8ae181ac48",
+   "license": "SEE-REPO",
+   "source_id": "rocRAND",
+   "lineage_id": "https://github.com/ROCm/rocRAND@9a2aab8643f1e2390e202fc6a71e0e8ae181ac48",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/rocSOLVER",
+   "repository_url": "https://github.com/ROCm/rocSOLVER",
+   "commit": "fe28dc62bba3860872577f60a7c52b7d3d048367",
+   "license": "SEE-REPO",
+   "source_id": "rocSOLVER",
+   "lineage_id": "https://github.com/ROCm/rocSOLVER@fe28dc62bba3860872577f60a7c52b7d3d048367",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/rocSPARSE",
+   "repository_url": "https://github.com/ROCm/rocSPARSE",
+   "commit": "57ab6fadeaa55fead8e69f9a67b489502f35ac17",
+   "license": "SEE-REPO",
+   "source_id": "rocSPARSE",
+   "lineage_id": "https://github.com/ROCm/rocSPARSE@57ab6fadeaa55fead8e69f9a67b489502f35ac17",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/rocThrust",
+   "repository_url": "https://github.com/ROCm/rocThrust",
+   "commit": "8c061ed4f0628254578a3de28df775bea765f89d",
+   "license": "SEE-REPO",
+   "source_id": "rocThrust",
+   "lineage_id": "https://github.com/ROCm/rocThrust@8c061ed4f0628254578a3de28df775bea765f89d",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/rocWMMA",
+   "repository_url": "https://github.com/ROCm/rocWMMA",
+   "commit": "97562d33167f5dda32fa319cc5b4f62815bdd9e3",
+   "license": "SEE-REPO",
+   "source_id": "rocWMMA",
+   "lineage_id": "https://github.com/ROCm/rocWMMA@97562d33167f5dda32fa319cc5b4f62815bdd9e3",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/triton",
+   "repository_url": "https://github.com/triton-lang/triton",
+   "commit": "e7eab7dd36b76e085d1ec858c6cee3aa88208400",
+   "license": "MIT",
+   "source_id": "triton",
+   "lineage_id": "https://github.com/triton-lang/triton@e7eab7dd36b76e085d1ec858c6cee3aa88208400",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/unsloth",
+   "repository_url": "https://github.com/unslothai/unsloth",
+   "commit": "3b235895bdf08410e0a9032e663e82c0de60a6a4",
+   "license": "Apache-2.0",
+   "source_id": "unsloth",
+   "lineage_id": "https://github.com/unslothai/unsloth@3b235895bdf08410e0a9032e663e82c0de60a6a4",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/vllm",
+   "repository_url": "https://github.com/vllm-project/vllm",
+   "commit": "05d4f8bba3aac85814c3fc42cfc60bef21bb2bb4",
+   "license": "Apache-2.0",
+   "source_id": "vllm",
+   "lineage_id": "https://github.com/vllm-project/vllm@05d4f8bba3aac85814c3fc42cfc60bef21bb2bb4",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE/repos/xformers",
+   "repository_url": "https://github.com/facebookresearch/xformers",
+   "commit": "42fc265f8831e7f900ffb89f331a1b43e0dfa13f",
+   "license": "BSD-3-Clause",
+   "source_id": "xformers",
+   "lineage_id": "https://github.com/facebookresearch/xformers@42fc265f8831e7f900ffb89f331a1b43e0dfa13f",
+   "verified": true
+  },
+  {
+   "local_path": "/home/shasriva/Kore-RL/KORE",
+   "repository_url": "https://github.com/amd-shasriva/KORE.git",
+   "commit": "37b391bc71da8f8f0244f7d2a7ddd6806533954c",
+   "license": "MIT",
+   "source_id": "kore-repo",
+   "lineage_id": "https://github.com/amd-shasriva/KORE.git@37b391bc71da8f8f0244f7d2a7ddd6806533954c",
+   "verified": true
+  }
+ ],
+ "datasets": [
+  {
+   "dataset_id": "GPUMODE/KernelBook",
+   "revision": "b76504d85f7f14ef4b1fad81f136f638f2ce625b",
+   "license": "MIT",
+   "verified": true,
+   "repository_url": "https://huggingface.co/datasets/GPUMODE/KernelBook",
+   "split": "train"
+  },
+  {
+   "dataset_id": "GPUMODE/kernelbot-data",
+   "revision": "4159cf6b2c6bab208be6dda885d6d87631cc16df",
+   "license": "MIT",
+   "verified": true,
+   "repository_url": "https://huggingface.co/datasets/GPUMODE/kernelbot-data",
+   "split": "train"
+  }
+ ],
+ "holdouts": {}
+}

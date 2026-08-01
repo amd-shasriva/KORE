@@ -58,6 +58,7 @@ _CORE_CODE_PATHS: tuple[tuple[str, Path], ...] = tuple(
         key=lambda item: str(item),
     )
 )
+_REPLAY_DISABLED_ANNOUNCED: set[str] = set()
 _FINGERPRINT_LOCK = threading.RLock()
 _FILE_FINGERPRINT_CACHE: dict[
     str, tuple[tuple[int, int, int, int, int], dict[str, Any]]
@@ -494,6 +495,31 @@ def _toolchain_fingerprint(config: Any) -> dict[str, Any]:
     }
 
 
+def _announce_replay_disabled() -> None:
+    """Say once, per process, that replay caching cannot engage.
+
+    An evaluation is only replayable against an identity proving the hardware and
+    runtime were validated and found stable *before* the run. No producer of
+    ``KORE_PREFLIGHT_RUNTIME_IDENTITY`` exists yet, so the cache fails closed and
+    every candidate -- including one already measured -- costs a fresh GPU
+    evaluation. That is safe and slow, and the slowness should be attributable.
+    """
+    with _FINGERPRINT_LOCK:
+        if "no_identity" in _REPLAY_DISABLED_ANNOUNCED:
+            return
+        _REPLAY_DISABLED_ANNOUNCED.add("no_identity")
+    import logging
+
+    logging.getLogger("kore.env").info(
+        "replay caching disabled: no preflight runtime identity supplied "
+        "(argument or %s), so no evaluation is cacheable and replay_hits will "
+        "stay at 0. Every candidate costs a fresh GPU evaluation. This is "
+        "fail-closed by design -- an observation may only be replayed against "
+        "proof that the hardware and runtime were validated as stable.",
+        _PREFLIGHT_IDENTITY_ENV,
+    )
+
+
 def _validated_preflight_identity(
     identity: Optional[Mapping[str, Any]],
     *,
@@ -511,6 +537,11 @@ def _validated_preflight_identity(
             except json.JSONDecodeError:
                 return {"state": "invalid", "source": source, "reason": "invalid JSON"}, False
     if value is None:
+        # Fail-closed is correct, but silence here is not: the caller sees
+        # replay_hits stay at 0 forever and cannot tell "no duplicates" apart
+        # from "caching never engaged". Nothing in this repo emits the env var
+        # yet, so this is the permanent state until a producer ships.
+        _announce_replay_disabled()
         return {"state": "unknown", "source": "none"}, False
     try:
         value = _finite_json_copy(value, label="preflight runtime identity")

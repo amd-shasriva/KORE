@@ -239,14 +239,17 @@ def test_damaged_checkpoint_fails_closed_instead_of_restarting(tmp_path, damage)
 
 
 def test_damaged_newest_checkpoint_falls_back_to_the_previous_good_one(tmp_path):
-    # THE reason discovery is not just configs.latest_checkpoint: that helper only
-    # inspects the highest-numbered dir, so a half-written newest checkpoint makes
-    # it report "nothing to resume" even though checkpoint-1800 is intact - and the
-    # run would silently restart from step 0.
+    # A half-written newest checkpoint must not cost the run its history.
+    # configs.latest_checkpoint used to inspect only the highest-numbered dir and
+    # report "nothing to resume" here, which is why GRPO grew its own discovery;
+    # that helper now walks newest-first too, so both agree on checkpoint-1800.
     good = _write_checkpoint(tmp_path, 1800)
     _write_checkpoint(tmp_path, 1900, valid=False)
-    assert latest_checkpoint(tmp_path) is None
+    assert latest_checkpoint(tmp_path) == str(good)
 
+    # GRPO's discovery remains the stricter of the two: it additionally verifies
+    # the trainer state parses and the manifest's files are all present, so it
+    # rejects checkpoints that merely *have* a trainer_state.json.
     path, state = grpo._find_grpo_resume_checkpoint(_cfg(tmp_path))
     assert path == good and state["global_step"] == 1800
 

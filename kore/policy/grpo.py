@@ -3892,7 +3892,9 @@ def grpo_config_from_dict(d: dict):
     from kore.policy.model_spec import IDENTITY_CONFIG_KEYS, apply_runtime_settings, split_runtime_settings
     from kore.policy.resources import PREFLIGHT_CONFIG_KEYS
 
-    d = dict(d)
+    # Drop the repo's in-config comment keys (``_comment_<field>``) before the
+    # strict parse, matching midtrain, sft and dpo.
+    d = {k: v for k, v in d.items() if not k.startswith("_")}
     d.pop("tasks", None)          # handled by _main -> train_grpo(tasks=...)
     d.pop("lora", None)           # GRPO is full-FT only; ignore any stale LoRA block
     # Identity/preflight keys are not GRPOConfig fields; split them off before the

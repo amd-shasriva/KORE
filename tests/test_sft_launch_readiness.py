@@ -10,11 +10,12 @@ that exact commit is not in the local Hugging Face cache, and tests that read th
 packaged corpus skip when the committed ``data/release/sft/`` parts are absent,
 so a bare checkout still collects and passes.
 
-Four tests are marked ``xfail``: they assert the behaviour the readiness review
-concluded is *correct*, against code that does not implement it yet. Each one
-turns green the moment the corresponding proposed patch in
-``docs/SFT_READINESS.md`` lands, which is the point - they are the executable
-form of the blocker list.
+Four tests were originally marked ``xfail``: they asserted the behaviour the
+readiness review concluded was *correct*, against code that did not implement it
+yet. All four patches have since landed, so the markers are gone and the tests
+are ordinary regressions guarding the fixed behaviour - the shipped dataset
+path, a configurable ``save_total_limit`` >= 2, ``latest_checkpoint`` falling
+back past a half-written directory, and ``--dry-run`` validating its inputs.
 """
 
 from __future__ import annotations
@@ -161,14 +162,6 @@ def test_documented_row_count_is_consistent_across_the_repo():
     assert f"{DOCUMENTED_ROWS:,}" in status or str(DOCUMENTED_ROWS) in status
 
 
-@pytest.mark.xfail(
-    reason=(
-        "BLOCKER 1: configs/sft_14b_full.json points at data/sft/multicap.jsonl, "
-        "but data/release/reassemble.sh writes data/b05factory/sft/multicap.jsonl. "
-        "A direct `launch_distributed.sh sft configs/sft_14b_full.json` therefore "
-        "loads 14B on every rank and only then raises FileNotFoundError."
-    ),
-)
 def test_shipped_config_dataset_path_is_what_reassemble_produces():
     reassemble = (REPO / "data" / "release" / "reassemble.sh").read_text()
     assert "../b05factory/sft/multicap.jsonl" in reassemble
@@ -473,16 +466,6 @@ def test_latest_checkpoint_finds_a_complete_checkpoint(tmp_path):
     assert latest_checkpoint(tmp_path) == str(tmp_path / "checkpoint-300")
 
 
-@pytest.mark.xfail(
-    reason=(
-        "BLOCKER 3: latest_checkpoint() only inspects the highest-numbered "
-        "checkpoint dir. A crash while writing checkpoint-N leaves that dir "
-        "without trainer_state.json, so the function returns None and the run "
-        "silently restarts from step 0 even though a complete older checkpoint "
-        "is sitting right next to it. It should fall back to the newest "
-        "checkpoint that actually has trainer_state.json."
-    ),
-)
 def test_latest_checkpoint_falls_back_past_a_half_written_checkpoint(tmp_path):
     from kore.policy.configs import latest_checkpoint
 
@@ -567,13 +550,6 @@ def test_launcher_dry_run_emits_the_expected_accelerate_command():
 
 
 @pytest.mark.shell
-@pytest.mark.xfail(
-    reason=(
-        "GAP: --dry-run returns before the launcher validates that the config "
-        "and accelerate YAML exist, so the CI syntax check cannot catch a "
-        "mistyped config path."
-    ),
-)
 def test_launcher_dry_run_rejects_a_missing_config():
     launcher = REPO / "scripts" / "launch_distributed.sh"
     result = subprocess.run(
@@ -585,14 +561,6 @@ def test_launcher_dry_run_rejects_a_missing_config():
 # --------------------------------------------------------------------------- #
 # 6. Checkpoint retention and run-length arithmetic
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(
-    reason=(
-        "BLOCKER 2: sft.py hardcodes save_total_limit=1 and SFTConfig has no "
-        "such field, so a launch config cannot even express the >= 2 retention "
-        "that MidTrainConfig has and configs/midtrain_14b_full.json sets. "
-        "Measured on gfx950: one 14B SFT checkpoint is 221 GB."
-    ),
-)
 def test_sft_launch_config_can_request_more_than_one_checkpoint():
     from kore.policy.configs import MidTrainConfig
     from kore.policy.sft import sft_config_from_dict
@@ -606,13 +574,51 @@ def test_sft_launch_config_can_request_more_than_one_checkpoint():
     assert getattr(config, "save_total_limit") == 2
 
 
-def test_sft_save_total_limit_is_currently_hardcoded():
-    """Pins today's behaviour so the blocker above cannot be quietly re-broken."""
+def test_sft_save_total_limit_is_read_from_config_not_hardcoded():
+    """The retention knob must come from the config, and default to a resumable >= 2.
+
+    Inverted from the tripwire that pinned the old ``save_total_limit=1``
+    hardcode: 1 is not crash-safe, because the Trainer rotates the previous
+    checkpoint out around each new save.
+    """
+    from kore.policy.configs import SFTConfig
+    from kore.policy.sft import sft_config_from_dict
+
     source = (REPO / "kore" / "policy" / "sft.py").read_text()
-    assert "save_total_limit=1," in source, (
-        "sft.py no longer hardcodes save_total_limit=1 - update "
-        "docs/SFT_READINESS.md and the xfail above"
-    )
+    assert "save_total_limit=1," not in source
+    assert 'save_total_limit=getattr(config, "save_total_limit", 2)' in source
+
+    assert SFTConfig().save_total_limit >= 2
+    shipped = json.loads((REPO / "configs" / "sft_14b_full.json").read_text())
+    assert shipped["save_total_limit"] >= 2
+
+    # An explicit request is honoured rather than silently clamped.
+    config, _ = sft_config_from_dict(dict(_sft_config(), save_total_limit=3))
+    assert config.save_total_limit == 3
+
+
+def test_every_stage_loader_drops_the_in_config_comment_convention():
+    """``_comment_<field>`` keys must not reach a strict dataclass parse.
+
+    ``configs/midtrain_14b_full.json`` documents its choices with these keys and
+    midtrain stripped them, but sft/dpo/grpo did not -- so adding the same
+    documentation to any other stage's launch JSON crashed that stage.
+    """
+    from kore.policy.dpo import dpo_config_from_dict
+    from kore.policy.grpo import grpo_config_from_dict
+    from kore.policy.midtrain import midtrain_config_from_dict
+    from kore.policy.sft import sft_config_from_dict
+
+    noise = {"_comment_anything": "explanatory prose", "_note": 123}
+    loaders = {
+        "sft": (sft_config_from_dict, "configs/sft_14b_full.json"),
+        "dpo": (dpo_config_from_dict, "configs/dpo_14b_full.json"),
+        "grpo": (grpo_config_from_dict, "configs/grpo_14b_full.json"),
+        "midtrain": (midtrain_config_from_dict, "configs/midtrain_14b_full.json"),
+    }
+    for stage, (loader, path) in loaders.items():
+        raw = json.loads((REPO / path).read_text())
+        loader({**raw, **noise})  # must not raise
 
 
 def _sft_step_plan(rows_trained: int, config: dict, world_size: int) -> dict:

@@ -265,6 +265,15 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         stage="sft", config=config, model_spec=identity.spec,
         inspection=identity.inspection))
 
+    # The dataset is not read until after the model load (~minutes x world_size),
+    # so a bad path would otherwise cost a full 14B load on every rank to report.
+    if not Path(dataset_path).is_file():
+        raise FileNotFoundError(
+            f"sft: training dataset not found at {str(dataset_path)!r} "
+            f"(cwd={Path.cwd()}). Run `cd data/release && ./reassemble.sh` to "
+            "materialize the packaged corpus, or point dataset_path at the built shard."
+        )
+
     import torch
     from peft import LoraConfig
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -388,7 +397,7 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         gradient_checkpointing_kwargs={"use_reentrant": True},
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
-        save_total_limit=1,   # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill
+        save_total_limit=getattr(config, "save_total_limit", 2),
         report_to=config.report_to,
         dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
         dataloader_pin_memory=getattr(config, "dataloader_pin_memory", True),
@@ -461,7 +470,10 @@ def sft_config_from_dict(d: dict) -> tuple[SFTConfig, str]:
     not ``SFTConfig`` fields, so they are split off and attached as attributes -
     the strict dataclass parse stays strict and a pinned config still parses.
     """
-    d = dict(d)
+    # Underscore-prefixed keys are the repo's in-config comment convention
+    # (``_comment_<field>``); midtrain already drops them, so SFT must too or a
+    # documented launch config crashes the strict dataclass parse.
+    d = {k: v for k, v in d.items() if not k.startswith("_")}
     lora = d.pop("lora", None)
     d, runtime = split_runtime_settings(
         d, IDENTITY_CONFIG_KEYS + PREFLIGHT_CONFIG_KEYS

@@ -426,8 +426,11 @@ def test_launcher_dry_run_prints_accelerate_command():
 
 
 def test_launcher_dry_run_dpo_with_nproc():
+    # A real config: --dry-run validates that its inputs exist before echoing,
+    # so a placeholder path would (correctly) be rejected here.
     r = subprocess.run(
-        ["bash", str(LAUNCHER), "dpo", "cfg.json", "--nproc", "8", "--dry-run"],
+        ["bash", str(LAUNCHER), "dpo", "configs/dpo_14b_full.json",
+         "--nproc", "8", "--dry-run"],
         capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr

@@ -1,0 +1,34 @@
+KORE — PROPRIETARY, AMD-INTERNAL. NOT FOR EXTERNAL RELEASE.
+
+Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+This repository, including its source code, configuration, documentation, task
+definitions, generated task assets, and packaged datasets, is proprietary and
+confidential to Advanced Micro Devices, Inc. ("AMD"). It is provided solely for
+internal AMD research and development use by authorized personnel.
+
+PERMITTED
+  - Internal use, modification, and execution by authorized AMD personnel in
+    the course of AMD research and development.
+
+NOT PERMITTED WITHOUT PRIOR WRITTEN AUTHORIZATION FROM AN AMD OWNER
+  - Distribution, publication, or disclosure outside AMD, in whole or in part.
+  - Publishing a wheel, sdist, container image, dataset, or model checkpoint
+    derived from this repository to any public or third-party registry.
+  - Use of the name KORE, or of results produced by it, in external
+    publications, marketing, benchmarks, or public claims.
+
+STATUS OF THIS FILE
+
+This file records that the project is internal. It is NOT an open-source
+license grant and it does NOT resolve the third-party terms that apply to
+material this project incorporates. Before any external release, an authorized
+owner must select and apply an outbound license and must resolve every item
+listed as unresolved in THIRD_PARTY.md. See that file for the specific
+outstanding items.
+
+NO WARRANTY
+
+This software is provided "AS IS", without warranty of any kind, express or
+implied, including but not limited to the warranties of merchantability,
+fitness for a particular purpose, and non-infringement.

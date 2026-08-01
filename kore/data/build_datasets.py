@@ -31,6 +31,9 @@ from kore.data.schemas import (
     RepairRecord,
     RankedGroupRecord,
     WinRecord,
+    baseline_relative_speedup,
+    credible_speedup_max,
+    is_credible_win,
     record_from_dict,
 )
 from kore.env.replay import kernel_hash
@@ -78,10 +81,28 @@ def _prov_common(rec: Any) -> dict:
 
 
 def _prov_win(rec: Any) -> dict:
+    """Win-row provenance, including WHAT the speedup is relative to and whether
+    it is credible - curation needs both to decide if the row may be an exemplar
+    or enter an aggregate (a parent-relative gold ratio and a 9,381x sequence-task
+    ratio are auditable facts, not training exemplars)."""
     p = _prov_common(rec)
     p.update({"kind": "win", "verified": True, "baseline": "measured",
               "speedup": getattr(rec, "speedup", None),
-              "snr_db": getattr(rec, "snr_db", None)})
+              "snr_db": getattr(rec, "snr_db", None),
+              # WHICH baseline (declared identity + vendor/torch kind).
+              "baseline_type": getattr(rec, "baseline_type", None),
+              "baseline_kind": getattr(rec, "baseline_kind", None),
+              "baseline_identity_source": getattr(
+                  rec, "baseline_identity_source", None),
+              "timing_classification": getattr(rec, "timing_classification", None),
+              # WHAT the ratio is against; ``baseline_speedup`` is populated only for
+              # an explicitly baseline-relative record, so pooling is safe by default.
+              "speedup_basis": getattr(rec, "speedup_basis", None),
+              "baseline_speedup": baseline_relative_speedup(rec),
+              # Physical plausibility of the persisted ratio.
+              "speedup_exceeds_credible": getattr(
+                  rec, "speedup_exceeds_credible", None),
+              "credible_speedup_max": getattr(rec, "credible_speedup_max", None)})
     return p
 
 
@@ -284,6 +305,36 @@ def candidate_baseline_speedup(cand: dict, group_baseline_wall: Any = None,
     return None
 
 
+# The three reasons a pair is a CORRECTNESS pair rather than a speed preference.
+# They are pedagogically different (a manufactured reward hack, a real broken
+# kernel, an unmeasurable comparison) but the emitted row used to record all three
+# identically as anchor="correctness"/weight=1.0, so the shipped corpus could not
+# distinguish them and a consumer could neither weight nor exclude the hacks.
+NEGATIVE_KIND_REWARD_HACK = "reward_hack"
+NEGATIVE_KIND_REPAIR = "repair"
+NEGATIVE_KIND_INCOMPARABLE_WALL = "incomparable_wall"
+
+
+def negative_kind(chosen_c: dict, rejected_c: dict) -> tuple[Optional[str], Optional[str]]:
+    """``(kind, label)`` for a correctness pair, ``(None, None)`` for a speed pair.
+
+    ``label`` is the rejected candidate's own label where it has one: the
+    ``reward_hack:<kind>`` string from ``hard_negatives`` or the repair record's
+    ``failure_class``.
+    """
+    hack = rejected_c.get("hard_negative")
+    if hack:
+        return NEGATIVE_KIND_REWARD_HACK, (hack if isinstance(hack, str) else None)
+    failure_class = rejected_c.get("failure_class")
+    if failure_class is not None:
+        return NEGATIVE_KIND_REPAIR, (failure_class if isinstance(failure_class, str)
+                                      else None)
+    cw, rw = _num(chosen_c.get("wall_us")), _num(rejected_c.get("wall_us"))
+    if not (cw is not None and cw > 0 and rw is not None and rw > 0):
+        return NEGATIVE_KIND_INCOMPARABLE_WALL, None
+    return None, None
+
+
 def _is_correctness_pair(chosen_c: dict, rejected_c: dict) -> bool:
     """True when the pair is a correctness (not speed) preference.
 
@@ -293,12 +344,7 @@ def _is_correctness_pair(chosen_c: dict, rejected_c: dict) -> bool:
     dropped, never treated as a speed signal. This is what preserves the mined
     reward-hack negatives untouched.
     """
-    if rejected_c.get("hard_negative"):
-        return True
-    if rejected_c.get("failure_class") is not None:
-        return True
-    cw, rw = _num(chosen_c.get("wall_us")), _num(rejected_c.get("wall_us"))
-    return not (cw is not None and cw > 0 and rw is not None and rw > 0)
+    return negative_kind(chosen_c, rejected_c)[0] is not None
 
 
 def _beats_baseline_weight(margin: Optional[float], chosen_speedup: Optional[float],
@@ -321,12 +367,23 @@ def _pair_meta(chosen_c: dict, rejected_c: dict, family: str, policy: DPOPrefPol
     (chosen faster than the rejected peer but still slower than production) |
     ``among_correct`` (faster-than-peer, baseline unknown/disabled) | ``near_tie``
     (speed gap inside the measurement-noise band -> dropped) | ``correctness``.
+
+    A correctness pair additionally reports ``negative_kind`` / ``negative_label``
+    so a reward-hack, a repair and an incomparable-wall pair stay distinguishable
+    in the emitted corpus.
     """
     meta = {"anchor": "correctness", "margin": None, "weight": 1.0,
             "chosen_speedup": None, "rejected_speedup": None,
-            "family": family, "drop": False, "reason": None}
-    if _is_correctness_pair(chosen_c, rejected_c):
-        return meta  # hard-negative / repair / incomparable -> neutral, always kept
+            "family": family, "drop": False, "reason": None,
+            "negative_kind": None, "negative_label": None,
+            "speedup_exceeds_credible": None}
+    neg_kind, neg_label = negative_kind(chosen_c, rejected_c)
+    if neg_kind is not None:
+        # hard-negative / repair / incomparable -> neutral weight, always kept, but
+        # now LABELLED instead of collapsed into an anonymous correctness pair.
+        meta["negative_kind"] = neg_kind
+        meta["negative_label"] = neg_label
+        return meta
 
     cw, rw = _num(chosen_c.get("wall_us")), _num(rejected_c.get("wall_us"))
     margin = rw / cw  # both > 0 here; == chosen_speedup / rejected_speedup (baseline cancels)
@@ -343,6 +400,15 @@ def _pair_meta(chosen_c: dict, rejected_c: dict, family: str, policy: DPOPrefPol
         meta["drop"] = True
         meta["reason"] = f"margin {margin:.4f} within noise band +{policy.margin_min:g}"
         return meta
+
+    # A chosen candidate whose absolute speedup exceeds the credible ceiling is
+    # recorded truthfully but never up-weighted: the ratio is real as measured and
+    # says nothing about kernel quality (usually a non-kernel baseline), so letting
+    # it drive the strongest preference weight would concentrate the signal on
+    # exactly the least meaningful pairs.
+    ceiling = credible_speedup_max()
+    if cbs is not None:
+        meta["speedup_exceeds_credible"] = bool(cbs > ceiling)
 
     # (1) Baseline anchoring: only a chosen that BEATS production is a "good" signal.
     if policy.anchor_baseline and cbs is not None:
@@ -361,7 +427,8 @@ def _pair_meta(chosen_c: dict, rejected_c: dict, family: str, policy: DPOPrefPol
 
     if policy.weighting:
         if meta["anchor"] == "beats_baseline":
-            meta["weight"] = _beats_baseline_weight(margin, cbs, family, policy)
+            meta["weight"] = (1.0 if meta["speedup_exceeds_credible"]
+                              else _beats_baseline_weight(margin, cbs, family, policy))
         elif meta["anchor"] == "sub_baseline" and policy.subbaseline_mode == "relabel":
             meta["weight"] = round(float(policy.subbaseline_weight), 4)
         else:
@@ -433,6 +500,7 @@ def build_dpo(records: Iterable[Any], prompt_fn=None, *,
          "chosen":   [{"role": "assistant", "content": "FULL_KERNEL:..."}],
          "rejected": [{"role": "assistant", "content": "FULL_KERNEL:..."}],
          "margin":  <float|None>, "weight": <float>, "anchor": <str>,
+         "negative_kind": <"reward_hack"|"repair"|"incomparable_wall"|None>,
          "_provenance": {... speed-grounding metadata ...}}
 
     ``margin`` (chosen_speedup / rejected_speedup == rejected_wall / chosen_wall),
@@ -441,6 +509,12 @@ def build_dpo(records: Iterable[Any], prompt_fn=None, *,
     the trainer-facing curation signals (see :class:`DPOPrefPolicy`). Behaviour is
     governed by ``policy`` (or the ``KORE_PREF_*`` env / these kwargs); the frontier
     defaults baseline-anchor + margin-weight + drop noise-band near-ties.
+
+    ``negative_kind`` labels WHY a pair is a negative - a manufactured
+    ``reward_hack`` (with the ``reward_hack:<kind>`` label mirrored into
+    ``_provenance.hard_negative``), a ``repair``, or an ``incomparable_wall``
+    comparison - so the three are auditable in the emitted corpus instead of all
+    reading as an anonymous ``anchor="correctness"`` / ``weight=1.0`` row.
 
     Degenerate pairs where the chosen and rejected sources are identical are skipped
     (no learnable preference signal)."""
@@ -453,7 +527,10 @@ def build_dpo(records: Iterable[Any], prompt_fn=None, *,
     n_degenerate = 0
     n_noise = 0
     n_subbaseline_dropped = 0
+    n_implausible = 0
     n_anchor = {"beats_baseline": 0, "sub_baseline": 0, "among_correct": 0, "correctness": 0}
+    n_negative = {NEGATIVE_KIND_REWARD_HACK: 0, NEGATIVE_KIND_REPAIR: 0,
+                  NEGATIVE_KIND_INCOMPARABLE_WALL: 0}
     for raw in records:
         rec = _as_record(raw)
         if not isinstance(rec, RankedGroupRecord):
@@ -485,6 +562,11 @@ def build_dpo(records: Iterable[Any], prompt_fn=None, *,
                     n_subbaseline_dropped += 1
                 continue
             n_anchor[meta["anchor"]] = n_anchor.get(meta["anchor"], 0) + 1
+            if meta["negative_kind"] is not None:
+                n_negative[meta["negative_kind"]] = (
+                    n_negative.get(meta["negative_kind"], 0) + 1)
+            if meta["speedup_exceeds_credible"]:
+                n_implausible += 1
             cw, rw = chosen_c.get("wall_us"), rejected_c.get("wall_us")
             out.append(
                 {
@@ -500,12 +582,22 @@ def build_dpo(records: Iterable[Any], prompt_fn=None, *,
                     "margin": meta["margin"],
                     "weight": meta["weight"],
                     "anchor": meta["anchor"],
-                    # Speed-grounding metadata (Pillar 5/3): auditable, baseline-anchored.
+                    # WHY this pair is a negative (None for a speed pair). Top-level
+                    # so a consumer can weight/exclude reward-hack pairs without
+                    # reaching into provenance.
+                    "negative_kind": meta["negative_kind"],
                     "_provenance": {
+                        # ``kind`` stays "dpo_group" for every ranked-group pair
+                        # (consumers filter on it); the negative label is a NEW
+                        # column, so old readers are unaffected.
                         "kind": "dpo_group", "task_id": rec.task_id,
                         "operation": getattr(rec, "operation", None),
                         "family": family,
                         "arch": getattr(rec, "gpu", None), "verified": True,
+                        # WHICH baseline the anchoring is against (a vendor kernel or
+                        # a torch bar), so a beats_baseline pair states what it beat.
+                        "baseline_type": getattr(rec, "baseline_type", None),
+                        "baseline_kind": getattr(rec, "baseline_kind", None),
                         "chosen_wall_us": cw, "rejected_wall_us": rw,
                         "chosen_snr_db": chosen_c.get("snr_db"),
                         "rejected_snr_db": rejected_c.get("snr_db"),
@@ -514,6 +606,16 @@ def build_dpo(records: Iterable[Any], prompt_fn=None, *,
                         "anchor": meta["anchor"],
                         "margin": meta["margin"],
                         "weight": meta["weight"],
+                        # Negative provenance: kind + the rejected candidate's own
+                        # label (``reward_hack:<kind>`` / repair failure_class), so a
+                        # reward-hack pair, a repair pair and an incomparable-wall
+                        # pair are no longer indistinguishable on disk.
+                        "negative_kind": meta["negative_kind"],
+                        "negative_label": meta["negative_label"],
+                        "hard_negative": rejected_c.get("hard_negative"),
+                        # Physical plausibility of the chosen candidate's absolute
+                        # speedup (None when no baseline reference exists).
+                        "speedup_exceeds_credible": meta["speedup_exceeds_credible"],
                         # Legacy field (chosen-vs-rejected speedup ratio == margin).
                         "speedup": meta["margin"],
                     },
@@ -527,6 +629,10 @@ def build_dpo(records: Iterable[Any], prompt_fn=None, *,
                sub_baseline=n_anchor["sub_baseline"],
                among_correct=n_anchor["among_correct"],
                correctness=n_anchor["correctness"],
+               reward_hack_negatives=n_negative[NEGATIVE_KIND_REWARD_HACK],
+               repair_negatives=n_negative[NEGATIVE_KIND_REPAIR],
+               incomparable_wall_negatives=n_negative[NEGATIVE_KIND_INCOMPARABLE_WALL],
+               implausible_speedup_pairs=n_implausible,
                anchor_baseline=pol.anchor_baseline, margin_min=pol.margin_min,
                pairs=len(out), **cap_stats)
     return out
@@ -534,10 +640,18 @@ def build_dpo(records: Iterable[Any], prompt_fn=None, *,
 
 # --- RFT (rejection-sampled SFT) ---
 def build_rft(records: Iterable[Any]) -> list[dict]:
-    """Chat-SFT rows on the single best candidate per group + win trajectories."""
+    """Chat-SFT rows on the single best candidate per group + win trajectories.
+
+    A win whose persisted speedup exceeds the credible ceiling is NOT emitted here:
+    RFT rows are pure exemplars and carry no ``_provenance``, so curation cannot
+    exclude them downstream - the filter has to be at this boundary. The record
+    itself is untouched on disk and still reachable through ``build_sft``, which
+    keeps it with an explicit flag.
+    """
     out: list[dict] = []
     n_group = 0
     n_win = 0
+    n_implausible = 0
     for raw in records:
         rec = _as_record(raw)
         if isinstance(rec, RankedGroupRecord):
@@ -563,9 +677,13 @@ def build_rft(records: Iterable[Any]) -> list[dict]:
                 )
         elif isinstance(rec, WinRecord):
             if rec.trajectory:
+                if not is_credible_win(rec):
+                    n_implausible += 1
+                    continue
                 out.append({"messages": _canonicalize_chat(rec.trajectory)})  # parity with build_sft
                 n_win += 1
-    log.metric("build_rft", rows=len(out), from_groups=n_group, from_wins=n_win)
+    log.metric("build_rft", rows=len(out), from_groups=n_group, from_wins=n_win,
+               implausible_wins_excluded=n_implausible)
     return out
 
 

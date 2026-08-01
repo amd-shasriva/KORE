@@ -467,14 +467,37 @@ def evaluate_policy_multiseed(
 # --------------------------------------------------------------------------- #
 # Unbiased best-of-N: pass@k and fast_p@k over a parallel-sampling eval
 # --------------------------------------------------------------------------- #
+def _sample_gated_speedup(sample: dict) -> float:
+    """The integrity-GATED speedup of one trajectory sample, for scoring.
+
+    fast_p@k must be scored on ``speedup_gated`` (written by :func:`_run_task`),
+    never on the raw ``speedup``: the raw value is the unfiltered worst-shape
+    ratio, so an ``excessive_speedup`` measurement artifact or a ``high_variance``
+    (noisy) bench would inflate the headline metric - exactly what
+    :func:`_integrity_gated_speedup` exists to prevent. A trajectory that carries
+    a raw speedup but no gated one is rejected rather than scored ungated.
+    """
+    if "speedup_gated" in sample:
+        return float(sample["speedup_gated"] or 0.0)
+    if sample.get("speedup") is not None:
+        raise ValueError(
+            "trajectory sample carries a raw 'speedup' but no 'speedup_gated'; "
+            "fast_p@k refuses to score an un-gated timing (a glitch or noisy bench "
+            "would inflate it). Produce trajectories with bakeoff.evaluate_policy."
+        )
+    return 0.0
+
+
 def best_of_n_pass_at_k(eval_result: dict, ks: Sequence[int] = (1,),
                         ps: Sequence[float] = DEFAULT_PS) -> dict:
     """Unbiased pass@k and fast_p@k from a parallel best-of-N eval result.
 
     Each task's trajectory is treated as ``n`` independent samples. pass@k is the
     per-task unbiased estimate averaged over the split; fast_p@k additionally
-    requires the sample to be faster than the production baseline by a factor p.
-    Use ``mode="parallel"`` in ``evaluate_policy`` so samples are independent.
+    requires the sample to be faster than the production baseline by a factor p,
+    measured on the timing-integrity-GATED speedup (see
+    :func:`_sample_gated_speedup`). Use ``mode="parallel"`` in
+    ``evaluate_policy`` so samples are independent.
     """
     per_task = eval_result.get("per_task", [])
     ks = list(ks)
@@ -494,7 +517,8 @@ def best_of_n_pass_at_k(eval_result: dict, ks: Sequence[int] = (1,),
                 traj = t.get("trajectory", [])
                 n = len(traj)
                 c = sum(1 for s in traj
-                        if s.get("correct") and (s.get("speedup") or 0.0) > p)
+                        if s.get("correct") and _sample_gated_speedup(s) > p)
                 f_vals.append(pass_at_k(n, c, k))
             fast_pk[f"k={k},p={float(p):g}"] = (sum(f_vals) / len(f_vals)) if f_vals else 0.0
-    return {"ks": ks, "pass_at_k": pass_k, "fast_p_at_k": fast_pk, "n": len(per_task)}
+    return {"ks": ks, "pass_at_k": pass_k, "fast_p_at_k": fast_pk, "n": len(per_task),
+            "speedup_basis": "speedup_gated"}

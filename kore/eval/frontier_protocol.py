@@ -41,6 +41,9 @@ from kore.eval.paired_stats import wilcoxon_signed_rank
 PROTOCOL_SCHEMA_VERSION = "kore.frontier-claim/v1"
 REPORT_SCHEMA_VERSION = "kore.frontier-report/v1"
 CANONICAL_BASELINE = "vendor-production"
+# Named integrity signal for a paired bootstrap whose resampling distribution has
+# zero variance (an arm saturated at 0/1 on every preregistered cell).
+BOOTSTRAP_DEGENERATE = "bootstrap_degenerate"
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _MOVING_REVISIONS = {"head", "latest", "main", "master", "tip", "trunk"}
 _SOL_TOLERANCE = 1e-9
@@ -445,6 +448,25 @@ class HierarchicalBootstrapResult:
     p_noninferiority: float
     superiority_margin: float
     noninferiority_margin: float
+    # Boundary handling.  A 0/1 arm that succeeds (or fails) on every cell makes
+    # every resample identical, so the percentile bootstrap collapses to a
+    # zero-width point interval.  The reported intervals above are therefore the
+    # widest of the design-aware bootstrap and the boundary-exact interval; the
+    # raw components are kept here so the substitution is auditable.
+    binary_outcomes: bool = True
+    candidate_saturated: bool = False
+    comparator_saturated: bool = False
+    degenerate: bool = False
+    interval_method: str = "cluster-bootstrap"
+    p_value_method: str = "centered-cluster-bootstrap"
+    candidate_successes: Optional[int] = None
+    comparator_successes: Optional[int] = None
+    candidate_ci_bootstrap: Optional[tuple[float, float]] = None
+    comparator_ci_bootstrap: Optional[tuple[float, float]] = None
+    delta_ci_bootstrap: Optional[tuple[float, float]] = None
+    candidate_ci_exact: Optional[tuple[float, float]] = None
+    comparator_ci_exact: Optional[tuple[float, float]] = None
+    delta_ci_exact: Optional[tuple[float, float]] = None
 
     def to_dict(self) -> dict:
         return _primitive(self)
@@ -485,6 +507,174 @@ def _bootstrap_greater_p(
     return (extreme + 1.0) / (len(boot) + 1.0)
 
 
+# ---------------------------------------------------------------------------
+# Boundary-aware proportion intervals.
+#
+# fast_p is the mean of 0/1 success indicators, so an arm that succeeds on every
+# preregistered cell sits exactly on the boundary of the parameter space.  The
+# nonparametric bootstrap is inconsistent there: the empirical distribution is
+# degenerate, every resample is all-ones, and the percentile interval collapses
+# to (1.0, 1.0) no matter how few cells were measured.  A zero-variance
+# resampling distribution also drives the centered-bootstrap p-value to its
+# floor, which is how a saturated arm can clear a superiority gate on no
+# evidence.  We therefore pair the design-aware bootstrap with an exact
+# (Clopper-Pearson) interval, which stays valid on the boundary.
+# ---------------------------------------------------------------------------
+def _normal_quantile(p: float) -> float:
+    """Standard-normal quantile by bisection on ``erf`` (no scipy dependency)."""
+    if not 0.0 < p < 1.0:
+        raise ValueError("normal quantile requires p in (0, 1)")
+    low, high = -40.0, 40.0
+    for _ in range(200):
+        mid = 0.5 * (low + high)
+        if 0.5 * (1.0 + math.erf(mid / math.sqrt(2.0))) < p:
+            low = mid
+        else:
+            high = mid
+    return 0.5 * (low + high)
+
+
+def _log_binom_coeff(n: int, k: int) -> float:
+    return math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1)
+
+
+def _binomial_tail(k: int, n: int, p: float, *, upper: bool) -> float:
+    """``P(X >= k)`` (upper) or ``P(X <= k)`` (lower) for ``X ~ Binomial(n, p)``."""
+    if upper:
+        if k <= 0:
+            return 1.0
+        if k > n:
+            return 0.0
+    else:
+        if k >= n:
+            return 1.0
+        if k < 0:
+            return 0.0
+    if p <= 0.0:
+        return 1.0 if (upper and k <= 0) or (not upper and k >= 0) else 0.0
+    if p >= 1.0:
+        return 1.0 if (upper and k <= n) or (not upper and k >= n) else 0.0
+    indices = range(k, n + 1) if upper else range(0, k + 1)
+    total = 0.0
+    for index in indices:
+        total += math.exp(
+            _log_binom_coeff(n, index)
+            + index * math.log(p)
+            + (n - index) * math.log1p(-p)
+        )
+    return min(1.0, max(0.0, total))
+
+
+def clopper_pearson_interval(
+    successes: int, n: int, ci_level: float = 0.95
+) -> tuple[float, float]:
+    """Exact (Clopper-Pearson) two-sided interval for a binomial proportion.
+
+    Valid at ``p_hat in {0, 1}``: with ``k = n`` successes the lower bound is
+    ``(alpha/2) ** (1/n)``, which shrinks toward 1 only as evidence accumulates.
+    Solved by bisection on the exact binomial tail, so no scipy/Beta inverse is
+    required and the result is reproducible.
+    """
+    if n <= 0:
+        raise ValueError("Clopper-Pearson requires n > 0")
+    if not 0 <= successes <= n:
+        raise ValueError("successes must lie in [0, n]")
+    if not 0.0 < ci_level < 1.0:
+        raise ValueError("ci_level must be in (0, 1)")
+    tail = (1.0 - ci_level) / 2.0
+
+    def _solve(target: float, *, upper_tail: bool, k: int) -> float:
+        low, high = 0.0, 1.0
+        for _ in range(80):
+            mid = 0.5 * (low + high)
+            value = _binomial_tail(k, n, mid, upper=upper_tail)
+            # P(X >= k) increases in p; P(X <= k) decreases in p.
+            if (value < target) == upper_tail:
+                low = mid
+            else:
+                high = mid
+        return 0.5 * (low + high)
+
+    lower = 0.0 if successes == 0 else _solve(tail, upper_tail=True, k=successes)
+    upper = 1.0 if successes == n else _solve(tail, upper_tail=False, k=successes)
+    return (max(0.0, min(1.0, lower)), max(0.0, min(1.0, upper)))
+
+
+def wilson_interval(
+    successes: int, n: int, ci_level: float = 0.95
+) -> tuple[float, float]:
+    """Wilson score interval for a binomial proportion (boundary-safe)."""
+    if n <= 0:
+        raise ValueError("Wilson interval requires n > 0")
+    if not 0 <= successes <= n:
+        raise ValueError("successes must lie in [0, n]")
+    z = _normal_quantile(1.0 - (1.0 - ci_level) / 2.0)
+    p_hat = successes / n
+    denominator = 1.0 + z * z / n
+    centre = (p_hat + z * z / (2.0 * n)) / denominator
+    half = (
+        z * math.sqrt(p_hat * (1.0 - p_hat) / n + z * z / (4.0 * n * n))
+    ) / denominator
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+def newcombe_difference_interval(
+    candidate: tuple[float, float],
+    candidate_estimate: float,
+    comparator: tuple[float, float],
+    comparator_estimate: float,
+) -> tuple[float, float]:
+    """Newcombe "square-and-add" interval for a difference of two proportions.
+
+    Combines the two boundary-aware single-proportion intervals (Newcombe 1998).
+    Built from independent-arm intervals, so for POSITIVELY correlated paired
+    cells -- which is what a matched task x run rectangle produces -- it is
+    conservative: it is never narrower than the correct paired interval.
+    """
+    delta = candidate_estimate - comparator_estimate
+    lower_gap = math.hypot(
+        candidate_estimate - candidate[0], comparator[1] - comparator_estimate
+    )
+    upper_gap = math.hypot(
+        candidate[1] - candidate_estimate, comparator_estimate - comparator[0]
+    )
+    return (max(-1.0, delta - lower_gap), min(1.0, delta + upper_gap))
+
+
+def _widest(
+    first: Optional[tuple[float, float]], second: Optional[tuple[float, float]]
+) -> tuple[float, float]:
+    """The union of two intervals: never narrower than either component."""
+    if first is None:
+        return second  # type: ignore[return-value]
+    if second is None:
+        return first
+    return (min(first[0], second[0]), max(first[1], second[1]))
+
+
+def _binary(values: Sequence[float]) -> bool:
+    return all(value in (0.0, 1.0) for value in values)
+
+
+def _sign_greater_p(deltas: Sequence[float], null_boundary: float) -> float:
+    """Exact one-sided paired SIGN-test p-value for H1: mean effect > boundary.
+
+    Used when the resampling distribution is degenerate.  It needs no variance
+    estimate -- which is exactly what a zero-variance bootstrap cannot supply --
+    and for the saturated case (candidate wins every cell, comparator none) it
+    reproduces the exact one-sided McNemar result ``0.5 ** n``.  It ignores
+    clustering, so it is paired with the conservative boundary-aware interval:
+    a gate must clear BOTH.
+    """
+    shifted = [float(value) - float(null_boundary) for value in deltas]
+    positives = sum(1 for value in shifted if value > 0.0)
+    negatives = sum(1 for value in shifted if value < 0.0)
+    effective = positives + negatives
+    if effective == 0:
+        return 1.0
+    return _binomial_tail(positives, effective, 0.5, upper=True)
+
+
 def hierarchical_paired_bootstrap(
     data: Sequence[PairedDatum],
     *,
@@ -499,6 +689,17 @@ def hierarchical_paired_bootstrap(
     Runs are sampled with replacement.  Within each selected run, families are
     sampled with replacement; within each selected family, its tasks are sampled
     with replacement.  Candidate/comparator values always travel as a pair.
+
+    For 0/1 success indicators the reported intervals are the UNION of that
+    design-aware bootstrap interval and the boundary-exact interval
+    (Clopper-Pearson per arm, Newcombe square-and-add for the paired delta), so
+    they are never narrower than either component and never zero-width: a
+    saturated arm reports the evidence its cell count actually supports instead
+    of a false ``(1.0, 1.0)``.  When the delta resampling distribution is fully
+    degenerate (``delta_se == 0``) the centered-bootstrap p-values are not
+    inferential -- zero variance pins them to their ``1/(n_boot+1)`` floor
+    regardless of evidence -- so they are replaced by exact one-sided paired
+    sign tests.
     """
     rows = list(data)
     if not rows:
@@ -546,9 +747,50 @@ def hierarchical_paired_bootstrap(
 
     alpha = 1.0 - ci_level
     bounds = (alpha / 2.0, 1.0 - alpha / 2.0)
-    candidate_ci = tuple(_quantile(candidate_boot, q) for q in bounds)
-    comparator_ci = tuple(_quantile(comparator_boot, q) for q in bounds)
-    delta_ci = tuple(_quantile(delta_boot, q) for q in bounds)
+    candidate_boot_ci = tuple(float(_quantile(candidate_boot, q)) for q in bounds)
+    comparator_boot_ci = tuple(float(_quantile(comparator_boot, q)) for q in bounds)
+    delta_boot_ci = tuple(float(_quantile(delta_boot, q)) for q in bounds)
+    delta_se = _sample_se(delta_boot)
+
+    candidate_values = [row.candidate for row in rows]
+    comparator_values = [row.comparator for row in rows]
+    binary = _binary(candidate_values) and _binary(comparator_values)
+    candidate_successes = comparator_successes = None
+    candidate_exact = comparator_exact = delta_exact = None
+    if binary:
+        candidate_successes = int(round(sum(candidate_values)))
+        comparator_successes = int(round(sum(comparator_values)))
+        candidate_exact = clopper_pearson_interval(
+            candidate_successes, len(rows), ci_level
+        )
+        comparator_exact = clopper_pearson_interval(
+            comparator_successes, len(rows), ci_level
+        )
+        delta_exact = newcombe_difference_interval(
+            candidate_exact, candidate_estimate, comparator_exact, comparator_estimate
+        )
+
+    candidate_ci = _widest(candidate_boot_ci, candidate_exact)
+    comparator_ci = _widest(comparator_boot_ci, comparator_exact)
+    delta_ci = _widest(delta_boot_ci, delta_exact)
+
+    degenerate = delta_se == 0.0
+    p_superiority = _bootstrap_greater_p(
+        delta_boot, delta_estimate, float(superiority_margin)
+    )
+    p_noninferiority = _bootstrap_greater_p(
+        delta_boot, delta_estimate, -float(noninferiority_margin)
+    )
+    p_method = "centered-cluster-bootstrap"
+    if degenerate:
+        # Zero resampling variance: the centered bootstrap tests nothing (its
+        # p-value is pinned to the 1/(n_boot+1) floor regardless of evidence).
+        # An exact paired sign test needs no variance estimate.
+        deltas = [row.candidate - row.comparator for row in rows]
+        p_superiority = _sign_greater_p(deltas, float(superiority_margin))
+        p_noninferiority = _sign_greater_p(deltas, -float(noninferiority_margin))
+        p_method = "exact-one-sided-sign-test"
+
     return HierarchicalBootstrapResult(
         n=len(rows),
         n_runs=len(run_ids),
@@ -561,15 +803,33 @@ def hierarchical_paired_bootstrap(
         candidate_ci=(float(candidate_ci[0]), float(candidate_ci[1])),
         comparator_ci=(float(comparator_ci[0]), float(comparator_ci[1])),
         delta_ci=(float(delta_ci[0]), float(delta_ci[1])),
-        delta_se=_sample_se(delta_boot),
-        p_superiority=_bootstrap_greater_p(
-            delta_boot, delta_estimate, float(superiority_margin)
-        ),
-        p_noninferiority=_bootstrap_greater_p(
-            delta_boot, delta_estimate, -float(noninferiority_margin)
-        ),
+        delta_se=delta_se,
+        p_superiority=p_superiority,
+        p_noninferiority=p_noninferiority,
         superiority_margin=float(superiority_margin),
         noninferiority_margin=float(noninferiority_margin),
+        binary_outcomes=binary,
+        candidate_saturated=bool(
+            binary and candidate_successes in (0, len(rows))
+        ),
+        comparator_saturated=bool(
+            binary and comparator_successes in (0, len(rows))
+        ),
+        degenerate=degenerate,
+        interval_method=(
+            "union(cluster-bootstrap, clopper-pearson/newcombe)"
+            if binary
+            else "cluster-bootstrap"
+        ),
+        p_value_method=p_method,
+        candidate_successes=candidate_successes,
+        comparator_successes=comparator_successes,
+        candidate_ci_bootstrap=candidate_boot_ci,
+        comparator_ci_bootstrap=comparator_boot_ci,
+        delta_ci_bootstrap=delta_boot_ci,
+        candidate_ci_exact=candidate_exact,
+        comparator_ci_exact=comparator_exact,
+        delta_ci_exact=delta_exact,
     )
 
 
@@ -1615,6 +1875,25 @@ def evaluate_claim(
             or report.delta_ci is None
         ):
             errors.append(f"ci: required confidence intervals missing for {track_kind.value}")
+            continue
+        bootstrap = report.bootstrap or {}
+        if not bootstrap.get("degenerate"):
+            continue
+        if bootstrap.get("binary_outcomes"):
+            # Recoverable: the paired resampling distribution collapsed because an
+            # arm sits on the 0/1 boundary, so the reported interval and p-values
+            # come from the boundary-exact substitution instead of the bootstrap.
+            warnings.append(
+                f"{BOOTSTRAP_DEGENERATE}: {track_kind.value} paired bootstrap has zero "
+                f"variance (delta_se=0); interval and p-values come from "
+                f"{bootstrap.get('interval_method')} / {bootstrap.get('p_value_method')}"
+            )
+        else:
+            errors.append(
+                f"{BOOTSTRAP_DEGENERATE}: {track_kind.value} paired bootstrap has zero "
+                "variance and the outcomes are not 0/1 successes, so no boundary-aware "
+                "interval exists; the reported interval is not inferential"
+            )
 
     # Primary hypothesis family: NI on both tracks plus preregistered superiority tests.
     superiority_tracks = set(profile.required_superiority_tracks) | set(
@@ -1654,7 +1933,15 @@ def evaluate_claim(
         )
         sup_pass[track_kind] = sup_ok
         if report is not None:
+            bootstrap = report.bootstrap or {}
             report.gates = {
+                "interval": {
+                    "method": bootstrap.get("interval_method"),
+                    "p_value_method": bootstrap.get("p_value_method"),
+                    BOOTSTRAP_DEGENERATE: bool(bootstrap.get("degenerate")),
+                    "candidate_saturated": bool(bootstrap.get("candidate_saturated")),
+                    "comparator_saturated": bool(bootstrap.get("comparator_saturated")),
+                },
                 "noninferiority": {
                     "passed": ni_ok,
                     "margin": profile.noninferiority_margin,
@@ -1783,6 +2070,7 @@ def format_frontier_report(report: FrontierReport) -> str:
 __all__ = [
     "PROTOCOL_SCHEMA_VERSION",
     "REPORT_SCHEMA_VERSION",
+    "BOOTSTRAP_DEGENERATE",
     "CANONICAL_BASELINE",
     "HarnessTrack",
     "ArmKind",
@@ -1814,6 +2102,9 @@ __all__ = [
     "artifact_payload_sha256",
     "manifest_fingerprint",
     "hierarchical_paired_bootstrap",
+    "clopper_pearson_interval",
+    "wilson_interval",
+    "newcombe_difference_interval",
     "mcnemar_exact",
     "paired_permutation_test",
     "holm_adjust",

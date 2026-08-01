@@ -7,17 +7,17 @@
 #SBATCH --job-name=kore-gpu-smoke
 #SBATCH --account=amd-general
 #SBATCH --partition=amd-spur
-#SBATCH --qos=amd-burst-qos
+#SBATCH --qos=amd-general-qos
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:mi355x:8
 #SBATCH --cpus-per-task=32
 #SBATCH --time=00:30:00
 #SBATCH --exclusive
-#SBATCH --output=/home/shasriva/Kore-RL/KORE_intall/runs/gpu-smoke-%j.out
-#SBATCH --error=/home/shasriva/Kore-RL/KORE_intall/runs/gpu-smoke-%j.err
+#SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/gpu-smoke-%j.out
+#SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/gpu-smoke-%j.err
 
 set -uo pipefail
-REPO="/home/shasriva/Kore-RL/KORE_intall"
+REPO="/home/shasriva/Kore-RL/KORE"
 PY="/home/shasriva/kore-venv/bin/python"
 cd "$REPO"
 mkdir -p runs

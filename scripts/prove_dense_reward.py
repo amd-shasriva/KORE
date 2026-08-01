@@ -3,6 +3,9 @@ exercises the exact GRPO path (env.collect_counters -> roofline_dense_score ->
 dense bonus + counter feedback) on a real compute-bound kernel via rocprofv3.
 
 Run pinned:  HIP_VISIBLE_DEVICES=3 python scripts/prove_dense_reward.py
+
+Exits non-zero if the path is inert (weight disabled, or no nonzero counters came
+back for a task), so it can be used as a gate rather than read by eye.
 """
 from __future__ import annotations
 
@@ -21,8 +24,10 @@ from kore.tasks.registry import get_task  # noqa: E402
 
 set_rigorous_verification(True)
 
-print(f"[dense] gate weight = {_dense_profile_weight(CONFIG)} (want 0.1)")
+WEIGHT = float(_dense_profile_weight(CONFIG) or 0.0)
+print(f"[dense] gate weight = {WEIGHT} (want 0.1)")
 
+INERT = []
 # Compute-bound op with an analytical roofline model.
 for tid in ("gemm_bf16", "genv_rmsnorm_bf16"):
     task = get_task(tid)
@@ -39,6 +44,17 @@ for tid in ("gemm_bf16", "genv_rmsnorm_bf16"):
     print(f"[dense] {tid}: feedback = {feedback[:240]}")
     live = (n > 0 and nonzero > 0)
     print(f"[dense] {tid}: LIVE={'YES' if live else 'NO'}  (counters flowing + score computed)")
+    if not live:
+        INERT.append(tid)
 
 print("\nDENSE_REWARD_PROOF_DONE")
+# A "proof" that always exits 0 proves nothing; fail closed instead.
+if WEIGHT <= 0.0:
+    print(f"DENSE_REWARD_PROOF_FAILED: dense profile weight is {WEIGHT} (path disabled)")
+    sys.exit(1)
+if INERT:
+    print("DENSE_REWARD_PROOF_FAILED: no nonzero rocprofv3 counters for "
+          + ", ".join(INERT))
+    sys.exit(1)
+print("DENSE_REWARD_PROOF_OK: counters flowing and dense term computed for every task")
 sys.exit(0)

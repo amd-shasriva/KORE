@@ -30,6 +30,29 @@ from typing import Optional
 MODEL_14B = "Qwen/Qwen3-14B"                              # bring-up / SFT default
 MODEL_32B = "Qwen/Qwen3-32B"                              # GRPO primary
 
+# Last-resort SKU if KoreConfig cannot be consulted. gfx950's conservative
+# member: understating the peak enlarges T_min, which keeps the speed-of-light
+# floor above true physics and can only reject, never admit, an impossible time.
+_FALLBACK_PHYSICS_SKU = "mi350x"
+
+
+def _default_physics_sku() -> str:
+    """Take the SKU from ``KoreConfig`` so there is a single source of truth.
+
+    Imported lazily: this module is deliberately constructible without torch, and
+    ``KoreConfig`` may probe the device to resolve the SKU. A second hardcoded
+    literal here could silently disagree with the observed hardware.
+    """
+    try:
+        from kore.config import CONFIG
+
+        sku = getattr(CONFIG, "physics_sku", None)
+        if isinstance(sku, str) and sku.strip():
+            return sku.strip()
+    except Exception:  # noqa: BLE001 - config import must never break CPU inspection
+        pass
+    return _FALLBACK_PHYSICS_SKU
+
 
 @dataclass
 class LoRAConfig:
@@ -69,13 +92,30 @@ class DistributedMixin:
     fsdp_transformer_layer_cls: Optional[str] = None
     fsdp_cpu_offload: bool = False
     # Input-pipeline parallelism (audit THEME E / R2 perf): the HF default is 0 loader
-    # workers + single-core tokenization, which starves 8 GPUs at 8k-16k seq. Sized for
-    # the 384-core box (12/rank x 8 = 96 loader procs, well under 384 with room for the
-    # trainers + preprocessing). These feed the Trainer stages (midtrain/sft/dpo);
-    # GRPO's custom loop ignores them.
-    dataloader_num_workers: int = 12
-    dataloader_pin_memory: bool = True
-    dataloader_prefetch_factor: int = 4
+    # workers + single-core tokenization, which starves 8 GPUs at 8k-16k seq. These
+    # feed the Trainer stages (midtrain/sft/dpo); GRPO's custom loop ignores them.
+    #
+    # HOST-MEMORY SIZING. These were 12 workers / pinned / prefetch 4, sized only
+    # against the 384-core count (12 x 8 ranks = 96 loader procs). Core count is
+    # not the binding constraint -- host RAM is. Each rank's workers hold
+    # num_workers x prefetch_factor batches resident, and with pin_memory those
+    # pages are page-locked, so they are NOT reclaimable when the process needs
+    # memory elsewhere. A FULL_STATE_DICT checkpoint save gathers the whole ~200GB
+    # model+optimizer state onto the host at once, and the two together exhausted
+    # the host pool: HSA_STATUS_ERROR_OUT_OF_RESOURCES / "Available Free mem: 0 MB"
+    # at step ~492 of a 14B midtrain.
+    #
+    # The defaults are therefore the values that cannot take a run down: 4 workers,
+    # unpinned, prefetch 2 (8x less resident loader memory per rank, none of it
+    # locked). The throughput given up is small -- these stages read pre-chunked
+    # text JSONL, so a handful of workers already stay ahead of an 8k-16k-sequence
+    # GPU step -- and a run that measures loader starvation can still raise them
+    # explicitly. A default that crashes at step 492 is worse than a slow one.
+    dataloader_num_workers: int = 4
+    dataloader_pin_memory: bool = False
+    dataloader_prefetch_factor: int = 2
+    # One-shot map-phase worker count, not resident during training and not
+    # pinned, so it is unaffected by the sizing above.
     dataset_num_proc: int = 32
 
 
@@ -382,7 +422,11 @@ class GRPOConfig(DistributedMixin):
     # One explicit, fingerprinted model is shared by online reward, integrity,
     # P0, and reports. Calibration files must identify architecture, exact SKU,
     # runtime stack, and calibrated units; legacy KORE_PEAK_* globals are rejected.
-    physics_sku: str = "mi350x"
+    # Defaults to KoreConfig's resolved SKU rather than restating a literal: a
+    # second hardcoded SKU here could disagree with the observed device, and
+    # overstating the peak shrinks T_min, putting the speed-of-light floor below
+    # true physics and admitting timings the hardware cannot produce.
+    physics_sku: str = field(default_factory=lambda: _default_physics_sku())
     physics_calibration_path: Optional[str] = None
     physics_model_fingerprint: Optional[str] = None
 
@@ -471,6 +515,10 @@ class GRPOConfig(DistributedMixin):
     seed: int = 0
     logging_steps: int = 1                  # WIRED: emit the per-step metrics event every N steps
     save_steps: int = 50                    # WIRED: write a periodic checkpoint every N steps
+    # Floor of 2, not 1: a crash during the save that rotates the previous
+    # checkpoint out would otherwise leave nothing resumable. A 14B GRPO
+    # checkpoint carries fp32 AdamW moments (~140GB), so 2 is ~280GB per run.
+    save_total_limit: int = 2
     report_to: str = "none"
 
     def validate(self, *, tasks=None, runtime=None, require_tasks: bool = False):
@@ -544,7 +592,13 @@ class MidTrainConfig(DistributedMixin):
     packing: bool = False
     logging_steps: int = 10
     save_steps: int = 200
-    save_total_limit: int = 1              # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill
+    # A 14B full-FT ckpt is ~220GB with optimizer state, so this caps disk. Note
+    # that 1 is NOT crash-safe on its own: the Trainer rotates the previous
+    # checkpoint out around the new save, so a crash inside that window leaves
+    # nothing for latest_checkpoint() to find and the run silently restarts from
+    # step 0. Every shipped launch config therefore sets >= 2 explicitly, buying
+    # one resumable generation for ~220GB of disk.
+    save_total_limit: int = 1
     seed: int = 0
 
 

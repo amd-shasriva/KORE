@@ -148,6 +148,18 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
                  "flash_attention_2); packing on SDPA cross-contaminates docs", attn=_attn_impl)
         _packing = False
 
+    # Host-memory sizing of the input pipeline. Every rank spawns its own loader
+    # workers, so the shipped configs deliberately run a small, unpinned pipeline:
+    # pinned (page-locked) pages are not reclaimable under pressure and are
+    # charged against the same host pool as the ~200GB CPU-side gather that a
+    # FULL_STATE_DICT checkpoint save performs, which is what produced the
+    # HSA_STATUS_ERROR_OUT_OF_RESOURCES crash at step ~492 of a 14B midtrain.
+    # Read the fields directly: they are DistributedMixin fields, always present,
+    # so a getattr fallback could only ever supply a second, disagreeing default.
+    dl_workers = int(config.dataloader_num_workers)
+    # HF rejects a prefetch factor when loading happens in-process (workers == 0).
+    dl_prefetch = int(config.dataloader_prefetch_factor) if dl_workers > 0 else None
+
     # Plain-text completion mode: SFTTrainer trains the LM objective over the
     # ``text`` field (no chat template / no completion-only masking).
     args = TRLSFTConfig(
@@ -167,9 +179,11 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
         gradient_checkpointing_kwargs={"use_reentrant": True},
         dataset_text_field="text",
         packing=_packing,
-        dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
-        dataloader_pin_memory=getattr(config, "dataloader_pin_memory", True),
-        dataset_num_proc=getattr(config, "dataset_num_proc", 32),
+        dataloader_num_workers=dl_workers,
+        dataloader_pin_memory=bool(config.dataloader_pin_memory),
+        dataloader_persistent_workers=dl_workers > 0,
+        dataloader_prefetch_factor=dl_prefetch,
+        dataset_num_proc=int(config.dataset_num_proc),
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         save_total_limit=config.save_total_limit,  # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill
@@ -244,8 +258,14 @@ def midtrain_config_from_dict(d: dict) -> MidTrainConfig:
 
     Presence of this builder is what the campaign's ``_stage_supports_launcher``
     detects to route ``--full-ft`` midtrain through the FSDP launcher.
+
+    Keys starting with ``_`` are comments. JSON has no comment syntax, and the
+    shipped launch configs carry operational notes (e.g. the disk cost behind
+    ``save_total_limit``) that must travel with the values they justify. Every
+    other unknown key still raises, so a misspelled field is caught before a 14B
+    model load instead of being silently ignored.
     """
-    return MidTrainConfig(**dict(d))
+    return MidTrainConfig(**{k: v for k, v in d.items() if not k.startswith("_")})
 
 
 def _main(argv: Optional[list[str]] = None) -> int:
@@ -260,7 +280,15 @@ def _main(argv: Optional[list[str]] = None) -> int:
     # config explicitly opts out.
     raw.setdefault("distributed", True)
     cfg = midtrain_config_from_dict(raw)
-    out = _train_single_process(cfg, cfg.corpus_path)
+    # Go through train_midtrain so this path gets the SAME corpus preflight the
+    # in-process path has. Calling _train_single_process directly let a missing
+    # corpus surface as an opaque dataset error on every rank AFTER the full 14B
+    # load. Reported as rc 2 to match the sft/dpo entrypoints.
+    try:
+        out = train_midtrain(cfg)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(f"[midtrain] -> {out}")
     return 0
 

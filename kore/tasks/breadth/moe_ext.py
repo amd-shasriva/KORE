@@ -444,7 +444,6 @@ def _fused_moe_fp32(hidden, w1, w2, tw, ti, act):
     M, D = x.shape
     E = w1.shape[0]
     I = w2.shape[2]
-    w1f, w2f = w1.float(), w2.float()
     out = torch.zeros((M, D), device=x.device, dtype=torch.float32)
     ids = ti.long()
     tw_f = tw.float()
@@ -455,10 +454,17 @@ def _fused_moe_fp32(hidden, w1, w2, tw, ti, act):
             continue
         idx = tok.nonzero(as_tuple=True)[0]
         xe = x[idx]
-        gate_up = xe @ w1f[e].t()
+        # Cast one expert at a time. Upcasting all of w1/w2 up front needs
+        # 2*E*(2I*D + D*I)*4 bytes held at once -- 180GB at E=256, D=4096,
+        # I=14336, which OOMs a 252GiB MI350X before the first matmul. Casting
+        # is elementwise, so slicing first is bit-identical, and experts with no
+        # routed tokens are now never upcast at all.
+        w1e = w1[e].float()
+        w2e = w2[e].float()
+        gate_up = xe @ w1e.t()
         gate, up = gate_up[:, :I], gate_up[:, I:]
         h = _act_fp32(gate, act) * up
-        ye = h @ w2f[e].t()
+        ye = h @ w2e.t()
         w_e = (tw_f * mask.float()).sum(dim=1)[idx]
         out[idx] += ye * w_e[:, None]
     return out

@@ -10,7 +10,8 @@ Design for a heavily-shared node:
   * Loads ONE checkpoint at a time and frees VRAM before the next (no stacking).
   * Pins the model AND the kernel-bench subprocess to a single free physical GPU.
   * Saves the combined JSON after EVERY policy, so a mid-run VRAM spike/OOM keeps
-    all completed policies' results.
+    all completed policies' results, and then exits non-zero so the caller learns
+    the requested comparison is incomplete.
 
 Usage:
   HIP set inside; just pass --gpu <free physical id>.
@@ -186,6 +187,21 @@ def main() -> int:
         print(f"[eval] save_report warn: {e}", flush=True)
     print(f"[eval] DONE -> {out.with_suffix('.json')}", flush=True)
     print(f"[eval] ranking: {combined['ranking_by_fast1']}", flush=True)
+
+    # Every failure above is caught and recorded so partial results survive; that
+    # must not be reported to the caller as success. Absent LOCAL checkpoints are
+    # skipped on purpose and are not errors, but a run where nothing was evaluated
+    # is still a failure.
+    errored = sorted(name for name, r in results.items() if "error" in r)
+    evaluated = sorted(name for name, r in results.items() if "fast_p" in r)
+    if not evaluated:
+        print(f"[eval] FAILED: no policy produced results (requested={model_list}, "
+              f"errored={errored or ['none']})", flush=True)
+        return 1
+    if errored:
+        print(f"[eval] FAILED: {len(errored)} of {len(errored) + len(evaluated)} "
+              f"evaluated policies errored: {', '.join(errored)}", flush=True)
+        return 1
     return 0
 
 

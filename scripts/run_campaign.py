@@ -2760,14 +2760,23 @@ def _eval_kernelbench_amd(ctx, kore_pol, KoreEnv):
         str(getattr(ctx["args"], "claim_profile", "core"))
     ]
     source_ok = not (_production(ctx) and required) or source == "full"
+    # A finite, non-empty report is necessary but not sufficient: without a
+    # metric bar this track passed at fast_1 == 0.0 on a real checkout.
+    from kore.eval.kernelbench_amd import kernelbench_claim_gate
+
+    gate = kernelbench_claim_gate(report, source=source)
     _log("eval", "\n" + format_kernelbench_report(report))
+    if not gate["passed"]:
+        _log("eval", "kernelbench-amd claim gate FAILED: " + "; ".join(gate["reasons"]))
     out = ctx["data_root"] / "eval" / "kernelbench_amd.json"
     _atomic_json(out, report)
     _log("eval", f"kernelbench-amd report -> {out}")
     from kore.campaign_lineage import file_digest
     return {
-        "passed": bool(source_ok),
+        "passed": bool(source_ok and gate["passed"]),
         "source": source,
+        "source_ok": bool(source_ok),
+        "gate": gate,
         "n": int(report["n"]),
         "fast_p": fast_p,
         "report": str(out),

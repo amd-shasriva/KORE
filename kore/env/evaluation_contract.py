@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 
-EVALUATION_CONTRACT_VERSION = 2
+EVALUATION_CONTRACT_VERSION = 3
 """Wire-format version; core content hashes independently bind evaluator semantics."""
 
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -40,12 +40,18 @@ _CORE_CODE_PATHS: tuple[tuple[str, Path], ...] = tuple(
             path
             for directory in (
                 _PROJECT_ROOT / "kore",
+                # The roofline/physical model decides the speed-of-light integrity
+                # verdict, so its content is part of what produced an observation.
+                _PROJECT_ROOT / "kore" / "analysis",
                 _PROJECT_ROOT / "kore" / "env",
                 _PROJECT_ROOT / "kore" / "reward",
                 _PROJECT_ROOT / "kore" / "tasks",
                 _PROJECT_ROOT / "kore" / "tasks" / "breadth",
                 _PROJECT_ROOT / "kore" / "verify",
                 _PROJECT_ROOT / "kore" / "verifier",
+                # The rocprofv3 CSV parser is the sole source of the counters that
+                # become profile_efficiency.
+                _PROJECT_ROOT / "kore" / "verifier" / "parsers",
             )
             for path in directory.glob("*.py")
         },
@@ -594,6 +600,10 @@ def build_evaluation_contract(
     verified_correctness = os.environ.get("KORE_VERIFIED_CORRECTNESS") == "1"
     compile_baseline = _env_truthy("KORE_COMPILE_BASELINE")
     cold_cache = os.environ.get("KORE_BENCH_COLD", "1") != "0"
+    # Mirrors kore.tasks._genops._use_vendor_baseline (default ON). It switches
+    # baseline_fn between the AITER/hipBLASLt production kernel and torch, which
+    # changes baseline_ms and therefore every speedup.
+    use_vendor_baseline = _env_truthy("KORE_USE_VENDOR_BASELINE", "1")
 
     raw = getattr(task, "raw", {}) or {}
     baseline_tier = raw.get("baseline_tier") if isinstance(raw, Mapping) else None
@@ -657,6 +667,7 @@ def build_evaluation_contract(
             "declared_mode": _json_scalar(getattr(task, "comparison_baseline", None)),
             "tier": _json_scalar(baseline_tier),
             "compile_baseline": compile_baseline,
+            "use_vendor_baseline": use_vendor_baseline,
             "fp8_encoding_override": (
                 os.environ.get("KORE_FP8_ENCODING", "").strip().lower() or None
             ),

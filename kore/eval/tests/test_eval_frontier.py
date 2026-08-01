@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 import torch
 
 from kore.eval import kernelbench_amd as kb
@@ -363,6 +364,9 @@ def test_heldout_protocol_excludes_families_and_nonempty():
     assert rep["ok"] is True
     assert rep["task_overlap"] == []
     assert rep["family_overlap"] == []
+    # Family leakage was actually evaluated, not skipped.
+    assert rep["family_check"] == "verified"
+    assert rep["unresolved_tasks"] == []
 
 
 def test_heldout_protocol_spans_all_three_axes():
@@ -388,9 +392,13 @@ def test_leakage_check_detects_injected_overlap():
     bad = kb.HeldoutProtocol(
         heldout_families=["gemm"], heldout_tasks=["x", "y"], train_tasks=["y", "z"],
     )
-    rep = kb.leakage_check(bad)
+    with pytest.warns(RuntimeWarning, match="without task objects"):
+        rep = kb.leakage_check(bad)
     assert rep["ok"] is False
     assert "y" in rep["task_overlap"]
+    # Without task objects the FAMILY invariant cannot be evaluated at all, so the
+    # report says so instead of implying a clean family check.
+    assert rep["family_check"] == "unverifiable"
 
 
 def test_shape_regime_classification():

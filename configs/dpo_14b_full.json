@@ -27,5 +27,8 @@
   "max_length": 16384,
   "fsdp": "full_shard auto_wrap",
   "fsdp_transformer_layer_cls": null,
-  "fsdp_cpu_offload": false
+  "fsdp_cpu_offload": false,
+  "dataloader_num_workers": 4,
+  "dataloader_pin_memory": false,
+  "dataloader_prefetch_factor": 2
 }

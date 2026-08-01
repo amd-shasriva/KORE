@@ -38,7 +38,18 @@ class KoreConfig:
     sandbox: SandboxConfig = field(default_factory=SandboxConfig.from_env)
     # Physical-model identity is explicit and is resolved/fingerprinted at runtime.
     # A calibration file must use kore.runtime-calibration.v1 (SKU + runtime metadata);
-    # legacy KORE_PEAK_* process-global overrides are intentionally unsupported.
+    # legacy KORE_PEAK_* process-global overrides are intentionally unsupported
+    # (they are a silent no-op; kore.analysis.rooflines warns when they are set).
+    #
+    # SKU: gfx950 spans MI350X (2.2 GHz / 1000 W / 2.30 PF/s bf16) and MI355X
+    # (2.4 GHz / 1400 W / 2.50 PF/s bf16). The peak differs by 8.7%, so the wrong
+    # SKU mis-scales every eta AND moves the SoL integrity floor. This node is an
+    # MI350X by device evidence (rocminfo Marketing Name "AMD Instinct MI350X",
+    # max sclk 2200 MHz, 1000 W package cap); the Slurm `--gres=gpu:mi355x:8`
+    # label is a cluster-side alias for the gfx950 partition, not the silicon.
+    # __post_init__ rejects an unknown SKU or one whose arch != gpu_target, and
+    # kore.analysis.rooflines.verify_runtime_sku() rejects a configured SKU that
+    # the device contradicts.
     physics_sku: str = field(default_factory=lambda: os.environ.get("KORE_PHYSICS_SKU", "mi350x"))
     physics_calibration_path: Optional[str] = field(
         default_factory=lambda: os.environ.get("KORE_PHYSICS_CALIBRATION") or None)
@@ -194,6 +205,20 @@ class KoreConfig:
         default_factory=lambda: os.environ.get("KORE_SPEED_AGG", "worst"))
     cvar_alpha: float = 0.5   # tail fraction for "cvar" (0<alpha<=1; ->0==worst, ==1==mean)
 
+    # --- KernelBench-AMD claim track thresholds ---------------------------------
+    # The claim track used to report PASS for ANY non-empty finite report, so
+    # fast_1 = 0.0 on a real KernelBench checkout passed. A claim needs a real bar.
+    # Defaults (see kore.eval.kernelbench_amd for the derivation): fast_1 >= 0.20
+    # sits above the published frontier-model band on KernelBench Level 1/2 vs
+    # torch-eager, and the correctness floor stops a track from clearing the speed
+    # bar on a handful of lucky tasks while most of the split fails to compile.
+    kernelbench_min_fast_1: float = field(
+        default_factory=lambda: float(os.environ.get("KORE_KB_MIN_FAST_1", "0.20")))
+    kernelbench_min_correct_rate: float = field(
+        default_factory=lambda: float(os.environ.get("KORE_KB_MIN_CORRECT_RATE", "0.50")))
+    kernelbench_min_tasks: int = field(
+        default_factory=lambda: int(os.environ.get("KORE_KB_MIN_TASKS", "20")))
+
     # multi-turn credit
     gamma: float = 0.4
 
@@ -223,6 +248,46 @@ class KoreConfig:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self._check_reward_invariants()
+        self._check_physics_invariants()
+        self._check_claim_thresholds()
+
+    def _check_physics_invariants(self) -> None:
+        """Fail fast on a physics identity that would divide by the wrong ceiling.
+
+        A typo'd or neighbouring SKU is not a cosmetic error: ``eta`` and the SoL
+        integrity floor are both computed from that SKU's peaks, so a silent
+        mismatch either flatters attainment or admits a physically impossible
+        timing. This is a STATIC check only (no device probe, so nothing spawns a
+        subprocess at import); the device cross-check lives in
+        :func:`kore.analysis.rooflines.verify_runtime_sku`.
+        """
+        from kore.analysis.roofline import ModelError, available_skus, hardware_spec
+
+        try:
+            spec = hardware_spec(self.physics_sku)
+        except ModelError as exc:
+            raise ValueError(
+                f"physics_sku={self.physics_sku!r} is not a known SKU "
+                f"({available_skus()}): {exc}"
+            ) from exc
+        if spec.architecture.lower() != str(self.gpu_target).lower():
+            raise ValueError(
+                f"physics_sku={spec.sku} is {spec.architecture}, which contradicts "
+                f"gpu_target={self.gpu_target!r}; set KORE_PHYSICS_SKU to a SKU of "
+                f"{self.gpu_target} so eta is computed against the right peaks"
+            )
+        # physics_model_fingerprint is deliberately NOT cross-checked here: with no
+        # calibration path it legitimately pins the datasheet model, and a pin that
+        # names a calibrated model while the path is missing already fails closed in
+        # PhysicalModel.require_fingerprint with the exact mismatch.
+
+    def _check_claim_thresholds(self) -> None:
+        if not 0.0 <= self.kernelbench_min_fast_1 <= 1.0:
+            raise ValueError("kernelbench_min_fast_1 must be a fraction in [0, 1]")
+        if not 0.0 <= self.kernelbench_min_correct_rate <= 1.0:
+            raise ValueError("kernelbench_min_correct_rate must be a fraction in [0, 1]")
+        if self.kernelbench_min_tasks < 1:
+            raise ValueError("kernelbench_min_tasks must be >= 1")
 
     def _check_reward_invariants(self) -> None:
         """Fail fast if a (possibly env-overridden) config would break the

@@ -35,6 +35,7 @@ _CONTRACT_ENV = (
     "KORE_FP8_ENCODING",
     "KORE_NO_BENCH_BOTH",
     "KORE_TIMING_LOCK",
+    "KORE_USE_VENDOR_BASELINE",
     "KORE_PREFLIGHT_RUNTIME_IDENTITY",
     "ROCR_VISIBLE_DEVICES",
     "HIP_VISIBLE_DEVICES",
@@ -606,6 +607,125 @@ def test_unstable_or_nonfinite_preflight_identity_disables_replay(tmp_path, fail
 
     assert len(runner.calls) == 2
     assert len(env._cache_obj) == 0
+
+
+def _contract_kwargs(env: KoreEnv, task: Task, config: SimpleNamespace) -> dict:
+    return {
+        "task": task,
+        "shapes": [task.shapes[0]],
+        "do_bench": True,
+        "config": config,
+        "snr_threshold": task.snr_threshold,
+        "correctness_timeout": env.correctness_timeout,
+        "bench_timeout": env.bench_timeout,
+        "gpu_selection": env._gpu_selection(task),
+        "runtime_identity": env._runtime_identity,
+    }
+
+
+def test_vendor_baseline_toggle_invalidates(tmp_path, monkeypatch):
+    """``KORE_USE_VENDOR_BASELINE`` switches ``baseline_fn`` between the AITER /
+    hipBLASLt production kernel and torch, moving every measured speedup."""
+    env, task, _config_obj, runner = _env(tmp_path)
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=True)  # default: vendor ON
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=True)
+    monkeypatch.setenv("KORE_USE_VENDOR_BASELINE", "0")
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=True)  # torch-only bar
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=True)
+    # An explicit "1" is the same *effective* baseline as leaving it unset, so it
+    # must reuse the first record rather than force a third evaluation.
+    monkeypatch.setenv("KORE_USE_VENDOR_BASELINE", "1")
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=True)
+
+    assert len(runner.calls) == 2
+
+
+def test_vendor_baseline_is_part_of_the_cache_key(tmp_path, monkeypatch):
+    env, task, config, _runner = _env(tmp_path)
+    kwargs = _contract_kwargs(env, task, config)
+
+    vendor = contract_module.build_evaluation_contract(**kwargs)
+    monkeypatch.setenv("KORE_USE_VENDOR_BASELINE", "off")
+    torch_only = contract_module.build_evaluation_contract(**kwargs)
+
+    assert vendor["baseline"]["use_vendor_baseline"] is True
+    assert torch_only["baseline"]["use_vendor_baseline"] is False
+    assert source_key(task.task_id, _SOURCE, vendor) != source_key(
+        task.task_id, _SOURCE, torch_only)
+
+
+@pytest.mark.parametrize(
+    "value", [None, "1", "0", "on", "off", "true", "FALSE", "yes", "no", "", "  1  "]
+)
+def test_vendor_baseline_contract_matches_the_driver_predicate(
+    tmp_path, monkeypatch, value
+):
+    """The contract must record what ``_genops`` will actually resolve, not a guess."""
+    from kore.tasks._genops import _use_vendor_baseline
+
+    env, task, config, _runner = _env(tmp_path)
+    if value is None:
+        monkeypatch.delenv("KORE_USE_VENDOR_BASELINE", raising=False)
+    else:
+        monkeypatch.setenv("KORE_USE_VENDOR_BASELINE", value)
+
+    contract = contract_module.build_evaluation_contract(
+        **_contract_kwargs(env, task, config))
+
+    assert contract["baseline"]["use_vendor_baseline"] is _use_vendor_baseline()
+
+
+# Directories whose content decides a verdict but that the core_code fingerprint
+# used to omit: the roofline model feeds the speed-of-light integrity gate, and the
+# rocprofv3 CSV parser feeds profile efficiency.
+_ADDED_CORE_MODULES = (
+    "kore/analysis/roofline.py",
+    "kore/verifier/parsers/rocprofv3.py",
+)
+
+
+def test_verdict_bearing_directories_are_fingerprinted():
+    labels = {label for label, _path in contract_module._CORE_CODE_PATHS}
+
+    for module in _ADDED_CORE_MODULES:
+        directory = module.rsplit("/", 1)[0]
+        assert module in labels, f"{module} is missing from the core_code fingerprint"
+        assert sum(1 for label in labels if label.startswith(f"{directory}/")) > 1, (
+            f"{directory}/ looks only partially covered")
+
+
+@pytest.mark.parametrize("module", _ADDED_CORE_MODULES)
+def test_editing_a_verdict_bearing_core_module_invalidates(tmp_path, monkeypatch, module):
+    """Editing the roofline model / rocprof parser must not hit a stale observation.
+
+    The real module is copied to a writable location and swapped in under its own
+    fingerprint label, so the repo tree is never mutated while the identical
+    ``(label, content)`` pair still produces the production digest.
+    """
+    real = dict(contract_module._CORE_CODE_PATHS)
+    editable = tmp_path / "editable.py"
+    editable.write_bytes(real[module].read_bytes())
+    monkeypatch.setattr(
+        contract_module,
+        "_CORE_CODE_PATHS",
+        tuple(
+            (label, editable if label == module else path)
+            for label, path in contract_module._CORE_CODE_PATHS
+        ),
+    )
+    contract_module._clear_fingerprint_caches()
+    env, task, _config_obj, runner = _env(tmp_path / "env")
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    editable.write_text(editable.read_text() + "\n# evaluator semantics changed\n")
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 2
 
 
 def test_core_evaluator_code_change_invalidates(tmp_path, monkeypatch):

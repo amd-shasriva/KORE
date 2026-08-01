@@ -37,7 +37,11 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from kore.config import CONFIG
-from kore.data.gen_groups import build_preferences
+from kore.data.gen_groups import (
+    build_preferences,
+    paired_baseline_wall_us,
+    primary_timing_classification,
+)
 from kore.data.gen_groups import rank_candidates as _rank_results
 from kore.data.mutate import apply_operator, infer_family, list_operators
 from kore.data.prompts import (
@@ -47,7 +51,14 @@ from kore.data.prompts import (
     format_assistant_turn,
     normalize_assistant,
 )
-from kore.data.schemas import RankedGroupRecord, WinRecord
+from kore.data.schemas import (
+    SPEEDUP_BASIS_BASELINE,
+    SPEEDUP_BASIS_SEED,
+    RankedGroupRecord,
+    WinRecord,
+    resolve_baseline_identity,
+    speedup_credibility,
+)
 from kore.env.replay import kernel_hash
 from kore.obs import get_logger
 from kore.reward.reward import Observation, compute_reward
@@ -325,6 +336,10 @@ def _result_dict(source: str, obs: Observation, rr) -> dict:
         "speedup": rr.speedup,
         "snr_db": obs.snr_db,
         "wall_us": _wall_us(obs),
+        # Absolute baseline anchor, so the groups evolve emits keep their
+        # baseline-relative DPO anchoring exactly like gen_groups' (a candidate
+        # with only ``wall_us`` degrades every derived pair to among_correct).
+        "baseline_wall_us": paired_baseline_wall_us(obs),
     }
 
 
@@ -374,6 +389,9 @@ def evolve_task(
     """
     cfg = cfg or EvolveConfig()
     rng = random.Random(cfg.seed)
+    # WHICH baseline env.step measures against; stamped on every emitted group and
+    # on the win, so a vendor-beating record is distinguishable from a torch-beating one.
+    identity = resolve_baseline_identity(task)
     family = infer_family(getattr(task, "operation", None) or getattr(task, "task_id", ""))
     operators = list_operators(cfg.operator_kind)
     bandit = DMABBandit(operators, c=cfg.bandit_c, ph_delta=cfg.ph_delta,
@@ -397,6 +415,10 @@ def evolve_task(
         # Tracks best_wall because a fixed baseline means fastest wall == highest
         # vendor speedup; used as the frontier admission gate for the emitted win.
         best_vendor_speedup = seed_rr.speedup
+        # Verifier obs of the current best, so the emitted win carries the timing
+        # provenance (baseline wall, measurement CVs, baseline-relative
+        # classification) measured on the EXACT kernel it ships.
+        best_obs = seed_obs
 
         groups: list[RankedGroupRecord] = []
         trajectory: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -464,6 +486,7 @@ def evolve_task(
                 ):
                     best_src, best_wall, best_snr, best_correct = src, cand_wall, obs.snr_db, True
                     best_vendor_speedup = rr.speedup
+                    best_obs = obs
                     gen_improved = True
                 feedback = _feedback(obs, rr)
 
@@ -475,7 +498,9 @@ def evolve_task(
                 rank_of = {idx: pos for pos, idx in enumerate(rorder)}
                 cand_recs = [
                     {"source": r["source"], "wall_us": r["wall_us"],
-                     "snr_db": r["snr_db"], "rank": rank_of[i]}
+                     "snr_db": r["snr_db"], "rank": rank_of[i],
+                     "speedup": r.get("speedup"),
+                     "baseline_wall_us": r.get("baseline_wall_us")}
                     for i, r in enumerate(results)
                 ]
                 prefs = build_preferences(results)
@@ -488,6 +513,11 @@ def evolve_task(
                         gpu=getattr(task, "gpu_target", "gfx950"),
                         operation=getattr(task, "operation", None),
                         arch=getattr(task, "gpu_target", None),
+                        baseline_wall_us=next(
+                            (r["baseline_wall_us"] for r in results
+                             if r.get("baseline_wall_us") is not None), None),
+                        baseline_type=identity["baseline_type"],
+                        baseline_kind=identity["baseline_kind"],
                     ))
 
             # ----- periodic ring migration between islands -----
@@ -527,6 +557,11 @@ def evolve_task(
                 and seed_rel is not None and seed_rel > 1.0
             )
             speedup = seed_rel
+        # Which reference the persisted ratio is against, declared once so the
+        # gate and the record can never disagree.
+        speedup_basis = (SPEEDUP_BASIS_BASELINE if cfg.require_vendor_win
+                         else SPEEDUP_BASIS_SEED)
+        credibility = speedup_credibility(speedup, cfg=reward_cfg)
         if is_win:
             # CONVERGENT transcript (audit R2 datagen C2): a WinRecord must teach the
             # clean seed -> VERIFIED-winning-kernel demo in the canonical contract, NOT
@@ -551,6 +586,11 @@ def evolve_task(
                                                               mode="exploit")},
                 {"role": "assistant", "content": _win_asst},
             ]
+            # Provenance for the persisted number, measured on best_src itself:
+            # WHICH baseline (declared identity + vendor/torch kind), WHAT the ratio
+            # is relative to (baseline under the frontier gate, seed under the stub
+            # fallback -- never pooled by accident), and whether the ratio is within
+            # the credible-speedup ceiling.
             wins.append(WinRecord(
                 task_id=task.task_id,
                 trajectory=win_trajectory,
@@ -562,6 +602,19 @@ def evolve_task(
                 gpu=getattr(task, "gpu_target", "gfx950"),
                 operation=getattr(task, "operation", None),
                 arch=getattr(task, "gpu_target", None),
+                baseline_type=identity["baseline_type"],
+                baseline_kind=identity["baseline_kind"],
+                baseline_identity_source=identity["baseline_identity_source"],
+                baseline_wall_us=paired_baseline_wall_us(best_obs),
+                final_cv_pct=getattr(best_obs, "cv_pct", None),
+                baseline_cv_pct=getattr(best_obs, "baseline_cv_pct", None),
+                paired_ratio_cv_pct=getattr(best_obs, "paired_ratio_cv_pct", None),
+                paired_ci_half_width_pct=getattr(
+                    best_obs, "paired_ci_half_width_pct", None),
+                timing_classification=primary_timing_classification(best_obs, task),
+                speedup_basis=speedup_basis,
+                speedup_exceeds_credible=credibility["speedup_exceeds_credible"],
+                credible_speedup_max=credibility["credible_speedup_max"],
             ))
 
         stats = {
@@ -569,6 +622,8 @@ def evolve_task(
             "n_benched": n_benched,
             "n_correct": n_correct,
             "best_speedup": speedup,
+            "speedup_basis": speedup_basis,
+            "speedup_exceeds_credible": credibility["speedup_exceeds_credible"],
             "best_correct": best_correct,
             "n_elites": len(merged),
             "bandit_resets": bandit.n_resets,

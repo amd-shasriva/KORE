@@ -1,4 +1,6 @@
 include README.md
+include LICENSE
+include THIRD_PARTY.md
 include pyproject.toml
 include requirements-conductor.txt
 include conftest.py

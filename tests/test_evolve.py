@@ -6,7 +6,10 @@ Covers the three review pieces:
   - MAP-Elites / island archive insert / elite / migrate semantics;
   - the operator registry exposed by mutate for the bandit to select from;
   - evolve_task end-to-end with a StubTeacher + a deterministic fake env,
-    producing verified WinRecords and RankedGroupRecords.
+    producing verified WinRecords and RankedGroupRecords;
+  - the frontier admission gate (only vendor-beating kernels become wins) and the
+    provenance an admitted win must carry: WHICH baseline it beat, WHAT its speedup
+    is relative to, and whether that ratio is physically credible.
 
 No GPU, no teacher model: the environment is a pure-python fake and the generator
 is a StubTeacher.
@@ -18,7 +21,9 @@ import hashlib
 import random
 from types import SimpleNamespace
 
+from kore.config import CONFIG
 from kore.data import mutate
+from kore.data.build_datasets import build_dpo
 from kore.data.evolve import (
     DMABBandit,
     EliteRecord,
@@ -28,7 +33,16 @@ from kore.data.evolve import (
     evolve_task,
     migrate,
 )
-from kore.data.schemas import RankedGroupRecord, WinRecord
+from kore.data.schemas import (
+    BASELINE_IDENTITY_DECLARED,
+    BASELINE_KIND_VENDOR,
+    SPEEDUP_BASIS_BASELINE,
+    SPEEDUP_BASIS_SEED,
+    RankedGroupRecord,
+    WinRecord,
+    baseline_relative_speedup,
+    credible_speedup_max,
+)
 from kore.data.teacher import StubTeacher
 from kore.reward.reward import Observation
 
@@ -202,6 +216,9 @@ def _fake_task():
         dtype="bf16",
         operation="gemm",
         gpu_target="gfx942",
+        # A real GEMM task is benched against the production dense-GEMM library, so
+        # the emitted win can state WHICH baseline it beat.
+        comparison_baseline="hipblaslt_gemm",
         seed_source=_SEED,
         shapes=[SimpleNamespace(name="s", dims={"M": 1024, "N": 1024, "K": 1024})],
     )
@@ -322,6 +339,13 @@ def test_evolve_frontier_gate_drops_vendor_losing_wins():
     res2 = evolve_task(task, _teacher(), _SlowVendorEnv(task), generations=6,
                        cfg=EvolveConfig(seed=0, islands=2, require_vendor_win=False))
     assert len(res2.wins) >= 1
+    # ...and when the fallback DOES admit one, its speedup is explicitly labelled
+    # seed-relative, so a vendor-losing record can never be pooled with (or read as)
+    # a vendor-beating one even though the gate was disabled.
+    fallback = res2.wins[0]
+    assert fallback.speedup_basis == SPEEDUP_BASIS_SEED
+    assert baseline_relative_speedup(fallback) is None
+    assert res2.stats["speedup_basis"] == SPEEDUP_BASIS_SEED
 
 
 def test_evolve_win_speedup_is_vendor_relative():
@@ -337,3 +361,37 @@ def test_evolve_win_speedup_is_vendor_relative():
     assert w.speedup is not None and w.speedup > 1.0
     assert w.final_wall_us is not None
     assert abs(w.speedup - (3000.0 / w.final_wall_us)) < 0.05  # baseline(3ms)/final, us
+    # ...and the record SAYS so, instead of leaving the scale to be guessed.
+    assert w.speedup_basis == SPEEDUP_BASIS_BASELINE
+    assert baseline_relative_speedup(w) == w.speedup
+
+
+def test_evolve_win_carries_baseline_identity_and_credibility():
+    """A win must name WHICH baseline it beat and whether its ratio is credible."""
+    task = _fake_task()
+    res = evolve_task(task, _teacher(), _FakeEnv(task), generations=6,
+                      cfg=EvolveConfig(seed=0, islands=2))
+    w = res.wins[0]
+    assert w.baseline_type == "hipblaslt_gemm"
+    assert w.baseline_kind == BASELINE_KIND_VENDOR      # a real production kernel
+    assert w.baseline_identity_source == BASELINE_IDENTITY_DECLARED
+    # The absolute anchor is the measured baseline wall, so the ratio is checkable.
+    assert w.baseline_wall_us == 3000.0
+    assert w.speedup_exceeds_credible is False
+    assert w.credible_speedup_max == credible_speedup_max(CONFIG)
+
+
+def test_evolve_groups_carry_the_baseline_anchor():
+    """The groups evolve emits must keep the DPO baseline anchoring that gen_groups'
+    do -- a candidate with only wall_us degrades every derived pair to among_correct."""
+    task = _fake_task()
+    res = evolve_task(task, _teacher(), _FakeEnv(task), generations=6,
+                      cfg=EvolveConfig(seed=0, islands=2))
+    assert res.groups
+    g = res.groups[0]
+    assert g.baseline_wall_us == 3000.0
+    for c in g.candidates:
+        assert c["baseline_wall_us"] == 3000.0
+        assert c["speedup"] is not None
+    rows = build_dpo([g])
+    assert rows and all(r["anchor"] == "beats_baseline" for r in rows)

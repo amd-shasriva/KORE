@@ -1,0 +1,19 @@
+# Every text file is stored as LF and checked out as LF, whatever core.autocrlf a
+# contributor happens to have. Commits ebe79e1 and 37b391b flip-flopped
+# scripts/run_campaign.py between CRLF and LF, turning a 16-line and a 2-line
+# change into 6,300-line diffs; pinning the attribute here means that cannot recur.
+#
+# This does not rewrite anything that is already committed: text=auto leaves a blob
+# that already contains CRLF alone until someone explicitly renormalizes it.
+* text=auto eol=lf
+
+# Packaged release artifacts: eol conversion would corrupt the gzip streams, the
+# fixed-size split parts that data/release/reassemble.sh concatenates, and the
+# pickled value model. A textual diff of a several-hundred-MB corpus is unreadable
+# anyway, so the dataset shards opt out of diffing too.
+*.gz    binary
+*.tgz   binary
+*.tar   binary
+*.part* binary
+*.pkl   binary
+*.jsonl -text -diff

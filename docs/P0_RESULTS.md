@@ -1,16 +1,90 @@
 # P0 roofline / Speed-of-Light validation — native gfx950 (MI350-class / CDNA4)
 
-**Verdict: PARTIAL.** Check (b), the residual decomposition, is a decisive PASS and the load-bearing result; check (a) passes against the AITER production baseline; check (c) is weak, as expected before any RL. All results here are offline (schedule-mutation kernels, not an RL policy).
+**Verdict: `INTEGRITY_ONLY`. All three preregistered checks FAIL under the v2 analysis.**
+
+An earlier revision of this document reported `PARTIAL`, with check (b) as a "decisive PASS" at
+R² = 0.978. That reading does not survive the controls this repository now implements. The stored
+artifact `data/p0_study_final.json` is a v1-schema report; re-running the current adjudicator
+(`kore.analysis.p0_sol.reanalyze_report`) on that same file returns `INTEGRITY_ONLY` with every
+check failing. The numbers below are from that re-analysis, not from the stored verdict strings.
+
+The physics model is retained, but its role is now stated correctly: **η is a bounded, PMC-free
+shaping potential and a speed-of-light integrity ceiling. It is not a validated predictor of
+speedup.** No operator family currently authorizes empirical residual shaping.
+
+## Why the earlier reading was wrong
+
+Both failing checks share the same defect: the quantity under test and the quantity it is being
+tested against share the denominator `T_candidate`, which varies over orders of magnitude across
+kernels. A high correlation or R² therefore follows from scale alone.
+
+The regression target in check (b) was `residual = T_candidate − T_min` and the regressors were
+`stall_frac · T_candidate` and `occupancy_deficit · T_candidate`. The v2 analysis adds three
+controls, and all three are decisive:
+
+| Control | Result |
+| --- | --- |
+| Named-term model, raw in-sample R² | **0.9783** (reproduces the previously reported headline exactly) |
+| `T_candidate`-only predictor, raw in-sample R² | **0.9971** — *higher* than the named model |
+| `T_candidate`-only, task-level cross-validated R² | **0.9970** vs the named model's 0.9471 |
+| Preregistered normalized target, held-out task clusters | **R² = −0.4582** |
+
+The preregistered primary target is the normalized gap `(T_candidate − T_min) / T_candidate`,
+which removes the shared scale. On held-out task clusters it scores −0.458 — worse than predicting
+the mean. Against a `T_candidate`-only baseline the increment is **−0.3365**, 95% CI
+[−0.4880, +0.6078]. In-sample it reaches only 0.3140. `p = p_adjusted = 0.986`.
+
+Check (a) fails the same way. η = `T_min / T_candidate` and speedup = `T_vendor / T_candidate`
+again share `T_candidate`:
+
+```
+(a) eta predicts speedup   : rho = 0.5290   n = 114   95% CI [0.1762, 0.8229]
+    T_candidate-only rho   :       0.7274
+    increment over T_cand  :      -0.1984   95% CI [-0.4862, +0.0474]   p = 0.970   -> FAIL
+(b) residual decomposition : normalized held-out CV R2 = -0.4582  n = 132, 15 task clusters
+    increment over T_cand  :      -0.3365   95% CI [-0.4880, +0.6078]   p = 0.986   -> FAIL
+(c) monotone-in-valley     : frac = 0.500   95% CI [0.3611, 0.6286]                 -> FAIL
+DECISION: INTEGRITY_ONLY        model_fingerprint_status: legacy-unfingerprinted
+shaping_evidence: disabled      authorized families: none
+```
+
+η is a *worse* predictor of speedup than the trivial `1/T_candidate` — that is, worse than the
+statement "faster kernels are faster."
+
+Reproduce:
+
+```bash
+PYTHONPATH=. python -c "
+import json; from kore.analysis.p0_sol import reanalyze_report
+print(json.dumps(reanalyze_report(json.load(open('data/p0_study_final.json'))), indent=2)[:4000])"
+```
+
+## What this does and does not invalidate
+
+**Still valid.** The measurements themselves are sound: the peak calibration, the AITER baseline
+timings, the PMC collection methodology, and the paired timing protocol are unaffected. The
+speed-of-light ceiling remains usable as an *integrity* bound — a kernel timing faster than
+`T_min` is physically impossible and is rejected — because that use requires only a conservative
+lower bound on achievable time, not predictive validity.
+
+**No longer claimable.** That counter-derived named terms explain the runtime residual; that η
+predicts vendor-relative speedup; that the residual is a validated training signal. Any external
+claim must be restated accordingly.
+
+**Not contaminated.** Empirical per-family shaping was never active in training. It requires both
+`physics_shaping_evidence_path` and `physics_shaping_evidence_fingerprint`, and `grpo_14b_full.json`
+sets neither, so `_dense_profile_weight` returns 0.0. `reanalyze_report` independently reports
+`shaping_evidence.status = "disabled"` with no authorized families, because a `legacy-unfingerprinted`
+model can never authorize shaping. The shipped models are therefore not affected by this correction.
 
 ## Node & stack
 
-- **Host:** 8× **gfx950** (AMD Instinct MI350-class, CDNA4), ROCm 7.2.3, `rocprofv3`. All GPU measurement runs on one device (datagen runs on a separate node).
-- **Main stack:** `torch 2.10.0+rocm7.0` + `pytorch-triton-rocm 3.5.1` (native gfx950) — used for the roofline model, PMC, candidate kernels, and peak calibration.
-- **AITER baseline stack (isolated):** AITER's kernels require `triton ≥ 3.6`, which the main stack does not ship, so the production baseline runs from a separate venv (local `torch 2.10.0+rocm7.0` + `triton 3.6.0` + a separate AITER checkout) so `aiter.ops.*` CK kernels JIT-compile on gfx950. This never modifies the main venv or the shared runtime.
-
-## Roofline model
-
-`T_min = max(W_flops/P_peak, Q_bytes/B_peak)`, `η = T_min/T_measured ∈ (0,1]` (SOL attainment). Peaks are overridable via `KORE_PEAK_{BF16,FP8,HBM_BW}`.
+- **Host:** 8× **gfx950** (AMD Instinct MI350-class, CDNA4), ROCm 7.2.3, `rocprofv3`. All GPU
+  measurement runs on one device (datagen runs on a separate node).
+- **Main stack:** `torch 2.10.0+rocm7.0` + `pytorch-triton-rocm 3.5.1` (native gfx950).
+- **AITER baseline stack (isolated):** AITER's kernels require `triton >= 3.6`, which the main
+  stack does not ship, so the production baseline runs from a separate venv so `aiter.ops.*` CK
+  kernels JIT-compile on gfx950. This never modifies the main venv or the shared runtime.
 
 ## Peak calibration (measured achievable, not datasheet)
 
@@ -22,24 +96,16 @@ On-device microbenchmarks (`kore.analysis.calibrate_peaks`, batched event timing
 | bf16 matrix | 2.5 PF/s | **1.27 PF/s** | 51% | 8192³ square matmul (`2N³` FLOPs, sustained) |
 | fp8 matrix | 5.0 PF/s | *(datasheet)* | – | `torch._scaled_mm` unavailable on this stack |
 
-Measured peaks are applied via `KORE_PEAK_HBM_BW=4.599e12`, `KORE_PEAK_BF16=1.273e15` (fp8 keeps the datasheet value). Using the achievable peak makes `η` a defensible fraction-of-attainable-SOL; because every kernel of a dtype divides by the same peak, this only rescales absolute `η` and leaves the tested relationships unchanged (check (b) R² is 0.978 calibrated vs 0.99 uncalibrated; both PASS). Details in `data/calibration.json`.
+> **Applying calibration.** Earlier revisions documented `KORE_PEAK_BF16` / `KORE_PEAK_HBM_BW` /
+> `KORE_PEAK_FP8` environment overrides. Those were deliberately removed as invisible,
+> unfingerprinted global calibration and are now a **silent no-op** — setting them changes nothing.
+> Calibrated peaks must be supplied as a fingerprinted `kore.runtime-calibration.v1` document; see
+> `kore/analysis/calibrate_peaks.py` and the `--calibration` path. Any figure produced without one
+> is computed against **datasheet** peaks, which inflates `T_min` by roughly 1.74× (memory-bound)
+> to 1.81× (compute-bound) and correspondingly roughly halves η.
 
-## Final study (3 representative shapes × 3 reseeds, PMC, bootstrap CIs)
-
-`data/p0_study_final.json`: every operator is measured at 3 representative shapes (primary + validation_0 + validation_1; the tiny `minimal` correctness shape is excluded as launch-overhead-bound), each timing reseeded 3× (median-of-medians, L2-flushed cold-cache), with rocprofv3 PMC and 1000× bootstrap 95% CIs. 132 correct kernel×shape points.
-
-```
-(a) η predicts speedup     : ρ = 0.529    n=114   95% CI [0.346, 0.701]   -> PASS
-(b) residual decomposition : R² = 0.9783  n=132   95% CI [0.967, 0.989]   -> PASS  (load-bearing)
-(c) monotone-in-valley     : frac = 0.525 pairs=59 95% CI [0.393, 0.646]  -> WEAK  (expected pre-RL)
-VERDICT: PARTIAL
-```
-
-**Check (b) is the headline.** The runtime residual `(T_measured − T_min)` reconstructs from counter-derived named terms — memory-stall time (`MemUnitStalled`) and occupancy-deficit time (`1 − OccupancyPercent`) — with **R² = 0.978 (95% CI [0.967, 0.989])** across 132 kernels. The CI lower bound stays well above 0.9: the named gradient KORE descends is real and measurable.
-
-**The R² ≈ 0.98 is in-sample and is operator-specific.** A leave-one-family-out experiment (`kore.analysis.residual_transfer`) refits the named-term → residual map on all families but one and predicts the held-out family: pooled in-sample R² = 0.978, but median out-of-family R² = 0.107 (raw) / negative (normalized), and families are separable in residual space. The residual is therefore a **dense per-family** signal, not a single universal latent that transfers zero-shot — which is why KORE trains on the per-family residual rather than assuming cross-family transfer.
-
-**Check (a) passes against the AITER production baseline** (`ρ = 0.529`, CI [0.346, 0.701]): kernels nearer the roofline attain higher speedup versus the production vendor.
+Using an achievable rather than datasheet peak rescales η for every kernel of a dtype identically,
+so it does not change any of the relationships tested above.
 
 ## Check (a) baselines — AITER production kernels
 
@@ -47,50 +113,54 @@ The reference for each operator is the real production kernel, tagged per operat
 
 | operator | baseline | median speedup (seed→best vs vendor) |
 | --- | --- | --- |
-| rmsnorm / layernorm / fused_add_rmsnorm | **AITER CK** (`rms_norm`, `layer_norm`, `fused_add_rms_norm_cu`) | 0.71 / 0.98 / 0.86× |
-| silu_and_mul / rope | **AITER CK** (`silu_and_mul`, `rope_fwd`) | 0.64 / 0.33× |
+| rmsnorm / layernorm / fused_add_rmsnorm | **AITER CK** | 0.71 / 0.98 / 0.86× |
+| silu_and_mul / rope | **AITER CK** | 0.64 / 0.33× |
 | flash_attn_decode / prefill / paged_attn_decode | **AITER** FMHA / ROCm paged attn | 1.32 / 0.07 / 0.15× |
 | fused_moe_silu / topk_softmax | **AITER** `fused_moe` / `topk_softmax` | 0.04 / 0.29× |
 | gemm_bf16 | **hipBLASLt** (`torch.matmul`) | 0.50× |
 | softmax / gelu_tanh | framework (torch — no standalone AITER op) | 0.51 / 0.89× |
 | gemm_fp8_a8w8 / quant_fp8_pertoken | η-only (fp8 vendor path not built on this stack) | – |
 
-Baseline composition (operators with a vendor speedup): 10 AITER-vendor, 1 hipBLASLt, 2 framework. Every AITER baseline passes the same torch-fp32 correctness oracle used for candidates.
+Baseline composition: 10 AITER-vendor, 1 hipBLASLt, 2 framework. Every AITER baseline passes the
+same torch-fp32 correctness oracle used for candidates.
+
+**Read this table as the difficulty bar, not as a result.** These are offline schedule-mutation
+kernels, not an RL policy. Only `flash_attn_decode` exceeds parity with the vendor library; the
+rest lose, several by an order of magnitude. Beating AITER and hipBLASLt is the actual problem.
+
+## Cross-family transfer
+
+A leave-one-family-out experiment refits the named-term → residual map on all families but one and
+predicts the held-out family. On the normalized target the held-out scores are strongly negative
+for most families, so the residual is at best a **dense per-family** signal and does not transfer
+zero-shot. Combined with the checks above, per-family fitting is a necessary but not sufficient
+condition — no family currently reaches an authorizing verdict.
 
 ## PMC (gfx950)
 
-gfx950/CDNA4 renamed the raw counters, so the original `SQ_*` list collected nothing. We use rocprofv3 derived metrics (`OccupancyPercent`, `MemUnitStalled`, `MfmaUtil`, `GRBM_GUI_ACTIVE`), parse the long-format `*_counter_collection.csv`, and select the longest-running compute kernel.
+gfx950/CDNA4 renamed the raw counters, so the original `SQ_*` list collected nothing. We use
+rocprofv3 derived metrics (`OccupancyPercent`, `MemUnitStalled`, `MfmaUtil`, `GRBM_GUI_ACTIVE`),
+parse the long-format `*_counter_collection.csv`, and select the longest-running compute kernel.
 
 ## Limitations
 
-- **`minimal`-shape regime:** on tiny correctness shapes (e.g. M=64, N=512) every kernel is launch/overhead-bound (`η < 2%`) and the roofline does not model launch cost; check (a) is therefore reported on representative shapes only.
+- **`minimal`-shape regime:** on tiny correctness shapes every kernel is launch/overhead-bound
+  (η < 2%) and the roofline does not model launch cost; check (a) is reported on representative
+  shapes only.
 - **fp8 peak** is datasheet (no `_scaled_mm`); the two fp8 operators are η-only.
-- **Check (c)** trajectories are schedule-mutations of the seed, not an RL policy — they show the residual moves with schedule, not that a policy drives it monotonically. WEAK is the expected pre-RL reading.
-
-## Reproduce
-
-```bash
-# calibrate peaks (main stack)
-python -m kore.analysis.calibrate_peaks --out data/calibration.json
-
-# AITER production baseline needs triton>=3.6 in a SEPARATE venv (never the datagen-shared one):
-#   python3.10 -m venv ~/kore-venv-aiter && \
-#   ~/kore-venv-aiter/bin/pip install <local torch 2.10+rocm7.0 wheel> triton==3.6 pandas einops psutil ninja pybind11 && \
-#   pip install -e <separate aiter checkout>
-
-# final study (calibrated peaks + AITER baselines + PMC + CIs):
-KORE_PEAK_HBM_BW=4.599e12 KORE_PEAK_BF16=1.273e15 PYTHONPATH=<aiter2> \
-  python -m kore.analysis.p0_sol --shapes-per-task 3 --reseeds 3 --bootstrap 1000 \
-    --warmup 5 --iters 20 --max-kernels-per-task 3 --out data/p0_study_final.json
-python -m kore.analysis.plots --report data/p0_study_final.json --out figures/
-```
+- **The stored artifact is v1-schema and `legacy-unfingerprinted`.** Its `checks.*.verdict` strings
+  (`PASS`/`WEAK`) are not values the current code can emit and must not be quoted. A definitive
+  re-run on-box with a fingerprinted calibration document is required before any figure derived
+  from this study is published.
 
 ## How the physics enters training
 
-The validated `T_min` is a live reward input. The within-turn reward is the vendor-relative **speedup** (`reward_mode=speedup`); the physics enters GRPO as a potential-based-shaping term on top:
-
-- **Shaping potential.** The scalar potential `Φ(s)` is folded into per-turn credit as `F_t = γ·Φ(s_{t+1}) − Φ(s_t)` (`kore.reward.whitebox`, `kore.reward.shaping`). Online, `Φ = η = T_min/T_measured` (PMC-free, bounded). Its counter-grounded refinement, the named residual `ρ = T_min/(T_min+N)` with `N = (stall_frac + occupancy_deficit)·T_measured` — the same decomposition that carries the check-(b) R² ≈ 0.98 — is the validated target `Φ` approximates; supplying per-turn rocprofv3 counters (or `reward_mode="residual"` with per-candidate counters) makes `ρ` the live potential. The shaping is a state-dependent baseline that redistributes terminal credit across turns (denser signal, variance reduction) without changing the ranking of returns. It is wired identically into the single-process and distributed GRPO paths and is live at `physics_shaping_weight=0.15` (`configs/grpo_14b_full.json`).
-- **Residual-descent reward.** `reward_mode="residual"` (`kore.reward.physics`) is available and unit-tested as an alternative within-turn objective.
-- **Zero-shot generalization harness** (`kore.eval.generalization`): leakage-checked hold-out of whole operator families, with offline evaluation of η and residual-descent on the held-out families.
-
-The R² ≈ 0.98 result is an offline validation of the physics signal; whether the online shaping improves the policy is measured by the GRPO run and its held-out evaluation.
+- **Integrity ceiling (active).** `T_min` rejects physically impossible timings. This use is sound
+  under a conservative lower bound and does not depend on predictive validity.
+- **Shaping potential (structurally present, empirically unauthorized).** `Φ = η` is wired into
+  GRPO credit as `F_t = γ·Φ(s_{t+1}) − Φ(s_t)`. Potential-based shaping preserves the ordering of
+  returns regardless of whether Φ is predictive, so this is safe — but it should be described as a
+  variance-reduction heuristic, not as a validated hardware signal.
+- **Residual-descent reward (available, not validated).** `reward_mode="residual"` exists and is
+  unit-tested as an alternative objective. Given the results above it should not be used as a
+  primary objective without a fresh, fingerprinted study that passes the v2 checks.

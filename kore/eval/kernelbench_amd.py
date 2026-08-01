@@ -38,6 +38,8 @@ and the loaders, so importing this module (and registry discovery) needs no GPU.
 
 from __future__ import annotations
 
+import math
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -50,6 +52,34 @@ KERNELBENCH_BASELINE = "torch_eager"
 
 # Field-standard fast_p thresholds KernelBench reports on (fast_1 is the headline).
 KERNELBENCH_PS: tuple[float, ...] = (1.0, 1.5, 2.0)
+
+# --------------------------------------------------------------------------- #
+# Claim-track thresholds.
+#
+# The KernelBench-AMD track used to report PASS for any non-empty, finite report,
+# i.e. `fast_1 = 0.0` on a real KernelBench checkout was a PASS. These are the
+# defaults for a real bar; every one of them is recorded in the gate result so a
+# report states the bar it cleared instead of hiding it in a caller.
+#
+#   fast_1 >= 0.20  - fraction of the WHOLE split that is correct AND faster than
+#                     torch-eager. KernelBench's published frontier-model results
+#                     on Level 1/2 sit in the single-digit-to-~0.2 band, so 0.20
+#                     is a bar a frontier-competitive claim should clear while
+#                     still being reachable; it is 0.20 of the split, not of the
+#                     correct subset, so it cannot be farmed by attempting less.
+#   correct_rate >= 0.50 - fast_p conflates correctness and speed, so a track
+#                     could clear the speed bar on a few lucky tasks while most
+#                     of the split fails to compile. This floors the denominator
+#                     of honest attempts.
+#   n >= 20         - a fast_1 over the 4 bundled smoke specs has a 0.25
+#                     granularity and is not a claim.
+# --------------------------------------------------------------------------- #
+DEFAULT_MIN_FAST_1 = 0.20
+DEFAULT_MIN_CORRECT_RATE = 0.50
+DEFAULT_MIN_TASKS = 20
+
+# Spec sources that can back a published claim (bundled fixtures are smoke only).
+CLAIMABLE_SOURCES: tuple[str, ...] = ("full",)
 
 # Accepted AMD backend arch tags (KORE target = gfx950/CDNA4; gfx942/CDNA3 lineage).
 KNOWN_AMD_ARCHES: tuple[str, ...] = ("gfx950", "gfx942")
@@ -283,9 +313,82 @@ def _fastp_from_result(res: dict, p: float, *, vs_torch: bool) -> float:
     return fastp(is_correct, baseline, actual, n, p)
 
 
+def kernelbench_claim_gate(report: dict, *, source: Optional[str] = None,
+                           min_fast_1: Optional[float] = None,
+                           min_correct_rate: Optional[float] = None,
+                           min_tasks: Optional[int] = None,
+                           cfg=None) -> dict:
+    """Decide whether a KernelBench-AMD report clears the claim bar.
+
+    Returns ``{passed, reasons, thresholds, observed}``. ``passed`` is True only
+    when every threshold is met AND the report is finite and non-empty; a
+    ``source`` outside :data:`CLAIMABLE_SOURCES` (i.e. the bundled smoke specs)
+    can never pass, because a 4-task fixture set is not a benchmark result.
+    Thresholds default to :data:`DEFAULT_MIN_FAST_1` /
+    :data:`DEFAULT_MIN_CORRECT_RATE` / :data:`DEFAULT_MIN_TASKS`, overridable per
+    call or through :class:`~kore.config.KoreConfig`; the values actually used are
+    echoed back so the persisted artifact records its own bar.
+    """
+    if cfg is None:
+        from kore.config import CONFIG as cfg
+    fast_1_bar = float(cfg.kernelbench_min_fast_1 if min_fast_1 is None else min_fast_1)
+    correct_bar = float(
+        cfg.kernelbench_min_correct_rate if min_correct_rate is None else min_correct_rate
+    )
+    tasks_bar = int(cfg.kernelbench_min_tasks if min_tasks is None else min_tasks)
+
+    n = int(report.get("n", 0) or 0)
+    fast_p = report.get("fast_p") or {}
+    fast_1 = report.get("fast_1")
+    correct_rate = report.get("correct_rate")
+    reasons: list[str] = []
+
+    if not isinstance(fast_p, dict) or not fast_p:
+        reasons.append("report carries no fast_p metrics")
+    else:
+        nonfinite = sorted(
+            str(key) for key, value in fast_p.items()
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value))
+        )
+        if nonfinite:
+            reasons.append(f"fast_p is non-finite at p in {nonfinite}")
+    if n < tasks_bar:
+        reasons.append(f"n={n} is below the minimum claimable split size {tasks_bar}")
+    if not isinstance(fast_1, (int, float)) or not math.isfinite(float(fast_1)):
+        reasons.append("fast_1 is missing or non-finite")
+    elif float(fast_1) < fast_1_bar:
+        reasons.append(f"fast_1={float(fast_1):.4f} is below the threshold {fast_1_bar:.4f}")
+    if not isinstance(correct_rate, (int, float)) or not math.isfinite(float(correct_rate)):
+        reasons.append("correct_rate is missing or non-finite")
+    elif float(correct_rate) < correct_bar:
+        reasons.append(
+            f"correct_rate={float(correct_rate):.4f} is below the threshold {correct_bar:.4f}"
+        )
+    if source is not None and str(source) not in CLAIMABLE_SOURCES:
+        reasons.append(
+            f"spec source {source!r} is not claimable (need one of {CLAIMABLE_SOURCES}; "
+            "the bundled specs are a smoke fixture)"
+        )
+
+    return {
+        "passed": not reasons,
+        "reasons": reasons,
+        "source": source,
+        "thresholds": {
+            "min_fast_1": fast_1_bar,
+            "min_correct_rate": correct_bar,
+            "min_tasks": tasks_bar,
+            "claimable_sources": list(CLAIMABLE_SOURCES),
+        },
+        "observed": {"fast_1": fast_1, "correct_rate": correct_rate, "n": n},
+    }
+
+
 def to_kernelbench_report(res: dict, specs: Optional[Sequence[KernelBenchSpec]] = None,
                           *, ps: Sequence[float] = KERNELBENCH_PS,
-                          prefer_torch_baseline: bool = False) -> dict:
+                          prefer_torch_baseline: bool = False,
+                          source: Optional[str] = None,
+                          gate_kwargs: Optional[dict] = None) -> dict:
     """Render a KORE ``evaluate_policy`` result as a KernelBench fast_p report.
 
     Returns the field-standard ``fast_p`` at ``p in {1.0, 1.5, 2.0}`` (fraction of
@@ -298,6 +401,10 @@ def to_kernelbench_report(res: dict, specs: Optional[Sequence[KernelBenchSpec]] 
     carried torch-eager times (production vendor baseline swapped for KernelBench's
     torch-eager baseline); by default the task's own baseline is used (which, for a
     minted KernelBench task, already IS torch-eager).
+
+    The report embeds its own claim ``gate`` (see :func:`kernelbench_claim_gate`)
+    so the persisted artifact records the threshold it was judged against instead
+    of leaving the decision to a caller that may not apply one at all.
     """
     vs_torch = bool(prefer_torch_baseline and res.get("torch_baseline_speed"))
     fast_p = {float(p): _fastp_from_result(res, float(p), vs_torch=vs_torch) for p in ps}
@@ -314,9 +421,11 @@ def to_kernelbench_report(res: dict, specs: Optional[Sequence[KernelBenchSpec]] 
         "fast_1": fast_p.get(1.0, 0.0),
         "geometric_mean_speedup": float(res.get("geometric_mean_speedup", 0.0)),
         "baseline_kind": "torch_eager" if vs_torch else "task_baseline",
+        "spec_source": source,
     }
     if specs is not None:
         report["per_level"] = _per_level_breakdown(res, specs, ps)
+    report["gate"] = kernelbench_claim_gate(report, source=source, **(gate_kwargs or {}))
     return report
 
 
@@ -360,6 +469,17 @@ def format_kernelbench_report(report: dict) -> str:
     ]
     for p in sorted(report.get("fast_p", {})):
         lines.append(f"| {float(p):g} | {report['fast_p'][p]:.3f} |")
+    gate = report.get("gate") or {}
+    if gate:
+        thresholds = gate.get("thresholds") or {}
+        lines += [
+            "",
+            f"- claim gate: {'PASS' if gate.get('passed') else 'FAIL'} "
+            f"(fast_1 >= {thresholds.get('min_fast_1')}, "
+            f"correct_rate >= {thresholds.get('min_correct_rate')}, "
+            f"n >= {thresholds.get('min_tasks')}, source={gate.get('source')})",
+        ]
+        lines += [f"  - {reason}" for reason in gate.get("reasons", [])]
     if report.get("per_level"):
         lines += ["", "## per level", "", "| level | n | correct | fast_1 |", "| --- | --- | --- | --- |"]
         for lvl, d in sorted(report["per_level"].items()):
@@ -376,13 +496,20 @@ def run_kernelbench_amd(policy_fn: Callable, specs: Sequence[KernelBenchSpec], *
                         env_factory: Optional[Callable] = None,
                         dry_run: Optional[object] = None,
                         mode: str = "serial",
-                        ps: Sequence[float] = KERNELBENCH_PS) -> dict:
+                        ps: Sequence[float] = KERNELBENCH_PS,
+                        source: Optional[str] = None,
+                        gate_kwargs: Optional[dict] = None) -> dict:
     """Score ``policy_fn`` over KernelBench ``specs`` and return eval + KB report.
 
     Mints the tasks (backend-tagged), runs KORE's matched-budget ``fast_p`` bake-off
     (:func:`kore.eval.bakeoff.evaluate_policy`), and renders the field-standard
     KernelBench report. Provide ``env_factory`` (live GPU) or ``dry_run``
     (precomputed Observations) for CPU testing - identical to ``evaluate_policy``.
+
+    ``source`` labels where the specs came from (``"full"`` for a real
+    KernelBench checkout, anything else is smoke) and is what the returned
+    ``gate`` judges claimability on; ``gate["passed"]`` is the value a claim
+    track should gate on.
     """
     from kore.eval.bakeoff import evaluate_policy
 
@@ -393,8 +520,10 @@ def run_kernelbench_amd(policy_fn: Callable, specs: Sequence[KernelBenchSpec], *
     grid = sorted(set(DEFAULT_PS) | {float(p) for p in ps})
     res = evaluate_policy(policy_fn, tasks, env_factory=env_factory, budget=budget,
                           mode=mode, dry_run=dry_run, ps=grid)
-    report = to_kernelbench_report(res, specs, ps=ps)
-    return {"eval": res, "report": report, "gpu_target": gpu_target}
+    report = to_kernelbench_report(res, specs, ps=ps, source=source,
+                                   gate_kwargs=gate_kwargs)
+    return {"eval": res, "report": report, "gpu_target": gpu_target,
+            "source": source, "gate": report["gate"]}
 
 
 # --------------------------------------------------------------------------- #
@@ -674,8 +803,15 @@ def leakage_check(protocol: HeldoutProtocol, tasks: Optional[Sequence] = None) -
     """Return a leakage report for a proposed protocol (does not raise).
 
     Checks (a) no task id in BOTH splits, (b) no operator family straddling the
-    train/held-out boundary (the family-level invariant), and (c) the held-out set
-    is non-empty. ``ok`` is True only when all three hold.
+    train/held-out boundary (the family-level invariant), (c) the held-out set is
+    non-empty, and (d) the declared ``by_family`` map actually covers the declared
+    held-out tasks.
+
+    FAILS CLOSED without ``tasks``: family membership is a property of the task
+    objects, so without them check (b) cannot run at all. It previously returned
+    ``family_overlap = []`` unconditionally, which reported ``ok=True`` for a
+    protocol with an arbitrary family leak. Omitting ``tasks`` now yields
+    ``ok=False`` with ``family_check="unverifiable"`` and a loud warning.
     """
     from kore.tasks import registry as reg
 
@@ -683,44 +819,85 @@ def leakage_check(protocol: HeldoutProtocol, tasks: Optional[Sequence] = None) -
     task_overlap = sorted(tset & hset)
 
     fam_overlap: list[str] = []
+    unresolved: list[str] = []
     if tasks is not None:
         by_id = {t.task_id: t for t in tasks}
         train_fams = {reg.operator_family(by_id[t]) for t in tset if t in by_id}
         held_fams = {reg.operator_family(by_id[t]) for t in hset if t in by_id}
         fam_overlap = sorted(train_fams & held_fams)
+        unresolved = sorted((tset | hset) - set(by_id))
+        family_check = "unresolved-tasks" if unresolved else "verified"
     else:
-        # Fall back to the declared family map when task objects are unavailable.
-        held_fams = set(protocol.by_family.keys())
-        # A train task whose family is a held-out family would be a leak; we can only
-        # detect this with task objects, so this branch checks the declared families.
-        fam_overlap = []
+        family_check = "unverifiable"
+        warnings.warn(
+            "leakage_check was called without task objects, so operator-family "
+            "leakage CANNOT be checked (family membership lives on the tasks). "
+            "Reporting ok=False; pass tasks= to actually verify the split.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
-    ok = not task_overlap and not fam_overlap and protocol.n_heldout > 0
+    # Declared-map self-consistency: catches a protocol whose family map does not
+    # describe its own held-out set, which is checkable without task objects.
+    declared = {task_id for ids in protocol.by_family.values() for task_id in ids}
+    declared_mismatch = sorted(hset ^ declared) if protocol.by_family else sorted(hset)
+
+    ok = bool(
+        not task_overlap
+        and not fam_overlap
+        and not unresolved
+        and protocol.n_heldout > 0
+        and family_check == "verified"
+    )
     return {
         "ok": ok,
         "task_overlap": task_overlap,
         "family_overlap": fam_overlap,
+        "family_check": family_check,
+        "unresolved_tasks": unresolved,
+        "declared_family_mismatch": declared_mismatch,
         "n_heldout": protocol.n_heldout,
         "n_train": len(protocol.train_tasks),
     }
 
 
 def assert_no_leakage(protocol: HeldoutProtocol, tasks: Optional[Sequence] = None) -> None:
-    """Raise ``AssertionError`` on any train/held-out leakage (used by the proposer)."""
+    """Raise ``AssertionError`` on any train/held-out leakage (used by the proposer).
+
+    ``tasks`` is REQUIRED: without the task objects the family-level invariant -
+    the whole point of the split - cannot be evaluated, so accepting ``None`` here
+    would wave through any family leak.
+    """
+    if tasks is None:
+        raise AssertionError(
+            "assert_no_leakage requires the task objects: operator-family leakage "
+            "cannot be verified from the id lists alone"
+        )
     rep = leakage_check(protocol, tasks)
     if rep["task_overlap"]:
         raise AssertionError(f"held-out/train TASK leakage: {rep['task_overlap']}")
     if rep["family_overlap"]:
         raise AssertionError(f"held-out/train FAMILY leakage: {rep['family_overlap']}")
+    if rep["unresolved_tasks"]:
+        raise AssertionError(
+            f"protocol references tasks absent from the task set: {rep['unresolved_tasks']}"
+        )
     if protocol.n_heldout <= 0:
         raise AssertionError("held-out set is empty")
+    if not rep["ok"]:
+        raise AssertionError(f"leakage check did not pass: {rep}")
 
 
 __all__ = [
+    "CLAIMABLE_SOURCES",
+    "DEFAULT_MIN_CORRECT_RATE",
+    "DEFAULT_MIN_FAST_1",
+    "DEFAULT_MIN_TASKS",
     "KERNELBENCH_BASELINE",
     "KERNELBENCH_PS",
     "KNOWN_AMD_ARCHES",
     "DEFAULT_ARCH",
+    "kernelbench_claim_gate",
     "KernelBenchSpec",
     "bundled_specs",
     "spec_to_task",

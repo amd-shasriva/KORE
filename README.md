@@ -2,9 +2,11 @@
 
 **Kernel-Optimization Reinforcement Learning for AMD GPUs.**
 
-KORE trains a language model to write fast, provably-correct ROCm/Triton GPU kernels for AMD Instinct MI350X silicon (gfx950 / CDNA4). Every kernel the model proposes is compiled, checked against an adversarial + metamorphic correctness oracle, and timed cold-cache against production vendor libraries (AITER / hipBLASLt). The training signal is a high-contrast, vendor-relative speedup that is only awarded once correctness is proven, and the hardware's physical performance limit — each operator's Speed-of-Light roofline — enters credit assignment as a shaping potential that densifies per-turn progress toward that limit.
+KORE trains a language model to write fast, verified ROCm/Triton GPU kernels for AMD Instinct MI350-class silicon (gfx950 / CDNA4). Every kernel the model proposes is compiled, checked for numerical equivalence against an fp32 oracle across every declared and augmented shape, and timed cold-cache with a paired, variance-gated protocol against the task's declared baseline. Correctness is a hard gate: no speed credit is awarded until it passes.
 
-The result is a training pipeline in which correctness is non-negotiable and speed is physically meaningful: the reward cannot be farmed with a weak baseline, a timing hack, or a lucky pass on random inputs, and the model learns to optimize kernels the way an expert does — propose, measure on real hardware, and refine.
+**Read the baseline lane before reading any speedup number.** The task registry has two lanes. Roughly 100 of 1,334 tasks are anchored to a production vendor kernel (64 declare AITER, 3 declare hipBLASLt, plus 33 gemm-fusion tasks resolved to hipBLASLt and 2 gated activations resolved to AITER at runtime). The remaining ~92%, including all 1,052 generated breadth tasks, are anchored to torch — `torch.compile`-fused when `KORE_COMPILE_BASELINE` is set, eager otherwise. A speedup is only a claim about the state of practice when it comes from the vendor lane; `WinRecord.baseline_type` records which lane produced it.
+
+The hardware's Speed-of-Light roofline is used two ways, and they should not be conflated. As an **integrity ceiling** it rejects physically impossible timings, which is sound because it needs only a conservative lower bound on achievable time. As a **shaping potential** it densifies per-turn credit; potential-based shaping preserves the ordering of returns whether or not the potential is predictive, so this is safe as variance reduction. It is *not* currently a validated predictor of speedup — see [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md), which reports the honest `INTEGRITY_ONLY` verdict.
 
 ---
 
@@ -32,9 +34,9 @@ The result is a training pipeline in which correctness is non-negotiable and spe
 
 Kernel-generation systems typically reward relative speedup against a reference and verify correctness with a handful of random inputs. Both signals are exploitable: relative speedup depends on the baseline and can be inflated with timing artifacts, and random-input checks admit kernels that are wrong only on edge regimes (zeros, denormals, activation kinks, all-equal rows). KORE is built on three grounding signals that close these gaps.
 
-- **Correctness is proven, not sampled.** Each kernel passes a four-pronged oracle — random, adversarial (deterministic edge regimes), metamorphic (algebraic self-consistency), and determinism — so a kernel that is wrong on any enumerated regime is rejected with certainty.
-- **Speed is measured against production baselines.** Timing is cold-cache (L2-flushed) against the vendor kernels a practitioner would actually use (AITER / hipBLASLt), compiled and warmed identically, so a reported speedup reflects a real win over the state of practice.
-- **Progress is anchored to physics.** Every operator has a roofline lower bound set by compute peak and memory bandwidth. KORE measures attainment against that bound and uses it to shape credit, giving the policy a dense, hardware-grounded gradient across the wide "correct-but-slow" region where raw speedup differences are flat.
+- **Correctness is gated, not sampled.** The production oracle runs at least five reseeded random trials per shape against an fp32 reference, an optional enumerated adversarial-fill battery (`KORE_VERIFIED_CORRECTNESS=1`), a determinism recheck, and a post-timing re-verification on the *same cached module* under a randomized timed window — so a kernel that is correct only when it thinks it is being checked is caught. Output arity, dtype, shape, and the NaN/±Inf masks must all match exactly. A richer four-prong oracle including metamorphic identities exists in [`kore/verify`](kore/verify/README.md) but is **not yet wired into the production path**.
+- **Speed is measured against the task's declared baseline, cold-cache and paired.** Timing is L2-flushed, uses randomized warmup and iteration counts per repeat, alternates candidate/baseline order AB/BA to cancel drift, and admits a measurement only when the candidate CV, baseline CV, paired-ratio CV, and paired CI half-width all clear threshold. Whether that baseline is a vendor kernel or torch depends on the lane — see above.
+- **Progress is bounded by physics.** Every operator has a roofline lower bound set by compute peak and memory bandwidth. KORE rejects timings that beat it, and uses attainment as a shaping potential to densify credit across the wide "correct-but-slow" region. The predictive-validity claim that previously appeared here did not survive the repository's own v2 controls and has been withdrawn.
 
 KORE targets gfx950 / MI350X / CDNA4 end to end — the roofline peaks, PMC counter sets, vendor baselines, and compiler paths are all specific to CDNA4 — and holds out structurally distinct operator families to measure genuine cross-family generalization rather than in-distribution recall.
 
@@ -64,7 +66,9 @@ named residual   N = (stall_frac + occupancy_deficit) · T_measured
 η = T_min / T_measured                           online potential;  η ≤ ρ ≤ 1
 ```
 
-The named residual `ρ` is the counter-grounded refinement of attainment and reconstructs the runtime residual with R² ≈ 0.98 on gfx950 (see [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md)); `η` is the PMC-free potential used online. Because the residual is dense within an operator family, KORE trains on the per-family signal rather than assuming a single residual latent transfers across families.
+`ρ` is the counter-grounded refinement of attainment and `η` is the PMC-free potential used online.
+
+> **Validity caveat.** An earlier revision reported that the named terms reconstruct the runtime residual with R² ≈ 0.98. That figure is reproducible but is a shared-denominator artifact: both sides scale with `T_candidate`, a `T_candidate`-only predictor scores 0.997, and on the preregistered normalized target evaluated over held-out task clusters the named model scores −0.458. The current adjudicator returns `INTEGRITY_ONLY` with all three checks failing, and authorizes empirical shaping for **no** operator family. See [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md). Empirical per-family shaping requires both an evidence artifact and its fingerprint and is inert without them, so no shipped model is affected.
 
 ### Reward ladder
 
@@ -82,7 +86,9 @@ The high-contrast vendor-relative speedup keeps intra-group advantages sharp whe
 
 ### Correctness oracle
 
-Four prongs run per candidate (`kore/verify/`): random (statistical coverage), **adversarial** (deterministic edge regimes enumerated per operator), **metamorphic** (algebraic self-consistency identities), and **determinism** (repeated runs must agree). A kernel wrong on any enumerated regime is rejected — no lucky pass.
+The **production** oracle lives in the task driver (`kore/tasks/_genops.py`) and runs per candidate: at least five reseeded random trials per shape against an fp32 reference, an enumerated adversarial-fill battery when `KORE_VERIFIED_CORRECTNESS=1`, a determinism recheck, and a post-timing re-verification on the same cached module. Structural equality (arity, dtype, shape) and independent NaN/+Inf/−Inf mask agreement are required, so a kernel cannot substitute one non-finite value for another.
+
+A more complete four-prong oracle — adding **metamorphic** algebraic self-consistency and an explicit `(1-p)^m` false-accept bound — is implemented in [`kore/verify`](kore/verify/README.md). It is currently reachable only from its own tests; wiring it into the production path is tracked work, not a shipped guarantee.
 
 ### Credit assignment
 

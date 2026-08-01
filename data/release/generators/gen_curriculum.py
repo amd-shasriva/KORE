@@ -5,7 +5,119 @@ from kore.data.teacher import make_teacher
 
 OUTDIR = "/home/shasriva/kore_offline/gen"; os.makedirs(OUTDIR, exist_ok=True)
 WORKERS = int(os.environ.get("GEN_WORKERS", "128"))
-t = make_teacher("claude", resilient=True)
+WINS_GLOB = "/home/shasriva/Kore-RL/KORE/data/b05factory/wins/*.jsonl"
+_TEACHER = None
+
+
+def teacher():
+    """Built on first use so this module (and its held-out guard) imports without
+    gateway credentials."""
+    global _TEACHER
+    if _TEACHER is None:
+        _TEACHER = make_teacher("claude", resilient=True)
+    return _TEACHER
+
+
+# --------------------------------------------------------------------------- #
+# Held-out guard for the win-grounded tiers
+#
+# Tier 4 quotes optimized kernel source VERBATIM into a training prompt, so a
+# win belonging to an eval-only task puts that task's solution into the corpus.
+# This previously globbed every shard under data/b05factory/wins/ with no filter
+# and leaked source for 11 held-out tasks into the midtrain corpus. Guard at both
+# levels: the shard identity (its filename is the task id) and every record
+# identity inside it, including provenance roots so a descendant cannot slip past.
+# --------------------------------------------------------------------------- #
+class HeldoutWinLeak(RuntimeError):
+    """A held-out task's optimized source reached a training-data generator."""
+
+
+def heldout_ids():
+    """The registry's eval-only ids. An empty or unavailable index is an error,
+    never an empty filter."""
+    from kore.tasks.registry import heldout_tasks
+    ids = frozenset(task.task_id for task in heldout_tasks())
+    if not ids:
+        raise HeldoutWinLeak("registry returned an empty held-out set")
+    return ids
+
+
+def shard_task_id(path):
+    name = os.path.basename(str(path))
+    return name[:-len(".jsonl")] if name.endswith(".jsonl") else name
+
+
+def record_task_ids(row):
+    """Every task identity a win record can be attributed to."""
+    out = set()
+    if not isinstance(row, dict):
+        return out
+    for key in ("task_id", "provenance_root", "lineage_root"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            out.add(value.strip())
+    for key in ("_provenance", "provenance"):
+        prov = row.get(key)
+        if isinstance(prov, dict):
+            for field in ("task_id", "root", "provenance_root"):
+                value = prov.get(field)
+                if isinstance(value, str) and value.strip():
+                    out.add(value.strip())
+    return out
+
+
+def assert_trainable_shard(path, heldout=None):
+    """Refuse a win shard whose task is held out."""
+    ids = heldout_ids() if heldout is None else heldout
+    tid = shard_task_id(path)
+    if tid in ids:
+        raise HeldoutWinLeak("refusing held-out win shard " + str(path) +
+                             ": task " + tid + " is eval-only")
+    return tid
+
+
+def assert_trainable_rows(rows, source="<memory>", heldout=None):
+    """Refuse a batch of win records if any identity in it is held out."""
+    ids = heldout_ids() if heldout is None else heldout
+    leaked = sorted({tid for row in rows for tid in record_task_ids(row) if tid in ids})
+    if leaked:
+        raise HeldoutWinLeak("held-out win records in " + str(source) + ": " +
+                             ", ".join(leaked))
+    return rows
+
+
+def load_win_shard(path, heldout=None):
+    """One shard, guarded at the shard identity and at every record identity."""
+    ids = heldout_ids() if heldout is None else heldout
+    assert_trainable_shard(path, ids)
+    return assert_trainable_rows(rd(path), path, ids)
+
+
+def load_wins(pattern=WINS_GLOB):
+    """Every TRAINABLE win shard matching ``pattern``.
+
+    Held-out shards are excluded and reported (the factory legitimately produces
+    them); a held-out record hiding inside a trainable shard is fatal, because
+    that means the shard's own identity lied.
+    """
+    ids = heldout_ids()
+    rows = []; skipped = []; unreadable = []
+    for path in sorted(glob.glob(pattern)):
+        tid = shard_task_id(path)
+        if tid in ids:
+            skipped.append(tid)
+            continue
+        try:
+            shard = rd(path)
+        except Exception:
+            unreadable.append(tid)
+            continue
+        rows += assert_trainable_rows(shard, path, ids)
+    print("wins: rows=" + str(len(rows)) + " heldout_shards_excluded=" + str(len(skipped)) +
+          " unreadable=" + str(len(unreadable)) +
+          (" excluded=" + ",".join(skipped[:12]) if skipped else ""), flush=True)
+    return rows
+
 
 GFX = ("Target: MI355X / gfx950 / CDNA4. Facts: 256 CUs, wave64, 512 VGPR/lane (unified regular+"
  "accumulator, granularity 8), 160KB LDS/CU, max 8 waves/SIMD; BF16 matrix 4096 FLOP/clk/CU @2.4GHz "
@@ -19,7 +131,8 @@ SYS = ("You are KORE, an elite AMD CDNA4 (gfx950/MI355X) GPU kernel engineer. Be
 
 def gen(sys_p, user, source, meta=None):
     try:
-        r = t.generate([{"role": "system", "content": sys_p}, {"role": "user", "content": user}])
+        r = teacher().generate([{"role": "system", "content": sys_p},
+                                {"role": "user", "content": user}])
     except Exception:
         return None
     if not r or len(r) < 60:
@@ -84,6 +197,9 @@ def tier3(n, seed=0):
 
 def tier4(wins, n, seed=0):
     rng = random.Random(seed); specs = []
+    # Last guard before eval-task source would be forwarded to the teacher: reaching
+    # here with a held-out win means an unguarded loader was used upstream.
+    assert_trainable_rows(wins, "tier4 win pool")
     pool = [w for w in wins if w.get("final_source") and (w.get("speedup") or 0) > 1.05]
     if not pool:
         return specs
@@ -171,12 +287,7 @@ def rd(p):
 
 if __name__ == "__main__":
     kb = rd("/home/shasriva/kore_offline/kb.jsonl")
-    wins = []
-    for p in glob.glob("/home/shasriva/Kore-RL/KORE/data/b05factory/wins/*.jsonl"):
-        try:
-            wins += rd(p)
-        except Exception:
-            pass
+    wins = load_wins()
     print("grounding: kb=" + str(len(kb)) + " wins=" + str(len(wins)), flush=True)
     # per-tier hard wall-clock budgets (seconds) - bounded total ~40 min worst case
     B2 = int(os.environ.get("BUDGET_T2", "600"))

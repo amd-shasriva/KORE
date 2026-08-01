@@ -1,7 +1,9 @@
 {
   "_comment_dataloader": "4 unpinned workers x prefetch 2 per rank: pinned loader pages are unreclaimable and share the host pool with the ~200GB FULL_STATE_DICT gather at save time (12/pinned/4 crashed a 14B midtrain with HSA_STATUS_ERROR_OUT_OF_RESOURCES).",
   "_comment_save_total_limit": "2, not 1: the previous checkpoint is rotated out around each new save, so a crash in that window leaves nothing resumable and the run restarts from step 0. Costs ~220GB of disk for the spare generation.",
+  "_comment_model_revision": "The immutable Hub commit the frontier dataset was built against (DATASET_STATUS.md). Threaded to from_pretrained so the trainer loads that exact snapshot instead of whatever the HF cache holds. Under HF_HUB_OFFLINE=1 it must resolve to a local snapshot; a development run whose cache lacks it warns and proceeds unpinned, KORE_MODEL_IDENTITY_MODE=production makes it fatal.",
   "model_id": "Qwen/Qwen3-14B",
+  "model_revision": "40c069824f4251a91eefaf281ebe4c544efd3e18",
   "corpus_path": "data/b05factory/midtrain/corpus.jsonl",
   "output_dir": "runs/midtrain_14b_24gpu",
   "use_lora": false, "distributed": true, "bf16": true, "gradient_checkpointing": true,

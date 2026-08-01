@@ -14,11 +14,20 @@ together correctly:
   * ``assemble`` folds on-policy / evolve / DAgger records into the SFT + DPO
     products (item 5); and
   * the dry-run import preflight includes every new symbol.
+
+Section 11 covers the four subsystems that shipped a tested production writer or
+API with NO caller, which is worse than shipping nothing: a reader reasonably
+assumes a tested module is doing something. Each of those tests pins the CALL -
+the frozen held-out shape lane being written before any stage runs, the five
+evaluation budget counters being charged through ``KoreEnv.evaluate``, hardware
+eligibility narrowing datagen selection only when asked, and the KernelBench
+claim gate being conjuncted into the track verdict.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -839,3 +848,672 @@ def test_lora_midtrain_stays_in_process_no_launcher(monkeypatch, tmp_path):
     assert seen["use_lora"] is True
     assert calls == []                     # LoRA -> in-process, no launcher
     assert ctx["midtrain_ckpt"] == "midtrain_ckpt"
+
+
+# =========================================================================== #
+# 11. The four subsystems whose PRODUCTION WRITERS/APIs existed with no caller.
+#
+# Each block below pins the CALL, not the callee: the callees are unit-tested
+# elsewhere and were all green while the campaign silently never invoked them.
+# =========================================================================== #
+
+# --------------------------------------------------------------------------- #
+# 11a. The held-out shape lane is frozen at TRAINING time.
+#
+# kore.eval.champion.held_out_shapes REFUSES to derive a lane (it hard-raises
+# without a manifest), so an unwritten lane does not degrade certification - it
+# removes it. The campaign therefore has to write it before anything runs, and
+# every rank of a sharded GRPO launch has to agree on exactly one lane.
+# --------------------------------------------------------------------------- #
+def _local_model(tmp_path):
+    """A content-addressable local checkpoint so lineage needs no download."""
+    model = tmp_path / "model"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "config.json").write_text(json.dumps({
+        "model_type": "qwen3",
+        "architectures": ["Qwen3ForCausalLM"],
+        "hidden_size": 4,
+        "num_hidden_layers": 2,
+    }))
+    (model / "tokenizer_config.json").write_text('{"model_max_length": 128}')
+    (model / "model.safetensors").write_bytes(b"weights")
+    return model
+
+
+def _split_ctx(tmp_path, *extra_argv):
+    args = _args(["--tasks", "rmsnorm_aiter", "--data-root", str(tmp_path), *extra_argv])
+    ctx = {"data_root": tmp_path, "args": args, "dry": False,
+           "tasks": [get_task("rmsnorm_aiter")]}
+    rc._apply_split(ctx)
+    return ctx
+
+
+def test_campaign_freezes_the_shape_lane_before_the_first_stage(monkeypatch, tmp_path):
+    """End-to-end through ``run()``: the lane exists on disk when a stage starts."""
+    from kore.tasks.shape_policy import SPLIT_INDEX_FILENAME
+    import kore.campaign_lineage as lineage_module
+
+    monkeypatch.setattr(lineage_module, "git_source_identity", lambda root: {
+        "commit": "a" * 40, "dirty": False, "dirty_status_digest": "sha256:clean",
+        "content_digest": "sha256:source", "scope": ["kore"],
+    })
+    seen: dict = {}
+
+    def recording_stage(ctx):
+        directory = ctx["shape_split_dir"]
+        seen["receipt_exists"] = (directory / SPLIT_INDEX_FILENAME).exists()
+        seen["manifest_exists"] = (directory / "rmsnorm_aiter.json").exists()
+        seen["env"] = os.environ.get("KORE_SHAPE_SPLIT_DIR")
+        seen["directory"] = directory
+
+    monkeypatch.setattr(rc, "_stage_grpo", recording_stage)
+    monkeypatch.setattr(rc, "_capture_stage_artifact", lambda ctx, stage: {})
+    monkeypatch.delenv("KORE_SHAPE_SPLIT_DIR", raising=False)
+
+    args = _args([
+        "--tasks", "rmsnorm_aiter", "--stages", "grpo",
+        "--campaign-mode", "development",
+        "--model", str(_local_model(tmp_path)),
+        "--data-root", str(tmp_path / "run"),
+    ])
+    assert rc.run(args) == 0
+
+    # The lane is OLDER than the first candidate the run could produce.
+    assert seen["receipt_exists"] is True, "no stage may start before the lane exists"
+    assert seen["manifest_exists"] is True
+    # ... and it is published to every stage + every rank that shells out.
+    assert seen["env"] == str(seen["directory"])
+    assert seen["directory"] == tmp_path / "run" / "shape_splits"
+
+
+def test_frozen_lane_is_consumable_by_champion_certification(tmp_path, monkeypatch):
+    """The written artifact is exactly what the certification reader demands."""
+    from kore.eval.champion import held_out_shapes, load_shape_manifests
+
+    monkeypatch.delenv("KORE_SHAPE_SPLIT_DIR", raising=False)
+    ctx = _split_ctx(tmp_path)
+    directory = rc._freeze_shape_splits(ctx)
+
+    task = get_task("rmsnorm_aiter")
+    # require_index=True refuses any directory not produced by the writer at all.
+    manifests = load_shape_manifests(
+        str(directory), tasks=[task], require_index=True)
+    shapes = held_out_shapes(task, frozen_split=manifests[task.task_id])
+
+    assert shapes, "certification would have nothing to re-evaluate on"
+    declared = {tuple(sorted(s.dims.items())) for s in task.shapes}
+    assert not declared & {tuple(sorted(s.dims.items())) for s in shapes}
+
+
+def test_second_campaign_run_reuses_the_lane_instead_of_re_deriving_it(
+        tmp_path, monkeypatch):
+    """A re-run must inherit the lane it started with, not choose a new one."""
+    from kore.tasks import shape_policy
+    from kore.tasks.shape_policy import SPLIT_INDEX_FILENAME
+
+    monkeypatch.delenv("KORE_SHAPE_SPLIT_DIR", raising=False)
+    ctx = _split_ctx(tmp_path)
+    directory = rc._freeze_shape_splits(ctx)
+    receipt = directory / SPLIT_INDEX_FILENAME
+    first = receipt.read_bytes()
+    manifest = (directory / "rmsnorm_aiter.json").read_bytes()
+
+    # Deriving a split is what must NOT happen the second time; re-validating and
+    # reusing the stored one is.
+    monkeypatch.setattr(
+        shape_policy, "freeze_shape_split",
+        lambda *a, **k: pytest.fail("a second run re-derived the hidden lane"))
+    assert rc._freeze_shape_splits(_split_ctx(tmp_path)) == directory
+
+    assert receipt.read_bytes() == first, "the receipt must stay byte-identical"
+    assert (directory / "rmsnorm_aiter.json").read_bytes() == manifest
+
+
+def test_the_sharded_grpo_entry_freezes_the_lane_before_training_starts(
+        monkeypatch, tmp_path):
+    """``python -m kore.policy.grpo <config.json>`` is what the FSDP launcher runs
+    on every rank, so it is the per-rank entry that must publish the lane."""
+    import kore.policy.grpo as grpo
+    from kore.tasks.shape_policy import SPLIT_INDEX_FILENAME
+
+    lane = tmp_path / "lane"
+    monkeypatch.setenv("KORE_SHAPE_SPLIT_DIR", str(lane))
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    seen: dict = {}
+
+    def fake_train(config, tasks=None):
+        seen["lane_ready"] = (lane / SPLIT_INDEX_FILENAME).exists()
+        seen["manifest_ready"] = (lane / "rmsnorm_aiter.json").exists()
+        seen["tasks"] = list(tasks or [])
+        return "runs/grpo_out"
+
+    monkeypatch.setattr(grpo, "train_grpo", fake_train)
+    config = tmp_path / "grpo.json"
+    config.write_text(json.dumps({
+        "model_id": "fake/model", "use_lora": False,
+        "output_dir": str(tmp_path / "out"), "tasks": ["rmsnorm_aiter"],
+    }))
+
+    assert grpo._main([str(config)]) == 0
+
+    assert seen["lane_ready"] is True, "training started before the lane existed"
+    assert seen["manifest_ready"] is True
+    # The frozen lane and the trained task list are provably the same list.
+    assert seen["tasks"] == ["rmsnorm_aiter"]
+
+
+def test_the_sharded_entry_freezes_exactly_the_tasks_it_will_train_on(
+        monkeypatch, tmp_path):
+    """A config with no explicit task list trains the whole train split, so the
+    lane has to cover the whole train split too."""
+    import kore.policy.grpo as grpo
+
+    lane = tmp_path / "lane"
+    monkeypatch.setenv("KORE_SHAPE_SPLIT_DIR", str(lane))
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    frozen: dict = {}
+    trained: dict = {}
+    real_freeze = grpo.freeze_training_shape_splits
+
+    def recording_freeze(config, task_ids):
+        frozen["ids"] = list(task_ids)
+        return real_freeze(config, task_ids)
+
+    def recording_train(config, tasks=None):
+        trained["ids"] = list(tasks or [])
+        return "runs/grpo_out"
+
+    monkeypatch.setattr(grpo, "freeze_training_shape_splits", recording_freeze)
+    monkeypatch.setattr(grpo, "train_grpo", recording_train)
+    config = tmp_path / "grpo.json"
+    config.write_text(json.dumps({
+        "model_id": "fake/model", "use_lora": False,
+        "output_dir": str(tmp_path / "out"),
+    }))
+
+    assert grpo._main([str(config)]) == 0
+
+    assert frozen["ids"] == trained["ids"] == grpo.default_grpo_task_ids()
+
+
+def _rank(monkeypatch, rank, world, lane):
+    """Put this process on ``rank`` of a ``world``-rank launch sharing ``lane``."""
+    import kore.policy.grpo as grpo
+    from kore.policy.configs import GRPOConfig
+
+    monkeypatch.setenv("KORE_SHAPE_SPLIT_DIR", str(lane))
+    monkeypatch.setenv("RANK", str(rank))
+    monkeypatch.setenv("WORLD_SIZE", str(world))
+    monkeypatch.setattr(grpo, "_SHAPE_SPLIT_BARRIER_TIMEOUT_S", 0.05)
+    return GRPOConfig(model_id="fake/model", output_dir=str(lane.parent / "out"),
+                      use_lora=False, total_steps=1)
+
+
+def _forbid_writing(monkeypatch):
+    from kore.tasks import shape_policy
+
+    monkeypatch.setattr(
+        shape_policy, "freeze_shape_splits",
+        lambda *a, **k: pytest.fail("a follower rank wrote the frozen lane"))
+
+
+def test_a_follower_rank_never_writes_the_lane(monkeypatch, tmp_path):
+    """Concurrent writers on one directory can publish an index that OMITS the
+    manifests another rank added, and certification rejects exactly that. A
+    follower that finds no receipt must fail loudly instead of rolling out
+    against a lane nobody will be able to certify against."""
+    import kore.policy.grpo as grpo
+
+    config = _rank(monkeypatch, 1, 4, tmp_path / "lane")
+    _forbid_writing(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="frozen shape split receipt"):
+        grpo.freeze_training_shape_splits(config, ["rmsnorm_aiter"])
+
+
+def test_a_follower_rank_proceeds_on_the_lane_rank_zero_published(
+        monkeypatch, tmp_path):
+    import kore.policy.grpo as grpo
+    from kore.tasks.shape_policy import SPLIT_INDEX_FILENAME
+
+    lane = tmp_path / "lane"
+    config = _rank(monkeypatch, 0, 4, lane)
+    assert grpo.freeze_training_shape_splits(config, ["rmsnorm_aiter"]) == lane
+    assert (lane / SPLIT_INDEX_FILENAME).exists()
+
+    config = _rank(monkeypatch, 2, 4, lane)
+    _forbid_writing(monkeypatch)
+
+    assert grpo.freeze_training_shape_splits(config, ["rmsnorm_aiter"]) == lane
+
+
+# --------------------------------------------------------------------------- #
+# 11b. The five evaluation budget counters are charged through KoreEnv.evaluate.
+#
+# evaluate() is the only funnel that can observe a replay hit, so it owns all
+# five. Until it charged them, a limit on any of them - including a hard 0 - was
+# silently unenforceable. No GPU: the subprocess boundary is stubbed exactly as
+# tests/test_env_plumbing.py stubs it.
+# --------------------------------------------------------------------------- #
+_BUDGET_SOURCE = "def kernel(x):\n    return x + 1\n"
+_BUDGET_OUT = "SNR: 99.0\nallclose: True\nmedian_ms: 1.0\n"
+_BUDGET_COUNTERS = (
+    "correctness_calls", "fresh_timed_calls", "replay_hits",
+    "verifier_gpu_seconds", "profiler_gpu_seconds",
+)
+_RUNTIME_IDENTITY = {
+    "identity_version": 1, "validated": True, "stable": True,
+    "hardware": {"id": "test-gpu-0", "gpu_target": "gfx950", "selected_gpu": "0"},
+    "runtime": {"preflight_revision": "test"},
+}
+
+
+def _budget_config(tmp_path, **overrides):
+    from kore.analysis.roofline import make_physical_model
+
+    model = make_physical_model("mi350x")
+    cfg = SimpleNamespace(
+        runs_dir=tmp_path / "runs", gpu_target="gfx950",
+        rocm_path=str(tmp_path / "missing-rocm"),
+        shape_augment=False, shape_augment_max=6,
+        snr_threshold_for=lambda _dtype: 25.0, atol=1e-2, rtol=1e-2,
+        verifier_determinism_check=False, determinism_snr_tol_db=10.0,
+        warmup_iters=10, bench_iters=30, min_variance_runs=3, max_variance_runs=5,
+        cv_threshold_pct=3.0, baseline_cv_threshold_pct=3.0,
+        paired_ratio_cv_threshold_pct=3.0, paired_ci_threshold_pct=3.0,
+        paired_confidence_z=1.96, noise_floor_pct=2.0, profile_reward_weight=0.0,
+        physics_sku="mi350x", physics_calibration_path=None,
+        physics_model_fingerprint=model.fingerprint,
+        physics_shaping_evidence_path=None,
+        physics_shaping_evidence_fingerprint=None,
+    )
+    for name, value in overrides.items():
+        setattr(cfg, name, value)
+    return cfg
+
+
+def _budget_task(tmp_path):
+    from kore.tasks.base import Shape, Task
+
+    task_dir = tmp_path / "task"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "task.yaml").write_text("task_id: budget_gemm_bf16\ndtype: bf16\n")
+    (task_dir / "reference.py").write_text("def reference(x):\n    return x\n")
+    (task_dir / "driver.py").write_text("def driver_main():\n    return 0\n")
+    return Task(
+        task_id="budget_gemm_bf16", operation="gemm", dtype="bf16", backend="triton",
+        gpu_target="gfx950", dir=task_dir, seed_kernel_name="seed_triton.py",
+        snr_threshold=25.0, comparison_baseline="aiter",
+        shapes=[Shape("primary", {"M": 128, "N": 128, "K": 128})],
+        raw={"baseline_tier": "vendor"},
+    )
+
+
+def _budget_env(tmp_path, ledger, *, use_replay=False, **cfg_overrides):
+    from kore.env.kore_env import KoreEnv
+    from kore.tasks._genops import (
+        DRIVER_CAPABILITY_PROTOCOL, DRIVER_PROTOCOL_ID, PUBLICATION_GUARANTEES,
+    )
+
+    task = _budget_task(tmp_path)
+    env = KoreEnv(
+        task, config=_budget_config(tmp_path, **cfg_overrides),
+        use_replay=use_replay, gpu="0", budget_ledger=ledger,
+        runtime_identity=_RUNTIME_IDENTITY if use_replay else None,
+    )
+    env._driver_caps_cache = {
+        "protocol": DRIVER_CAPABILITY_PROTOCOL, "protocol_id": DRIVER_PROTOCOL_ID,
+        "performance_eligible": True, **PUBLICATION_GUARANTEES,
+    }
+    env._exec = lambda cmd, workdir, environ, timeout: (0, _BUDGET_OUT, False)
+    quiet = [
+        {"pair": i, "order": "AB" if i % 2 == 0 else "BA",
+         "candidate_ms": 1.0, "baseline_ms": 2.0, "ratio": 2.0}
+        for i in range(5)
+    ]
+    env._bench_all = lambda driver, shapes, workdir, environ, snr_threshold=None: (
+        {shape.name: list(quiet) for shape in shapes}, False)
+    return env, task
+
+
+def _evaluate(env, task, *, do_bench=True):
+    return env.evaluate(task, _BUDGET_SOURCE, shapes=list(task.shapes),
+                        do_bench=do_bench)
+
+
+def _counters(ledger):
+    return {name: getattr(ledger, name) for name in _BUDGET_COUNTERS}
+
+
+def test_a_fresh_timed_evaluation_charges_correctness_timing_and_verifier_seconds(
+        tmp_path):
+    from kore.policy.budget import BudgetLedgerV1
+
+    ledger = BudgetLedgerV1()
+    env, task = _budget_env(tmp_path, ledger)
+    assert _counters(ledger) == dict.fromkeys(_BUDGET_COUNTERS, 0) | {
+        "verifier_gpu_seconds": 0.0, "profiler_gpu_seconds": 0.0}
+
+    obs = _evaluate(env, task)
+
+    assert obs.validation_passed and obs.wall_by_shape
+    assert ledger.correctness_calls == 1
+    assert ledger.fresh_timed_calls == 1
+    assert ledger.replay_hits == 0
+    assert ledger.verifier_gpu_seconds > 0.0
+    assert ledger.profiler_gpu_seconds == 0.0
+
+
+def test_a_correctness_only_evaluation_charges_no_timed_call(tmp_path):
+    from kore.policy.budget import BudgetLedgerV1
+
+    ledger = BudgetLedgerV1()
+    env, task = _budget_env(tmp_path, ledger)
+
+    obs = _evaluate(env, task, do_bench=False)
+
+    assert obs.validation_passed and not obs.wall_by_shape
+    assert ledger.correctness_calls == 1
+    assert ledger.fresh_timed_calls == 0, "an unbenched candidate spent no timing"
+    assert ledger.verifier_gpu_seconds > 0.0
+
+
+def test_a_replay_hit_charges_a_replay_hit_and_nothing_else(tmp_path):
+    from kore.policy.budget import BudgetLedgerV1
+
+    ledger = BudgetLedgerV1()
+    env, task = _budget_env(tmp_path, ledger, use_replay=True)
+    _evaluate(env, task)
+    after_fresh = _counters(ledger)
+    env._run = lambda *a, **k: pytest.fail("a cache hit must not re-run anything")
+
+    _evaluate(env, task)
+
+    assert ledger.replay_hits == 1
+    # A hit consumed no GPU, so nothing else may move.
+    assert _counters(ledger) == {**after_fresh, "replay_hits": 1}
+
+
+def test_profiler_seconds_are_carved_out_of_the_same_measured_interval(tmp_path):
+    """Two second-counters over one interval must not double-count it."""
+    import time
+
+    from kore.policy.budget import BudgetLedgerV1
+
+    ledger = BudgetLedgerV1()
+    env, task = _budget_env(tmp_path, ledger, profile_reward_weight=0.15)
+
+    def slow_profile(*_a, **_k):
+        time.sleep(0.05)
+        return 0.75
+
+    env._collect_profile = slow_profile
+    started = time.perf_counter()
+    obs = _evaluate(env, task)
+    elapsed = time.perf_counter() - started
+
+    assert obs.profile_efficiency == 0.75
+    assert ledger.profiler_gpu_seconds >= 0.05
+    assert ledger.verifier_gpu_seconds > 0.0
+    total = ledger.profiler_gpu_seconds + ledger.verifier_gpu_seconds
+    assert total <= elapsed, "the profiler pass was charged twice"
+    # kore.eval.champion reads this exact attribute to attribute profiler time.
+    assert env.last_profiler_seconds == pytest.approx(
+        ledger.profiler_gpu_seconds)
+
+
+def test_profiler_attribution_does_not_leak_into_a_later_evaluation(tmp_path):
+    from kore.policy.budget import BudgetLedgerV1
+
+    ledger = BudgetLedgerV1()
+    env, task = _budget_env(tmp_path, ledger, profile_reward_weight=0.15)
+    env._collect_profile = lambda *a, **k: 0.5
+    _evaluate(env, task)
+    assert env.last_profiler_seconds > 0.0
+
+    env.cfg.profile_reward_weight = 0.0
+    _evaluate(env, task)
+
+    assert env.last_profiler_seconds == 0.0
+
+
+@pytest.mark.parametrize(
+    ("counter", "limit", "cfg"),
+    [
+        pytest.param("correctness_calls", 0, {}, id="correctness_calls"),
+        pytest.param("fresh_timed_calls", 0, {}, id="fresh_timed_calls"),
+        pytest.param("verifier_gpu_seconds", 0.0, {}, id="verifier_gpu_seconds"),
+        pytest.param("profiler_gpu_seconds", 0.0, {"profile_reward_weight": 0.15},
+                     id="profiler_gpu_seconds"),
+    ],
+)
+def test_a_limit_of_zero_refuses_to_launch_the_evaluation(
+        tmp_path, counter, limit, cfg):
+    """Fail CLOSED: the refusal must land before the subprocess, not after.
+
+    A zero seconds budget is refused for the same reason a zero call budget is:
+    a launched evaluation is certain to spend a positive amount of both.
+    """
+    from kore.policy.budget import BudgetExceededError, BudgetLedgerV1
+
+    ledger = BudgetLedgerV1(limits={counter: limit})
+    env, task = _budget_env(tmp_path, ledger, **cfg)
+    env._run = lambda *a, **k: pytest.fail("a zero budget still launched the GPU work")
+
+    with pytest.raises(BudgetExceededError, match=counter):
+        _evaluate(env, task)
+
+    assert _counters(ledger)[counter] == limit
+
+
+def test_a_pre_flight_never_invents_a_duration_it_cannot_predict(tmp_path):
+    """The seconds claim exists only to catch an exhausted budget; a real budget
+    must be spent by the MEASURED duration, not by the pre-flight."""
+    from kore.policy.budget import BudgetLedgerV1
+
+    ledger = BudgetLedgerV1(limits={"verifier_gpu_seconds": 60.0})
+    env, task = _budget_env(tmp_path, ledger)
+
+    _evaluate(env, task)
+
+    assert 0.0 < ledger.verifier_gpu_seconds < 60.0
+    assert env.last_profiler_seconds == 0.0
+
+
+def test_a_replay_hit_limit_of_zero_is_enforced(tmp_path):
+    from kore.policy.budget import BudgetExceededError, BudgetLedgerV1
+
+    ledger = BudgetLedgerV1(limits={"replay_hits": 0})
+    env, task = _budget_env(tmp_path, ledger, use_replay=True)
+    _evaluate(env, task)
+
+    with pytest.raises(BudgetExceededError, match="replay_hits"):
+        _evaluate(env, task)
+
+
+def test_an_unbudgeted_environment_stays_a_no_op(tmp_path):
+    env, task = _budget_env(tmp_path, None)
+
+    assert _evaluate(env, task).validation_passed
+
+
+def test_grpo_hands_its_ledger_to_the_rollout_environment(monkeypatch):
+    """The ledger lives on the GRPOConfig; the env is handed kore.config.CONFIG,
+    so it can only arrive through an explicit argument."""
+    import kore.env.kore_env as env_module
+    import kore.policy.grpo as grpo
+    from kore.policy.budget import BudgetLedgerV1
+
+    ledger = BudgetLedgerV1()
+    seen: dict = {}
+    monkeypatch.setattr(
+        env_module, "KoreEnv",
+        lambda task, **kw: seen.update(kw) or SimpleNamespace(task=task))
+    config = SimpleNamespace(
+        _grpo_feature_runtime=SimpleNamespace(ledger=ledger),
+        profile_reward_weight=0.0, physics_shaping_weight=0.0)
+
+    grpo._make_rollout_env(get_task("rmsnorm_aiter"), config, gpu="4")
+
+    assert seen["budget_ledger"] is ledger
+    assert seen["gpu"] == "4"
+
+
+def test_an_unbudgeted_rollout_builds_the_environment_exactly_as_before(monkeypatch):
+    """No ledger means no argument, so an unbudgeted rollout is unchanged."""
+    import kore.env.kore_env as env_module
+    import kore.policy.grpo as grpo
+
+    seen: list = []
+    monkeypatch.setattr(
+        env_module, "KoreEnv",
+        lambda task, **kw: seen.append(kw) or SimpleNamespace(task=task))
+
+    grpo._make_rollout_env(get_task("rmsnorm_aiter"), SimpleNamespace())
+
+    assert seen == [{}]
+
+
+# --------------------------------------------------------------------------- #
+# 11c. Hardware eligibility is an OPT-IN narrowing of datagen selection.
+#
+# The registry's train split is 1289 tasks; the default eligibility policy drops
+# the 27 structurally-broken + 11 SNR-shortfall seeds. Applying that implicitly
+# would be its own bug - an operator who did not ask for a smaller scope would
+# read the shrunken totals as progress - so the default must not move.
+# --------------------------------------------------------------------------- #
+def _partition(tmp_path, name, *extra_argv):
+    import scripts.spur_partition as sp
+
+    out = tmp_path / name
+    argv = ["spur_partition.py", "--data-root", str(tmp_path / "data"),
+            "--out-dir", str(out), "--shards", "2", *extra_argv]
+    import sys
+
+    original = sys.argv
+    sys.argv = argv
+    try:
+        assert sp.main() == 0
+    finally:
+        sys.argv = original
+    return json.loads((out / "manifest.json").read_text())
+
+
+def test_partitioner_selection_is_unchanged_unless_a_policy_is_named(tmp_path):
+    from kore.tasks.registry import train_tasks
+
+    default = _partition(tmp_path, "default")
+
+    assert default["eligibility_policy"] is None
+    assert default["n_train_tasks"] == len(train_tasks())
+    assert default["n_ineligible_excluded"] == 0
+    assert default["ineligible_excluded"] == {}
+
+
+def test_naming_a_policy_narrows_selection_and_records_what_it_dropped(tmp_path):
+    from kore.tasks.registry import eligible_train_tasks, train_tasks
+
+    narrowed = _partition(tmp_path, "narrowed",
+                          "--eligibility-policy", "exclude_broken_and_shortfall")
+
+    eligible = {task.task_id for task in eligible_train_tasks()}
+    assert narrowed["eligibility_policy"] == "exclude_broken_and_shortfall"
+    assert narrowed["n_train_tasks"] == len(eligible)
+    assert narrowed["n_train_tasks"] < len(train_tasks())
+    dropped = narrowed["ineligible_excluded"]
+    assert len(dropped) == narrowed["n_ineligible_excluded"] > 0
+    assert not set(dropped) & eligible
+    # Every drop names the hardware evidence behind it, never a bare count.
+    assert all(reason for reason in dropped.values())
+    assert {item["task_id"] for item in narrowed["items"]} <= eligible
+
+
+def test_admit_all_is_a_nameable_no_op_policy(tmp_path):
+    from kore.tasks.registry import train_tasks
+
+    admit_all = _partition(tmp_path, "admit_all",
+                           "--eligibility-policy", "admit_all")
+
+    assert admit_all["n_train_tasks"] == len(train_tasks())
+    assert admit_all["n_ineligible_excluded"] == 0
+
+
+def test_partitioner_prefix_default_still_covers_every_train_task(tmp_path):
+    """The invariant tests/test_spur_supervisor.py asserts stays TRUE: the
+    default scope is the whole train split, so the eligibility option is the
+    only thing that can narrow it."""
+    from kore.tasks.registry import train_tasks
+
+    default = _partition(tmp_path, "coverage")
+    task_ids = {task.task_id for task in train_tasks()}
+
+    assert {item["task_id"] for item in default["items"]} == task_ids
+
+
+# --------------------------------------------------------------------------- #
+# 11d. The KernelBench-AMD claim gate is conjuncted into the track verdict.
+#
+# A finite, non-empty report is necessary but not sufficient: without a metric
+# bar this track passed at fast_1 == 0.0 on a real KernelBench checkout.
+# --------------------------------------------------------------------------- #
+def _kb_report(fast_1, *, n=25, correct_rate=0.8):
+    return {"n": n, "correct_rate": correct_rate, "fast_1": fast_1,
+            "fast_p": {1.0: fast_1, 1.5: fast_1 / 2}}
+
+
+def _kb_ctx(tmp_path, **overrides):
+    args = _args(["--tasks", "rmsnorm_aiter", "--eval-budget", "1"])
+    for name, value in overrides.items():
+        setattr(args, name, value)
+    return {"data_root": tmp_path, "args": args, "dry": False}
+
+
+def _stub_kernelbench(monkeypatch, report, *, real_specs):
+    import kore.eval.kernelbench_amd as kb
+
+    monkeypatch.setattr(kb, "bundled_specs", lambda: [{"spec": "smoke"}])
+    monkeypatch.setattr(kb, "load_real_kernelbench", lambda root: [{"spec": "real"}])
+    monkeypatch.setattr(kb, "format_kernelbench_report", lambda report: "report")
+    monkeypatch.setattr(
+        kb, "run_kernelbench_amd",
+        lambda policy, specs, **kw: {"report": report})
+    return real_specs
+
+
+@pytest.mark.parametrize(
+    ("fast_1", "expected"),
+    [pytest.param(0.0, False, id="fast_1-zero-is-not-a-claim"),
+     pytest.param(0.19, False, id="below-bar"),
+     pytest.param(0.35, True, id="clears-bar")],
+)
+def test_kernelbench_track_passes_only_when_the_claim_gate_passes(
+        monkeypatch, tmp_path, fast_1, expected):
+    from kore.eval.kernelbench_amd import kernelbench_claim_gate
+
+    _stub_kernelbench(monkeypatch, _kb_report(fast_1), real_specs=True)
+    ctx = _kb_ctx(tmp_path, kernelbench_root="/kb")
+
+    result = rc._eval_kernelbench_amd(ctx, object(), object())
+
+    assert result["source"] == "full" and result["source_ok"] is True
+    assert result["passed"] is expected
+    assert result["gate"] == kernelbench_claim_gate(
+        _kb_report(fast_1), source="full")
+    if not expected:
+        assert result["gate"]["reasons"], "a failure must say what missed the bar"
+    # The bar the verdict used travels with the persisted verdict.
+    assert result["gate"]["thresholds"]["min_fast_1"] > 0.0
+
+
+def test_kernelbench_bundled_smoke_specs_can_never_pass_the_track(
+        monkeypatch, tmp_path):
+    _stub_kernelbench(monkeypatch, _kb_report(1.0), real_specs=False)
+    ctx = _kb_ctx(tmp_path)
+
+    result = rc._eval_kernelbench_amd(ctx, object(), object())
+
+    assert result["source"] == "bundled-smoke"
+    assert result["passed"] is False
+    assert any("not claimable" in reason for reason in result["gate"]["reasons"])

@@ -426,7 +426,10 @@ def _win_admissible(obs, env, cfg, task=None) -> tuple[bool, dict]:
         # vendor/torch kind, and how that kind was established. Without the kind a
         # torch_add-relative win is indistinguishable from an aiter_flash_attn-relative
         # one and no aggregate vendor-beating claim is supportable.
-        **resolve_baseline_identity(task),
+        # observed_impl is the driver's runtime sentinel: it demotes a declared
+        # vendor bar to torch when AITER silently fell back, so a win recorded on
+        # a node where the vendor build failed cannot claim to have beaten it.
+        **resolve_baseline_identity(task, getattr(obs, "baseline_impl", None)),
         "baseline_wall_us": paired_baseline_wall_us(obs),
         "final_cv_pct": getattr(obs, "cv_pct", None),
         "baseline_cv_pct": getattr(obs, "baseline_cv_pct", None),

@@ -52,7 +52,7 @@ def _attn_fwd(Q, K, V, O, Slopes, Sink, sm_scale, H, HKV, SQ, SK,
                     mask=n_mask[None, :], other=0.0).to(tl.float32)
         qk = tl.dot(q, k) * sm_scale
         if SOFTCAP > 0.0:
-            qk = SOFTCAP * tl.math.tanh(qk / SOFTCAP)
+            qk = SOFTCAP * (2.0 * tl.sigmoid(2.0 * (qk / SOFTCAP)) - 1.0)
         if USE_ALIBI:
             qk = qk + slope * (n[None, :] - q_pos[:, None])
         keep = n_mask[None, :]

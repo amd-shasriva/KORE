@@ -11,6 +11,16 @@ Registry tasks are classified from exact task metadata and the generator source
 that emitted that metadata.  Name rules exist only as a centralized adapter for
 unregistered records/minted candidates; registry validation never relies on them.
 Unknown identities are eval-only, rather than becoming a raw-string family.
+
+Held-out and contaminated are two independent states, tracked separately:
+
+* *held out* means never trainable (the immutable product split).
+* *contaminated* means the pretrained model has already seen this task's source,
+  so the task cannot support a zero-shot generalization claim.
+
+A contaminated task stays held out forever; it is additionally struck from
+generalization scoring with its reason recorded.  Collapsing the two would either
+re-admit a contaminated task into training or quietly shrink the held-out set.
 """
 
 from __future__ import annotations
@@ -156,6 +166,113 @@ NEAR_GENERALIZATION_TASK_IDS = frozenset({
     "genb_tr_ls_ce_bwd_bf16",
     "genb_tr_rmsprop_centered_momentum_fp32",
 })
+
+
+# --------------------------------------------------------------------------- #
+# Train/eval contamination of the pretrained model
+# --------------------------------------------------------------------------- #
+CONTAMINATION_MIDTRAIN_CURRICULUM = "midtrain_curriculum_tier4_win_source"
+
+# Applied only if a contaminated identity would otherwise be trainable.  It is a
+# second, independent guard behind the held-out reservation, never the primary
+# reason a task is held out.
+CONTAMINATED_SPLIT_REASON = "contaminated"
+
+
+@dataclass(frozen=True)
+class ContaminationRecord:
+    """Why one held-out task can no longer support a zero-shot claim."""
+
+    task_id: str
+    reason: str
+    detector: str
+    match_kind: str
+    reference_id: str
+    corpus: str
+    note: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+# Measured evidence for the leak, kept next to the exclusion it justifies:
+# ``gen_curriculum.py`` built its Tier-4 "reasoning trace" prompts from every win
+# shard under ``data/b05factory/wins/`` with no held-out filter, so optimized
+# kernel source for held-out tasks was chunked into the midtrain corpus.  Running
+# ``kore.data.decontam.analyze_text_contamination`` over the 9,956 forwarded
+# curriculum chunks against the frozen benchmark artifact plus the held-out index
+# returned 17 hits covering 11 held-out tasks, every one matching that task's own
+# seed source and none matching a public benchmark.
+MIDTRAIN_CURRICULUM_CONTAMINATION: Mapping[str, Any] = MappingProxyType({
+    "reason": CONTAMINATION_MIDTRAIN_CURRICULUM,
+    "detector": "kore.data.decontam.analyze_text_contamination",
+    "match_kind": "directional_containment",
+    "generator": "data/release/generators/gen_curriculum.py::tier4",
+    "corpus": "data/b05factory/midtrain/corpus.jsonl (source=kernel_curriculum)",
+    "chunks_analyzed": 9956,
+    "hits": 17,
+    "tasks": 11,
+    "containment_min": 0.795,
+    "containment_max": 0.943,
+    "public_benchmark_hits": 0,
+    "reference_pattern": "kore-task:<task_id>:seed_triton.py",
+})
+
+_MIDTRAIN_CONTAMINATED_TASK_IDS: tuple[str, ...] = (
+    "genb_cv_conv2d_1x1_s2_fp16",
+    "genb_cv_depthwise_conv2d_5x5_s1_bf16",
+    "genb_norm_rmsnorm_h16384_bf16",
+    "genb_qx_int4_unpack_group_bf16",
+    "genb_qx_quant_fp8_block2d_fp8",
+    "genb_red_log_softmax_bwd_fp32",
+    "genb_red_rms_bf16",
+    "genb_smp_repetition_penalty_bf16",
+    "genb_ssm_gated_retention_c128_bf16",
+    "genb_ssm_lightning_attn_bf16",
+    "genb_tr_rmsprop_centered_momentum_fp32",
+)
+
+
+def _midtrain_contamination_records() -> Mapping[str, ContaminationRecord]:
+    evidence = MIDTRAIN_CURRICULUM_CONTAMINATION
+    return MappingProxyType({
+        task_id: ContaminationRecord(
+            task_id=task_id,
+            reason=str(evidence["reason"]),
+            detector=str(evidence["detector"]),
+            match_kind=str(evidence["match_kind"]),
+            reference_id=f"kore-task:{task_id}:seed_triton.py",
+            corpus=str(evidence["corpus"]),
+            note=(
+                "optimized kernel source reached the midtrain corpus through the "
+                "unfiltered Tier-4 win glob in "
+                f"{evidence['generator']}; containment "
+                f"{evidence['containment_min']}-{evidence['containment_max']}"
+            ),
+        )
+        for task_id in sorted(_MIDTRAIN_CONTAMINATED_TASK_IDS)
+    })
+
+
+CONTAMINATION_RECORDS: Mapping[str, ContaminationRecord] = _midtrain_contamination_records()
+CONTAMINATED_TASK_IDS = frozenset(CONTAMINATION_RECORDS)
+
+
+def contamination_record(task_id: str) -> Optional[ContaminationRecord]:
+    """The recorded contamination for ``task_id``, or ``None`` if it is clean."""
+
+    return CONTAMINATION_RECORDS.get(str(task_id or "").strip())
+
+
+def is_contaminated(task_id: str) -> bool:
+    """True when the pretrained model has already seen this task's source."""
+
+    return contamination_record(task_id) is not None
+
+
+def contamination_reason(task_id: str) -> Optional[str]:
+    record = contamination_record(task_id)
+    return record.reason if record is not None else None
 
 
 # Generator metadata -> canonical product leaf.  ``gen_*`` stores one of these
@@ -584,10 +701,56 @@ class SplitDecision:
     product_family: Optional[str]
     analysis_family: str
     provenance_root: str
+    contamination: Optional[ContaminationRecord] = None
 
     @property
     def heldout(self) -> bool:
         return self.split == "eval"
+
+    @property
+    def contaminated(self) -> bool:
+        return self.contamination is not None
+
+    @property
+    def contamination_reason(self) -> Optional[str]:
+        return self.contamination.reason if self.contamination is not None else None
+
+    @property
+    def generalization_eligible(self) -> bool:
+        """Whether this task may back a zero-shot generalization claim.
+
+        Held out is necessary but not sufficient: a task whose source leaked into
+        pretraining is no longer unseen, so it is excluded from the claim while
+        remaining permanently held out of training.
+        """
+        return self.heldout and not self.contaminated
+
+
+def _decide(
+    task_id: str,
+    split: str,
+    reason: str,
+    product_family: Optional[str],
+    analysis: str,
+    provenance_root: str,
+) -> SplitDecision:
+    """Attach contamination to every decision, on every code path.
+
+    Contamination is looked up by both identity and lineage root, so a minted
+    descendant of a leaked task inherits the mark.  If a contaminated identity
+    would otherwise be trainable the split is forced to eval -- the held-out
+    reservation is the primary guard, and this is the one that cannot be edited
+    away independently of the evidence.
+    """
+
+    record = CONTAMINATION_RECORDS.get(task_id) or CONTAMINATION_RECORDS.get(
+        provenance_root
+    )
+    if record is not None and split != "eval":
+        split, reason = "eval", CONTAMINATED_SPLIT_REASON
+    return SplitDecision(
+        task_id, split, reason, product_family, analysis, provenance_root, record
+    )
 
 
 def split_decision(task: Any, *, strict: bool = True) -> SplitDecision:
@@ -601,21 +764,21 @@ def split_decision(task: Any, *, strict: bool = True) -> SplitDecision:
     root = provenance_root_for_task(task)
 
     if task_id in NEAR_GENERALIZATION_TASK_IDS:
-        return SplitDecision(task_id, "eval", "near_probe", product, analysis, root)
+        return _decide(task_id, "eval", "near_probe", product, analysis, root)
     if root in NEAR_GENERALIZATION_TASK_IDS:
-        return SplitDecision(task_id, "eval", "heldout_lineage", product, analysis, root)
+        return _decide(task_id, "eval", "heldout_lineage", product, analysis, root)
     if product in WHOLE_FAMILY_HOLDOUTS:
-        return SplitDecision(task_id, "eval", "whole_family", product, analysis, root)
+        return _decide(task_id, "eval", "whole_family", product, analysis, root)
 
     arch = str(getattr(task, "gpu_target", "") or "").strip()
     if arch not in TRAIN_ARCHITECTURES:
-        return SplitDecision(task_id, "eval", "foreign_arch", product, analysis, root)
+        return _decide(task_id, "eval", "foreign_arch", product, analysis, root)
     dtype = str(getattr(task, "dtype", "") or "").strip()
     if dtype not in TRAIN_DTYPES:
-        return SplitDecision(task_id, "eval", "foreign_dtype", product, analysis, root)
+        return _decide(task_id, "eval", "foreign_dtype", product, analysis, root)
     if product is None:
-        return SplitDecision(task_id, "eval", "unclassified_operation", None, "other", root)
-    return SplitDecision(task_id, "train", "train", product, analysis, root)
+        return _decide(task_id, "eval", "unclassified_operation", None, "other", root)
+    return _decide(task_id, "train", "train", product, analysis, root)
 
 
 def split_decision_for_identity(
@@ -647,18 +810,18 @@ def split_decision_for_identity(
         raise TaxonomyError(f"record {tid!r}: empty provenance root")
 
     if tid in NEAR_GENERALIZATION_TASK_IDS:
-        return SplitDecision(tid, "eval", "near_probe", product, analysis, root)
+        return _decide(tid, "eval", "near_probe", product, analysis, root)
     if root in NEAR_GENERALIZATION_TASK_IDS:
-        return SplitDecision(tid, "eval", "heldout_lineage", product, analysis, root)
+        return _decide(tid, "eval", "heldout_lineage", product, analysis, root)
     if product in WHOLE_FAMILY_HOLDOUTS:
-        return SplitDecision(tid, "eval", "whole_family", product, analysis, root)
+        return _decide(tid, "eval", "whole_family", product, analysis, root)
     if architecture is not None and architecture not in TRAIN_ARCHITECTURES:
-        return SplitDecision(tid, "eval", "foreign_arch", product, analysis, root)
+        return _decide(tid, "eval", "foreign_arch", product, analysis, root)
     if dtype is not None and dtype not in TRAIN_DTYPES:
-        return SplitDecision(tid, "eval", "foreign_dtype", product, analysis, root)
+        return _decide(tid, "eval", "foreign_dtype", product, analysis, root)
     if product is None:
-        return SplitDecision(tid, "eval", "unclassified_operation", None, "other", root)
-    return SplitDecision(tid, "train", "train", product, analysis, root)
+        return _decide(tid, "eval", "unclassified_operation", None, "other", root)
+    return _decide(tid, "train", "train", product, analysis, root)
 
 
 def validate_task_assignments(tasks: Iterable[Any]) -> Mapping[str, str]:
@@ -687,8 +850,24 @@ def validate_task_assignments(tasks: Iterable[Any]) -> Mapping[str, str]:
             raise TaxonomyError(
                 f"operation {operation!r} maps to both {previous!r} and {family!r}"
             )
-        split_decision(task, strict=True)
+        decision = split_decision(task, strict=True)
+        if decision.contaminated and not decision.heldout:
+            raise TaxonomyError(
+                f"contaminated task {task_id!r} is not held out "
+                f"(split={decision.split!r}, reason={decision.reason!r})"
+            )
     return MappingProxyType(operation_map)
+
+
+def validate_contamination_coverage(task_ids: Iterable[str]) -> tuple[str, ...]:
+    """Return contaminated IDs missing from ``task_ids``.
+
+    An exclusion that names a task the registry no longer has cannot be enforced,
+    so callers treat a non-empty result as a fatal drift rather than a warning.
+    """
+
+    present = {str(task_id or "").strip() for task_id in task_ids}
+    return tuple(sorted(CONTAMINATED_TASK_IDS - present))
 
 
 def taxonomy_payload(tasks: Iterable[Any]) -> dict[str, Any]:
@@ -709,6 +888,9 @@ def taxonomy_payload(tasks: Iterable[Any]) -> dict[str, Any]:
             "split": decision.split,
             "reason": decision.reason,
             "provenance_root": decision.provenance_root,
+            "contaminated": decision.contaminated,
+            "contamination_reason": decision.contamination_reason,
+            "generalization_eligible": decision.generalization_eligible,
         })
     return {
         "version": TAXONOMY_VERSION,
@@ -718,6 +900,11 @@ def taxonomy_payload(tasks: Iterable[Any]) -> dict[str, Any]:
         "train_dtypes": sorted(TRAIN_DTYPES),
         "whole_family_holdouts": sorted(WHOLE_FAMILY_HOLDOUTS),
         "near_generalization_tasks": sorted(NEAR_GENERALIZATION_TASK_IDS),
+        "contaminated_tasks": {
+            task_id: record.as_dict()
+            for task_id, record in sorted(CONTAMINATION_RECORDS.items())
+        },
+        "contamination_evidence": dict(sorted(MIDTRAIN_CURRICULUM_CONTAMINATION.items())),
         "generator_sources": {
             "genops": dict(sorted(GENOPS_SOURCE_FAMILIES.items())),
             "genops_operation_overrides": dict(
@@ -756,11 +943,17 @@ def describe(tasks: Iterable[Any]) -> dict[str, Any]:
     product = Counter()
     analysis = Counter()
     reasons = Counter()
+    contaminated: list[str] = []
+    generalization: list[str] = []
     for task in task_list:
         decision = split_decision(task)
         product[decision.product_family] += 1
         analysis[decision.analysis_family] += 1
         reasons[decision.reason] += 1
+        if decision.contaminated:
+            contaminated.append(decision.task_id)
+        if decision.generalization_eligible:
+            generalization.append(decision.task_id)
     return {
         "version": TAXONOMY_VERSION,
         "digest": taxonomy_digest(task_list),
@@ -772,6 +965,9 @@ def describe(tasks: Iterable[Any]) -> dict[str, Any]:
         "split_reasons": dict(sorted(reasons.items())),
         "whole_family_holdouts": sorted(WHOLE_FAMILY_HOLDOUTS),
         "near_generalization_tasks": sorted(NEAR_GENERALIZATION_TASK_IDS),
+        "contaminated_tasks": sorted(contaminated),
+        "contamination_evidence": dict(sorted(MIDTRAIN_CURRICULUM_CONTAMINATION.items())),
+        "generalization_eval_tasks": sorted(generalization),
         "train_architectures": sorted(TRAIN_ARCHITECTURES),
         "train_dtypes": sorted(TRAIN_DTYPES),
     }
@@ -780,8 +976,14 @@ def describe(tasks: Iterable[Any]) -> dict[str, Any]:
 __all__ = [
     "ANALYSIS_FAMILIES",
     "BREADTH_MODULE_FAMILIES",
+    "CONTAMINATED_SPLIT_REASON",
+    "CONTAMINATED_TASK_IDS",
+    "CONTAMINATION_MIDTRAIN_CURRICULUM",
+    "CONTAMINATION_RECORDS",
+    "ContaminationRecord",
     "FAMILY_SPECS",
     "GENOPS_SOURCE_FAMILIES",
+    "MIDTRAIN_CURRICULUM_CONTAMINATION",
     "NEAR_GENERALIZATION_TASK_IDS",
     "PRIMARY_TRAIN_ARCHITECTURE",
     "PRODUCT_FAMILIES",
@@ -796,8 +998,11 @@ __all__ = [
     "analysis_family_for_task",
     "breadth_operation_families",
     "canonical_product_family",
+    "contamination_reason",
+    "contamination_record",
     "describe",
     "family_spec",
+    "is_contaminated",
     "mutation_family",
     "product_family_for_name",
     "product_family_for_source",
@@ -807,5 +1012,6 @@ __all__ = [
     "split_decision_for_identity",
     "taxonomy_digest",
     "taxonomy_payload",
+    "validate_contamination_coverage",
     "validate_task_assignments",
 ]

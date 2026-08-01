@@ -187,6 +187,14 @@ def search_from_kernel(root_source: str, task, env, *, budget: int = 64,
     error falls back to the curated library (never raises into the search). The
     discovered rewrites are conservatively-typed PROPOSALS, not proofs -- an
     out-of-contract child still fails the env's SNR gate and is pruned.
+
+    Seeding
+    -------
+    ``seed`` is forwarded to :func:`kore.search.alphakernel.search`, where it breaks
+    ties between exactly-equally-scored frontier nodes -- the only arbitrary choice
+    in an otherwise deterministic search. Pass a per-step seed (the GRPO rollout
+    passes ``seed=step``) so successive searches over the same root explore
+    differently; equal seeds reproduce a tree byte-for-byte.
     """
     lib = _resolve_search_library(root_source, discover, library)
     policy = TransformProposePolicy(k=k_expand, library=lib)

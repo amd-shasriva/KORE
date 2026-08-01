@@ -286,6 +286,18 @@ def balanced_partition(items: Iterable[WorkItem], n_shards: int) -> list[list[Wo
     return shards
 
 
+def _eligibility_policy_names() -> tuple[str, ...]:
+    """Named hardware-eligibility policies, read from their own definition.
+
+    Imported lazily so ``--help`` is the only thing that pays for loading the
+    verification report, and so the choices can never drift from
+    :mod:`kore.tasks.verification`.
+    """
+    from kore.tasks.verification import NAMED_POLICIES
+
+    return tuple(NAMED_POLICIES)
+
+
 def _atomic_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -343,14 +355,42 @@ def main() -> int:
         default=0,
         help="per-task attempt cap for downstream datagen (0 = unbounded)",
     )
+    # Hardware-verification eligibility, OPT-IN and unset by default. The gfx950
+    # sweep found 27 structurally-broken and 11 SNR-shortfall seeds whose own
+    # correctness gate is unreachable, so datagen against them can only ever score
+    # zero -- but silently narrowing 1289 -> 1253 would be its own bug: an operator
+    # who did not ask for a smaller scope would read the shrunken totals as
+    # progress. Name a policy to opt in; the manifest records exactly what it
+    # dropped. See kore.tasks.verification for what each policy excludes.
+    ap.add_argument(
+        "--eligibility-policy",
+        default=None,
+        choices=sorted(_eligibility_policy_names()),
+        help="hardware-eligibility policy for train-task selection "
+             "(unset = every registered train task, the default)",
+    )
     args = ap.parse_args()
 
-    from kore.tasks.registry import train_tasks
+    from kore.tasks.registry import (
+        eligible_train_tasks,
+        train_eligibility_exclusions,
+        train_tasks,
+    )
 
     data_root = Path(args.data_root).resolve()
     out_dir = Path(args.out_dir).resolve()
 
+    # The candidate pool stays the full train split even under a policy, so an
+    # explicit --task-file still reports a genuinely unknown id as unknown rather
+    # than as ineligible; the policy then subtracts from the resolved selection.
     tasks_by_id = {task.task_id: task for task in train_tasks()}
+    if args.eligibility_policy:
+        ineligible = dict(train_eligibility_exclusions(args.eligibility_policy))
+        eligible_ids = {task.task_id for task in eligible_train_tasks(
+            args.eligibility_policy)}
+    else:
+        ineligible = {}
+        eligible_ids = set(tasks_by_id)
     if args.task_file:
         wanted = [
             line.strip()
@@ -371,6 +411,15 @@ def main() -> int:
             for tid in tasks_by_id
             if any(tid.startswith(pfx) for pfx in prefixes)
         )
+    dropped = sorted(tid for tid in selected if tid not in eligible_ids)
+    if dropped:
+        print(
+            f"ELIGIBILITY policy={args.eligibility_policy} "
+            f"dropped={len(dropped)} of {len(selected)} selected train tasks"
+        )
+        for tid in dropped:
+            print(f"  - {tid}: {ineligible.get(tid, 'ineligible')}")
+        selected = [tid for tid in selected if tid in eligible_ids]
     task_ids = selected
 
     frontier_weight = _frontier_weight()
@@ -443,6 +492,12 @@ def main() -> int:
         "target_wins": args.target,
         "max_attempts_per_task": args.max_attempts_per_task,
         "frontier_weight": frontier_weight,
+        # Records the narrowing (or its absence) so a shard set can always be read
+        # back as "this scope, under this policy" rather than an unexplained count.
+        "eligibility_policy": args.eligibility_policy,
+        "n_registry_train_tasks": len(tasks_by_id),
+        "n_ineligible_excluded": len(dropped),
+        "ineligible_excluded": {tid: ineligible.get(tid, "ineligible") for tid in dropped},
         "n_train_tasks": len(task_ids),
         "n_work_items": len(items),
         "n_shards": args.shards,

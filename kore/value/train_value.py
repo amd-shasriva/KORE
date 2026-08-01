@@ -32,6 +32,7 @@ from kore.value.rerank import (
     benches_to_best,
     rank_correlation,
     score_candidates,
+    top_k_recall,
 )
 
 # Keys in a table row that describe the OUTCOME (everything else is meta).
@@ -142,6 +143,17 @@ def train_from_table(
     rows = _load_table(table_path)
     if not rows:
         raise ValueError(f"empty value table: {table_path}")
+
+    # A table with no per-candidate ``source`` leaves all 19 schedule features zero,
+    # so the fit CANNOT distinguish two kernels for the same problem: it returns a
+    # constant utility and rerank's degeneracy guard silently swaps in the hand-coded
+    # heuristic. Such a model is worthless as a schedule-aware ranker, so say so.
+    if not any(r.get("source") for r in rows):
+        print(f"[value] WARNING: no 'source' field in any of {len(rows)} rows of "
+              f"{table_path}; the candidate-schedule features will all be zero and "
+              f"the model will be BLIND to the kernel source (constant utility per "
+              f"problem). Train from real ranked groups instead: "
+              f"kore.value.replay_train.train_value_from_groups")
 
     rng = np.random.RandomState(seed)
     idx = np.arange(len(rows))
@@ -327,6 +339,24 @@ def groupwise_rank_corr(score_fn, groups: list[list[dict]]) -> float:
     return float(np.mean(corrs)) if corrs else 0.0
 
 
+def groupwise_top_k_recall(score_fn, groups: list[list[dict]], k: int) -> float:
+    """Mean within-group top-k recall between predicted scores and realized utility.
+
+    This is the metric that matches how the model is USED: the bench prefilter and
+    the search expansion measure only the top ``k`` candidates of a group, so what
+    matters is how many of the genuinely-best k the ranking recovers - not how well
+    the whole order correlates. ``score_fn(metas) -> scores`` (list/array).
+    """
+    recalls: list[float] = []
+    for rows in groups:
+        metas = [_split_row(r)[0] for r in rows]
+        util = np.array([_realized_utility(_split_row(r)[1]) for r in rows])
+        scores = np.asarray(score_fn(metas), dtype=np.float64)
+        if scores.shape[0] >= 2 and np.ptp(util) > 0:
+            recalls.append(top_k_recall(scores, util, k))
+    return float(np.mean(recalls)) if recalls else 0.0
+
+
 def train_ranking(groups: list[list[dict]], use_sklearn: Optional[bool] = None) -> ValueModel:
     """Fit a full ValueModel (pointwise heads) PLUS the pairwise ranking head
     from within-group order. Returns the model (with ``.ranker`` attached)."""
@@ -341,89 +371,6 @@ def train_ranking(groups: list[list[dict]], use_sklearn: Optional[bool] = None) 
     # throughput-weighted within-group ranking supervision
     model.fit_ranker(X, gids, utils, sample_weight=sw)
     return model
-
-
-# --------------------------------------------------------------------------- #
-# Online refit from freshly-benched candidates (env replay cache)
-# --------------------------------------------------------------------------- #
-def _obs_speedup(obs) -> Optional[float]:
-    """Worst-shape speedup from an Observation (mirrors reward._worst_speedup)."""
-    try:
-        from kore.reward.reward import _worst_speedup
-        return _worst_speedup(obs)
-    except Exception:
-        return None
-
-
-def row_from_observation(meta: dict, obs) -> dict:
-    """Turn a (meta, Observation) benched candidate into a value-table row."""
-    row = dict(meta or {})
-    compiled = bool(getattr(obs, "compiled", False))
-    correct = bool(getattr(obs, "validation_passed", False))
-    su = _obs_speedup(obs)
-    su = float(su) if (su and su > 0) else (0.0 if not correct else 1.0)
-    row["compiled"] = compiled
-    row["snr_pass"] = bool(correct)
-    row["speedup"] = su
-    row["log_speedup"] = math.log(su) if su > 0 else 0.0
-    return row
-
-
-def _coerce_row(item) -> dict:
-    """Accept a table row dict, a (meta, Observation) pair, or {meta..., 'obs':Observation}."""
-    if isinstance(item, tuple) and len(item) == 2:
-        return row_from_observation(item[0], item[1])
-    if isinstance(item, dict):
-        if "obs" in item:
-            meta = {k: v for k, v in item.items() if k != "obs"}
-            return row_from_observation(meta, item["obs"])
-        return dict(item)
-    raise TypeError(f"cannot coerce {type(item)!r} into a value-table row")
-
-
-def refit_online(
-    new_rows,
-    model: Optional[ValueModel] = None,
-    history: Optional[list] = None,
-    use_sklearn: Optional[bool] = None,
-    fit_ranker: bool = True,
-) -> tuple[ValueModel, list[dict]]:
-    """Refit the value model from freshly benched candidates logged during a run.
-
-    ``new_rows`` may be table-row dicts, ``(meta, Observation)`` pairs, or dicts
-    with an embedded ``obs`` Observation (as produced by the env replay cache).
-    ``history`` is the accumulated buffer of prior rows; the model is retrained on
-    ``history + new_rows`` (GBT can't warm-start, so a full refit on the growing
-    buffer is the robust online update - same 3-head + sklearn/numpy fallback).
-
-    If rows carry a ``group_id`` and ``fit_ranker`` is set, the pairwise ranking
-    head is refit too. Returns ``(model, buffer)`` so the caller can thread the
-    buffer through the next refit."""
-    buffer: list[dict] = list(history or [])
-    for it in new_rows:
-        buffer.append(_coerce_row(it))
-    if not buffer:
-        raise ValueError("refit_online: no rows to fit")
-
-    metas, outs = zip(*[_split_row(r) for r in buffer])
-    X = featurize_many(list(metas))
-    y_compile = np.array([1 if o.get("compiled") else 0 for o in outs])
-    y_snr = np.array([1 if o.get("snr_pass") else 0 for o in outs])
-    y_ls = np.array([float(o.get("log_speedup", 0.0)) for o in outs])
-    sw = np.array([max(float(o.get("speedup", 0.1)), 0.1) for o in outs])
-
-    if model is None:
-        model = ValueModel(use_sklearn=use_sklearn)
-    model.fit(X, y_compile, y_snr, y_ls, sample_weight=sw)
-
-    if fit_ranker:
-        gids = [r.get("group_id") for r in buffer]
-        if all(g is not None for g in gids) and len(set(gids)) >= 1:
-            utils = np.array([max(float(o.get("speedup", 0.0)), 0.0)
-                              if (o.get("compiled") and o.get("snr_pass")) else 0.0
-                              for o in outs])
-            model.fit_ranker(X, np.array(gids), utils, sample_weight=sw)
-    return model, buffer
 
 
 if __name__ == "__main__":

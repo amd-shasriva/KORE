@@ -59,6 +59,56 @@ import json; from kore.analysis.p0_sol import reanalyze_report
 print(json.dumps(reanalyze_report(json.load(open('data/p0_study_final.json'))), indent=2)[:4000])"
 ```
 
+## Independent replication on measured peaks (`data/p0_study_calibrated.json`)
+
+The re-analysis above adjudicates a *stored* v1 artifact whose peaks were datasheet numbers. The
+obvious objection is that the model only fails because it was fed the wrong constants. It was
+therefore re-measured end to end against **calibrated peaks from this device** (HBM 4.763 TB/s,
+bf16 1.296 PF/s — 60% and 56% of datasheet), under a verified model fingerprint, on an otherwise
+idle GPU:
+
+```bash
+HIP_VISIBLE_DEVICES=0 PYTHONPATH=. python -m kore.analysis.p0_sol \
+  --tasks fused_add_rmsnorm_bf16,fused_moe_silu_bf16,gelu_tanh_bf16,gemm_bf16,gemm_fp8_a8w8,\
+layernorm_bf16,quant_fp8_pertoken,rmsnorm_aiter,rope_bf16,silu_mul_bf16,softmax_bf16,\
+topk_softmax_bf16,flash_attn_decode_bf16,flash_attn_prefill_bf16,paged_attn_decode_bf16 \
+  --calibration data/calibration_v1.json \
+  --expect-model-fingerprint sha256:a6e01795829dd9a1c11752e12ff84825241f1e7d1e752c47dd2d926f7b858c7a \
+  --arch gfx950 --shapes-per-task 3 --reseeds 3 --bootstrap 1000 --permutations 1000 \
+  --out data/p0_study_calibrated.json
+```
+
+```
+(a) roofline beyond Tcand : rho = 0.6205   Tcand-only = 0.7291   delta = -0.1086   q = 0.277 -> FAIL
+(b) normalized held-out   : R2  = 0.0557   Tcand-only  = -0.1987                   q = 0.004 -> FAIL
+    raw in-sample         : named 0.9177 | Tcand-only 0.9814 | null median 0.9443 (p = 0.827)
+(c) collection-order      : frac = 0.5185  27 pairs                                q = 0.500 -> FAIL
+DECISION: INTEGRITY_ONLY        SHAPING: disabled; no family passed held-out evidence
+```
+
+Calibration helps and does not rescue. Check (a)'s deficit narrows from −0.198 to −0.109 once the
+peaks are real, but η still trails the trivial `1/T_candidate`. The raw in-sample R² of 0.918
+reproduces the old headline and remains *below* the denominator-preserving null's median of 0.944:
+random regressors sharing the same denominator score higher, and the permutation test cannot reject
+them (p = 0.83). Only under the normalized target does the named model finally beat its baseline
+(+0.254, p = 0.001) — but at CV R² = 0.056 it explains essentially none of the variance, and its
+95% CI [−0.327, +0.447] spans zero.
+
+Two further findings sharpen the negative result:
+
+- **Leave-one-family-out transfer is catastrophic.** Holding out a family and predicting it scores
+  activation +0.124, gemm −0.224, reduction −4.39, norm −5.23, quant −5.43, positional −14.87. The
+  fit is family-local; it does not generalize to an operator class it has not seen.
+- **The model cannot express the operators that matter most.** Five of the fifteen requested
+  operators — `fused_moe_silu`, `topk_softmax`, `flash_attn_decode`, `flash_attn_prefill`,
+  `paged_attn_decode` — have no roofline at all and were dropped as *unsupported model*. What
+  survives to be tested is ten memory- or compute-bound primitives. Attention and MoE, the shapes
+  that dominate real LLM serving, are outside the model's domain entirely.
+
+Both runs agree on `INTEGRITY_ONLY`, one from a stored artifact on datasheet peaks and one measured
+fresh on calibrated peaks under a verified fingerprint. The verdict is not an artifact of stale
+constants.
+
 ## What this does and does not invalidate
 
 **Still valid.** The measurements themselves are sound: the peak calibration, the AITER baseline
@@ -81,10 +131,15 @@ model can never authorize shaping. The shipped models are therefore not affected
 
 - **Host:** 8× **gfx950** (AMD Instinct MI350-class, CDNA4), ROCm 7.2.3, `rocprofv3`. All GPU
   measurement runs on one device (datagen runs on a separate node).
-- **Main stack:** `torch 2.10.0+rocm7.0` + `pytorch-triton-rocm 3.5.1` (native gfx950).
-- **AITER baseline stack (isolated):** AITER's kernels require `triton >= 3.6`, which the main
-  stack does not ship, so the production baseline runs from a separate venv so `aiter.ops.*` CK
-  kernels JIT-compile on gfx950. This never modifies the main venv or the shared runtime.
+- **Main stack:** `torch 2.10.0+rocm7.0` + `triton 3.6.0` (native gfx950).
+- **AITER baseline:** AITER's kernels require `triton >= 3.6`. That constraint historically forced
+  the vendor baseline into an isolated venv, and older revisions of this document describe that
+  split. The main stack now ships `triton 3.6.0` and imports `aiter` directly
+  (`aiter.jit.module_aiter_core` loads on gfx950), so the calibrated replication above ran the
+  vendor baselines and the candidate timings in **one** environment. Confirm before trusting a
+  vendor-anchored number: `python -c "import aiter, triton; print(triton.__version__)"`. If that
+  import fails the wrappers degrade to torch, which the run records as `baseline_impl` rather than
+  claiming a vendor win.
 
 ## Peak calibration (measured achievable, not datasheet)
 

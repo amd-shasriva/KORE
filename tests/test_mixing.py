@@ -10,7 +10,7 @@ import random
 
 import pytest
 
-from kore.policy.configs import MultiCapSFTConfig, MidTrainConfig
+from kore.policy.configs import MultiCapSFTConfig
 from kore.data import general_replay
 from kore.data.general_replay import (
     REPLAY_KINDS,
@@ -26,7 +26,6 @@ from kore.data.mixing import (
     allocate_counts,
     build_multicap_sft,
     mixture_report,
-    build_midtrain_corpus,
     dedup_rows,
     SOURCE_TAG_KEY,
 )
@@ -311,34 +310,13 @@ def test_dedup_rows_content_hash_ignores_source_tag():
 
 
 # --------------------------------------------------------------------------- #
-# build_midtrain_corpus
+# midtrain corpus ownership
 # --------------------------------------------------------------------------- #
-def test_build_midtrain_corpus_general_fraction():
-    cfg = MidTrainConfig()  # general_replay_frac = 0.15
-    kernel = [f"kernel doc {i}" for i in range(100)]
-    general = [f"general shard {i}" for i in range(100)]
-    mix = build_midtrain_corpus(kernel, general, cfg, seed=0)
-    rep = mixture_report(mix)
-    frac = rep["fractions"].get("general_shard", 0.0)
-    assert abs(frac - cfg.general_replay_frac) <= 0.03
-    assert rep["counts"]["kernel_corpus"] == 100
-    # docs normalized to dicts with a text field + source tag
-    assert all(isinstance(d, dict) and SOURCE_TAG_KEY in d for d in mix)
+def test_mixing_does_not_shadow_the_real_midtrain_builder():
+    """``mixing`` used to define a second ``build_midtrain_corpus`` that shadowed
+    (and diverged from) the one the campaign runs. Only the real one may exist, so
+    an import of the mixing module can never resolve to the wrong builder."""
+    from kore.data import midtrain_corpus, mixing
 
-
-def test_build_midtrain_corpus_caps_at_available_shards():
-    cfg = MidTrainConfig()
-    kernel = [f"k{i}" for i in range(100)]
-    general = [f"g{i}" for i in range(2)]  # fewer than target
-    mix = build_midtrain_corpus(kernel, general, cfg, seed=0)
-    rep = mixture_report(mix)
-    assert rep["counts"].get("general_shard", 0) == 2
-
-
-def test_build_midtrain_corpus_determinism():
-    cfg = MidTrainConfig()
-    kernel = [{"text": f"k{i}"} for i in range(50)]
-    general = [{"text": f"g{i}"} for i in range(50)]
-    a = build_midtrain_corpus(kernel, general, cfg, seed=1)
-    b = build_midtrain_corpus(kernel, general, cfg, seed=1)
-    assert a == b
+    assert not hasattr(mixing, "build_midtrain_corpus")
+    assert callable(midtrain_corpus.build_midtrain_corpus)

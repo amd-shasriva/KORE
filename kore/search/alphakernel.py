@@ -61,7 +61,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Protocol, runtime_checkable
 
-from kore.config import CONFIG
 from kore.reward.physics import compute_kernel_reward
 from kore.search.bandit import Budget, CallbackArm, MeasureStats, successive_halving
 
@@ -527,7 +526,7 @@ class _Search:
     """Internal search state machine. One instance per :func:`search` call."""
 
     def __init__(self, task, env, policy, value_model, budget, cfg,
-                 roofline_ub_fn, value_fn=None):
+                 roofline_ub_fn, value_fn=None, seed: int = 0):
         self.task = task
         self.env = env
         self.policy = policy
@@ -536,10 +535,10 @@ class _Search:
         self.cfg = cfg
         self.budget: Budget = budget if isinstance(budget, Budget) else Budget(int(budget))
         self.roofline_ub_fn = roofline_ub_fn
+        self.seed = int(seed)
 
         self.dtype = getattr(task, "dtype", "fp32")
         self.snr_threshold = getattr(task, "snr_threshold", None)
-        self.correctness_weight = float(getattr(CONFIG, "correctness_weight", 0.3))
 
         self.tt: dict[str, Node] = {}          # transposition table (fingerprint -> Node)
         self.env_calls: int = 0
@@ -763,6 +762,25 @@ class _Search:
                    * math.sqrt(1 + parent_visits) / (1 + node.visit_count))
         return q + explore + self.cfg.c_novelty * self._novelty(node)
 
+    def _tiebreak(self, node: Node) -> float:
+        """Seed-dependent jitter in [0, 1) used ONLY to order EXACTLY-tied nodes.
+
+        The search is otherwise fully deterministic (a fixed root, a deterministic
+        transform action space, softmaxed priors), so ``seed`` had nothing to act on
+        and every step of a run explored the identical tree. This gives it the one
+        decision that is genuinely arbitrary: which of several equally-scored
+        frontier nodes to expand next. It is applied as the SECOND element of a
+        tuple sort key, so it can never perturb a node's selection score or reorder
+        nodes whose scores differ -- only ties, which previously resolved to
+        "whichever was inserted first".
+
+        Keyed on ``(seed, fingerprint)`` rather than drawn from a stateful RNG so it
+        is independent of call order: the same seed always yields the same tree.
+        """
+        h = hashlib.blake2b(f"{self.seed}:{node.fingerprint}".encode(),
+                            digest_size=8).digest()
+        return int.from_bytes(h, "big") / 2.0 ** 64
+
     def _select(self) -> Optional[Node]:
         """Pick the best frontier node to expand; prune dominated ones en route."""
         md = self.cfg.max_depth
@@ -782,7 +800,7 @@ class _Search:
             frontier.append(n)
         if not frontier:
             return None
-        return max(frontier, key=self._selection_score)
+        return max(frontier, key=lambda n: (self._selection_score(n), self._tiebreak(n)))
 
     # -- expansion -------------------------------------------------------- #
     def _register(self, node: Node) -> None:
@@ -895,6 +913,7 @@ class _Search:
             "n_transpositions": self.n_transpositions,
             "max_depth": max((n.depth for n in nodes), default=0),
             "iterations": self.iters,
+            "seed": self.seed,
             "env_calls": self.env_calls,
             "budget_total": self.budget.total,
             "budget_used": self.budget.used,
@@ -937,17 +956,23 @@ def search(root_source: str, task, env, policy, value_model=None, budget=64, *,
                   taking precedence over ``value_model``. Clean hook for the
                   orchestrator to bind a trained value model (default None => the
                   historical heuristic / rerank fallback).
+    seed        : breaks ties between EXACTLY-equally-scored frontier nodes (see
+                  :meth:`_Search._tiebreak`). The search is otherwise deterministic,
+                  so this is the only knob that makes two runs over the same root
+                  explore differently -- which is what a per-step seed (``seed=step``
+                  from the GRPO rollout) is for. Reproducible: equal seeds give
+                  byte-identical trees.
 
     Returns a dict with:
       ``best_source``        - the incumbent (best CORRECT node by ``speedup_lcb``),
       ``best_speedup_lcb``   - its pessimistic measured speedup (None if none found),
       ``best_node``          - the incumbent :class:`Node` (or None),
       ``root``               - the root :class:`Node` (DAG entry point),
-      ``tree_stats``         - counters incl. the ``incumbent_trace``.
+      ``tree_stats``         - counters incl. the ``incumbent_trace`` and ``seed``.
     """
     cfg = config or AlphaKernelConfig()
     engine = _Search(task, env, policy, value_model, budget, cfg, roofline_ub_fn,
-                     value_fn=value_fn)
+                     value_fn=value_fn, seed=seed)
     root = engine.run(root_source)
     inc = engine.incumbent
     return {

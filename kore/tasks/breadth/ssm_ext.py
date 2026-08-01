@@ -55,7 +55,18 @@ imported lazily (registry discovery never needs a GPU).
 
 from __future__ import annotations
 
-from kore.tasks._genops import DTYPES, _parse_shape
+import math
+
+from kore.tasks._genops import (DTYPES, _assoc_scan_lastdim,
+                                _blocked_selective_scan, _chunk_dimgated_scan,
+                                _chunk_scalar_decay_scan, _lti_fft_conv,
+                                _parse_shape, _segsum_exp, _tril_mask)
+
+# Chunk length used by the PER-KEY-DIM gated baselines (GLA / HGRN2). Their
+# intra-chunk score matmul needs exp(-cumulative log-gate), which grows with the
+# chunk length, so this is deliberately shorter than the scalar-decay chunk (whose
+# every exponent is <= 0 and therefore length-independent).
+_DIMGATE_CHUNK = 32
 
 # --------------------------------------------------------------------------- #
 # task catalog: op -> (family, config). Every op is prefixed ``ssm_``.
@@ -147,7 +158,6 @@ def retention_gamma(H: int, mode: str = "retnet") -> list[float]:
                       gamma_h = exp(-2^(-(h+1))).
     Pure-python (no torch) so the oracle, the seed and the test share it exactly.
     """
-    import math
     if mode == "lightning":
         return [math.exp(-(2.0 ** (-(h + 1)))) for h in range(H)]
     return [1.0 - 2.0 ** (-5 - h) for h in range(H)]
@@ -334,12 +344,15 @@ def make_reference(op: str, dtype: str) -> dict:
             return _core(x.float()).to(x.dtype)
 
         def baseline_fn(x):
-            return _core(x)
+            # torch ships a native fused log-cumsum-exp scan; the streaming
+            # (max, sum) loop above is the ORACLE's formulation, never a bar.
+            return torch.logcumsumexp(x.float(), dim=-1).to(x.dtype)
 
         arity = 1
 
     elif fam in ("scan_cummax", "scan_cummin"):
         _redop = torch.maximum if fam == "scan_cummax" else torch.minimum
+        _cumop = torch.cummax if fam == "scan_cummax" else torch.cummin
 
         def get_inputs(shape, device="cuda", seed=0):
             B, D, L = shape["B"], shape["D"], shape["L"]
@@ -359,7 +372,9 @@ def make_reference(op: str, dtype: str) -> dict:
             return _core(x.float()).to(x.dtype)
 
         def baseline_fn(x):
-            return _core(x)
+            # native fused cumulative max/min (a monotone selection, so the
+            # in-dtype result is bit-identical to the fp32 oracle's).
+            return _cumop(x, dim=-1).values
 
         arity = 1
 
@@ -386,7 +401,10 @@ def make_reference(op: str, dtype: str) -> dict:
             return _core(x.float(), reset.float()).to(x.dtype)
 
         def baseline_fn(x, reset):
-            return _core(x, reset)
+            # Blelloch/Hillis-Steele associative scan on the (gate, value) pair.
+            # A cumulative-product formulation cannot be used here: the reset gate
+            # is exactly 0, so log/divide would be undefined.
+            return _assoc_scan_lastdim(1.0 - reset.float(), x.float()).to(x.dtype)
 
         arity = 2
 
@@ -421,7 +439,19 @@ def make_reference(op: str, dtype: str) -> dict:
             return _core(x.float(), nu.float(), theta.float()).to(x.dtype)
 
         def baseline_fn(x, nu, theta):
-            return _core(x, nu, theta)
+            # lambda is time-INVARIANT, so the doubling associative scan needs no
+            # gate tensor at all: step 2^k folds in lambda^(2^k) (squared each
+            # step). Complex arithmetic native, ceil(log2(L)) vectorized steps.
+            nuf, thf = nu.float(), theta.float()
+            lam = torch.complex(nuf * torch.cos(thf), nuf * torch.sin(thf))
+            h = torch.complex(x[..., 0].float(), x[..., 1].float()).contiguous()
+            L = h.shape[-1]
+            d = 1
+            while d < L:
+                h[..., d:] += lam[None, :, None] * h[..., : L - d].clone()
+                lam = lam * lam
+                d *= 2
+            return torch.stack([h.real, h.imag], dim=-1).to(x.dtype)
 
         arity = 3
 
@@ -455,7 +485,21 @@ def make_reference(op: str, dtype: str) -> dict:
             return _core(u.float(), Abar.float(), Bbar.float(), C.float()).to(u.dtype)
 
         def baseline_fn(u, Abar, Bbar, C):
-            return _core(u, Abar, Bbar, C)
+            # S4D is time-INVARIANT, so the recurrence IS a long causal
+            # convolution with kernel K[d,l] = sum_n C exp(Abar*l) Bbar. That is
+            # the production S4/S4D path: materialize K, then FFT-convolve
+            # (O(L log L)) rather than stepping the state L times.
+            Ab, W = Abar.float(), (C.float() * Bbar.float())
+            L = u.shape[-1]
+            blk = max(1, min(L, (1 << 26) // max(1, Ab.numel())))
+            ks = []
+            for s in range(0, L, blk):
+                ll = torch.arange(s, min(s + blk, L), device=u.device,
+                                  dtype=torch.float32)
+                ks.append(torch.einsum("dn,dnl->dl",
+                                       W, torch.exp(Ab[:, :, None] * ll)))
+            kern = ks[0] if len(ks) == 1 else torch.cat(ks, dim=-1)
+            return _lti_fft_conv(kern, u.float()).to(u.dtype)
 
         arity = 4
 
@@ -488,8 +532,11 @@ def make_reference(op: str, dtype: str) -> dict:
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(q, k, v, gl):
+            # chunked GLA: intra-chunk decay-weighted score matmul + an
+            # inter-chunk decay-weighted sum of per-chunk states.
+            return _chunk_dimgated_scan(F.logsigmoid(gl.float()), k, v, q,
+                                        _DIMGATE_CHUNK).to(q.dtype)
 
         arity = 4
 
@@ -514,11 +561,16 @@ def make_reference(op: str, dtype: str) -> dict:
                 y[:, :, t] = (q[:, :, t, :, None] * S).sum(-2)
             return y
 
+        _chunk = cfg.get("chunk", 64)
+
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(q, k, v, gl):
+            # chunkwise gated retention (scalar decay): every exponent used is
+            # <= 0, so the chunk length is free of overflow constraints.
+            return _chunk_scalar_decay_scan(F.logsigmoid(gl.float()), k, v, q,
+                                            _chunk).to(q.dtype)
 
         arity = 4
 
@@ -546,11 +598,19 @@ def make_reference(op: str, dtype: str) -> dict:
                 y[:, :, t] = (q[:, :, t, :, None] * S).sum(-2)
             return y
 
+        _chunk = cfg.get("chunk", 64)
+        _log_gamma = [math.log(g) for g in gamma_list]
+
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(q, k, v):
+            # RetNet chunkwise-recurrent retention: the fixed per-head decay is a
+            # constant log-decay per step, so the same scalar-decay chunk form
+            # applies (intra-chunk masked score matmul + chunk-state carry).
+            lg = torch.tensor(_log_gamma, dtype=torch.float32, device=q.device)
+            la = lg[None, :, None].expand(q.shape[0], q.shape[1], q.shape[2])
+            return _chunk_scalar_decay_scan(la, k, v, q, _chunk).to(q.dtype)
 
         arity = 3
 
@@ -595,11 +655,22 @@ def make_reference(op: str, dtype: str) -> dict:
                     y[:, :, t] = num
             return y
 
+        _chunk = cfg.get("chunk", 64)
+
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(q, k, v):
+            # chunked causal linear attention (decay == 1). The normalizer rides
+            # along as one extra VALUE column (z_t = z_{t-1} + phi(k_t) is the
+            # same recurrence with value 1), so it costs no second pass.
+            pq, pk, vf = _phi(q.float()), _phi(k.float()), v.float()
+            la = torch.zeros(q.shape[:-1], dtype=torch.float32, device=q.device)
+            if not normalize:
+                return _chunk_scalar_decay_scan(la, pk, vf, pq, _chunk).to(q.dtype)
+            vv = torch.cat([vf, torch.ones_like(vf[..., :1])], dim=-1)
+            out = _chunk_scalar_decay_scan(la, pk, vv, pq, _chunk)
+            return (out[..., :-1] / (out[..., -1:] + LINATTN_EPS)).to(q.dtype)
 
         arity = 3
 
@@ -629,8 +700,12 @@ def make_reference(op: str, dtype: str) -> dict:
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(q, v, gl):
+            # HGRN2 is GLA with the key tied to the gate: k = 1 - alpha =
+            # sigmoid(-gl); same chunked per-key-dim gated form.
+            glf = gl.float()
+            return _chunk_dimgated_scan(F.logsigmoid(glf), torch.sigmoid(-glf),
+                                        v, q, _DIMGATE_CHUNK).to(q.dtype)
 
         arity = 3
 
@@ -674,11 +749,73 @@ def make_reference(op: str, dtype: str) -> dict:
                 y[:, :, t] = (q[:, :, t, :, None] * S).sum(-2)
             return y
 
+        _chunk = cfg.get("chunk", 64)
+
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
         def baseline_fn(*xs):
-            return _core(*xs)
+            # Chunked DeltaNet via the UT/WY transform. Inside a chunk the delta
+            # rule is the LINEAR system (I + diag(beta) T) U = diag(beta) V, with
+            # T[j,i] = (gamma_j/gamma_i)(k_j.k_i) strictly causal, so one batched
+            # unit-triangular solve replaces C sequential state updates. The
+            # chunk-carried state enters the RHS linearly, so BOTH solves are
+            # done once for every chunk at once and only a tiny [Dk,Dv] state
+            # recurrence is left to walk the L/C chunk boundaries.
+            if gated:
+                q, k, v, al, be = xs
+                la = F.logsigmoid(al.float())
+            else:
+                q, k, v, be = xs
+                la = torch.zeros(q.shape[:-1], dtype=torch.float32, device=q.device)
+            qf, vf = q.float(), v.float()
+            kf = k.float()
+            kf = kf / (kf.norm(dim=-1, keepdim=True) + DELTA_EPS)
+            beta = torch.sigmoid(be.float())
+            Bs, H, L, Dk = qf.shape
+            Dv = vf.shape[-1]
+            C = max(1, min(int(_chunk), L))
+            nc = (L + C - 1) // C
+            pad = nc * C - L
+            if pad:
+                # beta = 0 on the tail: no write, so the carried state (and every
+                # output at t < L) is untouched by the padding.
+                la = F.pad(la, (0, pad))
+                beta = F.pad(beta, (0, pad))
+                qf, kf, vf = (F.pad(t, (0, 0, 0, pad)) for t in (qf, kf, vf))
+            la = la.reshape(Bs, H, nc, C)
+            beta = beta.reshape(Bs, H, nc, C)
+            q4 = qf.reshape(Bs, H, nc, C, Dk)
+            k4 = kf.reshape(Bs, H, nc, C, Dk)
+            v4 = vf.reshape(Bs, H, nc, C, Dv)
+
+            gam = _segsum_exp(la)                       # gamma_j / gamma_i, i<=j
+            gcum = torch.exp(torch.cumsum(la, dim=-1))  # gamma_j (state carry-in)
+            strict = _tril_mask(C, q.device) & ~torch.eye(
+                C, dtype=torch.bool, device=q.device)
+            kk = (k4 @ k4.transpose(-1, -2)) * gam * strict
+            M = (torch.eye(C, dtype=torch.float32, device=q.device)
+                 + beta[..., :, None] * kk)
+            rhs = torch.cat([beta[..., None] * v4,
+                             (beta * gcum)[..., None] * k4], dim=-1)
+            sol = torch.linalg.solve_triangular(M, rhs, upper=False,
+                                                unitriangular=True)
+            W, Kt = sol[..., :Dv], sol[..., Dv:]        # U = W - Kt @ S_in
+            kg = gam[..., -1, :, None] * k4             # decay to the chunk end
+
+            U = torch.empty_like(v4)
+            S_in = torch.empty(Bs, H, nc, Dk, Dv, dtype=torch.float32,
+                               device=q.device)
+            S = torch.zeros(Bs, H, Dk, Dv, dtype=torch.float32, device=q.device)
+            for c in range(nc):
+                S_in[:, :, c] = S
+                Uc = W[:, :, c] - Kt[:, :, c] @ S
+                U[:, :, c] = Uc
+                S = gcum[:, :, c, -1, None, None] * S + kg[:, :, c].transpose(-1, -2) @ Uc
+
+            y = ((q4 @ k4.transpose(-1, -2)) * gam) @ U
+            y = y + gcum[..., None] * (q4 @ S_in)
+            return y.reshape(Bs, H, nc * C, Dv)[:, :, :L].to(q.dtype)
 
         arity = 5 if gated else 4
 
@@ -718,11 +855,23 @@ def make_reference(op: str, dtype: str) -> dict:
                 y[:, t] = (h * C[:, t, :, None, :]).sum(-1)      # [B,H,P]
             return y
 
+        _chunk = cfg["chunk"]
+
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(x, dt, A, B_, C):
+            # The Mamba-2 SSD chunked scan (the state-space-duality formulation
+            # the Mamba-2 reference itself ships): the head decay is SCALAR, so
+            # the whole scan is a masked score matmul per chunk plus a
+            # decay-weighted sum over chunk states - no sequential step at all.
+            dts = F.softplus(dt.float())
+            la = (dts * A.float()).permute(0, 2, 1)          # [B,H,L]
+            K = B_.float().permute(0, 2, 1, 3)               # [B,H,L,N]
+            V = (dts.unsqueeze(-1) * x.float()).permute(0, 2, 1, 3)   # [B,H,L,P]
+            Q = C.float().permute(0, 2, 1, 3)                # [B,H,L,N]
+            y = _chunk_scalar_decay_scan(la, K, V, Q, _chunk)
+            return y.permute(0, 2, 1, 3).to(x.dtype)
 
         arity = 5
 
@@ -758,8 +907,13 @@ def make_reference(op: str, dtype: str) -> dict:
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(u, delta, A, B_, C, D_):
+            # Mamba-1's decay exp(dt*A) varies over BOTH channel and state dim, so
+            # there is no scalar-decay chunk form and no materializable parallel
+            # scan; the blocked scan is what torch can honestly do.
+            y = _blocked_selective_scan(F.softplus(delta.float()), u.float(),
+                                        A, B_, C)
+            return (y + u.float() * D_.float()).to(u.dtype)
 
         arity = 6
 
@@ -794,11 +948,22 @@ def make_reference(op: str, dtype: str) -> dict:
                 y[:, t] = (h * C[:, t, None, :]).sum(-1)
             return y
 
+        _chunk = cfg["chunk"]
+
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(x, conv_w, a, B_, C):
+            # conv stage is already one MIOpen call; the SSM stage has a
+            # SCALAR decay, so it takes the same chunked SSD form as Mamba-2.
+            Kk, D = conv_w.shape[1], x.shape[2]
+            xt = x.float().transpose(1, 2)
+            xc = F.silu(F.conv1d(F.pad(xt, (Kk - 1, 0)),
+                                 conv_w.float()[:, None, :], None,
+                                 groups=D)).transpose(1, 2)
+            y = _chunk_scalar_decay_scan(F.logsigmoid(a.float()), B_.float(),
+                                         xc, C.float(), _chunk)
+            return y.to(x.dtype)
 
         arity = 5
 
@@ -840,8 +1005,14 @@ def make_reference(op: str, dtype: str) -> dict:
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(u, conv_w, delta, A, B_, C):
+            Kk, D = conv_w.shape[1], u.shape[2]
+            ut = u.float().transpose(1, 2)
+            uc = F.silu(F.conv1d(F.pad(ut, (Kk - 1, 0)),
+                                 conv_w.float()[:, None, :], None,
+                                 groups=D)).transpose(1, 2)
+            return _blocked_selective_scan(F.softplus(delta.float()), uc,
+                                           A, B_, C).to(u.dtype)
 
         arity = 6
 
@@ -886,8 +1057,21 @@ def make_reference(op: str, dtype: str) -> dict:
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(k, v, w, u):
+            # The wkv numerator and denominator are two INDEPENDENT gated scans
+            # sharing one decay, so both are associative scans; the bonus term
+            # then reads the state as of t-1 (a shift), which is a pure view.
+            kf, vf = k.float(), v.float()
+            Bs, L, C = kf.shape
+            dec = torch.exp(-F.softplus(w.float()))
+            dec = (dec.transpose(1, 2) if data_dep
+                   else dec[None, :, None].expand(Bs, C, L))
+            ek = torch.exp(kf).transpose(1, 2)               # [B,C,L]
+            vt = vf.transpose(1, 2)
+            num = F.pad(_assoc_scan_lastdim(dec, ek * vt)[..., :-1], (1, 0))
+            den = F.pad(_assoc_scan_lastdim(dec, ek)[..., :-1], (1, 0))
+            eb = torch.exp(u.float() + kf).transpose(1, 2)
+            return ((num + eb * vt) / (den + eb)).transpose(1, 2).to(v.dtype)
 
         arity = 4
 
@@ -913,7 +1097,8 @@ def make_reference(op: str, dtype: str) -> dict:
             return _core(f_l.float(), g.float()).to(f_l.dtype)
 
         def baseline_fn(f_l, g):
-            return _core(f_l, g)
+            f = torch.sigmoid(f_l.float())
+            return _assoc_scan_lastdim(f, (1.0 - f) * g.float()).to(f_l.dtype)
 
         arity = 2
 
@@ -942,7 +1127,9 @@ def make_reference(op: str, dtype: str) -> dict:
             return _core(f_l.float(), i_l.float(), z.float()).to(f_l.dtype)
 
         def baseline_fn(f_l, i_l, z):
-            return _core(f_l, i_l, z)
+            return _assoc_scan_lastdim(
+                torch.sigmoid(f_l.float()),
+                torch.sigmoid(i_l.float()) * z.float()).to(f_l.dtype)
 
         arity = 3
 

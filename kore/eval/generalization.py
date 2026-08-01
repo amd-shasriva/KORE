@@ -171,11 +171,22 @@ def evaluate_generalization(split: HoldoutSplit, measures: list[dict],
     """
     assert_no_leakage(split)
     held = set(split.heldout_families)
+    # A held-out task whose kernel leaked into pretraining is still held out --
+    # it must stay untrainable and stay in the decontamination gate -- but it
+    # cannot support a ZERO-SHOT number, so it is struck from the scored scope
+    # and the exclusion is reported rather than silently applied.
+    from kore.tasks.registry import filter_generalization_scope
+
+    _, dropped = filter_generalization_scope(
+        {str(d.get("task_id") or "") for d in measures if d.get("task_id")}
+    )
     per_family: dict[str, dict] = {}
     scored_tasks: set[str] = set()
     for d in measures:
         rec = _Rec(d)
         if not rec.task_id or not rec.correct:
+            continue
+        if rec.task_id in dropped:
             continue
         fam = family_of(rec.task_id)
         if fam not in held:
@@ -219,9 +230,12 @@ def evaluate_generalization(split: HoldoutSplit, measures: list[dict],
         "physics_weight": physics_weight,
         "heldout_families_evaluated": sorted(per_family.keys()),
         "scored_tasks": sorted(scored_tasks),
+        "excluded_contaminated_tasks": dict(sorted(dropped.items())),
         "per_family": families_out,
         "note": ("offline zero-shot eval; feed a trained checkpoint's measured "
-                 "kernels to measure transfer. No training is performed here."),
+                 "kernels to measure transfer. No training is performed here. "
+                 "Tasks in excluded_contaminated_tasks are held out but were "
+                 "seen in pretraining, so they cannot carry a zero-shot claim."),
     }
 
 

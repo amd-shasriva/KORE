@@ -17,7 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -542,10 +542,20 @@ class AnalyticalLowerBounds:
         )
 
 
-def compute_analytical_lower_bounds(model_spec: ModelSpec) -> AnalyticalLowerBounds:
-    """Compute exact-count lower bounds without loading any model tensors."""
+def analytical_lower_bounds_from_counts(
+    *, parameter_count: int, checkpoint_tensor_bytes: int
+) -> AnalyticalLowerBounds:
+    """Compute exact-count lower bounds from checkpoint metadata alone.
 
-    parameters = model_spec.parameter_count
+    Split out from :func:`compute_analytical_lower_bounds` so the cheap,
+    header-only inspection tier can still report honest arithmetic. It carries no
+    identity, so a caller holding only these numbers can never assert fit.
+    """
+
+    parameters = _non_negative_int(parameter_count, "parameter_count")
+    checkpoint_tensor_bytes = _non_negative_int(
+        checkpoint_tensor_bytes, "checkpoint_tensor_bytes"
+    )
     bf16_weights = parameters * 2
     bf16_gradients = parameters * 2
     fp32_master = parameters * 4
@@ -556,7 +566,7 @@ def compute_analytical_lower_bounds(model_spec: ModelSpec) -> AnalyticalLowerBou
             "assert that the workload fits"
         ),
         exact_parameter_count=parameters,
-        checkpoint_tensor_bytes=model_spec.checkpoint.tensor_storage_bytes,
+        checkpoint_tensor_bytes=checkpoint_tensor_bytes,
         bf16_weights_bytes=bf16_weights,
         bf16_gradients_bytes=bf16_gradients,
         fp32_master_weights_bytes=fp32_master,
@@ -577,6 +587,15 @@ def compute_analytical_lower_bounds(model_spec: ModelSpec) -> AnalyticalLowerBou
             "framework, kernels, and graph memory",
             "checkpoint save/load transients",
         ),
+    )
+
+
+def compute_analytical_lower_bounds(model_spec: ModelSpec) -> AnalyticalLowerBounds:
+    """Compute exact-count lower bounds without loading any model tensors."""
+
+    return analytical_lower_bounds_from_counts(
+        parameter_count=model_spec.parameter_count,
+        checkpoint_tensor_bytes=model_spec.checkpoint.tensor_storage_bytes,
     )
 
 
@@ -2029,10 +2048,572 @@ def load_resource_snapshot(path: str | Path) -> ResourceSnapshot:
     return ResourceSnapshot.from_dict(payload)
 
 
+# --------------------------------------------------------------------------- #
+# Stage-level preflight entry
+#
+# The instrument above is deliberately strict: only repeated, per-rank, phase-
+# complete measured evidence bound to this exact environment can assert fit. That
+# makes it useless as a mandatory startup gate - an unprofiled machine would
+# never be allowed to start a run. So the stage entry is opt-in-strict:
+#
+#   * ``off``    - do nothing.
+#   * ``report`` - collect the inventory, compute exact analytical lower bounds,
+#     report the necessary conditions it can check, and NEVER raise. Default.
+#   * ``strict`` - the caller is asking for production assurance: a resolved
+#     ModelSpec, a resolved workload, and matching measured phase evidence must
+#     all be present, or the stage refuses to start.
+#
+# Nothing here can promote an incomplete result to a pass: a report produced
+# without a fingerprinted :class:`~kore.policy.model_spec.ModelSpec` cannot even
+# construct a :class:`PreflightReport`, so it cannot claim ``production_ready``.
+# --------------------------------------------------------------------------- #
+PREFLIGHT_OFF = "off"
+PREFLIGHT_REPORT = "report"
+PREFLIGHT_STRICT = "strict"
+_PREFLIGHT_MODES = (PREFLIGHT_OFF, PREFLIGHT_REPORT, PREFLIGHT_STRICT)
+
+PREFLIGHT_MODE_ENV = "KORE_RESOURCE_PREFLIGHT"
+MEASURED_PROFILE_ENV = "KORE_MEASURED_PROFILE"
+PREFLIGHT_REPORT_ENV = "KORE_PREFLIGHT_REPORT"
+
+# Launch-config keys that configure preflight instead of being stage dataclass
+# fields; the stage builders pop these before ``Config(**payload)``.
+PREFLIGHT_CONFIG_KEYS = (
+    "resource_preflight",
+    "measured_profile_path",
+    "preflight_report_path",
+    "scratch_path",
+)
+
+_STAGE_COPIES = {
+    "midtrain": (1, 0, 0),
+    "sft": (1, 0, 0),
+    "rft": (1, 0, 0),
+    "dpo": (1, 1, 0),
+    "grpo": (1, 1, 1),
+}
+_SEQUENCE_LENGTH_FIELDS = (
+    "max_seq_length",
+    "max_length",
+    "max_prompt_length",
+    "max_response_length",
+)
+
+
+def resolve_preflight_mode(
+    mode: Optional[str] = None, *, environ: Optional[Mapping[str, str]] = None
+) -> str:
+    """Resolve the preflight mode; the stricter of config and environment wins."""
+
+    env = os.environ if environ is None else environ
+    selected: list[str] = []
+    for value in (mode, env.get(PREFLIGHT_MODE_ENV)):
+        text = str(value or "").strip().lower()
+        if not text:
+            continue
+        if text not in _PREFLIGHT_MODES:
+            raise ResourcePreflightError(
+                "resource preflight mode must be one of "
+                f"{list(_PREFLIGHT_MODES)}; got {value!r}"
+            )
+        selected.append(text)
+    if not selected:
+        return PREFLIGHT_REPORT
+    return max(selected, key=_PREFLIGHT_MODES.index)
+
+
+def _int_attr(config: Any, name: str, default: int) -> int:
+    value = getattr(config, name, default)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def build_stage_workload_spec(
+    config: Any,
+    *,
+    stage: str,
+    resources: ResourceSnapshot,
+    model_spec: ModelSpec,
+    world_size: Optional[int] = None,
+    reference_copies: Optional[int] = None,
+    rollout_copies: Optional[int] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> WorkloadSpec:
+    """Derive the expected workload identity from a resolved stage config.
+
+    Every hash is taken from the live snapshot and the verified model, so a
+    measured profile recorded for a different topology, dependency set, code
+    revision, or checkpoint cannot silently authorize this run.
+    """
+
+    env = os.environ if environ is None else environ
+    if world_size is None:
+        try:
+            world_size = int(env.get("WORLD_SIZE", "1"))
+        except (TypeError, ValueError):
+            world_size = 1
+    world_size = max(1, int(world_size))
+
+    microbatch = _int_attr(config, "per_device_train_batch_size", 1)
+    accumulation = _int_attr(config, "gradient_accumulation_steps", 1)
+    use_lora = bool(getattr(config, "use_lora", False))
+    distributed = bool(getattr(config, "distributed", False))
+    offloaded = bool(getattr(config, "fsdp_cpu_offload", False)) or bool(
+        getattr(config, "cpu_offload", False)
+    )
+    if distributed and not use_lora:
+        sharding = str(getattr(config, "fsdp", "full_shard auto_wrap") or "fsdp")
+        sharding = f"fsdp:{sharding}"
+    else:
+        sharding = "single-process"
+
+    sequence_lengths = {
+        name: int(getattr(config, name))
+        for name in _SEQUENCE_LENGTH_FIELDS
+        if isinstance(getattr(config, name, None), int)
+        and not isinstance(getattr(config, name, None), bool)
+        and int(getattr(config, name)) > 0
+    }
+
+    normalized_stage = stage.strip().lower()
+    default_copies = _STAGE_COPIES.get(normalized_stage, (1, 0, 0))
+    if reference_copies is None:
+        reference_copies = 0 if use_lora else default_copies[1]
+    if rollout_copies is None:
+        rollout_copies = default_copies[2]
+
+    dependencies = {"torch", "transformers", "accelerate", "safetensors"}
+    if normalized_stage in {"midtrain", "sft", "dpo", "rft"}:
+        dependencies.add("trl")
+        dependencies.add("datasets")
+    if use_lora:
+        dependencies.add("peft")
+
+    resolved_config = {
+        "stage": normalized_stage,
+        "microbatch_size": microbatch,
+        "gradient_accumulation_steps": accumulation,
+        "world_size": world_size,
+        "sequence_lengths": dict(sorted(sequence_lengths.items())),
+        "precision": "bf16" if bool(getattr(config, "bf16", True)) else "fp32",
+        "sharding": sharding,
+        "offload": "cpu" if offloaded else "none",
+        "gradient_checkpointing": bool(
+            getattr(config, "gradient_checkpointing", False)
+        ),
+        "use_lora": use_lora,
+        "packing": bool(getattr(config, "packing", False)),
+        "dataloader_num_workers": _int_attr(config, "dataloader_num_workers", 0),
+        "dataloader_pin_memory": bool(
+            getattr(config, "dataloader_pin_memory", False)
+        ),
+        "dataloader_prefetch_factor": _int_attr(
+            config, "dataloader_prefetch_factor", 0
+        ),
+        "model_id": str(getattr(config, "model_id", "")),
+    }
+
+    return WorkloadSpec(
+        stage=normalized_stage,
+        global_batch_size=microbatch * accumulation * world_size,
+        microbatch_size=microbatch,
+        gradient_accumulation_steps=accumulation,
+        sequence_lengths=sequence_lengths,
+        precision=resolved_config["precision"],
+        sharding=sharding,
+        offload=resolved_config["offload"],
+        backend="transformers",
+        world_size=world_size,
+        topology_hash=resources.topology_hash,
+        optimizer="adamw_torch",
+        optimizer_initialized=True,
+        model_copies=default_copies[0],
+        reference_copies=int(reference_copies),
+        rollout_copies=int(rollout_copies),
+        resolved_config=resolved_config,
+        code_fingerprint=resources.code_fingerprint,
+        dependency_profile_hash=resources.dependency_profile_hash,
+        model_profile_hash=model_spec.profile_hash,
+        required_dependencies=tuple(sorted(dependencies)),
+    )
+
+
+@dataclass(frozen=True)
+class StagePreflight:
+    """Stage-level preflight outcome, including the honest "did not check" cases."""
+
+    stage: str
+    mode: str
+    status: str
+    fit_asserted: bool
+    reasons: tuple[str, ...]
+    analytical_lower_bounds: Optional[AnalyticalLowerBounds]
+    resources: Optional[ResourceSnapshot]
+    report: Optional[PreflightReport]
+    report_path: Optional[str]
+
+    @property
+    def production_ready(self) -> bool:
+        return self.report is not None and self.report.production_ready
+
+    def assert_production_ready(self) -> None:
+        if not self.production_ready:
+            raise ResourcePreflightError(
+                f"{self.stage}: resource preflight did not establish a measured "
+                f"fit (mode={self.mode!r}, status={self.status!r}): "
+                + "; ".join(self.reasons or ("no reasons recorded",))
+            )
+
+    def log_fields(self) -> dict[str, Any]:
+        bounds = self.analytical_lower_bounds
+        return {
+            "mode": self.mode,
+            "status": self.status,
+            "fit_asserted": self.fit_asserted,
+            "production_ready": self.production_ready,
+            "parameter_count": (
+                bounds.exact_parameter_count if bounds is not None else None
+            ),
+            "persistent_state_bytes": (
+                bounds.full_finetune_persistent_state_bytes
+                if bounds is not None
+                else None
+            ),
+            "visible_gpus": (
+                sum(1 for gpu in self.resources.gpus if gpu.visible is True)
+                if self.resources is not None
+                else None
+            ),
+            "report_path": self.report_path,
+            "reasons": list(self.reasons),
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "kind": "stage-resource-preflight",
+            "stage": self.stage,
+            "mode": self.mode,
+            "status": self.status,
+            "fit_asserted": self.fit_asserted,
+            "production_ready": self.production_ready,
+            "reasons": list(self.reasons),
+            "analytical_lower_bounds": (
+                {
+                    **asdict(self.analytical_lower_bounds),
+                    "profile_hash": self.analytical_lower_bounds.profile_hash,
+                }
+                if self.analytical_lower_bounds is not None
+                else None
+            ),
+            "resources": (
+                self.resources.to_dict() if self.resources is not None else None
+            ),
+            "report": self.report.to_dict() if self.report is not None else None,
+        }
+
+
+def _weights_lower_bound_check(
+    bounds: AnalyticalLowerBounds, resources: ResourceSnapshot
+) -> Optional[tuple[str, tuple[str, ...]]]:
+    """Necessary-condition check: exact weights bound against visible free HBM.
+
+    Returns ``None`` when the condition holds, else ``(status, reasons)``. A host
+    whose GPU inventory could not be resolved is reported as ``unresolved``, not
+    as ``insufficient``: "we could not measure it" and "it does not fit" are
+    different facts and only the second one is a capacity verdict.
+    """
+
+    required = max(bounds.checkpoint_tensor_bytes, bounds.bf16_weights_bytes)
+    if not resources.gpus:
+        return (
+            "skipped",
+            (
+                "no AMD GPU inventory was found on this host, so no capacity "
+                "condition could be checked",
+            ),
+        )
+    visible = [gpu for gpu in resources.gpus if gpu.visible is True]
+    if not visible:
+        return (
+            "unresolved",
+            (
+                f"{len(resources.gpus)} GPUs were inventoried but none has a "
+                "resolved HIP visibility mapping (set KORE_HIP_INVENTORY_JSON so "
+                "DRM/sysfs cards can be joined to HIP ordinals by PCI BDF)",
+            ),
+        )
+    try:
+        aggregate_free = sum(int(gpu.free_hbm_bytes) for gpu in visible)
+    except (TypeError, ValueError):
+        return ("unresolved", ("visible GPU free HBM is unresolved",))
+    if aggregate_free < required:
+        return (
+            "insufficient",
+            (
+                "aggregate free HBM is below the exact weights-only analytical "
+                f"lower bound ({aggregate_free} < {required})",
+            ),
+        )
+    return None
+
+
+def _is_primary_process(environ: Mapping[str, str]) -> bool:
+    return str(environ.get("RANK", "0")).strip() in ("", "0")
+
+
+def run_stage_preflight(
+    *,
+    stage: str,
+    config: Any = None,
+    model_spec: Optional[ModelSpec] = None,
+    inspection: Any = None,
+    model_path: Optional[str | Path] = None,
+    scratch_path: Optional[str | Path] = None,
+    mode: Optional[str] = None,
+    measured_profile_path: Optional[str | Path] = None,
+    report_path: Optional[str | Path] = None,
+    headroom_fraction: float = 0.10,
+    world_size: Optional[int] = None,
+    primary: Optional[bool] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> StagePreflight:
+    """Run the stage's resource preflight at the requested strictness.
+
+    ``model_spec`` is a fingerprinted :class:`~kore.policy.model_spec.ModelSpec`
+    and is what makes a fit assertion possible at all; ``inspection`` is the cheap
+    header-only tier and only ever backs analytical arithmetic. Raises only in
+    ``strict`` mode, or when a mode/argument is itself invalid.
+    """
+
+    env = dict(os.environ if environ is None else environ)
+    resolved_mode = resolve_preflight_mode(
+        mode if mode is not None else getattr(config, "resource_preflight", None),
+        environ=env,
+    )
+    if primary is None:
+        primary = _is_primary_process(env)
+
+    def _result(
+        status: str,
+        reasons: tuple[str, ...],
+        *,
+        bounds: Optional[AnalyticalLowerBounds] = None,
+        resources: Optional[ResourceSnapshot] = None,
+        report: Optional[PreflightReport] = None,
+        written: Optional[str] = None,
+    ) -> StagePreflight:
+        return StagePreflight(
+            stage=stage,
+            mode=resolved_mode,
+            status=status,
+            fit_asserted=bool(report is not None and report.fit_asserted),
+            reasons=reasons,
+            analytical_lower_bounds=bounds,
+            resources=resources,
+            report=report,
+            report_path=written,
+        )
+
+    if resolved_mode == PREFLIGHT_OFF:
+        return _result("off", ("resource preflight is disabled",))
+    if resolved_mode == PREFLIGHT_REPORT and not primary:
+        # One inventory per node-local job is enough to report; strict mode still
+        # runs everywhere so each rank checks the capacity it will actually use.
+        return _result(
+            "skipped",
+            ("reporting preflight runs on the primary rank only",),
+        )
+
+    bounds: Optional[AnalyticalLowerBounds] = None
+    if model_spec is not None:
+        bounds = compute_analytical_lower_bounds(model_spec)
+    elif inspection is not None:
+        bounds = analytical_lower_bounds_from_counts(
+            parameter_count=int(inspection.parameter_count),
+            checkpoint_tensor_bytes=int(
+                inspection.checkpoint.tensor_storage_bytes
+            ),
+        )
+
+    written: Optional[str] = None
+    configured_report = (
+        report_path
+        if report_path is not None
+        else getattr(config, "preflight_report_path", None)
+        or env.get(PREFLIGHT_REPORT_ENV)
+    )
+
+    def _finish(result: StagePreflight) -> StagePreflight:
+        if configured_report and primary:
+            try:
+                atomic_write_json(configured_report, result.to_dict())
+                result = replace(result, report_path=str(configured_report))
+            except OSError as exc:
+                if resolved_mode == PREFLIGHT_STRICT:
+                    raise
+                result = replace(
+                    result,
+                    reasons=result.reasons
+                    + (f"preflight report could not be written: {exc}",),
+                )
+        if resolved_mode == PREFLIGHT_STRICT:
+            result.assert_production_ready()
+        return result
+
+    if bounds is None:
+        # Nothing to compare capacity against, so skip the inventory probe
+        # entirely: an unpinned stage keeps its original, probe-free startup.
+        return _finish(
+            _result(
+                "skipped",
+                (
+                    "no local checkpoint metadata was available, so no analytical "
+                    "bound could be computed; pin a revision that resolves to a "
+                    "local snapshot to enable resource preflight",
+                ),
+            )
+        )
+
+    resolved_model_path = model_path
+    if resolved_model_path is None:
+        for candidate in (
+            getattr(model_spec, "checkpoint_path", None),
+            getattr(inspection, "checkpoint_path", None),
+            getattr(config, "model_id", None),
+        ):
+            if candidate and Path(str(candidate)).expanduser().exists():
+                resolved_model_path = candidate
+                break
+    resolved_scratch = (
+        scratch_path
+        if scratch_path is not None
+        else getattr(config, "scratch_path", None)
+        or getattr(config, "output_dir", None)
+        or "."
+    )
+    if resolved_model_path is None:
+        resolved_model_path = resolved_scratch
+
+    try:
+        resources = collect_resource_snapshot(
+            resolved_model_path, resolved_scratch, environ=env
+        )
+    except (OSError, ResourcePreflightError) as exc:
+        if resolved_mode == PREFLIGHT_STRICT:
+            raise
+        return _result(
+            "skipped",
+            (f"resource inventory could not be collected: {exc}",),
+            bounds=bounds,
+        )
+
+    unresolved = resources.unresolved_fields()
+    shortfall = _weights_lower_bound_check(bounds, resources)
+    if shortfall is not None:
+        status, shortfall_reasons = shortfall
+        return _finish(
+            _result(status, shortfall_reasons, bounds=bounds, resources=resources)
+        )
+
+    if model_spec is None:
+        return _finish(
+            _result(
+                "analytical_only",
+                (
+                    "exact analytical lower bounds computed from checkpoint "
+                    "headers; asserting fit additionally requires a fingerprinted "
+                    "model spec and matching measured phase evidence",
+                )
+                + (
+                    (
+                        "resource inventory has unresolved MEASURE fields: "
+                        + ", ".join(unresolved[:20]),
+                    )
+                    if unresolved
+                    else ()
+                ),
+                bounds=bounds,
+                resources=resources,
+            )
+        )
+
+    measured: Optional[MeasuredPeakProfile] = None
+    measured_source = (
+        measured_profile_path
+        if measured_profile_path is not None
+        else getattr(config, "measured_profile_path", None)
+        or env.get(MEASURED_PROFILE_ENV)
+    )
+    measured_reasons: list[str] = []
+    if measured_source:
+        try:
+            measured = MeasuredPeakProfile.from_json(measured_source)
+        except ResourcePreflightError as exc:
+            if resolved_mode == PREFLIGHT_STRICT:
+                raise
+            measured_reasons.append(
+                f"measured peak profile {measured_source} was unusable: {exc}"
+            )
+
+    expected_workload: Optional[WorkloadSpec] = None
+    if measured is not None and config is not None:
+        expected_workload = build_stage_workload_spec(
+            config,
+            stage=stage,
+            resources=resources,
+            model_spec=model_spec,
+            world_size=world_size,
+            environ=env,
+        )
+
+    report = evaluate_resource_preflight(
+        model_spec,
+        resources,
+        measured,
+        expected_workload=expected_workload,
+        headroom_fraction=headroom_fraction,
+    )
+    return _finish(
+        _result(
+            report.status,
+            tuple(report.reasons) + tuple(measured_reasons),
+            bounds=bounds,
+            resources=resources,
+            report=report,
+        )
+    )
+
+
+def log_stage_preflight(logger: Any, result: StagePreflight) -> None:
+    """Emit one structured preflight line; degradations are logged as warnings."""
+
+    logger.info("resource preflight", **result.log_fields())
+    if not result.production_ready:
+        for reason in result.reasons:
+            logger.warn(
+                "resource fit is not asserted",
+                stage=result.stage,
+                mode=result.mode,
+                status=result.status,
+                reason=reason,
+            )
+
+
 __all__ = [
     "ABSENT",
     "MEASURE",
     "NOT_APPLICABLE",
+    "PREFLIGHT_CONFIG_KEYS",
+    "PREFLIGHT_MODE_ENV",
+    "PREFLIGHT_OFF",
+    "PREFLIGHT_REPORT",
+    "PREFLIGHT_REPORT_ENV",
+    "PREFLIGHT_STRICT",
+    "MEASURED_PROFILE_ENV",
     "AnalyticalLowerBounds",
     "FilesystemCapacity",
     "GPUDevice",
@@ -2045,11 +2626,14 @@ __all__ = [
     "ResourcePreflightError",
     "ResourceSnapshot",
     "RankPeakReport",
+    "StagePreflight",
     "UnresolvedMeasurementError",
     "UnresolvedProductionFieldError",
     "WorkloadSpec",
     "analytical_lower_bounds",
+    "analytical_lower_bounds_from_counts",
     "atomic_write_json",
+    "build_stage_workload_spec",
     "collect_amd_gpu_devices",
     "collect_code_fingerprint",
     "collect_resource_snapshot",
@@ -2057,8 +2641,11 @@ __all__ = [
     "compute_analytical_lower_bounds",
     "evaluate_resource_preflight",
     "load_resource_snapshot",
+    "log_stage_preflight",
     "preflight_resources",
     "reject_unresolved_production_fields",
     "required_measurement_phases",
+    "resolve_preflight_mode",
     "run_resource_preflight",
+    "run_stage_preflight",
 ]

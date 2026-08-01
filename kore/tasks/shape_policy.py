@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
+import tempfile
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -20,6 +22,8 @@ from kore.tasks.base import Shape, Task
 
 POLICY_SCHEMA_VERSION = 2
 MANIFEST_SCHEMA_VERSION = 1
+SPLIT_INDEX_SCHEMA_VERSION = 1
+SPLIT_INDEX_FILENAME = "shape_split_index.json"
 ShapeKey = tuple[tuple[str, int], ...]
 
 BOUNDARY_REGIMES = ("small", "large", "non_power_of_two", "tail")
@@ -31,6 +35,51 @@ def _canonical_json(value: object) -> str:
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode()).hexdigest()
+
+
+def _artifact_json(value: object) -> str:
+    return json.dumps(value, indent=2, sort_keys=True) + "\n"
+
+
+def _write_durably(path: Path, text: str) -> Path:
+    """Publish ``text`` atomically and durably: a certification artifact must
+    survive the crash of the training run that produced it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            # Some filesystems do not support directory fsync; the file itself is
+            # still flushed and atomically replaced.
+            pass
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+    return path
+
+
+_TASK_ID_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def manifest_filename(task_id: str) -> str:
+    """Deterministic, collision-free, traversal-free manifest file name."""
+    text = str(task_id)
+    if not _TASK_ID_FILENAME.fullmatch(text):
+        raise ValueError(
+            f"task_id {text!r} cannot name a frozen shape manifest; task ids must "
+            "match [A-Za-z0-9][A-Za-z0-9._-]*")
+    return f"{text}.json"
 
 
 def _shape_dict(shape: Shape) -> dict:
@@ -279,10 +328,8 @@ class FrozenShapeSplit:
     def computed_hash(self) -> str:
         return _digest(self.to_dict(include_hash=False))
 
-    def write(self, path: str | Path) -> None:
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n")
+    def write(self, path: str | Path) -> Path:
+        return _write_durably(Path(path), _artifact_json(self.to_dict()))
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "FrozenShapeSplit":
@@ -865,14 +912,17 @@ def generated_shape_error(
     if regime is None:
         return "generated shape has no boundary-regime provenance"
     for anchor in base_shapes:
-        if tuple(anchor.dims) != tuple(candidate.dims):
+        # Dimension NAMES must match exactly; their iteration order carries no
+        # semantics (drivers parse ``--shape K=V,...`` by name) and does not
+        # survive a manifest round-trip through sorted JSON.
+        if set(anchor.dims) != set(candidate.dims):
             continue
-        changed = tuple(
+        changed = frozenset(
             dim for dim in anchor.dims
             if anchor.dims[dim] != candidate.dims[dim]
         )
         for transform in policy.effective_transforms:
-            if changed != transform.dims:
+            if changed != frozenset(transform.dims):
                 continue
             values = tuple(candidate.dims[dim] for dim in transform.dims)
             if transform.relation == "equal" and len(set(values)) != 1:
@@ -952,7 +1002,7 @@ def _cached_repository_code_identity() -> str:
     return _read_repository_code_identity()
 
 
-def _code_identity(task: Task, *, refresh: bool = False) -> str:
+def _code_identity(task: Optional[Task] = None, *, refresh: bool = False) -> str:
     explicit = os.environ.get("KORE_CODE_IDENTITY")
     if explicit:
         return explicit
@@ -1116,6 +1166,329 @@ def generate_hidden_shapes(
     _validate_max_shapes(max_shapes)
     validate_frozen_split(task, frozen_split)
     return list(_copy_shapes(frozen_split.hidden_shapes[:max_shapes]))
+
+
+# --------------------------------------------------------------------------- #
+# Training-time writer and certification-time reader
+#
+# ``freeze_shape_split`` alone is not enough to certify anything: the split has
+# to exist ON DISK before training starts, because the whole guarantee is that
+# the hidden lane was chosen without knowledge of the champion.  The writer below
+# is therefore the ONLY sanctioned way to produce hidden shapes for a campaign,
+# and it is deliberately IDEMPOTENT: a directory that already holds a manifest
+# for a task is re-validated and reused, never re-derived.  Combined with
+# ``generate_hidden_shapes`` (which validates before it hands anything back),
+# that makes a post-hoc hidden lane impossible to launder into certification.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ShapeSplitEntry:
+    """One task's row in the directory-level receipt."""
+
+    task_id: str
+    filename: str
+    content_hash: str
+    hidden_count: int
+
+    def to_dict(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "filename": self.filename,
+            "content_hash": self.content_hash,
+            "hidden_count": self.hidden_count,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ShapeSplitEntry":
+        return cls(
+            task_id=str(value["task_id"]),
+            filename=str(value["filename"]),
+            content_hash=str(value["content_hash"]),
+            hidden_count=int(value["hidden_count"]),
+        )
+
+
+@dataclass(frozen=True)
+class ShapeSplitIndex:
+    """Receipt binding a whole frozen-split directory to one training lineage.
+
+    Per-manifest hashes stop a manifest from being edited; this index stops the
+    SET from being edited, so a hidden lane cannot be added, swapped, or dropped
+    for a single task after the fact without the certification loader noticing.
+    """
+
+    schema_version: int
+    manifest_schema_version: int
+    created_at: str
+    seed: int
+    hidden_max_shapes: int
+    engine_digest: str
+    code_identity: str
+    entries: tuple[ShapeSplitEntry, ...]
+    content_hash: str
+
+    @property
+    def task_ids(self) -> tuple[str, ...]:
+        return tuple(entry.task_id for entry in self.entries)
+
+    @property
+    def hidden_shapes(self) -> int:
+        return sum(entry.hidden_count for entry in self.entries)
+
+    def entry(self, task_id: str) -> Optional[ShapeSplitEntry]:
+        for entry in self.entries:
+            if entry.task_id == task_id:
+                return entry
+        return None
+
+    def to_dict(self, *, include_hash: bool = True) -> dict:
+        value = {
+            "schema_version": self.schema_version,
+            "manifest_schema_version": self.manifest_schema_version,
+            "created_at": self.created_at,
+            "seed": self.seed,
+            "hidden_max_shapes": self.hidden_max_shapes,
+            "engine_digest": self.engine_digest,
+            "code_identity": self.code_identity,
+            "entries": [entry.to_dict() for entry in self.entries],
+        }
+        if include_hash:
+            value["content_hash"] = self.content_hash
+        return value
+
+    def computed_hash(self) -> str:
+        return _digest(self.to_dict(include_hash=False))
+
+    def write(self, path: str | Path) -> Path:
+        return _write_durably(Path(path), _artifact_json(self.to_dict()))
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ShapeSplitIndex":
+        index = cls(
+            schema_version=int(value["schema_version"]),
+            manifest_schema_version=int(value["manifest_schema_version"]),
+            created_at=str(value["created_at"]),
+            seed=int(value["seed"]),
+            hidden_max_shapes=int(value["hidden_max_shapes"]),
+            engine_digest=str(value["engine_digest"]),
+            code_identity=str(value["code_identity"]),
+            entries=tuple(
+                ShapeSplitEntry.from_dict(item) for item in value.get("entries", ())
+            ),
+            content_hash=str(value["content_hash"]),
+        )
+        if index.schema_version != SPLIT_INDEX_SCHEMA_VERSION:
+            raise ValueError("unsupported frozen shape split index schema")
+        if index.content_hash != index.computed_hash():
+            raise ValueError("frozen shape split index content hash mismatch")
+        if len(set(index.task_ids)) != len(index.entries):
+            raise ValueError("frozen shape split index lists a task twice")
+        return index
+
+    @classmethod
+    def read(cls, path: str | Path) -> "ShapeSplitIndex":
+        return cls.from_dict(json.loads(Path(path).read_text()))
+
+
+def _assert_manifest_seed(
+    manifest: FrozenShapeSplit, filename: str, seed: int
+) -> None:
+    """One frozen-split directory carries exactly one seed, so the receipt it
+    publishes describes every manifest under it."""
+    if manifest.seed != int(seed):
+        raise ValueError(
+            f"{filename!r} was frozen at seed {manifest.seed}, not {int(seed)}; "
+            "freeze the whole directory at one seed")
+
+
+def freeze_shape_splits(
+    tasks: Iterable[Task],
+    directory: str | Path,
+    *,
+    seed: int = 0,
+    hidden_max_shapes: int = 8,
+    created_at: Optional[str] = None,
+    code_identity: Optional[str] = None,
+    refreeze: bool = False,
+) -> ShapeSplitIndex:
+    """Freeze and durably persist the train/hidden split of every task.
+
+    Call this at TRAINING time, before the policy has seen the tasks; point
+    champion certification at the same ``directory`` afterwards.  Re-running is
+    idempotent - an existing manifest is re-validated against the live task and
+    reused - so hidden shapes are chosen exactly once.  A task whose policy,
+    declarations, task file, engine, or code identity moved since its manifest
+    was written is REJECTED rather than silently re-frozen; ``refreeze=True``
+    makes replacing the hidden lane an explicit, auditable operator decision.
+    """
+    _validate_max_shapes(hidden_max_shapes)
+    root = Path(directory)
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        prior = load_shape_split_index(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"{root / SPLIT_INDEX_FILENAME} is not a valid frozen split index "
+            f"({exc}); rebuilding the receipt has to be a deliberate act") from exc
+    if prior is not None and not refreeze:
+        changed = [
+            f"{name} {getattr(prior, name)!r} rather than {value!r}"
+            for name, value in (("seed", int(seed)),
+                                ("hidden_max_shapes", int(hidden_max_shapes)))
+            if getattr(prior, name) != value
+        ]
+        if changed:
+            raise ValueError(
+                f"{root} was frozen with {', '.join(changed)}; a hidden lane "
+                "cannot be re-parameterised after training (pass refreeze=True "
+                "to replace it deliberately)")
+    stamp = created_at or datetime.now(timezone.utc).isoformat()
+    entries: list[ShapeSplitEntry] = []
+    seen: set[str] = set()
+    for task in tasks:
+        task_id = str(getattr(task, "task_id", ""))
+        filename = manifest_filename(task_id)
+        if task_id in seen:
+            raise ValueError(f"duplicate task {task_id!r} in the freeze request")
+        seen.add(task_id)
+        path = root / filename
+        manifest: Optional[FrozenShapeSplit] = None
+        if path.exists() and not refreeze:
+            existing = FrozenShapeSplit.read(path)
+            if existing.task_id != task_id:
+                raise ValueError(
+                    f"{filename!r} already holds a manifest for "
+                    f"{existing.task_id!r}, not {task_id!r}")
+            _assert_manifest_seed(existing, filename, seed)
+            validate_frozen_split(task, existing, code_identity=code_identity)
+            manifest = existing
+        if manifest is None:
+            manifest = freeze_shape_split(
+                task,
+                hidden_max_shapes=hidden_max_shapes,
+                seed=seed,
+                created_at=stamp,
+                code_identity=code_identity,
+            )
+            validate_frozen_split(task, manifest, code_identity=code_identity)
+            manifest.write(path)
+        entries.append(ShapeSplitEntry(
+            task_id=task_id,
+            filename=filename,
+            content_hash=manifest.content_hash,
+            hidden_count=len(manifest.hidden_shapes),
+        ))
+
+    # The index is a receipt for the DIRECTORY, not just for this request, so
+    # freezing one task into a populated directory cannot orphan the manifests
+    # frozen earlier (the loader rejects any manifest the index omits).
+    requested_files = {entry.filename for entry in entries}
+    for path in sorted(root.glob("*.json")):
+        if path.name == SPLIT_INDEX_FILENAME or path.name in requested_files:
+            continue
+        other = FrozenShapeSplit.read(path)
+        if manifest_filename(other.task_id) != path.name:
+            raise ValueError(
+                f"frozen shape manifest {path.name!r} holds task "
+                f"{other.task_id!r}")
+        _assert_manifest_seed(other, path.name, seed)
+        if other.task_id in seen:
+            raise ValueError(f"duplicate shape manifest for {other.task_id!r}")
+        seen.add(other.task_id)
+        entries.append(ShapeSplitEntry(
+            task_id=other.task_id,
+            filename=path.name,
+            content_hash=other.content_hash,
+            hidden_count=len(other.hidden_shapes),
+        ))
+
+    index = ShapeSplitIndex(
+        schema_version=SPLIT_INDEX_SCHEMA_VERSION,
+        manifest_schema_version=MANIFEST_SCHEMA_VERSION,
+        created_at=stamp,
+        seed=int(seed),
+        hidden_max_shapes=int(hidden_max_shapes),
+        engine_digest=_engine_digest(),
+        code_identity=code_identity or _code_identity(),
+        entries=tuple(sorted(entries, key=lambda entry: entry.task_id)),
+        content_hash="",
+    )
+    index = replace(index, content_hash=index.computed_hash())
+    if prior is not None and replace(
+        index, created_at=prior.created_at, content_hash=prior.content_hash
+    ) == prior:
+        # Nothing was re-frozen: leave the original receipt byte-identical so a
+        # no-op re-freeze cannot look like a lineage change.
+        return prior
+    index.write(root / SPLIT_INDEX_FILENAME)
+    return index
+
+
+def load_shape_split_index(directory: str | Path) -> Optional[ShapeSplitIndex]:
+    """Read the directory receipt, or ``None`` for a directory without one."""
+    path = Path(directory) / SPLIT_INDEX_FILENAME
+    return ShapeSplitIndex.read(path) if path.exists() else None
+
+
+def load_frozen_shape_splits(
+    directory: str | Path,
+    *,
+    tasks: Optional[Iterable[Task]] = None,
+    require_index: bool = False,
+) -> dict[str, FrozenShapeSplit]:
+    """Load every training-time frozen split from an artifact directory.
+
+    When the directory carries a :class:`ShapeSplitIndex` it is fully enforced:
+    every manifest must be listed with its exact content hash and no unlisted
+    manifest may be present.  Passing ``tasks`` additionally asserts that each
+    of those tasks HAS a manifest and that the manifest still validates against
+    the live task, which is the check a campaign wants before it certifies.
+    """
+    root = Path(directory)
+    if not root.is_dir():
+        raise ValueError(f"frozen shape manifest directory does not exist: {root}")
+    index = load_shape_split_index(root)
+    if index is None and require_index:
+        raise ValueError(
+            f"{root} has no {SPLIT_INDEX_FILENAME}; it was not written by "
+            "freeze_shape_splits")
+    paths = sorted(
+        path for path in root.glob("*.json") if path.name != SPLIT_INDEX_FILENAME
+    )
+    if index is not None:
+        listed = {entry.filename for entry in index.entries}
+        unlisted = sorted(path.name for path in paths if path.name not in listed)
+        if unlisted:
+            raise ValueError(
+                "frozen shape manifests absent from the split index: "
+                f"{', '.join(unlisted)}")
+        missing = sorted(name for name in listed if not (root / name).exists())
+        if missing:
+            raise ValueError(
+                "split index references missing frozen shape manifests: "
+                f"{', '.join(missing)}")
+    manifests: dict[str, FrozenShapeSplit] = {}
+    for path in paths:
+        manifest = FrozenShapeSplit.read(path)
+        if manifest.task_id in manifests:
+            raise ValueError(f"duplicate shape manifest for {manifest.task_id!r}")
+        if index is not None:
+            entry = index.entry(manifest.task_id)
+            if entry is None or entry.filename != path.name or (
+                entry.content_hash != manifest.content_hash
+            ):
+                raise ValueError(
+                    f"frozen shape manifest {path.name!r} does not match the "
+                    "split index")
+        manifests[manifest.task_id] = manifest
+    if tasks is not None:
+        for task in tasks:
+            task_id = str(getattr(task, "task_id", ""))
+            manifest = manifests.get(task_id)
+            if manifest is None:
+                raise ValueError(
+                    f"no training-time frozen shape manifest for {task_id!r} in {root}")
+            validate_frozen_split(task, manifest)
+    return manifests
 
 
 @dataclass(frozen=True)
@@ -1330,3 +1703,68 @@ def audit_registry_shapes(
 
 
 audit_registry_augmentation = audit_registry_shapes
+
+
+def _resolve_cli_tasks(split: str, task_ids: Sequence[str]) -> list[Task]:
+    from kore.tasks.registry import all_tasks, get_task, train_tasks
+
+    if task_ids:
+        return [get_task(task_id) for task_id in task_ids]
+    return train_tasks() if split == "train" else all_tasks()
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:  # pragma: no cover - CLI
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Freeze and audit KORE train/hidden shape splits")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    freeze = sub.add_parser(
+        "freeze", help="write the training-time frozen split of every task")
+    freeze.add_argument("--out", required=True,
+                        help="artifact directory consumed by champion certification")
+    freeze.add_argument("--split", choices=("train", "all"), default="train")
+    freeze.add_argument("--task", action="append", default=[],
+                        help="freeze only this task id (repeatable)")
+    freeze.add_argument("--seed", type=int, default=0)
+    freeze.add_argument("--hidden-max-shapes", type=int, default=8)
+    freeze.add_argument("--refreeze", action="store_true",
+                        help="replace existing manifests (discards the hidden lane)")
+
+    audit = sub.add_parser("audit", help="audit shape policies over the registry")
+    audit.add_argument("--split", choices=("train", "all"), default="all")
+    audit.add_argument("--task", action="append", default=[])
+
+    args = parser.parse_args(argv)
+    tasks = _resolve_cli_tasks(args.split, args.task)
+
+    if args.command == "freeze":
+        index = freeze_shape_splits(
+            tasks,
+            args.out,
+            seed=args.seed,
+            hidden_max_shapes=args.hidden_max_shapes,
+            refreeze=args.refreeze,
+        )
+        print(f"[shape-split] tasks:         {len(index.entries)}")
+        print(f"[shape-split] hidden shapes: {index.hidden_shapes}")
+        print(f"[shape-split] seed:          {index.seed}")
+        print(f"[shape-split] code identity: {index.code_identity}")
+        print(f"[shape-split] index:         {Path(args.out) / SPLIT_INDEX_FILENAME}")
+        return 0
+
+    report = audit_registry_shapes(tasks)
+    print(f"[shape-audit] tasks:                {report.task_count}")
+    print(f"[shape-audit] claim eligible:       {report.claim_eligible_tasks}")
+    print(f"[shape-audit] generated candidates: {report.generated_candidates}")
+    print(f"[shape-audit] odd candidates:       {report.odd_candidates}")
+    print(f"[shape-audit] hidden shapes:        {report.hidden_shapes}")
+    print(f"[shape-audit] failures:             {len(report.failures)}")
+    for failure in report.failures[:20]:
+        print(f"  {failure}")
+    return 0 if report.ok else 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

@@ -360,5 +360,105 @@ def test_tolerance_for_relaxes_low_precision():
     assert bf16.rtol > fp32.rtol and bf16.snr_db_min < fp32.snr_db_min
 
 
+# =========================================================================== #
+# WHAT THE PRODUCTION GATE MISSES (the reason the metamorphic prong is wired)
+#
+# The shipped driver verdict is ``torch.allclose(atol=1e-2, rtol=1e-2)`` plus an
+# aggregate norm SNR against the fp32 reference. Both are *value* checks, and
+# both are loose in exactly the band where a structurally-wrong kernel lives.
+# These tests reproduce that gate in numpy and show the gap concretely.
+# =========================================================================== #
+def _driver_gate(candidate, reference, snr_db_min: float) -> bool:
+    """The production correctness verdict for one trial (allclose + norm SNR)."""
+    c = np.asarray(candidate, dtype=np.float64)
+    r = np.asarray(reference, dtype=np.float64)
+    noise = float(np.linalg.norm(c - r))
+    signal = float(np.linalg.norm(r))
+    snr = math.inf if noise == 0.0 else 20.0 * math.log10(signal / noise)
+    return bool(np.allclose(c, r, atol=1e-2, rtol=1e-2)) and snr >= snr_db_min
+
+
+def _row_leak_relu(x, eps: float = 1e-3):
+    """relu that mixes 0.1% of the row above into each element.
+
+    A pointwise function of (x, row index) rather than of x: the values stay well
+    inside the shipped gate, but the output is no longer independent of where a
+    row sits in the tensor.
+    """
+    shifted = np.vstack([x[:1], x[:-1]])
+    return np.maximum(x + eps * shifted, 0.0)
+
+
+def test_structurally_wrong_kernel_clears_the_shipped_value_gate():
+    """The premise: this defect is invisible to random trials + norm SNR."""
+    rng = np.random.default_rng(11)
+    for trial in range(5):  # the driver's reseeded trials
+        x = rng.standard_normal((64, 512)).astype(np.float32)
+        assert _driver_gate(_row_leak_relu(x), np.maximum(x, 0.0), snr_db_min=40.0), (
+            f"trial {trial} should pass the shipped gate")
+    # ... and on the driver's enumerated adversarial fills, too.
+    for fill in (np.zeros((64, 512), np.float32), np.ones((64, 512), np.float32),
+                 -np.ones((64, 512), np.float32),
+                 np.full((64, 512), 1e3, np.float32),
+                 np.full((64, 512), -1e3, np.float32),
+                 np.full((64, 512), 1e-3, np.float32)):
+        assert _driver_gate(_row_leak_relu(fill), np.maximum(fill, 0.0),
+                            snr_db_min=40.0)
+
+
+def test_metamorphic_prong_rejects_what_the_shipped_value_gate_accepts():
+    """The payoff: the same kernel violates the elementwise identities."""
+    inputs = (np.random.default_rng(11).standard_normal((64, 512)).astype(np.float32),)
+    violated = []
+    for rel in metamorphic_relations("elementwise"):
+        lhs, rhs = rel.apply(_row_leak_relu, inputs)
+        if not compare_pair(lhs, rhs, FP32, rtol=FP32.metamorphic_rtol,
+                            snr_db_min=FP32.metamorphic_snr_db_min).ok:
+            violated.append(rel.name)
+    # Row-position dependence breaks the three relations that move rows around.
+    # Column permutation does NOT catch it - it preserves every row - which is
+    # exactly why the class ships four complementary relations rather than one.
+    assert set(violated) == {"elem_row_permutation", "elem_locality",
+                             "elem_reshape"}
+
+
+def test_end_to_end_oracle_rejects_the_structurally_wrong_kernel():
+    ref = lambda x: np.maximum(x.astype(np.float64), 0.0)
+    res = verify_equivalence(_row_leak_relu, ref, _elemwise_gen, dtype="fp32",
+                             shape=(64, 512), op_class="elementwise",
+                             n_random=8, n_determinism=2)
+    assert res.verified is False, res.summary()
+    assert res.prong("metamorphic").passed is False
+
+
+def test_metamorphic_relations_survive_honest_fp32_reassociation():
+    """A correct kernel must never be rejected for legitimate fp reordering."""
+    rng = np.random.default_rng(23)
+    x = rng.standard_normal((64, 512)).astype(np.float32)
+
+    def reversed_row_sum(a):  # a real Triton reduction reassociates like this
+        acc = np.zeros(a.shape[0], dtype=np.float32)
+        for j in range(a.shape[1] - 1, -1, -1):
+            acc = acc + a[:, j]
+        return acc
+
+    for rel in metamorphic_relations("reduction"):
+        lhs, rhs = rel.apply(reversed_row_sum, (x,))
+        assert compare_pair(lhs, rhs, FP32, rtol=FP32.metamorphic_rtol,
+                            snr_db_min=FP32.metamorphic_snr_db_min).ok, rel.name
+
+
+def test_reduction_random_prong_is_statistically_weak_which_the_bound_shows():
+    """A per-row reduction compares only M values per trial, not M*N.
+
+    The reported bound is what tells a consumer that the random prong is far
+    weaker here than for a pointwise op - and therefore that the deterministic
+    prongs are carrying the verdict.
+    """
+    elementwise = false_accept_probability(1e-4, 5 * 64 * 512)
+    reduction = false_accept_probability(1e-4, 5 * 64)
+    assert elementwise < 1e-6 < 0.9 < reduction < 1.0
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -18,8 +18,9 @@ Design goals:
   * Dedup by chat-content hash, tag every row with ``_source``, and shuffle
     deterministically so ``seed`` fully reproduces the mix.
 
-Also provides ``build_midtrain_corpus`` for the Stage-0 continued-pretraining
-corpus: mixing ~10-15% general shards into the ROCm/HIP/Triton corpus.
+Scope: Stage-1 SFT mixing only. The Stage-0 continued-pretraining corpus is built
+by :func:`kore.data.midtrain_corpus.build_midtrain_corpus` (the one the campaign
+actually runs), not here.
 
 Everything here is PURE (no GPU / teacher / heavy imports) and unit-testable.
 """
@@ -50,10 +51,6 @@ SOURCE_FRACTION_FIELDS: dict[str, str] = {
 GENERAL_REPLAY_SOURCES = ("general_code", "math_reasoning", "general_chat")
 
 SOURCE_TAG_KEY = "_source"
-
-# Midtrain corpus source tags.
-KERNEL_CORPUS_TAG = "kernel_corpus"
-GENERAL_SHARD_TAG = "general_shard"
 
 
 # --------------------------------------------------------------------------- #
@@ -282,70 +279,3 @@ def build_multicap_sft(
             print(_format_realized_report(realized["counts"], targets, realized["total"]))
 
         return mixed
-
-
-# --------------------------------------------------------------------------- #
-# Stage-0 midtrain corpus (kernel corpus + a little general replay)
-# --------------------------------------------------------------------------- #
-def _norm_doc(doc: Any, tag: str) -> dict:
-    """Normalize a corpus doc to a tagged dict (``{"text": ...}`` for strings)."""
-    if isinstance(doc, dict):
-        d = dict(doc)
-    else:
-        d = {"text": str(doc)}
-    d[SOURCE_TAG_KEY] = tag
-    return d
-
-
-def build_midtrain_corpus(
-    kernel_docs: list,
-    general_shards: list,
-    config: Any,
-    seed: int = 0,
-    verbose: bool = True,
-) -> list[dict]:
-    """Mix ~10-15% general shards into the ROCm/Triton corpus for Stage-0.
-
-    Keeps all ``kernel_docs`` and adds enough ``general_shards`` so that general
-    data is ``config.general_replay_frac`` of the combined corpus (capped at the
-    number of shards available). Tags each doc with ``_source`` and shuffles
-    deterministically by ``seed``. Returns the mixed doc list.
-    """
-    frac = float(getattr(config, "general_replay_frac", 0.15))
-    kernel_tagged = [_norm_doc(d, KERNEL_CORPUS_TAG) for d in kernel_docs]
-    kernel = dedup_rows(kernel_tagged)
-    shards_tagged = [_norm_doc(d, GENERAL_SHARD_TAG) for d in general_shards]
-    shards = dedup_rows(shards_tagged)
-
-    n_kernel = len(kernel)
-    if frac <= 0.0 or n_kernel == 0:
-        n_general = 0
-    elif frac >= 1.0:
-        n_general = len(shards)
-    else:
-        # g / (k + g) = frac  =>  g = frac * k / (1 - frac)
-        n_general = int(round(frac * n_kernel / (1.0 - frac)))
-    n_general = min(n_general, len(shards))
-
-    rng = random.Random(f"{seed}:midtrain_general")
-    idx = rng.sample(range(len(shards)), n_general) if n_general > 0 else []
-    chosen_general = [shards[i] for i in idx]
-
-    mixed = kernel + chosen_general
-    random.Random(seed).shuffle(mixed)
-
-    total = len(mixed)
-    realized_frac = len(chosen_general) / total if total else 0.0
-    log.metric(
-        "midtrain_corpus", kernel=n_kernel, general=len(chosen_general),
-        total=total, realized_general_frac=realized_frac, target_frac=frac,
-        kernel_dedup_dropped=len(kernel_tagged) - len(kernel),
-        shard_dedup_dropped=len(shards_tagged) - len(shards),
-    )
-    if verbose:
-        print(
-            f"[midtrain] kernel={n_kernel} general={len(chosen_general)} "
-            f"total={total} realized_general_frac={realized_frac:.3f} "
-            f"target={frac:.3f}"
-        )
-    return mixed

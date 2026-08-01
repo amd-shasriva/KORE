@@ -79,14 +79,16 @@ addopts = [
     "--strict-markers",
     "--import-mode=importlib",
     "-m",
-    "not gpu and not model and not network and not dependency and not release",
+    "not gpu and not release",
 ]
+# Every name here must select at least one test; tests/test_marker_contract.py
+# fails the suite otherwise, so a marker cannot be declared (and deselected in
+# addopts) while no test carries it. Adding a new opt-in group means adding its
+# tests in the same change - `model`, `network` and `dependency` were removed
+# because they selected nothing and their deselection was therefore a no-op.
 markers = [
     "cpu: deterministic tests that run without an accelerator or external service",
     "gpu: opt-in tests that require a supported AMD GPU and ROCm",
-    "model: opt-in tests that load or train model artifacts",
-    "network: opt-in tests that call an external network service",
-    "dependency: opt-in tests for dependencies outside the test extra",
     "packaging: source distribution, wheel, and installed-artifact contracts",
     "release: release-blocking checks intentionally excluded from the default suite",
     "shell: shell syntax and side-effect-free entrypoint help checks",

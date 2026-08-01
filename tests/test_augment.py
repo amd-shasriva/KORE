@@ -344,6 +344,59 @@ def test_manifest_generation_is_seeded_and_memory_bounded():
     )
 
 
+def test_persisted_manifest_survives_a_json_round_trip(tmp_path):
+    """A frozen split read back from disk must still validate.
+
+    JSON object keys come back sorted, so a task whose declared dimension order
+    is not alphabetical yields reordered ``dims``.  Dimension order carries no
+    semantics - drivers parse ``--shape K=V,...`` by name - so it must not decide
+    whether a stored hidden shape is admissible, or certification could never
+    consume the manifest that training wrote.
+    """
+    from kore.tasks.augment import FrozenShapeSplit, validate_frozen_split
+
+    base = [Shape("primary", {"N": 4096, "M": 2048, "K": 512})]
+    task = _task(
+        "gemm_bias",
+        base,
+        task_id="unsorted_dims",
+        raw={"generated": True, "op_family": "gemm_fusion"},
+    )
+    split = freeze_shape_split(task, created_at="2000-01-01T00:00:00+00:00")
+    assert split.hidden_shapes
+
+    path = tmp_path / "unsorted_dims.json"
+    split.write(path)
+    loaded = FrozenShapeSplit.read(path)
+    assert loaded.to_dict() == split.to_dict()
+    assert [tuple(shape.dims) for shape in loaded.hidden_shapes] != [
+        tuple(shape.dims) for shape in split.hidden_shapes]
+
+    validate_frozen_split(task, loaded)
+    policy = augmentation_policy(task)
+    assert all(
+        generated_shape_error(base, shape, policy) is None
+        for shape in (*loaded.train_shapes[len(base):], *loaded.hidden_shapes)
+    )
+
+
+def test_writer_persists_exactly_what_the_freezer_produced(tmp_path):
+    from kore.tasks.registry import get_task
+    from kore.tasks.shape_policy import freeze_shape_splits, load_frozen_shape_splits
+
+    tasks = [get_task("softmax_bf16"), get_task("genb_tr_foreach_sgd_bf16")]
+    index = freeze_shape_splits(tasks, tmp_path, seed=13)
+    stored = load_frozen_shape_splits(tmp_path, tasks=tasks, require_index=True)
+    for task in tasks:
+        manifest = stored[task.task_id]
+        expected = freeze_shape_split(
+            task, seed=13, created_at=manifest.created_at)
+        assert manifest.to_dict() == expected.to_dict()
+        assert index.entry(task.task_id).hidden_count == len(manifest.hidden_shapes)
+        assert manifest.hidden_keys.isdisjoint(
+            manifest.train_keys | manifest.prompt_keys)
+
+
 def test_source_generators_emit_serializable_explicit_policies():
     import yaml
 

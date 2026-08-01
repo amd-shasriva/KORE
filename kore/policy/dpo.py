@@ -29,6 +29,18 @@ from kore.policy.configs import (
     LoRAConfig,
     build_fsdp_kwargs,
 )
+from kore.policy.model_spec import (
+    IDENTITY_CONFIG_KEYS,
+    apply_runtime_settings,
+    log_model_identity,
+    model_identity_for_config,
+    split_runtime_settings,
+)
+from kore.policy.resources import (
+    PREFLIGHT_CONFIG_KEYS,
+    log_stage_preflight,
+    run_stage_preflight,
+)
 
 log = get_logger("policy.dpo")
 
@@ -234,8 +246,39 @@ def apply_pref_weights(rows: list[dict], *, enabled: bool = True, seed: int = 0)
     return out or [_strip(r) for r in rows]
 
 
+def _reference_identity(config: DPOConfig, policy_identity):
+    """Identity for the frozen reference, which may be a different checkpoint.
+
+    Iterative DPO points ``ref_model_id`` at a specific earlier round, so the
+    reference gets its own pin (``ref_model_revision`` / ``$KORE_REF_MODEL_REVISION``).
+    When the reference IS the policy checkpoint the policy's identity is reused,
+    so one pin cannot disagree with itself.
+    """
+    ref_id = config.ref_model_id or config.model_id
+    if ref_id == config.model_id:
+        return ref_id, policy_identity
+    return ref_id, model_identity_for_config(
+        config, stage="dpo", role="reference", model_id=ref_id
+    )
+
+
 def train(config: DPOConfig) -> dict:
     """Run DPO training (full-FT or LoRA) from ``config.dataset_path`` (preference JSONL)."""
+    # Resolve policy + reference identity before the heavy imports: DPO loads TWO
+    # 14B models, so a wrong or unpinned checkpoint must fail in milliseconds.
+    identity = model_identity_for_config(config, stage="dpo")
+    log_model_identity(log, identity)
+    # Only full-FT loads an explicit reference (LoRA uses the adapter-disabled
+    # base), so an unused ``ref_model_id`` is never verified.
+    ref_id, ref_identity = (
+        (None, None) if config.use_lora else _reference_identity(config, identity)
+    )
+    if ref_identity is not None and ref_identity is not identity:
+        log_model_identity(log, ref_identity)
+    log_stage_preflight(log, run_stage_preflight(
+        stage="dpo", config=config, model_spec=identity.spec,
+        inspection=identity.inspection))
+
     import torch
     from datasets import Dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -252,7 +295,8 @@ def train(config: DPOConfig) -> dict:
     # there - under FSDP the model is loaded plain and the Trainer wraps it.
     fsdp_kwargs = build_fsdp_kwargs(config)
 
-    tokenizer = AutoTokenizer.from_pretrained(config.model_id)
+    tokenizer = AutoTokenizer.from_pretrained(config.model_id,
+                                              **identity.load_kwargs)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -284,8 +328,12 @@ def train(config: DPOConfig) -> dict:
     # to the saved-tensor-count check, and its mem-efficient backend stays O(seq)
     # in memory at long context.
     attn_impl = "sdpa"
+    # Re-fingerprint immediately before the load (no-op when nothing was
+    # fingerprinted), closing the preflight-to-load window.
+    identity.validate_before_load()
     model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=dtype,
-                                                 attn_implementation=attn_impl)
+                                                 attn_implementation=attn_impl,
+                                                 **identity.load_kwargs)
     # Activation checkpointing (routed through fsdp_config) is INCOMPATIBLE with
     # the KV cache: the cache changes the tensor count between forward and
     # recompute -> torch.utils.checkpoint CheckpointError. HF's Trainer only
@@ -303,9 +351,13 @@ def train(config: DPOConfig) -> dict:
     # (an explicit ref alongside a peft_config is unsupported by trl).
     ref_model = None
     if not config.use_lora:
-        ref_id = config.ref_model_id or config.model_id
+        if ref_identity is not identity:
+            # The policy's own re-check ran just above, so only a genuinely
+            # different reference checkpoint needs a second one.
+            ref_identity.validate_before_load()
         ref_model = AutoModelForCausalLM.from_pretrained(ref_id, torch_dtype=dtype,
-                                                         attn_implementation=attn_impl)
+                                                         attn_implementation=attn_impl,
+                                                         **ref_identity.load_kwargs)
 
     peft_config = _peft_config(config) if config.use_lora else None
 
@@ -405,9 +457,14 @@ def dpo_config_from_dict(d: dict) -> DPOConfig:
     ``loss_type`` / ``label_smoothing`` (IPO / cDPO knobs, not fields on the base
     dataclass) are accepted here and attached as attributes so the JSON config
     path - and per-round iterative DPO - can select them without a schema change.
+    Identity/preflight keys (``model_revision``, ``ref_model_revision``,
+    ``resource_preflight``, ...) travel the same way.
     """
     d = dict(d)
     lora = d.pop("lora", None)
+    d, _identity_settings = split_runtime_settings(
+        d, IDENTITY_CONFIG_KEYS + PREFLIGHT_CONFIG_KEYS
+    )
     # Fields that are NOT on the base DPOConfig dataclass (TRL loss knobs / guards):
     # pop them so DPOConfig(**d) doesn't choke, then attach as attributes that
     # build_trl_dpo_kwargs reads via getattr. Covers the iterative-DPO + KORE-DPO-v2
@@ -423,6 +480,7 @@ def dpo_config_from_dict(d: dict) -> DPOConfig:
     for k, v in _extras.items():
         if v is not None:
             setattr(cfg, k, v)
+    apply_runtime_settings(cfg, _identity_settings)
     return cfg
 
 

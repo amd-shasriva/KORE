@@ -300,6 +300,19 @@ _IMPORT_CHECKS = [
     ("kore.data.evolve", "EvolveConfig", True, []),
     # Correctness->latency GRPO curriculum (item 4).
     ("kore.policy.grpo", "apply_reward_phase", True, []),
+    # Held-out shape lane. The campaign freezes it before any stage runs and GRPO
+    # re-freezes it idempotently before its first rollout; champion certification
+    # hard-raises without it, so drift in this writer silently makes the
+    # hidden-shape claim unreachable.
+    ("kore.tasks.shape_policy", "freeze_shape_splits", True,
+        ["tasks", "directory", "seed", "hidden_max_shapes", "refreeze"]),
+    ("kore.policy.grpo", "freeze_training_shape_splits", True, ["config", "task_ids"]),
+    ("kore.policy.grpo", "shape_split_directory", True, ["config"]),
+    # The five evaluation budget counters are charged inside KoreEnv.evaluate, the
+    # only place that can observe a replay hit.
+    ("kore.policy.budget", "EvaluationWork", True, []),
+    ("kore.policy.budget", "check_evaluation_budget", True, ["ledger", "work"]),
+    ("kore.policy.budget", "charge_evaluation_work", True, ["ledger", "work"]),
     ("kore.data.build_datasets", "leakage_split", True, ["records", "by"]),
     ("kore.data.build_datasets", "dedup_by_source_hash", True, []),
     ("kore.data.schemas", "read_jsonl", True, []),
@@ -1291,6 +1304,10 @@ def run(args) -> int:
     _log("plan", f"authoritative split: train={ctx['train_task_ids']} "
                  f"held-out(eval)={ctx['eval_task_ids']}")
 
+    # Before ANY stage: the held-out shape lane has to be older than every
+    # candidate this run produces for a hidden-shape claim to mean anything.
+    _freeze_shape_splits(ctx)
+
     dispatch = {
         "reverify": _stage_reverify,
         "datagen": _stage_datagen, "evolve": _stage_evolve, "agentic": _stage_agentic,
@@ -1425,6 +1442,45 @@ def _apply_split(ctx) -> None:
     ctx["eval_tasks"] = [get_task(task_id) for task_id in contract.eval_ids]
     ctx["train_task_ids"] = list(train_ids)
     ctx["eval_task_ids"] = list(contract.eval_ids)
+
+
+def _freeze_shape_splits(ctx) -> Path:
+    """Freeze this campaign's held-out shape lane before any stage can run.
+
+    ``kore.eval.champion`` can only CONSUME a training-time manifest - it refuses
+    to derive one - so without this call the hidden-shape half of champion
+    certification is unreachable no matter how the campaign is invoked. Writing it
+    here, before the stage loop, is what makes the lane older than every candidate
+    the run will ever produce.
+
+    The campaign is a single process, so there is no writer race to guard here; the
+    rank-0/barrier discipline lives in :func:`kore.policy.grpo.
+    freeze_training_shape_splits`, which repeats this call on every rank of a
+    sharded GRPO launch. Both point at the SAME directory (published through
+    ``KORE_SHAPE_SPLIT_DIR``, which the FSDP launcher passes straight through to
+    each rank) and both leave seed/hidden-count at the writer's defaults, so the
+    second call re-validates and reuses the lane instead of re-deriving it.
+    """
+    from kore.policy.grpo import SHAPE_SPLIT_DIR_ENV, SHAPE_SPLIT_DIRNAME
+    from kore.tasks.shape_policy import freeze_shape_splits
+
+    directory = ctx["data_root"] / SHAPE_SPLIT_DIRNAME
+    # Exported before any stage: the training stages and the certification gate
+    # must agree on one lane, and a stage that shells out inherits this.
+    os.environ[SHAPE_SPLIT_DIR_ENV] = str(directory)
+    ctx["shape_split_dir"] = directory
+    if ctx["dry"]:
+        _log("plan", f"would freeze the held-out shape lane -> {directory}")
+        return directory
+    index = freeze_shape_splits(_train_tasks(ctx), directory)
+    _log("plan", f"held-out shape lane: {len(index.entries)} tasks, "
+                 f"{index.hidden_shapes} hidden shapes, seed={index.seed}, "
+                 f"hidden_max_shapes={index.hidden_max_shapes} -> {directory} "
+                 f"(certify with --shape-manifests {directory})")
+    LOG.event("shape_split_frozen", directory=str(directory),
+              tasks=len(index.entries), hidden_shapes=index.hidden_shapes,
+              seed=index.seed, code_identity=index.code_identity)
+    return directory
 
 
 def _train_tasks(ctx) -> list:

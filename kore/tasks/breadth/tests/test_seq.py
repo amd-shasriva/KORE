@@ -221,13 +221,47 @@ def test_ref_matches_independent(op):
 
 @pytest.mark.parametrize("op", SQ.OPS)
 def test_baseline_matches_ref(op):
-    """The torch eager baseline (fp32) agrees with the fp32 oracle (same math)."""
+    """The torch perf baseline (fp32) agrees with the fp32 oracle (same math)."""
     ns = SQ.make_reference(op, "fp32")
     inputs = ns["get_inputs"](_SMALL[op], device="cpu", seed=1)
     out = ns["baseline_fn"](*inputs)
     ref = ns["ref_fn"](*inputs)
     assert out.shape == ref.shape
     assert _close(out, ref)
+
+
+@pytest.mark.parametrize("op", SQ.OPS)
+def test_baseline_matches_ref_across_chunk_boundaries(op):
+    """A FASTER baseline must not become a WRONG baseline.
+
+    The perf baseline is the chunked / associative-scan / native-op formulation a
+    practitioner would run, not the oracle's eager recurrence, so its agreement
+    with the oracle is load-bearing. L = 71 spans several chunks and divides none
+    of them, exercising the causal tail padding, the inter-chunk state carry and
+    the chunk-boundary scan; two seeds guard against a lucky draw."""
+    ns = SQ.make_reference(op, "fp32")
+    shape = dict(_SMALL[op], L=71)
+    for seed in (0, 5):
+        inputs = ns["get_inputs"](shape, device="cpu", seed=seed)
+        out = ns["baseline_fn"](*inputs)
+        ref = ns["ref_fn"](*inputs)
+        assert out.shape == ref.shape, f"{op}: {tuple(out.shape)} vs {tuple(ref.shape)}"
+        assert _close(out, ref), (
+            f"{op} (seed {seed}): baseline deviates from the oracle by "
+            f"{(out.double() - ref.double()).abs().max().item():.3e}")
+
+
+@pytest.mark.parametrize("op", SQ.OPS)
+@pytest.mark.parametrize("dtype", ["bf16", "fp16"])
+def test_baseline_preserves_dtype_and_tracks_ref(op, dtype):
+    """In the task dtype the baseline keeps the oracle's dtype AND its values."""
+    ns = SQ.make_reference(op, dtype)
+    inputs = ns["get_inputs"](dict(_SMALL[op], L=40), device="cpu", seed=3)
+    out = ns["baseline_fn"](*inputs)
+    ref = ns["ref_fn"](*inputs)
+    tdt = getattr(torch, DTYPES[dtype][0])
+    assert out.dtype == tdt == ref.dtype
+    assert _close(out, ref, atol=5e-2, rtol=5e-2)
 
 
 @pytest.mark.parametrize("op", SQ.OPS)

@@ -82,12 +82,15 @@ BASELINE_KINDS = frozenset((
 # How ``baseline_kind`` was obtained. Deliberately NO "runtime_confirmed" value:
 # the AITER wrappers fall back to torch when the runtime is unavailable and only
 # announce it through the ``KORE_BASELINE_IMPL:<impl>`` stderr sentinel of the bench
-# subprocess, which the verifier does not surface on its Observation. So a vendor
-# kind means "the vendor code path was SELECTED", never "vendor kernels ran".
+# ``declared`` and ``static_resolution`` mean "the vendor code path was SELECTED",
+# never "vendor kernels ran": the AITER wrappers degrade to torch on an import or
+# JIT failure. ``observed`` is the only source that carries runtime proof -- the
+# driver's KORE_BASELINE_IMPL sentinel, surfaced on ``Observation.baseline_impl``.
 BASELINE_IDENTITY_DECLARED = "declared"            # from task.comparison_baseline
 BASELINE_IDENTITY_STATIC = "static_resolution"     # from the generated-op resolver
+BASELINE_IDENTITY_OBSERVED = "observed_runtime"    # from the driver's sentinel
 BASELINE_IDENTITY_SOURCES = frozenset((
-    BASELINE_IDENTITY_DECLARED, BASELINE_IDENTITY_STATIC,
+    BASELINE_IDENTITY_DECLARED, BASELINE_IDENTITY_STATIC, BASELINE_IDENTITY_OBSERVED,
 ))
 
 # Generated-op families whose baseline callable is actually chosen by
@@ -359,7 +362,7 @@ def classify_baseline_kind(declared: Any) -> str:
     return BASELINE_KIND_UNKNOWN
 
 
-def resolve_baseline_identity(task: Any) -> dict:
+def resolve_baseline_identity(task: Any, observed_impl: Any = None) -> dict:
     """Best-available identity of the baseline ``task`` is measured against.
 
     Returns the ``baseline_type`` / ``baseline_kind`` / ``baseline_identity_source``
@@ -371,11 +374,13 @@ def resolve_baseline_identity(task: Any) -> dict:
     static resolver, so its declared string is classified instead and the source is
     reported as ``declared``.
 
-    A ``vendor`` kind states that the vendor code path was selected. The AITER
-    wrappers degrade to torch when the runtime is missing and only report it through
-    the ``KORE_BASELINE_IMPL:`` stderr sentinel of the bench subprocess, which the
-    verifier does not put on its Observation, so this function never claims runtime
-    confirmation.
+    ``observed_impl`` is the driver's ``KORE_BASELINE_IMPL:`` sentinel, carried on
+    ``Observation.baseline_impl``. It is the ONLY runtime evidence of which
+    baseline actually ran: every AITER wrapper degrades to torch on an import or
+    JIT failure, so on a node where AITER fails to build a statically-resolved
+    ``vendor`` kind would otherwise label eager-torch numbers as vendor-beating.
+    When supplied it OVERRIDES both the declaration and the static resolution, and
+    the source is reported as ``observed``.
     """
     declared = _get(task, "comparison_baseline")
     declared = declared.strip() if isinstance(declared, str) and declared.strip() else None
@@ -400,6 +405,17 @@ def resolve_baseline_identity(task: Any) -> dict:
         if mapped is not None:
             kind = mapped
             source = BASELINE_IDENTITY_STATIC
+    observed = {
+        "aiter_vendor": BASELINE_KIND_VENDOR,
+        "hipblaslt_vendor": BASELINE_KIND_VENDOR,
+        "rocblas_vendor": BASELINE_KIND_VENDOR,
+        "torch_compile": BASELINE_KIND_TORCH_COMPILE,
+        "framework": BASELINE_KIND_TORCH,
+        "eager": BASELINE_KIND_TORCH,
+    }.get(str(observed_impl).strip()) if observed_impl else None
+    if observed is not None:
+        kind = observed
+        source = BASELINE_IDENTITY_OBSERVED
     return {
         "baseline_type": declared,
         "baseline_kind": kind,

@@ -41,7 +41,7 @@ def load_default_model(path=None)                                 # install a gl
 
 GRPO calls `rank_candidates` to pick which of N generated kernels to bench (`value_prefilter=true`, `value_prefilter_k=4`). With no trained model it falls back to `_heuristic_scores` (prefer `tl.dot`, 64-multiple tiles, sane warp/stage counts, an fp32 accumulator, bounds masking, a K reduction loop) so cold start never benches blindly. A bounded structural tie-breaker keeps genuinely distinct sources from collapsing to an identical score, and a usable-but-degenerate model (one that returns a near-constant utility over distinct candidates) defers to the heuristic so the PUCT prior stays informative.
 
-**Offline training + validation** (`train_value.py`): `train_from_table` fits from a JSONL value table and reports held-out Spearman correlation and *benches-to-best* (how many benches the reranker saves vs. random order); `refit_online` grows the buffer from live env replay.
+**Offline training + validation** (`train_value.py`): `train_from_table` fits from a JSONL value table and reports held-out Spearman correlation, *benches-to-best* (how many benches the reranker saves vs. random order), and top-k recall. A `refit_online` path was removed: the replay JSONL stores only `(task_id -> Observation)` with no candidate source, so it cannot learn to separate sibling candidates and reproduces a degenerate model by construction. Refit from ranked groups via `replay_train.train_value_from_groups` instead.
 
 ---
 

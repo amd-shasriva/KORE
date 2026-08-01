@@ -7,6 +7,12 @@ scheduler benches only the most promising ones first.
     utility = p_compile * p_snr_pass * exp(e_log_speedup)
             = E[speedup] gated by the probability the candidate is even valid.
 
+When the model also carries a fitted pairwise RANKING head (every model trained by
+``train_value.train_ranking`` does, which is what the campaign trains via
+``replay_train.train_value_from_groups``), that head supplies the ordering instead:
+it is fit on within-group candidate order, which is precisely what a top-k bench
+selector consumes. See :func:`_model_utility`.
+
 Analogue (KORE.pdf Sec 4.5):
   - Ansor ranks schedules by predicted throughput and measures only the top-k;
     the acquisition here is the same, with an explicit validity gate (a kernel
@@ -40,12 +46,15 @@ so we substitute the always-varied heuristic (see :func:`score_candidates`).
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Optional, Sequence
 
 import numpy as np
 
 from kore.value.features import extract_schedule_features, featurize_many
+
+_LOG = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Default model wiring (so the rollout can call rank_candidates(items, task)
@@ -65,11 +74,34 @@ def get_default_model() -> Any:
     return _DEFAULT_MODEL
 
 
+def _model_is_serviceable(model: Any) -> bool:
+    """Smoke-test a freshly-loaded model against the CURRENT featurizer.
+
+    A pickle is only as good as the ``features`` layout it was fit under. An
+    artifact trained before a feature block was added expects a narrower ``X`` and
+    raises (e.g. sklearn's "X has 47 features, but ... is expecting 28") on the
+    first real call - which would surface as a rollout crash, not a fallback. So we
+    score a two-row probe here and refuse anything that cannot answer.
+    """
+    try:
+        from kore.value.features import N_FEATURES
+
+        probe = np.zeros((2, N_FEATURES), dtype=np.float64)
+        out = np.asarray(_model_utility(model, probe), dtype=np.float64)
+        return out.shape == (2,) and bool(np.all(np.isfinite(out)))
+    except Exception:  # noqa: BLE001 - any failure means "not serviceable"
+        return False
+
+
 def load_default_model(path: Optional[str] = None) -> Any:
     """Load a saved :class:`ValueModel` from disk and install it as default.
 
-    Returns the model, or None if the file is missing / unreadable (leaving the
-    heuristic fallback in place). Safe to call at rollout start.
+    Returns the model, or None if the file is missing / unreadable / STALE (leaving
+    the heuristic fallback in place). Safe to call at rollout start.
+
+    A model is only installed once it answers a probe under the current feature
+    layout (:func:`_model_is_serviceable`), so a stale artifact degrades to the
+    heuristic instead of raising into the rollout on its first prediction.
     """
     from kore.value.model import ValueModel
 
@@ -83,6 +115,8 @@ def load_default_model(path: Optional[str] = None) -> Any:
     try:
         model = ValueModel.load(path)
     except Exception:
+        return None
+    if not _model_is_serviceable(model):
         return None
     set_default_model(model)
     return model
@@ -133,18 +167,51 @@ def _is_usable_model(model: Any) -> bool:
     return bool(getattr(model, "fitted", True))
 
 
-def _model_utility(model: Any, X: np.ndarray) -> np.ndarray:
-    """utility = p_compile * p_snr_pass * exp(e_log_speedup) from a fitted model.
+def _has_fitted_ranker(model: Any) -> bool:
+    """True when ``model`` carries a FITTED pairwise ranking head.
 
-    ``X`` is the ``featurize_many`` matrix for the candidates (passed in so the
-    caller can reuse it for the degeneracy/distinctness check without re-featurizing).
+    ``getattr`` (not attribute access) on purpose: a model pickled before the
+    ranking head existed has no ``.ranker`` at all, and ``ValueModel.rank_scores``
+    would raise ``AttributeError`` on it.
     """
+    ranker = getattr(model, "ranker", None)
+    return ranker is not None and bool(getattr(ranker, "fitted", False))
+
+
+def _pointwise_utility(model: Any, X: np.ndarray) -> np.ndarray:
+    """utility = p_compile * p_snr_pass * exp(e_log_speedup) from the 3 pointwise
+    heads: E[speedup] gated by the probability the candidate is even valid."""
     pred = model.predict(X)
     p_c = np.asarray(pred["p_compile"], dtype=np.float64)
     p_s = np.asarray(pred["p_snr_pass"], dtype=np.float64)
     e_ls = np.asarray(pred["e_log_speedup"], dtype=np.float64)
     # clip exponent so a wild regressor output cannot produce inf utility
     return p_c * p_s * np.exp(np.clip(e_ls, -50.0, 50.0))
+
+
+def _model_utility(model: Any, X: np.ndarray) -> np.ndarray:
+    """Ordering score for the candidates in ``X`` (higher is better).
+
+    Prefers the model's WITHIN-GROUP pairwise ranking head when one is fitted, and
+    otherwise the pointwise ``p_compile * p_snr_pass * exp(e_log_speedup)`` utility.
+    That is exactly the contract of :meth:`kore.value.model.ValueModel.rank_scores`,
+    which we route through when it is available.
+
+    Why prefer the ranker: ``train_value.train_ranking`` (the trainer the campaign
+    runs via :func:`kore.value.replay_train.train_value_from_groups`) ALWAYS fits
+    the pairwise head on within-group order - which is the signal the top-k bench
+    selector and the PUCT prior actually consume - whereas the pointwise regressor
+    is fit to an absolute E[log speedup] target. Reading only the pointwise heads
+    trained the ranker on every run and then threw it away.
+
+    ``X`` is the ``featurize_many`` matrix for the candidates (passed in so the
+    caller can reuse it for the degeneracy/distinctness check without re-featurizing).
+    """
+    if _has_fitted_ranker(model):
+        rank_scores = getattr(model, "rank_scores", None)
+        if callable(rank_scores):
+            return np.asarray(rank_scores(X), dtype=np.float64)
+    return _pointwise_utility(model, X)
 
 
 def _is_degenerate(arr: np.ndarray) -> bool:
@@ -239,20 +306,32 @@ def score_candidates(items: Sequence[Any], task: Any = None, model: Any = None) 
     IGNORES the kernel source, collapsing to a uniform prior. In that case we defer
     to the always-varied source heuristic so the prior still guides the search. A
     model that meaningfully discriminates the candidates is used as-is (unchanged
-    behavior); the heuristic never overrides it."""
+    behavior); the heuristic never overrides it.
+
+    STALE-MODEL GUARD: a model whose feature layout no longer matches the current
+    featurizer RAISES on predict rather than returning something wrong. Ranking a
+    candidate set is never worth failing a rollout over, so a scoring failure also
+    falls back to the heuristic (loudly, via ``log``) instead of propagating."""
     task_meta = _task_meta(task)
     metas = [_item_meta(it, task_meta) for it in items]
     if not metas:
         return []
     if model is None:
         model = get_default_model()
+    arr: Any = None
     if _is_usable_model(model):
         X = featurize_many(metas)
-        arr = np.nan_to_num(np.asarray(_model_utility(model, X), dtype=np.float64),
-                            nan=0.0, posinf=1e30, neginf=0.0)
-        if _is_degenerate(arr) and _has_distinct_feature_rows(X):
+        try:
+            arr = np.nan_to_num(np.asarray(_model_utility(model, X), dtype=np.float64),
+                                nan=0.0, posinf=1e30, neginf=0.0)
+        except Exception as e:  # noqa: BLE001 - a stale/broken model must not fail the rollout
+            _LOG.warning("value model failed to score %d candidates (%s: %s); "
+                         "falling back to the source heuristic",
+                         len(metas), type(e).__name__, e)
+            arr = None
+        if arr is not None and _is_degenerate(arr) and _has_distinct_feature_rows(X):
             arr = _heuristic_scores(metas)
-    else:
+    if arr is None:
         arr = _heuristic_scores(metas)
     arr = np.nan_to_num(np.asarray(arr, dtype=np.float64), nan=0.0,
                         posinf=1e30, neginf=0.0)

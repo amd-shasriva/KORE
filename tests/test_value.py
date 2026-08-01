@@ -32,8 +32,7 @@ from kore.value.rerank import (
 )
 from kore.value.train_value import (
     groupwise_rank_corr,
-    refit_online,
-    row_from_observation,
+    groupwise_top_k_recall,
     synthesize_groups,
     synthesize_table,
     train_ranking,
@@ -411,34 +410,158 @@ def test_train_ranking_attaches_ranker():
 
 
 # --------------------------------------------------------------------------- #
-# online refit from freshly benched candidates (env replay)
+# the trained ranking head is CONSULTED by the reranker (not just fitted)
 # --------------------------------------------------------------------------- #
-def test_refit_online_from_rows():
-    model, buf = refit_online(synthesize_table(80, seed=2), use_sklearn=False)
-    assert model.fitted and len(buf) == 80
-    pred = model.predict(featurize_many([_sample_meta()]))
-    assert np.all(np.isfinite(pred["e_log_speedup"]))
-    # threading the buffer accumulates history across refits
-    model, buf = refit_online(synthesize_table(40, seed=3), model=model,
-                              history=buf, use_sklearn=False)
-    assert len(buf) == 120
+def test_score_candidates_routes_through_the_fitted_ranking_head():
+    """``train_ranking`` always fits a pairwise head; ``score_candidates`` must read
+    it. Regression guard: the head used to be trained on every run and ignored."""
+    from kore.value import rerank as rr
+
+    groups = synthesize_groups(120, group_size=6, seed=5)
+    model = train_ranking(groups, use_sklearn=False)
+    assert model.ranker is not None and model.ranker.fitted
+
+    metas = [{"operation": "gemm", "M": 4096, "N": 4096, "K": 4096, "dtype": "bf16",
+              "source": src} for src in (_GOOD_KERNEL, _BAD_KERNEL)]
+    X = featurize_many(metas)
+
+    # the reranker's utility IS the model's rank_scores when a ranker is fitted...
+    assert np.allclose(rr._model_utility(model, X), model.rank_scores(X))
+    # ...and that is genuinely different from the pointwise-only utility
+    assert not np.allclose(rr._model_utility(model, X),
+                           rr._pointwise_utility(model, X))
 
 
-def test_refit_online_from_observations():
-    from kore.reward.reward import Observation
+def test_score_candidates_falls_back_to_pointwise_without_a_ranker():
+    """A model with no ranking head keeps the historical pointwise utility exactly."""
+    from kore.value import rerank as rr
 
-    obs_good = Observation(compiled=True, validation_passed=True, snr_db=40.0,
-                           wall_ms=1.0, baseline_ms=2.0)
-    obs_bad = Observation(compiled=False, error_text="boom")
-    meta_g = {"operation": "gemm", "M": 1024, "N": 1024, "K": 1024,
-              "dtype": "bf16", "source": _GOOD_KERNEL}
-    meta_b = {"operation": "gemm", "M": 1024, "N": 1024, "K": 1024,
-              "dtype": "bf16", "source": _BAD_KERNEL}
-    row = row_from_observation(meta_g, obs_good)
-    assert row["compiled"] and row["snr_pass"] and row["speedup"] == 2.0
-    # accepts (meta, Observation) pairs and dicts carrying an 'obs'
-    model, buf = refit_online(
-        [(meta_g, obs_good), {**meta_b, "obs": obs_bad}] * 20,
-        use_sklearn=False,
-    )
-    assert model.fitted and len(buf) == 40
+    rows = synthesize_table(300, seed=6)
+    metas, outs = zip(*[_split_row(r) for r in rows])
+    model = ValueModel(use_sklearn=False)
+    model.fit(featurize_many(list(metas)),
+              [o["compiled"] for o in outs],
+              [o["snr_pass"] for o in outs],
+              [o["log_speedup"] for o in outs])
+    assert model.ranker is None
+
+    X = featurize_many([_sample_meta()])
+    assert np.allclose(rr._model_utility(model, X), rr._pointwise_utility(model, X))
+
+
+def test_model_utility_tolerates_a_model_pickled_before_the_ranker_existed():
+    """``rank_scores`` touches ``self.ranker``, which a pre-ranker pickle lacks. The
+    reranker must probe with getattr and never raise AttributeError."""
+    from kore.value import rerank as rr
+
+    rows = synthesize_table(200, seed=7)
+    metas, outs = zip(*[_split_row(r) for r in rows])
+    model = ValueModel(use_sklearn=False)
+    model.fit(featurize_many(list(metas)),
+              [o["compiled"] for o in outs],
+              [o["snr_pass"] for o in outs],
+              [o["log_speedup"] for o in outs])
+    del model.ranker  # exactly what an old artifact unpickles as
+    assert not hasattr(model, "ranker")
+
+    X = featurize_many([_sample_meta(), _sample_meta()])
+    assert np.all(np.isfinite(rr._model_utility(model, X)))
+    assert len(score_candidates([_GOOD_KERNEL, _BAD_KERNEL], model=model)) == 2
+
+
+def test_groupwise_top_k_recall_rewards_getting_the_benched_candidates_right():
+    """top-k recall is the metric matching how the model is USED (bench only top-k)."""
+    groups = synthesize_groups(120, group_size=6, seed=8)
+    tr, te = groups[:90], groups[90:]
+    model = train_ranking(tr, use_sklearn=False)
+
+    def trained_fn(metas):
+        return model.rank_scores(featurize_many(metas))
+
+    def flat_fn(metas):
+        return np.zeros(len(metas))
+
+    r_trained = groupwise_top_k_recall(trained_fn, te, 2)
+    r_flat = groupwise_top_k_recall(flat_fn, te, 2)
+    assert 0.0 <= r_flat <= 1.0
+    assert 0.0 <= r_trained <= 1.0
+    assert r_trained > r_flat
+    # a perfect scorer recovers the whole true top-k
+    def oracle_fn(metas):
+        return [1.0] * len(metas)
+    assert groupwise_top_k_recall(oracle_fn, [], 2) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# a STALE artifact must degrade to the heuristic, never raise into a rollout
+# --------------------------------------------------------------------------- #
+def test_score_candidates_survives_a_stale_feature_layout():
+    """A model fit under a narrower feature layout raises on predict. Ranking is
+    never worth failing a rollout over, so it must fall back to the heuristic."""
+    class _StaleModel:
+        fitted = True
+
+        def predict(self, X):
+            raise ValueError(f"X has {np.asarray(X).shape[1]} features, "
+                             f"but this estimator is expecting 28")
+
+    scores = score_candidates([_GOOD_KERNEL, _BAD_KERNEL], model=_StaleModel())
+    assert len(scores) == 2
+    assert scores[0] > scores[1]  # the heuristic still gives a varied, ordered prior
+    assert rank_candidates([_GOOD_KERNEL, _BAD_KERNEL], model=_StaleModel()) == [0, 1]
+
+
+def _fit_stale_model(tmp_path) -> str:
+    """Save a REAL artifact fit under a NARROWER feature layout.
+
+    This is the exact shape of the audited ``runs/value/value_model.pkl``: it was
+    trained before the 19 candidate-schedule features existed, so it expects 28
+    columns and raises on today's 47-column matrix.
+    """
+    n_narrow = len(FEATURE_NAMES) - len(SCHEDULE_FEATURE_NAMES)
+    rows = synthesize_table(120, seed=21)
+    metas, outs = zip(*[_split_row(r) for r in rows])
+    X_narrow = featurize_many(list(metas))[:, :n_narrow]
+    model = ValueModel(use_sklearn=False)
+    model.fit(X_narrow,
+              [o["compiled"] for o in outs],
+              [o["snr_pass"] for o in outs],
+              [o["log_speedup"] for o in outs])
+    p = tmp_path / "stale.pkl"
+    model.save(str(p))
+    return str(p)
+
+
+def test_load_default_model_rejects_a_stale_artifact(tmp_path):
+    """``load_default_model`` must not install an artifact that cannot answer under
+    the current featurizer, or the first real prediction crashes the rollout."""
+    from kore.value.rerank import get_default_model, load_default_model, set_default_model
+
+    path = _fit_stale_model(tmp_path)
+    # the artifact really is unusable under the current layout
+    stale = ValueModel.load(path)
+    with pytest.raises(Exception):
+        stale.predict(featurize_many([_sample_meta(), _sample_meta()]))
+
+    try:
+        set_default_model(None)
+        assert load_default_model(path) is None
+        assert get_default_model() is None  # never installed
+    finally:
+        set_default_model(None)
+
+
+def test_load_default_model_installs_a_serviceable_artifact(tmp_path):
+    from kore.value.rerank import get_default_model, load_default_model, set_default_model
+
+    groups = synthesize_groups(40, group_size=5, seed=9)
+    model = train_ranking(groups, use_sklearn=False)
+    p = tmp_path / "good.pkl"
+    model.save(str(p))
+    try:
+        set_default_model(None)
+        loaded = load_default_model(str(p))
+        assert loaded is not None
+        assert get_default_model() is loaded
+    finally:
+        set_default_model(None)

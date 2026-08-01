@@ -18,6 +18,25 @@ from typing import Optional
 
 from kore.sandbox.config import SandboxConfig
 
+
+# --------------------------------------------------------------------------- #
+# Baseline-honesty default (applied at import, before anything reads it)
+# --------------------------------------------------------------------------- #
+# ``kore.tasks._genops`` grades the fusion / gemm_fusion families against the
+# COMPILER-FUSED torch bar by default, because beating unfused eager torch only
+# measures the absence of ``torch.compile``.  That default is published into the
+# ENVIRONMENT here, not just into Python, for two reasons:
+#
+#   * the verifier runs the driver in a SUBPROCESS that inherits os.environ, and
+#     the contract/provenance recorders (kore.env.evaluation_contract,
+#     kore.data.generation_identity.behavioral_environment / rigor) read the raw
+#     variable - so a Python-only default would let the recorded identity of a run
+#     disagree with the bar the run actually used;
+#   * ``setdefault`` never overrides an operator's explicit value, so opting back
+#     down to the inflated eager bar stays a deliberate act (KORE_COMPILE_BASELINE=0)
+#     that is then visible in every one of those records.
+os.environ.setdefault("KORE_COMPILE_BASELINE", "1")
+
 KORE_ROOT = Path(__file__).resolve().parent.parent          # repo root (the kore/ package's parent)
 WORKSPACE_ROOT = KORE_ROOT.parent                            # umbrella workspace (repo root's parent)
 REPOS_DIR = WORKSPACE_ROOT / "repos"
@@ -68,6 +87,17 @@ class KoreConfig:
     snr_threshold_lowp: float = 25.0
     atol: float = 1e-2
     rtol: float = 1e-2
+
+    # Baseline honesty: fusion / gemm_fusion are timed against the COMPILER-FUSED
+    # torch kernel (see kore.tasks._genops.compile_baseline_status). Mirrored here
+    # so the resolved bar is part of the recorded config identity of every run, and
+    # so an eager-bar run is distinguishable from an honest one after the fact.
+    # Read-only mirror: the env var above is the single source of truth the
+    # verifier subprocess and the provenance recorders both consult.
+    compile_baseline: bool = field(
+        default_factory=lambda: os.environ.get(
+            "KORE_COMPILE_BASELINE", "1").strip().lower()
+        not in ("0", "false", "no", "off"))
 
     # benchmark trust
     warmup_iters: int = 10

@@ -212,26 +212,32 @@ AST and anti-hack scan only. `scripts/verify_tasks_gpu.py` now executes every ta
 committed seed through its own `driver.py` on real hardware and records a per-task
 verdict in `data/gfx950_task_verification.json`.
 
-First full sweep (8× MI350X / gfx950, six devices, 534 s, reproduced exactly across
-two independent runs):
+Current sweep (MI350X / gfx950, 1,052 tasks):
 
 | Verdict | Tasks | Share |
 | --- | ---: | ---: |
-| `PASS` — seed correct at its declared SNR gate | 937 | 89.1% |
-| `FAIL_CORRECTNESS` | 111 | 10.6% |
+| `PASS` — seed correct at its declared SNR gate | 948 | 90.1% |
+| `FAIL_CORRECTNESS` | 100 | 9.5% |
 | `INFRA` — resource fault, **not** a task defect | 4 | 0.4% |
 
-The 111 correctness failures are not uniform, and the split matters:
+The 100 correctness failures are not uniform, and the split is what matters:
 
-- **73 are near-misses in the 25–30 dB band** against a 30 dB gate. For bf16/fp16 this
-  looks like threshold calibration rather than wrong math, but it is unproven either
-  way — do not assume benign.
-- **27 report −999 dB** (zero signal: structurally broken), concentrated in
-  sliding-window attention (`genb_attn2_window*`).
-- **11 sit between 0 and 25 dB** and are genuinely incorrect.
+- **73 have SNR at or ABOVE their declared gate** (30.2–92.0 dB) and fail only
+  `torch.allclose`'s elementwise tolerance. The drivers hard-code `atol=rtol=1e-2`,
+  which is fp32-calibrated; applied to bf16/fp16/fp8 outputs it rejects kernels the
+  SNR gate accepts (e.g. a bf16 attention-backward at 57.9 dB failing on
+  `max_diff 0.03125`). This is a tolerance-calibration defect, not wrong math.
+- **15 report −999 dB** (zero signal: structurally broken), concentrated in
+  sliding-window attention (`genb_attn2_window*`). All 15 are `max_diff: inf`.
+- **11 fall short of their gate** by more than 5 dB (4.7–24.6 dB against 30/40 dB
+  gates) and are genuinely incorrect.
+- **1 sits within 5 dB of its gate** (`genb_red_topk256_fp16`, 29.67 dB vs 30.0).
 
-By engine: moe 26, fused 13, quant 12, ssm 11, attention 18 across both engines,
-reduction 10, training 9, norm 8, sampling 8.
+A previous sweep recorded 937 pass / 111 fail. Twelve of those failures were an
+`AttributeError` on `tl.math.tanh`, which Triton 3.6 removed — a toolchain break,
+not a task defect. Replacing it with the repo's libdevice-free `2·sigmoid(2x) − 1`
+form (max abs error 1.79e-07 vs `torch.tanh`) recovered **11 tasks with zero
+regressions**.
 
 The 4 `INFRA` cases are all 256-expert MoE at `D=4096, I=14336`. Their expert weights
 are ~60 GB per tensor in bf16, and `_randn` stages an fp32 buffer (plus a second for

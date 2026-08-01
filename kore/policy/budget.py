@@ -37,6 +37,19 @@ _FLOAT_COUNTERS = (
 )
 _ALL_COUNTERS = _INTEGER_COUNTERS + _FLOAT_COUNTERS
 
+# The evaluation-path subset, in ledger-counter naming so one observed record
+# maps onto the ledger without any translation table.
+_EVALUATION_INTEGER_FIELDS = (
+    "correctness_calls",
+    "fresh_timed_calls",
+    "replay_hits",
+)
+_EVALUATION_FLOAT_FIELDS = (
+    "verifier_gpu_seconds",
+    "profiler_gpu_seconds",
+)
+_EVALUATION_FIELDS = _EVALUATION_INTEGER_FIELDS + _EVALUATION_FLOAT_FIELDS
+
 
 class BudgetError(ValueError):
     """Base class for malformed or inconsistent budget state."""
@@ -69,6 +82,99 @@ def _finite_nonnegative(name: str, value: Any, *, integer: bool) -> int | float:
     if not math.isfinite(value) or value < 0.0:
         raise BudgetError(f"{name} must be non-negative and finite")
     return value
+
+
+@dataclass(frozen=True)
+class EvaluationWork:
+    """The physical work ONE evaluation performed, as observed.
+
+    Every field is an independent observation of a distinct physical event, so
+    the ledger's non-derivation rule survives: a timed evaluation reports its own
+    timing call, a correctness-only evaluation reports no timing call, and a
+    replay hit reports neither because it ran nothing.  The seconds are measured
+    wall time attributed to the stage that spent it, never inferred from a count.
+    """
+
+    correctness_calls: int = 0
+    fresh_timed_calls: int = 0
+    replay_hits: int = 0
+    verifier_gpu_seconds: float = 0.0
+    profiler_gpu_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name in _EVALUATION_INTEGER_FIELDS:
+            object.__setattr__(
+                self, name,
+                _finite_nonnegative(name, getattr(self, name), integer=True),
+            )
+        for name in _EVALUATION_FLOAT_FIELDS:
+            object.__setattr__(
+                self, name,
+                _finite_nonnegative(name, getattr(self, name), integer=False),
+            )
+        calls = self.correctness_calls + self.fresh_timed_calls
+        seconds = self.verifier_gpu_seconds + self.profiler_gpu_seconds
+        if self.replay_hits and (calls or seconds):
+            raise BudgetError(
+                "a replay hit performs no correctness, timing or profiling work")
+        if seconds > 0.0 and not calls:
+            raise BudgetError(
+                "measured GPU seconds require at least one correctness or timed call")
+
+    @property
+    def is_empty(self) -> bool:
+        return not any(getattr(self, name) for name in _EVALUATION_FIELDS)
+
+    def to_dict(self) -> dict[str, int | float]:
+        return {name: getattr(self, name) for name in _EVALUATION_FIELDS}
+
+    @classmethod
+    def from_observation(
+        cls,
+        observation: Any,
+        *,
+        verifier_seconds: float,
+        profiler_seconds: float = 0.0,
+        replayed: bool = False,
+        executed: bool = True,
+    ) -> "EvaluationWork":
+        """Read one KoreEnv observation as physical work.
+
+        ``replayed`` marks a cache-served evaluation: it consumed no GPU, so it
+        is charged as a replay hit and nothing else, whatever its wall time was.
+        ``executed`` is the caller's assertion that a candidate-bearing
+        subprocess actually ran; pass ``False`` for evaluations rejected before
+        launch (static hack scan, source-budget violation).  It defaults to
+        ``True`` because over-charging an evaluation fails closed while
+        under-charging it hands out free compute.
+        """
+        if replayed:
+            return cls(replay_hits=1)
+        if not executed:
+            return cls()
+        return cls(
+            correctness_calls=1,
+            fresh_timed_calls=1 if _timing_executed(observation) else 0,
+            verifier_gpu_seconds=verifier_seconds,
+            profiler_gpu_seconds=profiler_seconds,
+        )
+
+
+def _timing_executed(observation: Any) -> bool:
+    """Whether the benchmark subprocesses actually ran for an observation.
+
+    Timings that came back prove it.  So does a requested timing whose admission
+    was ``rejected``: that verdict means the bench ran but some shape produced no
+    usable measurement, which still spent the GPU.  A driver that was refused as
+    performance-ineligible never reached the benchmark and is not counted.
+    """
+    if getattr(observation, "wall_by_shape", None):
+        return True
+    return bool(
+        getattr(observation, "timing_requested", False)
+        and getattr(observation, "infra_error", False)
+        and str(getattr(observation, "timing_grade", "")) == "rejected"
+    )
 
 
 @dataclass(frozen=True)
@@ -201,21 +307,27 @@ class BudgetLedgerV1:
             if limit is not None and candidate[name] > limit:
                 raise BudgetExceededError(name, candidate[name], limit)
 
-    def _increment(self, **deltas: int | float) -> None:
+    def _candidate_totals(
+        self, deltas: Mapping[str, int | float]
+    ) -> dict[str, int | float]:
         unknown = sorted(set(deltas) - set(_ALL_COUNTERS))
         if unknown:
             raise BudgetError(f"unknown budget counter(s): {', '.join(unknown)}")
+        candidate = self._counter_snapshot()
+        for name, delta in deltas.items():
+            checked = _finite_nonnegative(
+                name, delta, integer=name in _INTEGER_COUNTERS
+            )
+            candidate[name] += checked
+            if name in _FLOAT_COUNTERS and not math.isfinite(candidate[name]):
+                raise BudgetError(f"{name} total must remain finite")
+        if candidate["groups_kept"] > candidate["groups_attempted"]:
+            raise BudgetError("groups_kept cannot exceed groups_attempted")
+        return candidate
+
+    def _increment(self, **deltas: int | float) -> None:
         with self._lock:
-            candidate = self._counter_snapshot()
-            for name, delta in deltas.items():
-                checked = _finite_nonnegative(
-                    name, delta, integer=name in _INTEGER_COUNTERS
-                )
-                candidate[name] += checked
-                if name in _FLOAT_COUNTERS and not math.isfinite(candidate[name]):
-                    raise BudgetError(f"{name} total must remain finite")
-            if candidate["groups_kept"] > candidate["groups_attempted"]:
-                raise BudgetError("groups_kept cannot exceed groups_attempted")
+            candidate = self._candidate_totals(deltas)
             self._assert_limits(candidate)
             for name, value in candidate.items():
                 setattr(self, name, value)
@@ -244,6 +356,28 @@ class BudgetLedgerV1:
             verifier_gpu_seconds=verifier_gpu_seconds,
             profiler_gpu_seconds=profiler_gpu_seconds,
         )
+
+    def record_evaluation_work(self, work: EvaluationWork) -> EvaluationWork:
+        """Charge one observed evaluation in a single atomic ledger update."""
+
+        if not isinstance(work, EvaluationWork):
+            raise BudgetError("evaluation work must be an EvaluationWork")
+        self.record_evaluation(**work.to_dict())
+        return work
+
+    def check_evaluation(self, work: EvaluationWork) -> None:
+        """Raise before compute a hard limit already forbids is actually spent.
+
+        Charging after the fact still binds a limit, but only once the GPU work
+        is gone.  Calling this with the work an evaluation is ABOUT to do keeps
+        the ledger fail-closed: a ``correctness_calls`` limit of 0 refuses to
+        launch the evaluation at all.
+        """
+
+        if not isinstance(work, EvaluationWork):
+            raise BudgetError("evaluation work must be an EvaluationWork")
+        with self._lock:
+            self._assert_limits(self._candidate_totals(work.to_dict()))
 
     def record_groups(self, *, attempted: int = 0, kept: int = 0) -> None:
         self._increment(groups_attempted=attempted, groups_kept=kept)
@@ -355,3 +489,31 @@ class BudgetLedgerV1:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
         return target
+
+
+# --------------------------------------------------------------------------- #
+# Evaluation-path producer
+#
+# The evaluation path is the only place that knows what physically happened to a
+# candidate, so it owns the five evaluation counters.  These two helpers are the
+# whole interface it needs, and both tolerate ``ledger=None`` so an unbudgeted
+# evaluation (a bare KoreEnv, a test, a one-off script) stays a no-op.
+# --------------------------------------------------------------------------- #
+def check_evaluation_budget(
+    ledger: Optional[BudgetLedgerV1], work: EvaluationWork
+) -> EvaluationWork:
+    """Pre-flight the work an evaluation is about to do; raise if it is barred."""
+
+    if ledger is not None:
+        ledger.check_evaluation(work)
+    return work
+
+
+def charge_evaluation_work(
+    ledger: Optional[BudgetLedgerV1], work: EvaluationWork
+) -> EvaluationWork:
+    """Charge the work an evaluation actually did."""
+
+    if ledger is not None:
+        ledger.record_evaluation_work(work)
+    return work

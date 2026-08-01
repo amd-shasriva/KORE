@@ -12,7 +12,10 @@ The target is **gfx950 / CDNA4 (MI350X / MI355X)** by default, with **gfx942 / C
 | --- | --- |
 | `pmc.py` | Named counter sets (`standard` / `full` / `memory` / `compute` / `grounding`), multi-pass grouping, derived metrics, and the arch-selected occupancy model |
 | `parsers/rocprofv3.py` | `KernelPMC` + `parse_rocprofv3_csv` (both LONG and WIDE layouts) |
-| `parsers/compiler_output.py` | hipcc/clang register + occupancy parsing (CDNA3/CDNA4) |
+(A `parsers/compiler_output.py` existed and was removed: its occupancy model
+hardcoded 256-VGPR / 80 KB-LDS thresholds that contradict this package's own
+verified CDNA4 limits of 512 VGPR/lane and 160 KB LDS/CU, and it had no callers.
+Occupancy is grounded on rocprofv3 counters instead — see `est_occupancy` below.)
 
 ---
 
@@ -71,6 +74,10 @@ def parse_rocprofv3_csv(csv_path) -> list[KernelPMC]
 
 Per-dispatch resource columns (VGPR/AGPR/SGPR/LDS/scratch/workgroup size, under the naming variants seen across ROCm versions) are parsed into typed fields rather than the `counters` dict, so occupancy and register-pressure reasoning is available without disturbing counter consumers. Timestamps are dropped (wall time comes from the verifier's own timing). Counter lookup is alias-tolerant (`TCC_HIT_sum` vs `TCC_HIT`, `TCC_EA0_*` vs `TCC_EA_*`), returning `None` when a family is absent so a caller can distinguish "0" from "not collected". `wait_mfma_ratio`: `<5` compute-bound, `5–10` balanced, `>10` memory-bound.
 
-**Compiler output** (`parsers/compiler_output.py`): `parse_register_info` extracts VGPR/AGPR/SGPR/LDS/spill/occupancy from hipcc/clang verbose output or an ISA dump; `parse_compiler_errors` / `parse_compiler_warnings` pull diagnostic lines. Occupancy heuristic (gfx942/gfx950): VGPR ≤ 256 → occupancy ≥ 2 possible; LDS ≤ 80 KB → dual-occupancy OK.
+**Compiler output**: there is deliberately no compiler-text parser. Register and
+occupancy facts come from rocprofv3 counters (`vgpr_count`, `lds_bytes`,
+`num_warps`) through `est_occupancy`, which uses the measured CDNA4 limits rather
+than a threshold heuristic. Compile diagnostics reach the reward through
+`Observation.error_text` and the `failure_class` taxonomy, not a line-grep.
 
 See also: [`env`](../env/README.md) (collection), [`reward`](../reward/README.md) (`profile_reward`), [`analysis`](../analysis/README.md).

@@ -58,6 +58,7 @@ from kore.data.schemas import (
     BASELINE_IDENTITY_DECLARED,
     BASELINE_IDENTITY_STATIC,
     BASELINE_KIND_TORCH,
+    BASELINE_KIND_TORCH_COMPILE,
     BASELINE_KIND_UNKNOWN,
     BASELINE_KIND_VENDOR,
     CREDIBLE_SPEEDUP_MAX_DEFAULT,
@@ -295,19 +296,32 @@ def test_generated_op_identity_uses_the_real_baseline_resolver(monkeypatch):
     assert identity["baseline_identity_source"] == BASELINE_IDENTITY_STATIC
     assert identity["baseline_type"] == "torch_gemm_bias_gelu"  # declaration kept
 
-    # A fusion op AITER does not ship a fused kernel for resolves to the torch bar,
+    # A fusion op AITER does not ship a fused kernel for resolves to a torch bar,
     # so it is never labelled vendor (the resolver only says vendor for gemm_fusion
-    # and the two gated activations).
+    # and the two gated activations). WHICH torch bar depends on the compile
+    # switch, which now defaults ON so a fusion task is graded against a fused
+    # reference rather than an inflated unfused one -- assert the contract, not
+    # whichever default happens to be current.
     plain = _task(operation="mul_tanh", baseline="torch_mul_tanh",
                   source_family="fusion")
+    assert resolve_baseline_identity(plain)["baseline_kind"] == BASELINE_KIND_TORCH_COMPILE
+
+    monkeypatch.setenv("KORE_COMPILE_BASELINE", "0")
     assert resolve_baseline_identity(plain)["baseline_kind"] == BASELINE_KIND_TORCH
+    monkeypatch.delenv("KORE_COMPILE_BASELINE", raising=False)
 
     gated = _task(operation="silu_mul", baseline="torch_silu_mul",
                   source_family="fusion")
     assert resolve_baseline_identity(gated)["baseline_kind"] == BASELINE_KIND_VENDOR
 
-    # The vendor path is env-gated, and the recorded kind follows the gate.
+    # The vendor path is env-gated, and the recorded kind follows the gate: with
+    # the vendor bar off, a gemm_fusion task falls back to a torch bar and must
+    # never still be labelled vendor. Which torch bar depends on the compile
+    # switch, so pin both rather than whichever default is current.
     monkeypatch.setenv("KORE_USE_VENDOR_BASELINE", "0")
+    assert resolve_baseline_identity(fused)["baseline_kind"] == BASELINE_KIND_TORCH_COMPILE
+
+    monkeypatch.setenv("KORE_COMPILE_BASELINE", "0")
     assert resolve_baseline_identity(fused)["baseline_kind"] == BASELINE_KIND_TORCH
 
 

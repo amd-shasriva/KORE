@@ -112,7 +112,7 @@ def build_trl_dpo_kwargs(config) -> dict:
         gradient_checkpointing_kwargs={"use_reentrant": True},
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
-        save_total_limit=1,   # a 14B full-FT ckpt is ~220GB w/ optimizer; cap to avoid disk-fill
+        save_total_limit=getattr(config, "save_total_limit", 2),
         seed=config.seed,
         report_to=config.report_to,
         dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
@@ -460,7 +460,9 @@ def dpo_config_from_dict(d: dict) -> DPOConfig:
     Identity/preflight keys (``model_revision``, ``ref_model_revision``,
     ``resource_preflight``, ...) travel the same way.
     """
-    d = dict(d)
+    # Drop the repo's in-config comment keys (``_comment_<field>``) before the
+    # strict parse, matching midtrain and sft.
+    d = {k: v for k, v in d.items() if not k.startswith("_")}
     lora = d.pop("lora", None)
     d, _identity_settings = split_runtime_settings(
         d, IDENTITY_CONFIG_KEYS + PREFLIGHT_CONFIG_KEYS

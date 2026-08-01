@@ -166,6 +166,10 @@ class SFTConfig(DistributedMixin):
     seed: int = 0
     logging_steps: int = 10
     save_steps: int = 200
+    # >= 2, matching MidTrainConfig: the Trainer rotates the previous checkpoint
+    # out around each new save, so 1 leaves nothing resumable if the process dies
+    # inside that window. Measured on gfx950: one 14B SFT checkpoint is 221 GB.
+    save_total_limit: int = 2
     report_to: str = "none"
 
 
@@ -204,6 +208,10 @@ class DPOConfig(DistributedMixin):
     seed: int = 0
     logging_steps: int = 10
     save_steps: int = 200
+    # >= 2 for the same reason as SFT/MidTrain: the Trainer rotates the previous
+    # checkpoint out around each new save, so 1 leaves nothing resumable if the
+    # process dies inside that window.
+    save_total_limit: int = 2
     report_to: str = "none"
 
 
@@ -766,10 +774,15 @@ def latest_checkpoint(output_dir) -> Optional[str]:
         except (ValueError, IndexError):
             return -1
 
-    latest = max(ckpts, key=_step)
-    # Only resume if the checkpoint actually has trainer state (not a half-written dir).
-    if os.path.exists(os.path.join(latest, "trainer_state.json")):
-        return latest
+    # Walk newest-first rather than inspecting only the highest-numbered dir.
+    # ``trainer_state.json`` is written near the END of a save, so a crash during
+    # a multi-hundred-GB checkpoint leaves the newest dir without it; an older
+    # COMPLETE checkpoint is still a far better resume point than step 0.
+    for candidate in sorted(ckpts, key=_step, reverse=True):
+        if _step(candidate) < 0:
+            continue
+        if os.path.exists(os.path.join(candidate, "trainer_state.json")):
+            return candidate
     return None
 
 

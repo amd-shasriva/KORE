@@ -1,36 +1,50 @@
 # Stage-1 SFT launch readiness
 
-**Verdict: CONDITIONAL GO — one launch-fatal blocker, two durability blockers.**
+**Verdict: GO. All three blockers found by this review are fixed and regression-tested.**
 
 The SFT stage trains. It was run end to end on this box against the real
 `Qwen/Qwen3-14B` weights: identity resolution, template masking, dataset load,
 FSDP construction, real optimizer steps, a 221 GB checkpoint write, and a resume
-from that checkpoint all execute on the current `master`. Nothing in today's
-changes broke the training path.
+from that checkpoint all execute on the current `master`.
 
-What is *not* ready is the launch itself. `configs/sft_14b_full.json` points at a
-dataset path that no tool in this repo produces, and the failure surfaces only
-after every rank has loaded 14B of weights. Two further defects mean that if the
-run dies mid-flight it restarts from step 0 rather than from its last checkpoint.
-All three have one-line-scale patches below.
+The review found the *launch* unready for three reasons: the shipped config
+pointed at a dataset path no tool produces, and two separate defects meant a
+mid-flight death restarted from step 0 rather than the last checkpoint. All
+three are now patched, along with two gaps the fixes exposed.
 
-- **Verified on:** `master` @ `3dfe1e8` (working tree dirty — several agents editing concurrently)
+- **Verified on:** `master` @ `3dfe1e8`; blockers fixed in the commit that adds this line
 - **Hardware:** 2 × AMD Instinct MI350X (gfx950), HIP ordinals 6 and 7
 - **Stack:** Python 3.10.14, torch 2.10.0+rocm7.0, transformers 4.57.6, trl 0.29.1, accelerate 1.14.0, peft 0.19.1, datasets 3.6.0. `flash_attn` is **absent** → SDPA.
-- **Regression tests:** `tests/test_sft_launch_readiness.py` (30 pass, 4 xfail — the xfails *are* the blocker list, and turn green when the patches land)
+- **Regression tests:** `tests/test_sft_launch_readiness.py` — 35 pass, no xfail. The four tests that encoded the blocker list are now ordinary regressions.
 
 | # | Item | Verdict |
 |---|---|---|
-| 1 | SFT data exists and is loadable | **PASS** (config path is wrong — Blocker 1) |
+| 1 | SFT data exists and is loadable | **PASS** |
 | 2 | Loss-masking template surgery | **PASS** — unqualified |
 | 3 | Model identity resolution | **PASS** |
 | 4 | SFT can actually start training | **PASS** — real 14B, real steps, real checkpoint, real resume |
-| 5 | Handoff from midtrain | **PASS with defects** (Blockers 1 & 3) |
-| 6 | Memory and time | **PASS with defects** (Blocker 2) |
+| 5 | Handoff from midtrain | **PASS** |
+| 6 | Memory and time | **PASS** |
+
+## What was fixed
+
+| Blocker | Fix |
+|---|---|
+| 1 — config named a dataset nothing produces | `configs/sft_14b_full.json` now points at `data/b05factory/sft/multicap.jsonl`, and `train_sft` checks the path *before* `from_pretrained` so a typo costs milliseconds instead of a 14B load on every rank |
+| 2 — `save_total_limit` hardcoded to 1 | `SFTConfig.save_total_limit` added, defaulting to 2; `sft.py` reads it; the shipped config sets it explicitly with a justifying comment |
+| 3 — `latest_checkpoint` gave up on a half-written dir | walks candidates newest-first and returns the newest one that actually has `trainer_state.json` |
+| F5 — `--dry-run` validated nothing | the config and accelerate-YAML existence checks moved above the dry-run exit |
+| (exposed by 2) — `_comment_<field>` crashed every non-midtrain stage | `sft`, `dpo` and `grpo` loaders now strip underscore-prefixed keys, as midtrain already did |
+
+Blockers 2 and 3 had to land together: the spare checkpoint that 2 retains is
+only reachable through the fallback that 3 adds.
+
+The sections below are the original review, kept as the evidence trail for each
+finding.
 
 ---
 
-## Blockers
+## Blockers (fixed — retained for the reasoning)
 
 ### Blocker 1 — the shipped SFT config points at a dataset that nothing produces
 
@@ -552,15 +566,14 @@ export HF_HUB_OFFLINE=1
 (cd data/release && ./reassemble.sh)
 wc -l data/b05factory/sft/multicap.jsonl          # must print 56493
 
-# 2. Resolve the launch config: real dataset path + the midtrain checkpoint as the
-#    SFT base. Drop the dataset_path override once Blocker 1's patch has landed;
-#    model_id must always be overridden (the shipped config names the raw base).
+# 2. Resolve the launch config. dataset_path is now correct in the shipped file;
+#    model_id must still be overridden, because the shipped config names the raw
+#    base and this stage trains the midtrain output.
 python - <<'PY'
 import json, pathlib
 cfg = json.loads(pathlib.Path("configs/sft_14b_full.json").read_text())
-cfg["dataset_path"] = "data/b05factory/sft/multicap.jsonl"   # Blocker 1
-cfg["model_id"]     = "runs/midtrain_14b_full"               # Stage-0 output
-cfg["output_dir"]   = "runs/sft_14b_full"
+cfg["model_id"]   = "runs/midtrain_14b_full"                 # Stage-0 output
+cfg["output_dir"] = "runs/sft_14b_full"
 pathlib.Path("configs/sft_14b_full.resolved.json").write_text(json.dumps(cfg, indent=2))
 print(json.dumps(cfg, indent=2))
 PY
@@ -584,17 +597,18 @@ the base is now a directory), `sft: completion-only loss enabled`,
 `dropped_overlong=3299`, then 1,599 steps over 5–7 hours.
 
 Do **not** set `KORE_RESOURCE_PREFLIGHT=strict` (F9). Ensure the output
-filesystem has **≥ 800 GB** free (Blocker 2). If the run dies, check that
-`latest_checkpoint('runs/sft_14b_full')` returns a directory before relaunching —
-until Blocker 3 is fixed, a `None` there means it will silently restart from step
-0 even if a complete older checkpoint exists.
+filesystem has **≥ 800 GB** free: `save_total_limit: 2` means a transient peak of
+three 221 GB checkpoints during rotation, settling to `2 × 221 GB + 55 GiB`.
+If the run dies, relaunching now resumes from the newest checkpoint that has a
+`trainer_state.json`, so a crash during a save falls back to the previous
+generation instead of restarting from step 0.
 
 ---
 
 ## Reproducing this report
 
 ```bash
-pytest tests/test_sft_launch_readiness.py -q            # 30 pass, 4 xfail (the blockers)
+pytest tests/test_sft_launch_readiness.py -q            # 35 pass, no xfail
 pytest tests/test_sft_launch_readiness.py -q -m release # full 56,493-row corpus count
 ```
 

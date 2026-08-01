@@ -1,7 +1,7 @@
 {
   "model_id": "Qwen/Qwen3-14B",
   "model_revision": "40c069824f4251a91eefaf281ebe4c544efd3e18",
-  "dataset_path": "data/sft/multicap.jsonl",
+  "dataset_path": "data/b05factory/sft/multicap.jsonl",
   "output_dir": "runs/sft_14b_full",
   "use_lora": false,
   "distributed": true,
@@ -15,6 +15,9 @@
   "lr_scheduler_type": "cosine",
   "warmup_ratio": 0.03,
   "repair_loss_weight": 2.0,
+  "save_steps": 200,
+  "_comment_save_total_limit": "2, not 1: the previous checkpoint is rotated out around each new save, so a crash in that window leaves nothing resumable and the run restarts from step 0. One 14B SFT checkpoint measures 221GB, so provision >= 800GB on the output filesystem.",
+  "save_total_limit": 2,
   "fsdp": "full_shard auto_wrap",
   "fsdp_transformer_layer_cls": null,
   "fsdp_cpu_offload": false,

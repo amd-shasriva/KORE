@@ -92,11 +92,8 @@ ACCEL_ARGS+=("-m" "kore.policy.$STAGE" "$CONFIG")
 
 CMD=(accelerate "${ACCEL_ARGS[@]}")
 
-if [ "$DRY_RUN" = "1" ]; then
-  echo "[launch_distributed] (dry-run) PYTHONPATH=$REPO_ROOT ${CMD[*]}"
-  exit 0
-fi
-
+# Validate BEFORE the dry-run exit, so --dry-run is a real preflight rather than
+# an echo: a mistyped config path must fail here, not after an 8-rank 14B load.
 if [ ! -f "$ACCEL_CONFIG" ]; then
   echo "error: accelerate config not found at $ACCEL_CONFIG" >&2
   exit 1
@@ -104,6 +101,11 @@ fi
 if [ ! -f "$CONFIG" ]; then
   echo "error: training config not found at $CONFIG" >&2
   exit 1
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+  echo "[launch_distributed] (dry-run) PYTHONPATH=$REPO_ROOT ${CMD[*]}"
+  exit 0
 fi
 
 echo "[launch_distributed] stage=$STAGE config=$CONFIG accel=$ACCEL_CONFIG"

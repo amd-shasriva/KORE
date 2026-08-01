@@ -97,20 +97,23 @@ def test_midtrain_config_keeps_a_resumable_spare_checkpoint(rel_path):
     assert _settings(rel_path)["save_total_limit"] >= MIN_SAVE_TOTAL_LIMIT, rel_path
 
 
-def test_sft_and_dpo_configs_cannot_carry_save_total_limit():
-    """Documents why ``save_total_limit`` is checked on midtrain configs only.
+def test_every_full_ft_stage_honours_a_resumable_save_total_limit():
+    """``save_total_limit`` is a real, configurable knob on every 14B full-FT stage.
 
-    ``SFTConfig`` / ``DPOConfig`` have no such field and their entrypoints
-    hardcode the Trainer value, so putting the key in these JSONs would not
-    change anything -- it would crash the strict ``Config(**d)`` parse. The
-    contract is therefore enforced where the knob is real.
+    It used to be hardcoded to 1 in ``sft.py`` and ``dpo.py`` while only midtrain
+    read it from config, so those two stages could not express the >= 2 retention
+    the repo's own durability note requires -- and 1 is not crash-safe, because
+    the Trainer rotates the previous checkpoint out around each new save.
     """
     from kore.policy.configs import DPOConfig, SFTConfig
 
     for cls in (SFTConfig, DPOConfig):
-        assert not hasattr(cls(), "save_total_limit")
-    for rel_path in OTHER_TRAINER_CONFIGS:
-        assert "save_total_limit" not in _load(rel_path), rel_path
+        assert cls().save_total_limit >= 2, cls.__name__
+
+    for stage in ("sft", "dpo"):
+        source = (REPO_ROOT / "kore" / "policy" / f"{stage}.py").read_text()
+        assert "save_total_limit=1," not in source, stage
+        assert 'save_total_limit=getattr(config, "save_total_limit", 2)' in source, stage
 
 
 # --------------------------------------------------------------------------- #

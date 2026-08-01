@@ -1116,7 +1116,24 @@ def validate_frozen_split(
     )
     for label, frozen, current in checks:
         if frozen != current:
-            raise ValueError(f"frozen shape manifest {label} digest changed")
+            message = f"frozen shape manifest {label} digest changed"
+            if label == "code identity":
+                # This one is the repository's git HEAD, so ANY commit trips it --
+                # including a docs-only commit that cannot have moved a shape.
+                # Recovery must be deliberate: silently re-deriving would hand the
+                # run a *different* hidden lane and quietly void the held-out
+                # guarantee every downstream certification rests on.
+                message += (
+                    f" (frozen={frozen!r} current={current!r}). This digest is the "
+                    "repository git HEAD, so any commit changes it. The lane itself "
+                    "may well still be valid -- 'policy engine' above covers the "
+                    "shape-derivation code and passed. Recover deliberately, never "
+                    "silently: either re-freeze the lane (accepting that the hidden "
+                    "shapes change, which voids comparisons against the old lane), "
+                    "or pin KORE_CODE_IDENTITY to the value the manifest was frozen "
+                    "with to assert this commit did not move any shape."
+                )
+            raise ValueError(message)
     expected_train = tuple(augment_shapes(
         getattr(task, "shapes", ()) or (),
         task=task,

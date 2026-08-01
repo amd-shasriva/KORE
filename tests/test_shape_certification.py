@@ -461,3 +461,47 @@ def test_index_schema_is_versioned(tmp_path):
     value["content_hash"] = _rehash(value)
     with pytest.raises(ValueError, match="unsupported frozen shape split index"):
         ShapeSplitIndex.from_dict(value)
+
+
+def test_a_commit_invalidates_the_lane_with_an_actionable_message():
+    """The code-identity digest is git HEAD, so ANY commit trips it.
+
+    That strictness is deliberate -- silently re-deriving would hand the run a
+    different hidden lane and void the held-out guarantee. But the abort has to
+    tell an operator how to recover, and it has to distinguish "the shape code
+    moved" from "someone committed a docs change", because the separate
+    ``policy engine`` digest already covers the former.
+    """
+    task = _tasks("softmax_bf16")[0]
+    frozen = freeze_shape_split(task)
+
+    with pytest.raises(ValueError) as excinfo:
+        validate_frozen_split(task, frozen, code_identity="0" * 40)
+    message = str(excinfo.value)
+
+    assert "code identity" in message
+    assert frozen.code_identity in message and "0" * 40 in message
+    # Names both recovery paths, and says the derivation code itself was fine.
+    assert "KORE_CODE_IDENTITY" in message
+    assert "re-freeze" in message
+    assert "policy engine" in message
+
+    # Asserting the commit moved no shape is enough to re-validate.
+    validate_frozen_split(task, frozen, code_identity=frozen.code_identity)
+
+
+def test_editing_any_digest_field_is_caught_by_the_content_seal():
+    """The content hash is the outer seal, so a forged digest never gets read.
+
+    Ordering matters: the per-field digest checks are only meaningful on a
+    manifest that has not been edited, and the content hash is what establishes
+    that. Rewriting ``engine_digest`` to make a stale lane look current is
+    therefore rejected as tampering rather than as a digest mismatch.
+    """
+    task = _tasks("softmax_bf16")[0]
+    frozen = freeze_shape_split(task)
+
+    for field, forged in (("engine_digest", "0" * 64), ("code_identity", "0" * 40)):
+        tampered = replace(frozen, **{field: forged})
+        with pytest.raises(ValueError, match="content hash mismatch"):
+            validate_frozen_split(task, tampered, code_identity=frozen.code_identity)

@@ -1,6 +1,6 @@
 # `kore/tasks` — kernel task registry
 
-Every RL "environment instance" is a **kernel-optimization task**: a Triton kernel to make fast, an fp32 **reference oracle** for correctness, a **production vendor baseline** to beat (AITER / hipBLASLt / framework), a set of evaluation **shapes**, and a driver contract the verifier speaks. Tasks are discovered from `<task_id>/task.yaml` directories. Hand-authored, `gen_*`, `genv_*`, and `genb_*` task assets are all checked in and ship in release artifacts.
+Every RL "environment instance" is a **kernel-optimization task**: a Triton kernel to make fast, an fp32 **reference oracle** for correctness, a declared **comparison baseline** to beat (a production vendor kernel for ~100 tasks, torch for the rest — see [Baselines](#baselines)), a set of evaluation **shapes**, and a driver contract the verifier speaks. Tasks are discovered from `<task_id>/task.yaml` directories. Hand-authored, `gen_*`, `genv_*`, and `genb_*` task assets are all checked in and ship in release artifacts.
 
 `registry.all_tasks()` is the source of truth. Derive the live totals and group
 breakdown directly from the generated registry:
@@ -70,31 +70,55 @@ class Task:
 
 ## Train / held-out split
 
+The sole authority is [`kore/tasks/taxonomy.py`](taxonomy.py). It is deliberately **not**
+environment-overridable, so a manifest means the same thing in every process.
+
 ```python
-TRAIN_ARCH  = "gfx950"                          # primary target: CDNA4 (MI350X / MI355X)
-TRAIN_ARCHS = {"gfx950", "gfx942"}              # arches accepted into train (override: KORE_TRAIN_ARCHS)
-HELDOUT_FAMILIES = ("mla", "paged_attention")
-HELDOUT_TASKS    = {"mla_decode_bf16", "paged_attn_decode_bf16"}
+TRAIN_ARCHITECTURES        = {"gfx950", "gfx942"}          # no env override
+WHOLE_FAMILY_HOLDOUTS      = frozenset({"mla", "paged_attention"})
+NEAR_GENERALIZATION_TASK_IDS = {...}                       # 43 stratified probes
 ```
 
-A task is held out if **any** of these hold (`registry.is_heldout`):
+Live split: **1,289 train / 45 eval** of 1,334 registered tasks — 43 `near_probe` plus the
+2 `whole_family` members. `taxonomy_version = 1.0.0`.
 
-1. its `task_id` is in `HELDOUT_TASKS`, **or**
-2. its `operator_family()` is in `HELDOUT_FAMILIES` (`mla` or `paged_attention`), **or**
-3. it targets a **foreign arch** (a `gpu_target` outside `TRAIN_ARCHS`).
+`split_decision` evaluates six conditions **in precedence order**; the first match wins:
 
-This is the single source of truth used by both datagen (never trains on held-out) and eval (measures zero-shot transfer to the held-out families).
+1. `task_id` is a near-generalization probe → eval, reason `near_probe`
+2. its `provenance_root` is a probe → eval, reason `heldout_lineage`
+3. its product family is in `WHOLE_FAMILY_HOLDOUTS` → eval, reason `whole_family`
+4. `gpu_target` outside `TRAIN_ARCHITECTURES` → eval, reason `foreign_arch`
+5. `dtype` outside `TRAIN_DTYPES` → eval, reason `foreign_dtype`
+6. unclassifiable operation → eval, reason `unclassified_operation`
+
+otherwise train. Order matters: the lineage and reserved-family checks precede arch and dtype, so a
+held-out task cannot be relabelled by editing its arch tag. Unknown identity always resolves to
+eval, never train.
 
 ```mermaid
 flowchart TD
-  T[Task] --> ID{task_id in HELDOUT_TASKS?}
-  ID -->|yes| HO[held-out: eval only]
-  ID -->|no| F{"family in (mla, paged_attention)?"}
+  T[Task] --> P{near-probe id or provenance root?}
+  P -->|yes| HO[held-out: eval only]
+  P -->|no| F{"product family in (mla, paged_attention)?"}
   F -->|yes| HO
-  F -->|no| A{"gpu_target in TRAIN_ARCHS?"}
+  F -->|no| A{"gpu_target in TRAIN_ARCHITECTURES?"}
   A -->|no| HO
-  A -->|yes| TR[train]
+  A -->|yes| D{"dtype in TRAIN_DTYPES?"}
+  D -->|no| HO
+  D -->|yes| C{operation classifiable?}
+  C -->|no| HO
+  C -->|yes| TR[train]
 ```
+
+**The split is content-addressed.** `taxonomy_digest` is a SHA-256 over a canonical payload
+containing every live task's `(operation, dtype, architecture, product_family, analysis_family,
+split, reason, provenance_root)`. Adding, removing, or reclassifying any single task changes the
+digest, and `validate_split_manifest` raises `StaleSplitManifestError` on any drift.
+
+> **Conditions 4–6 are currently unreachable in practice.** All 1,334 tasks are `gfx950` and every
+> live dtype is in `TRAIN_DTYPES`, and the registry raises on an unclassifiable operation before the
+> branch is reached. `provenance_root` likewise defaults to `task_id` for every task, so condition 2
+> is correct-by-vacuity rather than exercised. They are retained as fail-closed guards.
 
 **Core attention is trained, not held out.** Flash-attention prefill / decode / sliding-window / varlen / fp8 all train, so the product model is strong at attention. Only the two *structurally distinct* families are withheld to measure genuine cross-family transfer: **MLA** (DeepSeek latent attention) and **paged-KV decode** (a different KV-cache mechanism).
 
@@ -104,7 +128,12 @@ flowchart TD
 
 **Why gfx942 stays in train.** gfx942/CDNA3 shares the hardware lineage with the gfx950/CDNA4 target and runs correctly on-node, so previous-gen-tagged tasks and any in-flight gfx942 datagen keep training instead of being retroactively held out when the primary arch advanced to gfx950. A truly foreign arch (gfx1100, NVIDIA) is still held out.
 
-> **Two family taxonomies exist by design.** `registry.operator_family` is the coarse split authority (the `mla` / `paged_attention` / `attention` / … buckets above). `kore.eval.generalization.family_of` is a richer 8-family classifier (attention, moe, gemm, norm, positional, quant, reduction, activation) used for offline leave-one-family-out analysis. The two are distinct; do not conflate them.
+> **One authority, two levels.** `taxonomy.py` defines 18 `product_family` leaves (the split
+> authority) which roll up to 14 `analysis_family` parents (reporting and leave-one-family-out),
+> plus a third `mutation_family` axis for `kore/data/mutate.py`. `kore.eval.generalization.classify`
+> now *delegates* to the same authority rather than maintaining its own classifier, so the two can
+> no longer drift. The only remaining independent classifier is a coarse 3-bucket substring match in
+> `scripts/spur_partition.py` used solely for cost biasing; it is non-authoritative.
 
 ---
 
@@ -146,9 +175,84 @@ Generation is idempotent and its current outputs are checked in. Registry discov
 
 ## Baselines
 
-Baselines are **production vendor kernels**, not torch-eager. `aiter_ref.py` / `aiter_ref_attn.py` wrap AITER (`aiter_rms_norm`, `aiter_fused_add_rms_norm`, `flash_attn_func`, `fused_moe`, `paged_attention_rocm`, …), hipBLASLt for GEMM, and torch only where AITER has no standalone op — always labeled via a `KORE_BASELINE_IMPL:<impl>` stderr sentinel, so "correct-but-slow vs. production" is never mistaken for "beats torch".
+**There are two baseline lanes, and a speedup means different things in each.** Measured across all
+1,334 `task.yaml` files: **1,259 declare a `torch_*` baseline**, 64 declare AITER, 3 declare
+hipBLASLt, and 8 declare something else. At runtime `_genops._vendor_baseline` additionally upgrades
+33 `gemm_fusion` tasks to hipBLASLt (via `torch.matmul` / `torch._scaled_mm`) and 2 gated activations
+to AITER when `KORE_USE_VENDOR_BASELINE=1` (the default).
+
+| Lane | Tasks | Baseline | What a >1× result means |
+| --- | ---: | --- | --- |
+| Vendor | ~100 | AITER / hipBLASLt CK kernels | beats the state of practice — citable |
+| Breadth | ~1,234 | torch (`torch.compile`-fused if `KORE_COMPILE_BASELINE=1`, else eager) | beats PyTorch — not a vendor claim |
+
+`aiter_ref.py` / `aiter_ref_attn.py` wrap the AITER ops (`aiter_rms_norm`, `flash_attn_func`,
+`fused_moe`, `paged_attention_rocm`, …) and hipBLASLt for GEMM.
+
+> **Every AITER wrapper silently degrades to torch on import or signature failure**, emitting a
+> one-time `KORE_BASELINE_IMPL:<impl>` stderr sentinel. That sentinel is consumed only by the offline
+> analysis harness (`kore/analysis/p0_sol.py`) — **not** by the env or reward path. On a node where
+> the AITER JIT build fails, a task declaring a vendor baseline is therefore graded against torch.
+> `WinRecord.baseline_type` is the field that records which baseline actually produced a stored win;
+> read it before pooling numbers across lanes.
+
+> **~94 sequence/SSM tasks declare a baseline that is an eager Python `for t in range(L)` recurrence**
+> over 2,048–8,192 timesteps. A correct fused Triton kernel beats that by orders of magnitude. Those
+> ratios are real as measured and meaningless as claims.
 
 > fp8 e4m3 is arch-selected by `aiter_ref.FP8_DTYPE`: OCP `e4m3fn` on gfx950/CDNA4 (MI350X/MI355X — the native format and this node's default), FNUZ `e4m3fnuz` on gfx942/CDNA3. Override with `KORE_FP8_ENCODING=ocp|fnuz`.
+
+---
+
+## Hardware verification status
+
+Until 2026-08-01 no `genb_*` task had ever had a kernel compiled against it on the
+target architecture — the 1,052 generated breadth tasks were admitted by a CPU-side
+AST and anti-hack scan only. `scripts/verify_tasks_gpu.py` now executes every task's
+committed seed through its own `driver.py` on real hardware and records a per-task
+verdict in `data/gfx950_task_verification.json`.
+
+First full sweep (8× MI350X / gfx950, six devices, 534 s, reproduced exactly across
+two independent runs):
+
+| Verdict | Tasks | Share |
+| --- | ---: | ---: |
+| `PASS` — seed correct at its declared SNR gate | 937 | 89.1% |
+| `FAIL_CORRECTNESS` | 111 | 10.6% |
+| `INFRA` — resource fault, **not** a task defect | 4 | 0.4% |
+
+The 111 correctness failures are not uniform, and the split matters:
+
+- **73 are near-misses in the 25–30 dB band** against a 30 dB gate. For bf16/fp16 this
+  looks like threshold calibration rather than wrong math, but it is unproven either
+  way — do not assume benign.
+- **27 report −999 dB** (zero signal: structurally broken), concentrated in
+  sliding-window attention (`genb_attn2_window*`).
+- **11 sit between 0 and 25 dB** and are genuinely incorrect.
+
+By engine: moe 26, fused 13, quant 12, ssm 11, attention 18 across both engines,
+reduction 10, training 9, norm 8, sampling 8.
+
+The 4 `INFRA` cases are all 256-expert MoE at `D=4096, I=14336`. Their expert weights
+are ~60 GB per tensor in bf16, and `_randn` stages an fp32 buffer (plus a second for
+`* scale`) before downcasting — ~240 GB transient on a 252 GiB card. This is a
+shape-authoring defect, not a node fault; `_fused_moe_fp32` was fixed to cast one
+expert at a time (bit-identical, 168 GB → 84 GB) but the input-generation staging
+remains. Chunking `_randn` would change the seeded RNG stream for every task in the
+suite, so it needs deliberate treatment.
+
+**Treat a task's verdict as evidence, not as eligibility.** Nothing yet gates training
+on this artifact; the registry still admits all 1,289 train tasks. Wiring the verdict
+into eligibility is tracked work.
+
+Reproduce:
+
+```bash
+python scripts/verify_tasks_gpu.py --out report.json --gpus 0,1,2,3,4,5 --prefix genb_
+```
+
+It exits non-zero on task defects only — an infra fault cannot launder a broken corpus
+into a green verification.
 
 ---
 

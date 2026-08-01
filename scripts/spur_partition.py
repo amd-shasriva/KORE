@@ -315,17 +315,18 @@ def main() -> int:
         help="datagen: deep_/base_ lists (default). reverify/evolve: single "
              "shard_NNN.txt list per node for the frontier stages.",
     )
-    # Comma-separated list of task-id prefixes to include. The default now
-    # includes both generated (genb_) tasks AND the hand-authored frontier
-    # compute-bound families (flash_attn_, gemm, moe, fused_) that carry no
-    # genb_ prefix (flash_attn_, gemm, moe, fused_), plus the genv_ vendor-
-    # baseline and gen_ epilogue-fusion families, so vendor-baseline compute-
-    # bound tasks are reachable in the manifest.
-    # Use an empty prefix (e.g. --prefix '') to include every train task.
+    # Selection defaults to every registered train task (empty prefix). The
+    # taxonomy split in kore/tasks/taxonomy.py is already the authority for what
+    # may be trained on, so a prefix allowlist layered on top can only silently
+    # drop work. An earlier eight-family default did exactly that: it reached
+    # 1278 of 1289 train tasks and excluded eleven hand-authored vendor-lane
+    # tasks (rmsnorm_aiter, layernorm_bf16, softmax_bf16, rope_bf16, ...) that
+    # carry no matching prefix -- the highest-value tasks in the registry.
+    # Narrow deliberately with --prefix or --task-file when that is the intent.
     ap.add_argument(
         "--prefix",
-        default="genb_,genv_,gen_,flash_attn_,gemm,moe_,fused_moe,fused_",
-        help="comma-separated task-id prefixes to include (empty string = all)",
+        default="",
+        help="comma-separated task-id prefixes to include (empty string = all train tasks)",
     )
     # Optional explicit allowlist: one task id per line. When set it takes
     # precedence over --prefix, giving fully deterministic selection.

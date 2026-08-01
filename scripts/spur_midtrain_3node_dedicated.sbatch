@@ -20,7 +20,9 @@ set -euo pipefail
 
 REPO="${KORE_REPO:-/home/shasriva/Kore-RL/KORE}"
 PY="${KORE_PY:-/home/shasriva/kore-venv/bin/python}"
-CFG="${1:-$REPO/data/b05factory/launch/midtrain_64gpu.json}"
+# Pass an explicit config as $1 to override, e.g.
+# data/b05factory/launch/midtrain_frontier.json for the 3-epoch frontier schedule.
+CFG="${1:-$REPO/data/b05factory/launch/midtrain_24gpu.json}"
 NNODES="${SLURM_NNODES:?not in an sbatch alloc}"
 NPROC_GLOBAL=$(( NNODES * 8 ))
 # First host in the (uncompressed, comma-sep) SPUR nodelist is the rendezvous master.

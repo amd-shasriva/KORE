@@ -12,7 +12,10 @@ emitted code never implemented. These tests assert:
   * turns that "describe but don't implement" their claim are dropped;
   * a real regression is optionally kept as an explicit "tried X, slower, reverted"
     lesson without changing the final kernel;
-  * a search that never improves yields no win.
+  * a search that never improves yields no win;
+  * an admitted win records WHICH baseline it was measured against, WHAT its stored
+    speedup is relative to (the footer is trajectory-relative even though admission
+    is baseline-relative), and whether that ratio is physically credible.
 
 No GPU, no teacher model, no torch/triton. Pure reconstruction + a scripted stub.
 """
@@ -21,12 +24,21 @@ from __future__ import annotations
 
 import re
 
+from kore.config import CONFIG
 from kore.data.gen_wins import (
     build_convergent_trajectory,
     generate_wins,
     WinTurn,
 )
-from kore.data.schemas import WinRecord
+from kore.data.schemas import (
+    BASELINE_IDENTITY_DECLARED,
+    BASELINE_KIND_TORCH,
+    SPEEDUP_BASIS_TRAJECTORY_INITIAL,
+    WinRecord,
+    baseline_relative_speedup,
+    credible_speedup_max,
+    is_credible_win,
+)
 from kore.policy.format import format_assistant_turn
 from kore.reward.reward import Observation
 
@@ -254,6 +266,9 @@ class _Task:
     operation = "row_sum"
     dtype = "bf16"
     gpu_target = "gfx942"
+    # A row reduction has no vendor kernel, so its production bar is plain torch --
+    # exactly the distinction a stored win has to record.
+    comparison_baseline = "torch_row_sum"
 
     def __init__(self, seed_wall=100):
         self.seed_source = _kernel(seed_wall, "seed")
@@ -306,3 +321,48 @@ def test_generate_wins_returns_empty_when_no_speedup():
     teacher = _SeqTeacher([_resp(120, "a"), _resp(110, "b")])
     recs = generate_wins(task, teacher, _MarkerEnv(), gens=2)
     assert recs == []
+
+
+# --------------------------------------------------------------------------- #
+# 6. Provenance of the stored number: which baseline, which scale, is it credible.
+# --------------------------------------------------------------------------- #
+def test_generate_wins_records_which_baseline_it_was_measured_against():
+    task = _Task(seed_wall=100)
+    teacher = _SeqTeacher([_resp(70, "a"), _resp(50, "c")])
+    w = generate_wins(task, teacher, _MarkerEnv(), gens=2)[0]
+    # WHICH baseline: the declared bar, reduced to the only distinction a claim can
+    # rest on (a torch bar is not a vendor kernel), plus how that was established.
+    assert w.baseline_type == "torch_row_sum"
+    assert w.baseline_kind == BASELINE_KIND_TORCH
+    assert w.baseline_identity_source == BASELINE_IDENTITY_DECLARED
+    # The absolute anchor + the baseline-relative verdict the admission gate used.
+    assert w.baseline_wall_us == 1000.0        # _MarkerEnv baselines at 1.0 ms
+    assert w.timing_classification == "faster"
+    assert w.admit_cv_threshold_pct is not None
+
+
+def test_generate_wins_declares_the_speedup_scale_and_credibility():
+    task = _Task(seed_wall=100)
+    teacher = _SeqTeacher([_resp(70, "a"), _resp(50, "c")])
+    w = generate_wins(task, teacher, _MarkerEnv(), gens=2)[0]
+    # Admission is baseline-relative but the stored footer is initial/final, so the
+    # record says so explicitly and is never pooled as a production-relative number.
+    assert w.speedup == 2.0
+    assert w.speedup_basis == SPEEDUP_BASIS_TRAJECTORY_INITIAL
+    assert baseline_relative_speedup(w) is None
+    assert w.speedup_exceeds_credible is False
+    assert w.credible_speedup_max == credible_speedup_max(CONFIG)
+
+
+def test_implausible_speedup_is_flagged_but_the_win_is_still_recorded():
+    # A 900 ms seed improved to 50 us is a genuine 18,000x AS MEASURED (this is what
+    # a Python-loop reference produces). Record it truthfully, flag it, and let
+    # curation exclude it -- deleting it would hide a real measurement.
+    task = _Task(seed_wall=900000)
+    teacher = _SeqTeacher([_resp(50, "a")])
+    recs = generate_wins(task, teacher, _MarkerEnv(), gens=1)
+    assert len(recs) == 1
+    w = recs[0]
+    assert w.speedup == 18000.0                    # value untouched
+    assert w.speedup_exceeds_credible is True      # ...but flagged
+    assert is_credible_win(w) is False

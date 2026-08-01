@@ -2,10 +2,30 @@
 
 Figures:
   fig1_roofline_eta.png   - per-operator SOL attainment (eta), colored by roofline bound
-  fig2_eta_vs_speedup.png - check (a): eta vs speedup-vs-vendor (Spearman rho)
-  fig3_residual_fit.png   - check (b): measured residual vs counter-predicted (R^2)
-  fig4_monotone_valley.png- check (c): dominant residual term along the improvement path
+  fig2_eta_vs_speedup.png - check (a): eta vs speedup, with the preregistered
+                            increment over the T_candidate-only baseline
+  fig3_residual_fit.png   - check (b): the PREREGISTERED NORMALIZED residual model
+                            (gap = (T_cand - T_min)/T_cand ~ stall + occupancy
+                            deficit), headlined by its held-out CV R^2
+  fig4_monotone_valley.png- check (c): dominant residual along the preregistered
+                            collection order (never re-sorted by eta)
   fig5_correct_but_slow.png - the correct-but-slow wall: eta and speedup per op
+
+These are publication artifacts, so each figure reads the keys the current
+:mod:`kore.analysis.p0_sol` actually emits and presents that check's
+PREREGISTERED primary statistic:
+
+* check (a)'s CI lives at ``rho_ci95_task_bootstrap`` (not ``ci95``), and rho
+  alone is not the claim: the preregistered quantity is the INCREMENT over a
+  ``T_candidate``-only predictor, so the figure reports both.
+* check (b)'s primary is ``normalized_primary`` - a held-out, task-cluster
+  cross-validated R^2 on a normalized target, with its own bootstrap CI. The raw
+  in-sample residual OLS is a shared-denominator artifact (a ``T_candidate``-only
+  predictor beats it and the denominator-preserving permutation null sits above
+  it), so it appears only as a labelled, self-refuting diagnostic.
+* check (c) is evaluated along the preregistered collection order. Sorting a
+  trajectory by eta would define "improvement" using the outcome under test,
+  which is precisely what ``p0_sol.check_c`` refuses to do.
 
 Usage: python -m kore.analysis.plots --report runs/p0_study.json --out figures/
 """
@@ -29,6 +49,70 @@ GREY = "#6B7280"
 
 def _load(path: str) -> dict:
     return json.loads(Path(path).read_text())
+
+
+def _num(value):
+    """The value when it is a finite real number, else ``None``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if np.isfinite(value) else None
+
+
+def _fmt(value, spec: str = ".3f") -> str:
+    number = _num(value)
+    return format(number, spec) if number is not None else "n/a"
+
+
+def _interval(bounds, spec: str = ".3f") -> str:
+    """Render a stored ``[lo, hi]`` CI, or say explicitly that there is none."""
+    if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+        return "  95%CI unavailable"
+    lo, hi = _num(bounds[0]), _num(bounds[1])
+    if lo is None or hi is None:
+        return "  95%CI unavailable"
+    return f"  95%CI[{format(lo, spec)},{format(hi, spec)}]"
+
+
+def _verdict(check: dict) -> str:
+    return str(check.get("verdict") or "UNREPORTED")
+
+
+def _hardware(rep: dict) -> str:
+    model = rep.get("model") or {}
+    sku = model.get("sku") or (rep.get("peaks") or {}).get("sku") or "unidentified SKU"
+    arch = model.get("architecture") or rep.get("arch") or "unknown arch"
+    return f"{arch} ({sku})"
+
+
+def _counter_rows(rep: dict) -> list[dict]:
+    """Measures admissible to check (b), mirroring ``p0_sol._counter_rows``.
+
+    Same validity filter as the statistic (fractions in range, positive candidate
+    time, non-negative residual, no super-SOL point), so the figure's point cloud
+    is exactly the sample the reported R^2 was computed on.
+    """
+    rows: list[dict] = []
+    for m in rep.get("measures") or []:
+        stall = _num(m.get("stall_frac"))
+        occupancy = _num(m.get("occupancy"))
+        residual = _num(m.get("residual_ms"))
+        candidate = _num(m.get("cand_ms"))
+        t_min = _num(m.get("t_min_ms"))
+        if None in (stall, occupancy, residual, candidate, t_min):
+            continue
+        if not (0.0 <= stall <= 1.0 and 0.0 <= occupancy <= 1.0 and candidate > 0.0):
+            continue
+        if residual < -1e-12 or t_min > candidate * (1.0 + 1e-9):
+            continue
+        rows.append({
+            "task_id": m["task_id"],
+            "stall": stall,
+            "occ_deficit": 1.0 - occupancy,
+            "cand_ms": candidate,
+            "residual_ms": max(residual, 0.0),
+            "gap": max(0.0, min(1.0, residual / candidate)),
+        })
+    return rows
 
 
 def _seed_points(rep: dict) -> list:
@@ -60,7 +144,7 @@ def fig_roofline_eta(rep: dict, out: Path) -> None:
     ax.set_yticklabels(names, fontsize=8)
     ax.invert_yaxis()
     ax.set_xlabel("SOL attainment  η = T_min / T_measured   (%)")
-    ax.set_title("Seed-kernel SOL attainment per operator on gfx950 (MI350X)")
+    ax.set_title(f"Seed-kernel SOL attainment per operator on {_hardware(rep)}")
     from matplotlib.patches import Patch
     ax.legend(handles=[Patch(color=ACCENT, label="compute-bound"),
                        Patch(color=BLUE, label="memory-bound")], loc="lower right")
@@ -71,6 +155,7 @@ def fig_roofline_eta(rep: dict, out: Path) -> None:
 
 
 def fig_eta_vs_speedup(rep: dict, out: Path) -> None:
+    check = rep.get("checks", {}).get("a", {})
     pts = [(m["eta"] * 100, m["speedup"], m["task_id"]) for m in rep["measures"]
            if m.get("eta") and m.get("speedup")]
     fig, ax = plt.subplots(figsize=(7.5, 6))
@@ -85,14 +170,26 @@ def fig_eta_vs_speedup(rep: dict, out: Path) -> None:
             seen_lbl.add(n)
             ax.annotate(n, (x, y), fontsize=7, xytext=(4, 4), textcoords="offset points")
         ax.axhline(1.0, ls="--", color=GREY, label="parity with vendor (speedup=1)")
-    rho = rep["checks"]["a"].get("rho")
-    n = rep["checks"]["a"].get("n")
-    ci = rep["checks"]["a"].get("ci95")
-    ci_s = f"  95%CI[{ci[0]:.2f},{ci[1]:.2f}]" if ci else ""
+    rho = check.get("rho")
+    n = check.get("n")
+    # Current key. ``ci95`` is only read so a legacy artifact still annotates.
+    ci = check.get("rho_ci95_task_bootstrap") or check.get("ci95")
     ax.set_xlabel("SOL attainment  η  (%)")
     ax.set_ylabel("speedup vs production baseline  (vendor / candidate)")
-    ax.set_title(f"Check (a): does η predict speedup?   Spearman ρ = {rho:.3f} (n={n}){ci_s}"
-                 if rho is not None else "Check (a): η vs speedup")
+    if rho is None:
+        ax.set_title("Check (a): η vs speedup")
+    else:
+        # The preregistered statistic is the INCREMENT over a T_candidate-only
+        # predictor: rho alone cannot separate "η predicts speedup" from "both
+        # carry the candidate runtime in their denominator".
+        ax.set_title(
+            f"Check (a) [{_verdict(check)}]: does η predict speedup beyond T_candidate?\n"
+            f"Spearman ρ = {_fmt(rho)} (n={n}){_interval(ci)}\n"
+            f"T_candidate-only ρ = {_fmt(check.get('tcand_only_rho'))}, "
+            f"increment = {_fmt(check.get('increment_over_tcand'), '+.3f')}"
+            f"{_interval(check.get('increment_ci95_task_bootstrap'))}",
+            fontsize=10,
+        )
     ax.grid(alpha=0.3)
     ax.legend(loc="best")
     fig.tight_layout()
@@ -101,60 +198,134 @@ def fig_eta_vs_speedup(rep: dict, out: Path) -> None:
 
 
 def fig_residual_fit(rep: dict, out: Path) -> None:
-    rows = [m for m in rep["measures"] if m.get("stall_frac") is not None
-            and m.get("occupancy") is not None and m.get("residual_ms") is not None and m.get("cand_ms")]
-    fig, ax = plt.subplots(figsize=(7.5, 6))
+    """Check (b) as preregistered: the NORMALIZED, held-out counter model.
+
+    Plots the normalized target ``gap = (T_candidate - T_min)/T_candidate`` against
+    the preregistered ``[stall, occupancy-deficit]`` prediction and headlines the
+    held-out task-cluster CV R² with its bootstrap CI. The raw in-sample residual
+    OLS this figure used to report is a shared-denominator artifact, so it appears
+    only as a labelled diagnostic beside the ``T_candidate``-only score that beats
+    it and the permutation null that sits above it.
+    """
+    check = rep.get("checks", {}).get("b", {})
+    primary = check.get("normalized_primary") or {}
+    raw = check.get("raw_in_sample") or {}
+    rows = _counter_rows(rep)
+
+    fig, ax = plt.subplots(figsize=(7.8, 6.4))
     if len(rows) >= 3:
-        X = np.array([[m["stall_frac"] * m["cand_ms"], (1 - m["occupancy"]) * m["cand_ms"], 1.0]
-                      for m in rows])
-        y = np.array([m["residual_ms"] for m in rows])
-        coef, *_ = np.linalg.lstsq(X, y, rcond=None)
-        pred = X @ coef
-        ss_res = float(((y - pred) ** 2).sum())
-        ss_tot = float(((y - y.mean()) ** 2).sum())
-        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else float("nan")
-        ax.scatter(pred, y, s=60, color=GREEN, zorder=3, edgecolor="white")
-        lim = [0, max(float(y.max()), float(pred.max())) * 1.05]
+        design = np.array([[r["stall"], r["occ_deficit"]] for r in rows])
+        y = np.array([r["gap"] for r in rows])
+        coefficients = primary.get("coefficients")
+        if isinstance(coefficients, (list, tuple)) and len(coefficients) == 3:
+            # Stored preregistered fit: feature weights then intercept (p0_sol._predict).
+            weights = np.array([float(c) for c in coefficients[:-1]])
+            pred = design @ weights + float(coefficients[-1])
+            fit_label = "preregistered stored coefficients"
+        else:
+            augmented = np.column_stack([design, np.ones(len(rows))])
+            coef, *_ = np.linalg.lstsq(augmented, y, rcond=None)
+            pred = augmented @ coef
+            fit_label = "refit on the normalized target"
+        ax.scatter(pred, y, s=60, color=GREEN, zorder=3, edgecolor="white",
+                   label=f"measured vs predicted ({fit_label})")
+        low = float(min(y.min(), pred.min()))
+        high = float(max(y.max(), pred.max()))
+        pad = 0.05 * max(high - low, 1e-9)
+        lim = [low - pad, high + pad]
         ax.plot(lim, lim, ls="--", color=GREY, label="y = x (perfect)")
         ax.set_xlim(lim); ax.set_ylim(lim)
-        ci = rep["checks"]["b"].get("ci95")
-        ci_s = f"  95%CI[{ci[0]:.3f},{ci[1]:.3f}]" if ci else ""
-        ax.set_title(f"Check (b): residual decomposes into stall + occupancy-deficit\n"
-                     f"measured vs counter-predicted residual   R² = {r2:.4f} (n={len(rows)}){ci_s}")
+        ax.set_title(
+            f"Check (b) [{_verdict(check)}]: normalized residual gap from PMC terms\n"
+            f"PRIMARY held-out task-cluster CV R² = "
+            f"{_fmt(primary.get('task_cluster_cv_r2'), '.4f')} (n={len(rows)})"
+            f"{_interval(primary.get('ci95_task_bootstrap'))}\n"
+            f"T_candidate-only CV R² = {_fmt(primary.get('tcand_only_cv_r2'), '.4f')}, "
+            f"intercept-only = {_fmt(primary.get('intercept_only_cv_r2'), '.4f')}",
+            fontsize=10,
+        )
+        # The discredited statistic, drawn only so the figure refutes it.
+        null = raw.get("denominator_preserving_null") or {}
+        ax.text(
+            0.02, 0.98,
+            "non-primary diagnostic (NOT the result):\n"
+            f"raw in-sample residual OLS R² = {_fmt(raw.get('named_r2'), '.4f')}\n"
+            f"  T_candidate-only alone scores {_fmt(raw.get('tcand_only_r2'), '.4f')}\n"
+            f"  denominator-preserving null median = "
+            f"{_fmt(null.get('null_median'), '.4f')} (p={_fmt(null.get('p_value'), '.3f')})\n"
+            "  -> shared-denominator artifact, not counter evidence",
+            transform=ax.transAxes, va="top", ha="left", fontsize=7.5, color=GREY,
+            bbox=dict(boxstyle="round", facecolor="white", edgecolor=GREY, alpha=0.85),
+        )
     else:
         ax.set_title("Check (b): insufficient PMC data")
-    ax.set_xlabel("predicted residual time from PMC terms  (ms)")
-    ax.set_ylabel("measured residual  T_measured − T_min  (ms)")
+    ax.set_xlabel("predicted normalized gap from PMC terms  (stall, occupancy deficit)")
+    ax.set_ylabel("measured normalized gap  (T_measured − T_min) / T_measured")
     ax.grid(alpha=0.3)
-    ax.legend(loc="best")
+    ax.legend(loc="lower right", fontsize=8)
     fig.tight_layout()
     fig.savefig(out / "fig3_residual_fit.png", dpi=150)
     plt.close(fig)
 
 
+def _dominant(measure: dict) -> float:
+    """Dominant named residual component: max(stall fraction, occupancy deficit)."""
+    stall = _num(measure.get("stall_frac")) or 0.0
+    occupancy = _num(measure.get("occupancy"))
+    return max(stall, 1.0 - (occupancy if occupancy is not None else 1.0))
+
+
+def _trajectories(rep: dict) -> dict[str, list[dict]]:
+    """Per (task, shape) trajectories in the report's PREREGISTERED order.
+
+    Mirrors ``p0_sol.reanalyze_report``: measures are grouped by task and shape and
+    kept in collection order. Re-sorting by eta - which this figure used to do -
+    would define the improvement direction using the outcome under test, which is
+    exactly why ``p0_sol.check_c`` refuses to sort.
+    """
+    grouped: dict[str, list[dict]] = {}
+    for m in rep.get("measures") or []:
+        if not (m.get("correct") and _num(m.get("cand_ms")) and m.get("stall_frac") is not None):
+            continue
+        shape = m.get("shape_id")
+        if not shape and "@" in str(m.get("label", "")):
+            shape = str(m["label"]).rsplit("@", 1)[-1]
+        grouped.setdefault(f"{m['task_id']}@{shape or 'unknown'}", []).append(m)
+    return {key: values for key, values in grouped.items() if len(values) >= 2}
+
+
 def fig_monotone_valley(rep: dict, out: Path) -> None:
-    # group measures by task, order by eta ascending, plot dominant residual term
-    by_task: dict[str, list] = {}
-    for m in rep["measures"]:
-        if m.get("correct") and m.get("eta") and m.get("stall_frac") is not None:
-            by_task.setdefault(m["task_id"], []).append(m)
-    trajs = {t: sorted(ms, key=lambda m: m["eta"]) for t, ms in by_task.items() if len(ms) >= 2}
+    check = rep.get("checks", {}).get("c", {})
+    trajs = _trajectories(rep)
+    flat_tol = 0.10  # p0_sol.check_c: a pair is "in the valley" when |d wall|/wall < 10%
     fig, ax = plt.subplots(figsize=(8.5, 6))
-
-    def dom(m):
-        return max(m.get("stall_frac") or 0.0, 1 - (m.get("occupancy") if m.get("occupancy") is not None else 1.0))
-
-    if trajs:
-        for t, ms in list(trajs.items())[:8]:
-            xs = [m["eta"] * 100 for m in ms]
-            ys = [dom(m) * 100 for m in ms]
-            ax.plot(xs, ys, marker="o", label=t, alpha=0.8)
-    ax.set_xlabel("SOL attainment η (%)  - improvement direction →")
+    valley_x: list[int] = []
+    valley_y: list[float] = []
+    for key, ms in list(trajs.items())[:8]:
+        xs = list(range(1, len(ms) + 1))
+        ys = [_dominant(m) * 100 for m in ms]
+        ax.plot(xs, ys, marker="o", label=key, alpha=0.8)
+        for index, (first, second) in enumerate(zip(ms, ms[1:])):
+            before, after = _num(first.get("cand_ms")), _num(second.get("cand_ms"))
+            if not before or after is None:
+                continue
+            if abs((after - before) / before) < flat_tol:
+                valley_x.extend([xs[index], xs[index + 1]])
+                valley_y.extend([ys[index], ys[index + 1]])
+    if valley_x:
+        ax.scatter(valley_x, valley_y, s=140, facecolors="none", edgecolors=ACCENT,
+                   linewidths=1.4, zorder=4,
+                   label=f"flat-wall pair endpoints (|Δwall|/wall < {flat_tol:.0%})")
+    ax.set_xlabel("measurement index along the preregistered trajectory "
+                  "(collection order; NOT sorted by η)")
     ax.set_ylabel("dominant residual term  max(stall, occ-deficit)  (%)")
-    frac = rep["checks"]["c"].get("frac")
-    pairs = rep["checks"]["c"].get("in_valley_pairs")
-    ax.set_title(f"Check (c): dominant residual falls as η rises\n"
-                 f"monotone-in-valley fraction = {frac} (pairs={pairs})")
+    ax.set_title(
+        f"Check (c) [{_verdict(check)}]: does the dominant residual fall across a "
+        f"flat-wall step?\nmonotone-in-valley fraction = {_fmt(check.get('frac'))} "
+        f"(pairs={check.get('in_valley_pairs')}, tasks={check.get('tasks')})"
+        f"{_interval(check.get('ci95_task_bootstrap'))}",
+        fontsize=10,
+    )
     ax.grid(alpha=0.3)
     if trajs:
         ax.legend(fontsize=7, loc="best", ncol=2)

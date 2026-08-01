@@ -38,6 +38,7 @@ import re
 import resource
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -75,12 +76,19 @@ _LOG = get_logger("env")
 # OPTIONAL sandbox/isolation backend.
 #
 # The fail-closed broker/isolation execution boundary lives in ``kore.sandbox``.
-# That package is NOT present in the default deployment (the broker backend does
-# not exist yet), so importing it eagerly at module import would break EVERY
-# consumer of ``kore_env`` (all training). We therefore import it LAZILY and
-# treat its absence as "sandbox unavailable". Combined with the default-OFF gate
-# in :class:`KoreEnv`, this guarantees that when no broker is configured the
-# verifier behaves EXACTLY as the default subprocess + paired-timing path.
+# That package IS present in this deployment, and ``kore.config`` already imports
+# ``kore.sandbox.config`` at module top level, so ``_SANDBOX_AVAILABLE`` is in
+# practice always True here. Consequences worth stating plainly:
+#
+# * every :class:`KoreEnv` constructs a ``TrustedSubprocessController`` (the
+#   in-process, broker-free controller) plus its policy;
+# * the EXECUTION gate (``self._sandbox_enabled``) is still default OFF, so that
+#   controller is never actually invoked - ``_exec`` runs the plain subprocess
+#   path and none of the sandbox policy checks apply.
+#
+# The guarded import is kept because it is the only thing that keeps this module
+# importable in a stripped deployment (absence => "sandbox unavailable" and the
+# gate can never turn on), not because the package is expected to be missing.
 # --------------------------------------------------------------------------- #
 _SANDBOX_AVAILABLE = False
 try:  # pragma: no cover - exercised only where kore.sandbox is deployed
@@ -144,6 +152,42 @@ def _ev(level: str, name: str, **fields) -> None:
 
 def _sha12(source: str) -> str:
     return hashlib.sha256(source.encode("utf-8", "ignore")).hexdigest()[:12]
+
+
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_private_lockfile(path: Path) -> Optional[int]:
+    """Open/create an owned, private, non-symlink lockfile; ``None`` if unsafe.
+
+    The timing lockfile lives at a predictable name in a world-writable shared
+    tmpdir on a multi-user cluster, so it gets the same discipline as
+    :class:`kore.ops.runtime.SecureFileLock`: ``O_NOFOLLOW`` refuses a symlink
+    planted at the path, ``O_CLOEXEC`` keeps the descriptor out of the candidate
+    subprocess, ``fchmod`` makes it private, and the post-open ``fstat`` on the
+    *descriptor we hold* proves it is a regular file owned by us (so a foreign uid
+    cannot redirect our writes or hold our timing phase hostage).
+
+    Deliberately inlined rather than importing ``kore.ops``: ``SecureFileLock`` is
+    fail-CLOSED and raises :class:`~kore.ops.runtime.SecurityError`, while this lock
+    is only a measurement-quality optimization and must degrade to unlocked timing
+    instead of destroying an otherwise valid evaluation.
+    """
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | _NOFOLLOW | _CLOEXEC, 0o600)
+    except OSError:
+        return None
+    try:
+        os.fchmod(fd, 0o600)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise OSError(f"timing lockfile is not an owned regular file: {path}")
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
 
 _SNR = re.compile(r"SNR:\s*([-\d.eE]+)")
 _ALLCLOSE = re.compile(r"allclose:\s*(True|False)", re.IGNORECASE)
@@ -242,6 +286,39 @@ def _parse_timing_pairs(block: str, expected_count: int) -> tuple[list[dict], Op
     if abs(orders.count("AB") - orders.count("BA")) > 1:
         return [], "pair order is not balanced AB/BA"
     return pairs, None
+
+
+def _cold_cache_timing(env: Mapping[str, Any], caps: Mapping[str, Any]) -> bool:
+    """Whether the timed subprocess really flushed L2 between timed iterations.
+
+    Two independent facts have to hold, and both are known here: the driver we timed
+    with advertised the KORE timing protocol (its ``_time_fn``/``_time_fn_value``
+    helpers are what own the L2 flush), and ``KORE_BENCH_COLD`` was not disabled in
+    the exact environment mapping we handed that subprocess - which is not always
+    ``os.environ``, because the sandbox path rebuilds the child environment from an
+    allowlist. The default-ON reading mirrors the driver's own.
+    """
+    try:
+        protocol = int(caps.get("protocol") or 0)
+    except (TypeError, ValueError):
+        return False
+    if protocol < DRIVER_CAPABILITY_PROTOCOL:
+        return False
+    return str(env.get("KORE_BENCH_COLD", "1")) != "0"
+
+
+def _noise_demoted_timing(obs: Observation) -> bool:
+    """True for a correct observation whose timing was demoted by measurement noise.
+
+    ``timing_pair_count`` is set only by the paired publication path, so a
+    ``screening`` grade carrying one can only have come from the noise demotion in
+    :meth:`KoreEnv._run` (operator-forced screening reports protocol 0 and no pair
+    count). That verdict is a property of the run's noise rather than of the
+    ``(task, source, contract)`` identity, so it must never be replayed: a later
+    quiet measurement of the same kernel deserves its speed credit.
+    """
+    return (getattr(obs, "timing_grade", None) == "screening"
+            and getattr(obs, "timing_pair_count", None) is not None)
 
 
 def _timing_completeness_error(expected_names, candidate, baseline) -> Optional[str]:
@@ -465,8 +542,10 @@ class KoreEnv:
             self._active_source, self._active_task = previous_source, previous_task
             shutil.rmtree(workdir, ignore_errors=True)
 
-        # Only cache DETERMINISTIC terminal verdicts - never transient infra errors.
+        # Only cache DETERMINISTIC terminal verdicts - never transient infra errors,
+        # and never a timing verdict that only this run's measurement noise produced.
         cacheable = (obs.compiled or obs.error_text) and not obs.infra_error
+        cacheable = cacheable and not _noise_demoted_timing(obs)
         cacheable = cacheable and observation_satisfies_contract(obs, contract)
         if (self.use_replay and self._cache_obj is not None and replay_ready
                 and cacheable):
@@ -1046,16 +1125,44 @@ class KoreEnv:
             obs.wall_ms = max(wall_by_shape.values())
         if base_by_shape:
             obs.baseline_ms = max(base_by_shape.values())
+        # Physics-integrity provenance for the speed-of-light gate: the HBM branch of
+        # the floor is sound only if L2 was flushed between timed iterations, so the
+        # flag must reflect the configuration the timing subprocess actually ran under.
+        obs.cold_cache_verified = bool(wall_by_shape) and _cold_cache_timing(env, caps)
 
         timing_error = _timing_completeness_error(
             requested_names, wall_by_shape, base_by_shape)
-        if timing_error or admission_errors:
-            reason = timing_error or "; ".join(admission_errors)
+        if timing_error:
+            # No usable measurement came back for some requested shape - the bench
+            # subprocess was killed/timed out, or the driver broke the pair protocol.
+            # There is no timing evidence to judge, so this stays an infra failure.
             _ev("WARN", "eval_bench_incomplete", task=task.task_id,
-                source_sha=_sha12(source), reason=reason)
+                source_sha=_sha12(source), reason=timing_error)
             obs.timing_grade = "rejected"
+            obs.performance_eligible = False
             obs.infra_error = True
-            obs.error_text = f"infra: timing admission failed: {reason}"
+            obs.error_text = f"infra: timing admission failed: {timing_error}"
+            return obs
+        if admission_errors:
+            # Complete candidate+baseline timing exists for every requested shape; it
+            # merely missed the CV/CI admission gates. That is MEASUREMENT NOISE, not
+            # broken infrastructure, and the kernel already cleared every correctness
+            # check including the post-timing re-verification. Flagging it infra_error
+            # made kore.policy.grpo drop the turn from the training batch entirely,
+            # throwing away a verified-correct signal because the node was busy.
+            # Demote the timing instead: the reward ladder's ``correct_screening``
+            # tier banks the correctness credit and grants no speed credit, which is
+            # the honest verdict for a correct-but-unmeasurable candidate.
+            reason = "; ".join(admission_errors)
+            _ev("WARN", "eval_timing_unadmitted", task=task.task_id,
+                source_sha=_sha12(source), reason=reason, cv_pct=obs.cv_pct,
+                paired_ratio_cv_pct=obs.paired_ratio_cv_pct,
+                paired_ci_half_width_pct=obs.paired_ci_half_width_pct)
+            obs.timing_grade = "screening"
+            obs.performance_eligible = False
+            obs.error_text = f"timing not admitted (measurement noise): {reason}"
+            # The P5 bonus below is reachable only from the timed tier, so spending
+            # two more rocprofv3 runs here would buy nothing.
             return obs
 
         # P5 (flagship novelty): dense hardware-counter efficiency, baseline-relative.
@@ -1068,7 +1175,52 @@ class KoreEnv:
             except Exception as e:  # pragma: no cover - GPU/rocprof only
                 _ev("DEBUG", "profile_error", task=task.task_id, error=str(e)[:200])
                 obs.profile_efficiency = None
+            # Two rocprofv3 runs produced a number; the reward's P5 gate additionally
+            # needs the empirical evidence backing counter shaping to exist and pass.
+            passed, fingerprint = self._profile_evidence(task, obs.profile_efficiency)
+            obs.profile_evidence_passed = passed
+            obs.profile_evidence_fingerprint = fingerprint
+            _ev("DEBUG", "profile_evidence", task=task.task_id, passed=passed,
+                fingerprint=fingerprint, efficiency=obs.profile_efficiency)
         return obs
+
+    def _profile_evidence(self, task: Task,
+                          efficiency: Optional[float]) -> tuple[bool, Optional[str]]:
+        """Validated held-out evidence backing a counter-efficiency bonus, if any.
+
+        The P5 profile bonus is empirical shaping, so it is admitted only when BOTH
+        halves exist for THIS observation: a usable efficiency in [0, 1] from the
+        rocprofv3 passes, and preregistered evidence for this task's operator family
+        that passes :meth:`kore.reward.shaping.FamilyShapingEvidence.passes` under the
+        same fingerprinted physical model. The evidence artifact and its expected
+        fingerprint must be configured explicitly
+        (``physics_shaping_evidence_path`` / ``..._fingerprint``); with none
+        configured this returns ``(False, None)`` and the bonus stays withheld.
+
+        Imported lazily - the physics bridge pulls in ``kore.analysis.roofline``,
+        which an evaluation that is not profiling has no reason to load.
+        """
+        if not (isinstance(efficiency, (int, float))
+                and not isinstance(efficiency, bool)
+                and math.isfinite(float(efficiency))
+                and 0.0 <= float(efficiency) <= 1.0):
+            return False, None
+        if not (getattr(self.cfg, "physics_shaping_evidence_path", None)
+                and getattr(self.cfg, "physics_shaping_evidence_fingerprint", None)):
+            return False, None
+        try:
+            from kore.reward.physics import model_from_config
+            from kore.reward.shaping import evidence_for_task
+
+            model = model_from_config(self.cfg)
+            evidence = evidence_for_task(task, self.cfg, model.fingerprint)
+        except Exception as exc:  # noqa: BLE001 - unresolvable evidence => no bonus
+            _ev("DEBUG", "profile_evidence_unavailable", task=task.task_id,
+                error=str(exc)[:200])
+            return False, None
+        if evidence is None or not evidence.report_fingerprint:
+            return False, None
+        return True, str(evidence.report_fingerprint)
 
     def collect_counters(self, source: str, shape: Optional["Shape"] = None) -> Optional[dict]:
         """PUBLIC: rocprofv3 PMC counters for a kernel (Pillar 4 grounded reasoning).
@@ -1221,24 +1373,43 @@ class KoreEnv:
         for them (oversubscription uses the idle cores). But wall-clock TIMING needs
         the GPU to itself - concurrent kernels/L2-flushes inflate and destabilize the
         measurement (CV blows up). Workers pinned to the same physical GPU take an
-        exclusive lock on ``/tmp/kore_timing_gpu_<id>.lock`` around timing only, so
-        speedups stay clean while compiles keep running in parallel. Disable with
-        KORE_TIMING_LOCK=0."""
+        exclusive lock on ``<tmp>/kore_timing_gpu_<id>.uid<uid>.lock`` around timing
+        only, so speedups stay clean while compiles keep running in parallel. Disable
+        with KORE_TIMING_LOCK=0.
+
+        The lockfile is opened through :func:`_open_private_lockfile` (O_NOFOLLOW,
+        O_CLOEXEC, mode 0600, ownership re-checked on the fd) because the shared
+        tmpdir is world-writable on a multi-user cluster. The name is uid-scoped so
+        same-uid workers - the real deployment - still serialize on one lock per
+        physical GPU, while a foreign uid squatting the path can neither be blocked
+        by us nor block us. If the path cannot be opened safely we time WITHOUT the
+        lock (noisier measurement, admission gates still apply) rather than fail the
+        evaluation."""
         if os.environ.get("KORE_TIMING_LOCK", "1").strip().lower() in ("0", "false", "no"):
             yield
             return
         physid = str(self._gpu if self._gpu is not None
                      else os.environ.get("HIP_VISIBLE_DEVICES", "0")).split(",")[0].strip() or "0"
-        lp = Path(tempfile.gettempdir()) / f"kore_timing_gpu_{physid}.lock"
-        f = open(lp, "w")
+        lp = (Path(tempfile.gettempdir())
+              / f"kore_timing_gpu_{physid}.uid{os.getuid()}.lock")
+        fd = _open_private_lockfile(lp)
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:
+                os.close(fd)
+                fd = None
+        if fd is None:
+            _ev("WARN", "timing_lock_unavailable", gpu=physid, path=str(lp))
+            yield
+            return
         try:
-            fcntl.flock(f, fcntl.LOCK_EX)
             yield
         finally:
             try:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                fcntl.flock(fd, fcntl.LOCK_UN)
             finally:
-                f.close()
+                os.close(fd)
 
     def _driver_capabilities(self, driver: Path, workdir: Path, env: dict) -> dict:
         """Probe and cache the driver's explicit versioned capability handshake."""
@@ -1269,56 +1440,6 @@ class KoreEnv:
             protocol=caps.get("protocol"), batch=_supports_batch_bench(caps),
             probe_rc=rc, timed_out=timed)
         return caps
-
-    def _batch_bench_ok(self, driver: Path, workdir: Path, env: dict) -> bool:
-        """True only for a driver that explicitly promises the full batch protocol.
-
-        Unsupported and older drivers safely fall back to their per-implementation
-        ``--bench-mode`` path.  Set ``KORE_NO_BENCH_BOTH=1`` to force that path for
-        timing-parity validation.
-        """
-        if os.environ.get("KORE_NO_BENCH_BOTH", "").strip().lower() in ("1", "true", "yes"):
-            return False
-        return _supports_batch_bench(
-            self._driver_capabilities(driver, workdir, env))
-
-    def _bench_pair(self, driver: Path, sh: Shape, workdir: Path, env: dict,
-                    snr_threshold: Optional[float] = None):
-        """Time candidate AND reference in ONE ``--bench-both`` process (``max_variance_runs``
-        in-process repeats). Returns ``(cand_samples, ref_samples, poisoned)``.
-
-        Because both impls are timed back-to-back in the same process, external GPU
-        load hits them equally -> the speedup RATIO stays fair under oversubscription,
-        while collapsing ~10 per-shape subprocess spawns (2 impls x ~5 runs) into one.
-        ``poisoned`` mirrors the per-impl path: a False/low post-timing candidate
-        verdict is a bench-time reward hack."""
-        n_max = max(1, self.cfg.max_variance_runs)
-        cmd = [sys.executable, str(driver), "--bench-both",
-               "--warmup", str(self.cfg.warmup_iters), "--iters", str(self.cfg.bench_iters),
-               "--repeat", str(n_max), *sh.as_args()]
-        with self._timing_lock(), _LOG.timer("bench_pair", task=self.task.task_id, shape=sh.name):
-            rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
-        if timed or rc != 0:
-            _ev("DEBUG", "bench_pair", task=self.task.task_id, shape=sh.name, ok=False, rc=rc)
-            return [], [], False
-        ac = _last(_ALLCLOSE, out)
-        snr = _last(_SNR, out)
-        threshold = self._snr_threshold if snr_threshold is None else snr_threshold
-        if ac is None and snr is None:
-            return [], [], False
-        if (ac and ac.group(1).lower() == "false") or \
-           (snr and float(snr.group(1)) < threshold):
-            return None, None, True
-        pairs, pair_error = _parse_timing_pairs(out, n_max)
-        if pair_error:
-            return [], [], False
-        cand = [p["candidate_ms"] for p in pairs]
-        ref = [p["baseline_ms"] for p in pairs]
-        _ev("DEBUG", "bench_pair", task=self.task.task_id, shape=sh.name,
-            cand_runs=len(cand), ref_runs=len(ref),
-            cand_med=round(_median(cand), 4) if cand else None,
-            ref_med=round(_median(ref), 4) if ref else None)
-        return cand, ref, False
 
     @staticmethod
     def _shape_spec(sh: Shape) -> str:

@@ -21,7 +21,7 @@ from typing import Callable, Optional
 from kore.config import CONFIG
 from kore.data.amd_knowledge import live_system_prompt
 from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, extract_kernel
-from kore.data.schemas import RankedGroupRecord
+from kore.data.schemas import RankedGroupRecord, resolve_baseline_identity
 from kore.data.teacher import TeacherClient
 from kore.env.replay import kernel_hash
 from kore.obs import get_logger
@@ -121,8 +121,68 @@ def build_preferences(
     return prefs
 
 
+def primary_shape_name(task) -> Optional[str]:
+    """Name of the shape a group/win is keyed on, or None.
+
+    "primary" -> "minimal" -> the first declared shape, mirroring ``KoreEnv``'s own
+    primary selection so this reads the SAME shape the verifier keys its per-shape
+    timing maps under. Fully fail-safe: a stub task without ``shape()``/``shapes``
+    yields None and the caller degrades to the across-shape rule."""
+    for probe in ("primary", "minimal"):
+        try:
+            shape = task.shape(probe)
+        except Exception:  # noqa: BLE001 - stub tasks may lack shape()
+            shape = None
+        if shape is not None:
+            return getattr(shape, "name", None)
+    shapes = getattr(task, "shapes", None) or []
+    if shapes:
+        return getattr(shapes[0], "name", None)
+    return None
+
+
+def primary_timing_classification(obs, task) -> Optional[str]:
+    """Baseline-relative classification for the primary shape (fail-safe -> None).
+
+    Persisted on wins and on group candidates. With no resolvable primary key,
+    EVERY measured shape must be ``faster``; otherwise the first non-faster label is
+    reported, which is both deterministic and conservative (returning
+    ``values[0]`` depended on shape iteration order and reported "faster" for a
+    partial win whenever the fastest shape happened to come first)."""
+    by_shape = getattr(obs, "timing_classification_by_shape", None) or {}
+    if not by_shape:
+        return None
+    primary = primary_shape_name(task) if task is not None else None
+    if primary is not None and primary in by_shape:
+        return by_shape.get(primary)
+    values = list(by_shape.values())
+    if all(value == "faster" for value in values):
+        return "faster"
+    return next(value for value in values if value != "faster")
+
+
+def paired_baseline_wall_us(obs) -> Optional[float]:
+    """Measured PRODUCTION-baseline wall (us) paired with this obs' reported wall.
+
+    ``KoreEnv`` summarises multi-shape timing as the max across shapes for the
+    candidate AND the baseline independently, and those two maxima can come from
+    different shapes - so dividing the summaries is not a measured ratio. When the
+    per-shape maps are present, take the baseline of the shape that produced the
+    reported wall (so ``baseline_wall_us / wall_us`` is a real same-shape ratio);
+    otherwise fall back to the summary ``baseline_ms``. Fail-safe -> None."""
+    wall_by_shape = getattr(obs, "wall_by_shape", None) or {}
+    base_by_shape = getattr(obs, "baseline_by_shape", None) or {}
+    if wall_by_shape and base_by_shape:
+        reported = max(wall_by_shape, key=lambda name: wall_by_shape[name])
+        if reported in base_by_shape:
+            return float(base_by_shape[reported]) * 1000.0
+    base_ms = getattr(obs, "baseline_ms", None)
+    return float(base_ms) * 1000.0 if base_ms is not None else None
+
+
 def _evaluate(env, task, source: str, cfg) -> dict:
     """Run one candidate through the verifier + reward into a result dict."""
+    identity = resolve_baseline_identity(task)
     try:
         obs = env.step(source, full_validation=True, multi_shape=True)
     except Exception as e:  # keep the group intact even if one candidate explodes
@@ -133,32 +193,14 @@ def _evaluate(env, task, source: str, cfg) -> dict:
             "speedup": None,
             "snr_db": None,
             "wall_us": None,
+            "baseline_wall_us": None,
+            **identity,
             "error": str(e)[:200],
             "infra_error": True,   # an exception is a TRANSIENT/infra failure, not a
                                    # genuine correctness verdict (see reverify keep-on-infra)
         }
     rr = compute_reward(obs, source, dtype=task.dtype, cfg=cfg)
     wall_us = obs.wall_ms * 1000.0 if obs.wall_ms is not None else None
-    # Baseline-relative classification for the group's primary shape (used by
-    # the significance gate in gold_wins). Fail-safe: absent -> None.
-    _tc_by_shape = getattr(obs, "timing_classification_by_shape", None) or {}
-    _primary = None
-    for _probe in ("primary", "minimal"):
-        try:
-            _sh = task.shape(_probe)
-        except Exception:  # noqa: BLE001 - stub tasks may lack shape()
-            _sh = None
-        if _sh is not None:
-            _primary = getattr(_sh, "name", None)
-            break
-    if _primary is not None and _primary in _tc_by_shape:
-        _classification = _tc_by_shape.get(_primary)
-    elif _tc_by_shape:
-        _vals = list(_tc_by_shape.values())
-        _classification = "faster" if all(v == "faster" for v in _vals) else (
-            _vals[0] if _vals else None)
-    else:
-        _classification = None
     return {
         "source": source,
         "compiled": bool(obs.compiled),
@@ -166,6 +208,12 @@ def _evaluate(env, task, source: str, cfg) -> dict:
         "speedup": rr.speedup,
         "snr_db": obs.snr_db,
         "wall_us": wall_us,
+        # The ABSOLUTE baseline anchor. Without it a candidate whose reward-side
+        # ``speedup`` is unmeasurable has no baseline reference at all, and
+        # build_dpo.candidate_baseline_speedup degrades every pair in the group to
+        # the flat-weight among_correct anchor (measured: 0/218,732 on-disk
+        # candidates carried this field, 45.5% of DPO pairs lost their anchor).
+        "baseline_wall_us": paired_baseline_wall_us(obs),
         # Timing-rigor provenance (frontier upgrade): keep the measurement
         # variance figures + baseline-relative classification instead of
         # discarding them, so the significance-gated stored-win path can use
@@ -174,8 +222,10 @@ def _evaluate(env, task, source: str, cfg) -> dict:
         "baseline_cv_pct": getattr(obs, "baseline_cv_pct", None),
         "paired_ratio_cv_pct": getattr(obs, "paired_ratio_cv_pct", None),
         "paired_ci_half_width_pct": getattr(obs, "paired_ci_half_width_pct", None),
-        "timing_classification": _classification,
-        "baseline_type": getattr(task, "comparison_baseline", None),
+        "timing_classification": primary_timing_classification(obs, task),
+        # WHICH baseline: the declared comparison_baseline plus its vendor/torch
+        # kind and how that kind was established (see schemas.resolve_baseline_identity).
+        **identity,
         # Surface OOM/timeout/profiler crashes so re-verification never treats a
         # transient failure as a real "no longer correct" verdict and drops data.
         "infra_error": bool(getattr(obs, "infra_error", False)),
@@ -211,6 +261,9 @@ def generate_groups(
     with log.stage("generate_groups", task=task.task_id, n_parents=n_parents, k=k):
         rng = random.Random(seed)
         speed_band, snr_band = resolve_noise_bands(cfg)
+        # WHICH baseline every candidate in every group of this task is timed
+        # against (also what gold_wins reads to stamp a minted win's baseline_type).
+        _identity = resolve_baseline_identity(task)
         modes = ["exploit", "explore", "repair"]
         records: list[RankedGroupRecord] = []
         parent_src = task.seed_source
@@ -263,6 +316,12 @@ def generate_groups(
                 }
                 for i, r in enumerate(results)
             ]
+            # Group-level anchor: the same production baseline every candidate was
+            # timed against, so build_dpo can resolve an absolute speedup even for a
+            # candidate whose own timing came back unmeasurable.
+            group_baseline_wall_us = next(
+                (r["baseline_wall_us"] for r in results
+                 if r.get("baseline_wall_us") is not None), None)
             prefs = build_preferences(results, speed_band, snr_band)
             # Pillar 4 (opt-in, KORE_GROUND_REASONING=1): profile the rank-0 correct
             # candidate so gold-win reasoning minted from this group is grounded in real
@@ -305,6 +364,9 @@ def generate_groups(
                 counters=counters,
                 parent_counters=parent_counters,
                 parent_wall_us=parent_wall_us,
+                baseline_wall_us=group_baseline_wall_us,
+                baseline_type=_identity["baseline_type"],
+                baseline_kind=_identity["baseline_kind"],
             )
             records.append(record)
             if on_record is not None:

@@ -11,6 +11,16 @@ Levers (all deterministic, PURE stdlib):
   * :func:`filter_trivial_wins` - drop win demos whose measured speedup is below a
     floor (the shipped wins were 50% in 1.0-1.1x - barely-better demos dilute the
     signal). Repairs are never dropped here (correctness lessons).
+  * :func:`filter_implausible_wins` - the HIGH end: a win whose measured speedup
+    exceeds the credible ceiling (``schemas.credible_speedup_max``) is excluded from
+    the exemplar mixture. Such rows are real as measured but are usually timing a
+    non-kernel baseline (the sequence/SSM tasks are benched against a Python
+    ``for t in range(...)`` interpreter loop, so four-digit ratios are genuine and
+    say nothing about kernel quality), and :func:`quality_score` used to clamp at
+    log(10) so a 9,381x row scored exactly like a 10x one and survived curation.
+  * :func:`win_speedup_stats` - the only honest way to aggregate win speedups: pool
+    ONLY rows that are explicitly baseline-relative AND credible, and report what
+    was excluded rather than averaging incomparable scales together.
   * :func:`balance_by_family` - cap how many rows any one operator family / dtype
     contributes so gemm (many tasks) can't drown rmsnorm/quant.
   * :func:`difficulty_score` + :func:`curriculum_order` - order easy->hard for a
@@ -25,6 +35,11 @@ from typing import Any, Callable, Iterable, Optional
 
 # ``_family_of`` is a pure string classifier (no registry/GPU); reuse it.
 from kore.data.decontam import _family_of
+from kore.data.schemas import (
+    baseline_relative_speedup,
+    credible_speedup_max,
+    is_credible_win,
+)
 
 _KERNEL_SOURCES = {"kernel_repair_opt", "kernel_qa"}
 
@@ -48,6 +63,37 @@ def _row_len(row: dict) -> int:
               if isinstance(m, dict))
 
 
+def is_implausible_win(row: dict, *, threshold: Optional[float] = None) -> bool:
+    """True for a WIN row whose measured speedup exceeds the credible ceiling.
+
+    Uses the flag the datagen path persisted when present, else re-derives it from
+    the speedup so the already-shipped (unflagged) wins are graded too.
+    """
+    p = _prov(row)
+    if p.get("kind") != "win":
+        return False
+    return not is_credible_win(p, threshold=threshold)
+
+
+def _speedup_credit(p: dict, *, threshold: Optional[float] = None) -> float:
+    """Log-speedup credit, awarded only for a speedup inside the credible ceiling.
+
+    The previous ``log(min(sp, 10.0))`` clamp gave a 9,381x row exactly the same
+    credit as a 10x row, so implausible rows tied the best real ones and survived
+    every top-k selection. A ratio above the ceiling now earns NO speed credit: it
+    is not evidence about the kernel (see :func:`filter_implausible_wins`).
+    """
+    sp = p.get("speedup")
+    if isinstance(sp, bool) or not isinstance(sp, (int, float)) or sp <= 0:
+        return 0.0
+    ceiling = credible_speedup_max(threshold=threshold)
+    if p.get("speedup_exceeds_credible") is True or float(sp) > ceiling:
+        return 0.0
+    # log-speedup: 1x -> 0, 2x -> ~0.69, 4x -> ~1.39 (diminishing, outlier-safe)
+    import math
+    return math.log(min(float(sp), ceiling))
+
+
 def quality_score(row: dict) -> float:
     """Higher = keep. Kernel rows scored by measured speedup + SNR + verified.
 
@@ -60,11 +106,7 @@ def quality_score(row: dict) -> float:
     score = 0.0
     if p.get("verified"):
         score += 1.0
-    sp = p.get("speedup")
-    if isinstance(sp, (int, float)) and sp > 0:
-        # log-speedup: 1x -> 0, 2x -> ~0.69, 4x -> ~1.39 (diminishing, outlier-safe)
-        import math
-        score += math.log(min(float(sp), 10.0))
+    score += _speedup_credit(p)
     snr = p.get("snr_db")
     if isinstance(snr, (int, float)):
         score += min(max(float(snr), 0.0), 100.0) / 200.0  # 0..0.5
@@ -98,6 +140,84 @@ def filter_trivial_wins(rows: Iterable[dict], min_speedup: float = 1.1) -> tuple
                 continue
         kept.append(r)
     return kept, {"n_dropped_trivial_wins": dropped, "n_kept": len(kept)}
+
+
+def filter_implausible_wins(rows: Iterable[dict], *,
+                            threshold: Optional[float] = None,
+                            ) -> tuple[list[dict], dict]:
+    """Exclude WIN rows whose measured speedup exceeds the credible ceiling.
+
+    The counterpart to :func:`filter_trivial_wins` at the HIGH end. Nothing is
+    deleted from the corpus - the record keeps its measured value and its explicit
+    flag on disk - it is only excluded from the SFT exemplar mixture, because a
+    ratio that large is (almost always) timing a baseline that is not a single GPU
+    kernel and teaching it as a demonstration of kernel skill is a false claim.
+    Only ``kind == "win"`` rows are eligible; repairs and retention rows are never
+    touched.
+    """
+    kept, dropped = [], 0
+    for r in rows:
+        if is_implausible_win(r, threshold=threshold):
+            dropped += 1
+            continue
+        kept.append(r)
+    return kept, {"n_dropped_implausible_wins": dropped, "n_kept": len(kept),
+                  "credible_speedup_max": credible_speedup_max(threshold=threshold)}
+
+
+def _percentile(sorted_values: list[float], q: float) -> float:
+    """Nearest-rank percentile of a NON-EMPTY sorted list (q in [0, 1])."""
+    if not sorted_values:
+        raise ValueError("percentile of an empty sample")
+    idx = min(len(sorted_values) - 1,
+              max(0, int(round(q * (len(sorted_values) - 1)))))
+    return sorted_values[idx]
+
+
+def win_speedup_stats(rows: Iterable[dict], *,
+                      threshold: Optional[float] = None) -> dict:
+    """Aggregate win speedups over ONLY the pool where an aggregate means something.
+
+    A row enters the pool exclusively when it declares a baseline-relative
+    ``speedup_basis`` AND its ratio is within the credible ceiling. Everything else
+    is counted as an explicit exclusion rather than silently averaged in: the
+    gold-minted wins carry a sibling/parent-relative ratio and the gen_wins footers
+    are relative to their own first measurement, so pooling all three scales in one
+    mean is meaningless, and the four-digit outliers would dominate whatever pool
+    they landed in.
+    """
+    pooled: list[float] = []
+    n_win = 0
+    n_not_baseline_relative = 0
+    n_implausible = 0
+    for r in rows:
+        p = _prov(r)
+        if p.get("kind") != "win":
+            continue
+        n_win += 1
+        if not is_credible_win(p, threshold=threshold):
+            n_implausible += 1
+            continue
+        speedup = baseline_relative_speedup(p)
+        if speedup is None:
+            n_not_baseline_relative += 1
+            continue
+        pooled.append(speedup)
+    pooled.sort()
+    stats = {
+        "n_wins": n_win,
+        "n_pooled": len(pooled),
+        "n_excluded_not_baseline_relative": n_not_baseline_relative,
+        "n_excluded_implausible": n_implausible,
+        "credible_speedup_max": credible_speedup_max(threshold=threshold),
+    }
+    if pooled:
+        stats.update({
+            "median_speedup": round(_percentile(pooled, 0.5), 4),
+            "p90_speedup": round(_percentile(pooled, 0.9), 4),
+            "max_speedup": round(pooled[-1], 4),
+        })
+    return stats
 
 
 def balance_by_family(rows: Iterable[dict], cap_per_family: Optional[int] = None,
@@ -229,14 +349,24 @@ def rebalance_by_headroom(rows: Iterable[dict], *, target_compute_frac: float = 
 
 def curate(rows: Iterable[dict], *, min_win_speedup: float = 1.1,
            family_cap_frac: Optional[float] = 0.25, quality_floor: float = 0.0,
-           curriculum: bool = False) -> tuple[list[dict], dict]:
+           curriculum: bool = False, drop_implausible_wins: bool = True,
+           credible_speedup_threshold: Optional[float] = None,
+           ) -> tuple[list[dict], dict]:
     """Full curation pass. Returns ``(curated_rows, stats)``.
 
-    Order: drop trivial wins -> quality floor -> family balance -> (curriculum).
+    Order: drop trivial wins -> drop implausible wins -> quality floor ->
+    family balance -> (curriculum). Both speedup gates are bounds on the SAME
+    quantity: below ``min_win_speedup`` a demo teaches nothing, above the credible
+    ceiling it teaches something false. Set ``drop_implausible_wins=False`` to keep
+    them (they stay flagged either way).
     """
     rows = list(rows)
     n0 = len(rows)
     rows, s_triv = filter_trivial_wins(rows, min_win_speedup)
+    s_impl = {"n_dropped_implausible_wins": 0}
+    if drop_implausible_wins:
+        rows, s_impl = filter_implausible_wins(
+            rows, threshold=credible_speedup_threshold)
     if quality_floor > 0.0:
         rows = [r for r in rows if quality_score(r) >= quality_floor or not is_kernel_row(r)]
     rows, s_bal = balance_by_family(rows, cap_frac=family_cap_frac)
@@ -244,12 +374,14 @@ def curate(rows: Iterable[dict], *, min_win_speedup: float = 1.1,
         rows = curriculum_order(rows)
     stats = {"n_in": n0, "n_out": len(rows),
              "dropped_trivial_wins": s_triv["n_dropped_trivial_wins"],
+             "dropped_implausible_wins": s_impl["n_dropped_implausible_wins"],
              "family_capped": s_bal.get("capped", 0)}
     return rows, stats
 
 
 __all__ = [
     "quality_score", "difficulty_score", "filter_trivial_wins",
+    "filter_implausible_wins", "is_implausible_win", "win_speedup_stats",
     "balance_by_family", "curriculum_order", "curate", "is_kernel_row", "row_family",
     "op_class", "rebalance_by_headroom",
 ]

@@ -4,6 +4,13 @@ This lightweight login-node supervisor submits exactly one wave at a time,
 waits for all ``kore-factory`` children to leave the queue, verifies durable
 progress, and repartitions the remaining work. It never cancels jobs and aborts
 instead of looping when the scheduler is unavailable or progress stalls.
+
+Two properties keep a flaky control plane from duplicating a live 64-node wave:
+a reply that cannot be read is a distinct state from an empty queue (and is
+retried, never acted on), and a wave is only considered drained after several
+consecutive empty replies. Verification covers exactly the task families
+``scripts/spur_partition.py`` shards, so completion and stall detection see all
+of the work rather than the breadth slice.
 """
 from __future__ import annotations
 
@@ -17,12 +24,69 @@ import subprocess
 import sys
 import time
 
+try:
+    from scripts._kf_verify import PARTITION_TASK_PREFIXES
+except ImportError:  # run as `python scripts/spur_supervise_datagen.py`
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from scripts._kf_verify import PARTITION_TASK_PREFIXES
+
+# Tri-state classification of a scheduler reply. "unreadable" exists so a
+# control-plane error blob can never be mistaken for "no jobs are queued".
+QUEUE_ACTIVE = "active"
+QUEUE_EMPTY = "empty"
+QUEUE_UNREADABLE = "unreadable"
+
+# Positive markers of a scheduler that could not answer. SPUR's control plane
+# intermittently replies to ``squeue`` with an anyhow/tower cause chain instead
+# of a job table, sometimes at exit code 0:
+#
+#     Error: failed to connect to spurctld
+#     Caused by:
+#         0: transport error
+#         3: Connection refused (os error 111)
+#
+# Detection is deliberately POSITIVE (match the error shape) rather than
+# negative (anything that isn't a job table): a genuinely empty SPUR queue may
+# legitimately print nothing at all, or a bare header, or a "no jobs" notice,
+# and treating any of those as an error would stall the campaign at the end of
+# every wave. None of these markers can appear in a squeue row, whose third
+# whitespace field is the job name.
+_QUEUE_ERROR_RE = re.compile(
+    r"""
+      ^\s*error\b
+    | ^\s*caused \s+ by:
+    | \b os \s+ error \s+ \d+
+    | \b transport \s+ error \b
+    | \b connection \s+ (?: refused | reset | timed \s+ out ) \b
+    | \b failed \s+ to \s+ connect \b
+    | \b slurm_load_jobs \s+ error \b
+    | \b unable \s+ to \s+ contact \b
+    | \b socket \s+ timed \s+ out \b
+    | \b no \s+ leader \s+ elected \b
+    """,
+    re.IGNORECASE | re.MULTILINE | re.VERBOSE,
+)
+
+
+def classify_queue_reply(squeue_output: str) -> str:
+    """Classify a ``squeue`` reply as active / empty / unreadable."""
+    text = squeue_output or ""
+    if _QUEUE_ERROR_RE.search(text):
+        return QUEUE_UNREADABLE
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[2].startswith("kore-fac"):
+            return QUEUE_ACTIVE
+    return QUEUE_EMPTY
+
 
 def factory_jobs_active(squeue_output: str) -> bool:
-    return any(
-        len(fields := line.split()) >= 3 and fields[2].startswith("kore-fac")
-        for line in squeue_output.splitlines()[1:]
-    )
+    """True only when the reply positively shows a live ``kore-fac*`` job.
+
+    Callers that must not confuse an unreadable scheduler with an empty queue
+    use :func:`classify_queue_reply` instead.
+    """
+    return classify_queue_reply(squeue_output) == QUEUE_ACTIVE
 
 
 def progress_score(summary: dict) -> int:
@@ -96,6 +160,11 @@ class Supervisor:
         return result
 
     def verify(self) -> dict:
+        # --prefix must name the SAME families spur_partition.py shards. With the
+        # verifier's own genb_ default the completion test and the stall score
+        # would only see breadth tasks, so the supervisor would log COMPLETE with
+        # vendor/gemm/attention/MoE work outstanding, or score a wave that only
+        # moved those families as a stall and stop submitting.
         cleanup = self.state_path.with_suffix(".cleanup.txt")
         result = self.run(
             [
@@ -103,6 +172,8 @@ class Supervisor:
                 "scripts/_kf_verify.py",
                 self.args.data_root,
                 str(self.args.target),
+                "--prefix",
+                self.args.verify_prefix,
                 "--json",
                 "--cleanup-out",
                 str(cleanup),
@@ -118,52 +189,73 @@ class Supervisor:
         return summary
 
     def queue(self) -> str:
-        # The spur controller intermittently returns transient errors ("no leader
-        # elected yet" / rc=1). Retry a few times before giving up so a scheduler
-        # hiccup cannot kill a multi-hour supervisor.
-        last = None
-        for attempt in range(6):
+        # The spur controller intermittently fails to answer: sometimes with a
+        # non-zero exit, sometimes with an error blob at rc=0. BOTH are transient
+        # failures subject to this bounded retry -- an unreadable reply must never
+        # reach the callers as "the queue is empty".
+        last = ""
+        attempts = self.args.queue_attempts
+        for attempt in range(attempts):
             result = self.run(
                 ["squeue", "-u", self.args.user],
                 check=False,
                 timeout=self.args.queue_timeout_seconds,
             )
-            if not result.returncode:
+            unreadable = classify_queue_reply(result.stdout) == QUEUE_UNREADABLE
+            if not result.returncode and not unreadable:
                 return result.stdout
-            last = result
+            reason = "unreadable reply" if unreadable else f"rc={result.returncode}"
+            last = reason
             self.log(
-                f"WARN squeue transient rc={result.returncode} "
-                f"(attempt {attempt + 1}/6); retrying"
+                f"WARN squeue transient {reason} "
+                f"(attempt {attempt + 1}/{attempts}); retrying"
             )
             time.sleep(min(30, 5 * (attempt + 1)))
-        raise RuntimeError(
-            f"squeue failed rc={last.returncode if last else '?'} after retries"
-        )
+        raise RuntimeError(f"squeue failed ({last or '?'}) after {attempts} attempts")
+
+    def queue_state(self) -> str:
+        """``QUEUE_ACTIVE`` or ``QUEUE_EMPTY``; raises when the reply is unreadable."""
+        return classify_queue_reply(self.queue())
 
     def wait_for_wave(self) -> None:
         time.sleep(self.args.submission_grace_seconds)
         failures = 0
+        empty_polls = 0
         seen_active = False
+        needed = self.args.empty_polls_to_finish
         visibility_deadline = time.monotonic() + self.args.visibility_timeout_seconds
         while True:
             try:
-                output = self.queue()
+                state = self.queue_state()
                 failures = 0
             except RuntimeError as exc:
                 failures += 1
+                # A scheduler we could not read tells us nothing about the wave,
+                # so drop any partial debounce rather than counting toward it.
+                empty_polls = 0
                 self.log(f"WARN scheduler query failed ({failures}): {exc}")
                 if failures >= self.args.max_scheduler_failures:
                     raise
                 time.sleep(self.args.poll_seconds)
                 continue
-            active = factory_jobs_active(output)
-            if active:
+            if state == QUEUE_ACTIVE:
                 seen_active = True
+                empty_polls = 0
                 self.log("WAIT factory wave remains active")
                 time.sleep(self.args.poll_seconds)
                 continue
+            empty_polls += 1
             if seen_active:
-                return
+                # Debounce: a single empty poll can also be a scheduler that
+                # answered without listing a still-running wave, and returning
+                # early there verifies a half-finished wave and repartitions on
+                # top of live workers.
+                if empty_polls >= needed:
+                    self.log(f"WAIT factory wave drained ({empty_polls} empty polls)")
+                    return
+                self.log(f"WAIT queue empty {empty_polls}/{needed}; debouncing")
+                time.sleep(self.args.poll_seconds)
+                continue
             if time.monotonic() >= visibility_deadline:
                 self.log("WAIT no factory child became visible before deadline")
                 return
@@ -211,7 +303,10 @@ class Supervisor:
                 self.log("FATAL another SPUR supervisor is active")
                 return 3
 
-            if factory_jobs_active(self.queue()):
+            # queue_state() raises when the scheduler cannot be read, so this
+            # guard can only fall through on a reply that positively shows no
+            # factory job -- never on an error blob that merely looks empty.
+            if self.queue_state() == QUEUE_ACTIVE:
                 self.log("FATAL pre-existing factory jobs detected")
                 return 3
 
@@ -260,10 +355,23 @@ def main() -> int:
     ap.add_argument("--poll-seconds", type=int, default=60)
     ap.add_argument("--submission-grace-seconds", type=int, default=15)
     ap.add_argument("--queue-timeout-seconds", type=int, default=30)
+    ap.add_argument("--queue-attempts", type=int, default=6)
+    ap.add_argument(
+        "--empty-polls-to-finish",
+        type=int,
+        default=3,
+        help="consecutive empty scheduler replies required to call a wave done",
+    )
     ap.add_argument("--visibility-timeout-seconds", type=int, default=120)
     ap.add_argument("--max-scheduler-failures", type=int, default=5)
     ap.add_argument("--max-stalled-waves", type=int, default=2)
     ap.add_argument("--max-waves", type=int, default=12)
+    ap.add_argument(
+        "--verify-prefix",
+        default=PARTITION_TASK_PREFIXES,
+        help="comma-separated task-id prefixes to verify; defaults to the family "
+             "set scripts/spur_partition.py shards",
+    )
     ap.add_argument("--user", default=os.environ.get("USER", ""))
     ap.add_argument(
         "--log",
@@ -280,6 +388,8 @@ def main() -> int:
         "poll_seconds",
         "submission_grace_seconds",
         "queue_timeout_seconds",
+        "queue_attempts",
+        "empty_polls_to_finish",
         "visibility_timeout_seconds",
         "max_scheduler_failures",
         "max_stalled_waves",

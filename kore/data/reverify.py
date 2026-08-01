@@ -14,7 +14,11 @@ Per record type (reusing the verified gen_groups primitives):
     stay honest. Optionally attaches rocprof counters for the rank-0 candidate.
   * wins    - re-evaluate final_source vs the STRONG baseline; DROP the win if it no
     longer beats it (speedup <= 1.0) or fails adversarial correctness (an honest
-    "was only fast vs eager" cull). Otherwise update speedup/snr/wall.
+    "was only fast vs eager" cull). Otherwise update speedup/snr/wall plus the
+    measurement's own provenance: the absolute baseline anchor, the baseline
+    IDENTITY (declared type + vendor/torch kind), the baseline-relative timing
+    classification, the CVs, the explicit baseline-relative ``speedup_basis`` and
+    the credible-speedup verdict.
   * repair  - re-verify the FIXED kernel under adversarial rigor; DROP if it no longer
     passes (a v1 lucky-pass), else keep (the correctness lesson survives).
 
@@ -82,6 +86,14 @@ def reverify_group(group: dict, task, env, cfg, *, speed_band: float = _SPEED_BA
     out = dict(group)
     out["candidates"] = new_cands
     out["preferences"] = build_preferences(results, speed_band, snr_band)
+    # Group-level anchor + WHICH baseline the re-measurement used (mirrors
+    # gen_groups.generate_groups; gold_wins reads baseline_type off the group).
+    group_baseline = next((r["baseline_wall_us"] for r in results
+                           if r.get("baseline_wall_us") is not None), None)
+    if group_baseline is not None:
+        out["baseline_wall_us"] = group_baseline
+    out["baseline_type"] = results[0].get("baseline_type")
+    out["baseline_kind"] = results[0].get("baseline_kind")
     if ground and order and results[order[0]].get("correct") \
             and hasattr(env, "collect_counters"):
         try:
@@ -92,8 +104,20 @@ def reverify_group(group: dict, task, env, cfg, *, speed_band: float = _SPEED_BA
 
 
 def reverify_win(win: dict, task, env, cfg) -> Optional[dict]:
-    """Re-baseline a win vs the STRONG baseline; drop if it no longer wins/verifies."""
+    """Re-baseline a win vs the STRONG baseline; drop if it no longer wins/verifies.
+
+    The re-measured row carries the full timing provenance of THIS measurement: the
+    absolute ``baseline_wall_us`` anchor, WHICH baseline it was (declared type +
+    vendor/torch kind + how the kind was established), the baseline-relative
+    ``timing_classification``, the measurement CVs, and - since the re-measured
+    ``speedup`` is the reward's baseline-relative ratio - an explicit
+    ``speedup_basis`` so it can never be pooled with a gold-minted parent-relative
+    or trajectory-relative number. A physically implausible ratio is flagged, never
+    silently deleted: against a non-kernel baseline (a Python-loop reference) a
+    four-digit ratio is real as measured and simply cannot support a claim.
+    """
     from kore.data.gen_groups import _evaluate
+    from kore.data.schemas import SPEEDUP_BASIS_BASELINE, speedup_credibility
 
     src = win.get("final_source") or ""
     if not src:
@@ -111,13 +135,27 @@ def reverify_win(win: dict, task, env, cfg) -> Optional[dict]:
         # timing flake, common for fp8/attention). Do NOT drop a still-correct win
         # as if it were slow -- keep the original (audit R2 reverify: bench-flake
         # was conflated with <=1.0x). A genuine slowdown has a real number below.
+        # The retained speedup is the OLD number, so no basis/identity is stamped
+        # onto it here -- that would assert a provenance this pass did not measure.
         return dict(win)
     if sp <= 1.0:
         return None  # genuinely no longer beats the strong baseline -> not a win
     out = dict(win)
-    out["speedup"] = round(float(sp), 4)
+    speedup = round(float(sp), 4)
+    out["speedup"] = speedup
     out["snr_db"] = r["snr_db"]
     out["final_wall_us"] = r["wall_us"]
+    out["baseline_wall_us"] = r.get("baseline_wall_us")
+    out["baseline_type"] = r.get("baseline_type")
+    out["baseline_kind"] = r.get("baseline_kind")
+    out["baseline_identity_source"] = r.get("baseline_identity_source")
+    out["timing_classification"] = r.get("timing_classification")
+    out["final_cv_pct"] = r.get("cv_pct")
+    out["baseline_cv_pct"] = r.get("baseline_cv_pct")
+    out["paired_ratio_cv_pct"] = r.get("paired_ratio_cv_pct")
+    out["paired_ci_half_width_pct"] = r.get("paired_ci_half_width_pct")
+    out["speedup_basis"] = SPEEDUP_BASIS_BASELINE
+    out.update(speedup_credibility(speedup, cfg=cfg))
     return out
 
 

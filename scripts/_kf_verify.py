@@ -12,6 +12,24 @@ import json
 import os
 from pathlib import Path
 
+# The task-id prefix selection ``scripts/spur_partition.py`` shards (its
+# ``--prefix`` default). Empty means every registered train task, because the
+# taxonomy split is already the authority for what may be trained on. The SPUR
+# supervisor imports this so its completion test and stall score cover EXACTLY
+# the work the partitioner hands to the nodes; ``spur_partition.py`` keeps its
+# default inline in argparse with no importable constant, so
+# ``tests/test_spur_supervisor.py`` reads that default out of the partitioner's
+# source and fails on drift.
+PARTITION_TASK_PREFIXES = ""
+
+
+def split_prefixes(prefix: str) -> tuple[str, ...]:
+    """Split a comma-separated ``--prefix`` value the way the partitioner does.
+
+    An empty prefix matches every task (``str.startswith("")`` is True).
+    """
+    return tuple(part.strip() for part in prefix.split(","))
+
 
 def _records(path: Path) -> list[dict]:
     if not path.exists() or path.stat().st_size == 0:
@@ -92,7 +110,12 @@ def main() -> int:
     ap.add_argument("root")
     ap.add_argument("target", type=int)
     ap.add_argument("--tasks", default="", help="optional comma-separated task IDs")
-    ap.add_argument("--prefix", default="genb_")
+    ap.add_argument(
+        "--prefix",
+        default="genb_",
+        help="comma-separated task-id prefixes to verify (empty string = all); "
+             f"the SPUR partitioner's family set is {PARTITION_TASK_PREFIXES}",
+    )
     ap.add_argument("--cleanup-out", default="")
     ap.add_argument("--require-complete", action="store_true")
     ap.add_argument("--json", action="store_true")
@@ -105,10 +128,11 @@ def main() -> int:
     if args.tasks.strip():
         tasks = list(dict.fromkeys(t for t in args.tasks.split(",") if t))
     else:
+        prefixes = split_prefixes(args.prefix)
         tasks = [
             task.task_id
             for task in train_tasks()
-            if task.task_id.startswith(args.prefix)
+            if any(task.task_id.startswith(pfx) for pfx in prefixes)
         ]
     summary, undone = verify(Path(args.root), tasks, args.target)
     cleanup_out = args.cleanup_out

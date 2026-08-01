@@ -33,6 +33,10 @@ from typing import Optional
 
 from kore.config import CONFIG
 from kore.data.amd_knowledge import ExperienceLedger, live_system_prompt
+from kore.data.gen_groups import (
+    paired_baseline_wall_us,
+    primary_timing_classification,
+)
 from kore.data.grounded_reasoning import (
     _transform_hint,
     collect_counters as _collect_counters,
@@ -44,7 +48,12 @@ from kore.data.prompts import (
     extract_kernel,
     normalize_assistant,
 )
-from kore.data.schemas import WinRecord
+from kore.data.schemas import (
+    SPEEDUP_BASIS_TRAJECTORY_INITIAL,
+    WinRecord,
+    resolve_baseline_identity,
+    speedup_credibility,
+)
 from kore.obs import get_logger
 from kore.policy.format import format_assistant_turn, parse_response
 from kore.reward.reward import compute_reward
@@ -367,31 +376,7 @@ def build_convergent_trajectory(
     }
 
 
-def _primary_shape_name(env) -> Optional[str]:
-    """Name of the shape the win is admitted on (primary -> minimal -> first).
-
-    Mirrors :meth:`KoreEnv._shapes`/``evaluate`` primary selection so the
-    admission gate reads the SAME shape the verifier keys its per-shape timing
-    maps under. Fully fail-safe: any missing attribute yields ``None`` and the
-    caller degrades to the obs' top-level (max-across-shape) fields.
-    """
-    task = getattr(env, "task", None)
-    if task is None:
-        return None
-    for probe in ("primary", "minimal"):
-        try:
-            sh = task.shape(probe)
-        except Exception:  # noqa: BLE001 - stub tasks may not implement shape()
-            sh = None
-        if sh is not None:
-            return getattr(sh, "name", None)
-    shapes = getattr(task, "shapes", None) or []
-    if shapes:
-        return getattr(shapes[0], "name", None)
-    return None
-
-
-def _win_admissible(obs, env, cfg) -> tuple[bool, dict]:
+def _win_admissible(obs, env, cfg, task=None) -> tuple[bool, dict]:
     """Baseline-relative, variance-gated stored-win admission (frontier upgrade).
 
     A trajectory earns a place in the durable dataset ONLY when, on the primary
@@ -402,23 +387,20 @@ def _win_admissible(obs, env, cfg) -> tuple[bool, dict]:
     Missing figures (``None``/non-finite) never *earn* admission on their own but
     also never block it - the classification is the mandatory baseline-relative
     gate. Returns ``(admit, fields)`` where ``fields`` are the WinRecord timing
-    provenance columns populated from ``obs`` (empty when ``obs`` is None).
+    provenance columns - the absolute baseline anchor, the baseline IDENTITY, the
+    classification and the CVs - populated from ``obs`` (empty when ``obs`` is None).
     """
     if obs is None:
         return False, {}
+    # The caller's task is authoritative; ``env.task`` is only a fallback, so the
+    # recorded baseline identity never depends on the env exposing the task.
+    task = task if task is not None else getattr(env, "task", None)
     thr = float(getattr(cfg, "win_admit_cv_threshold_pct", 3.0))
-    sh_name = _primary_shape_name(env)
-    tc_by_shape = getattr(obs, "timing_classification_by_shape", None) or {}
-    if sh_name is not None and sh_name in tc_by_shape:
-        classification = tc_by_shape.get(sh_name)
-    elif tc_by_shape:
-        # No resolvable primary key: require EVERY measured shape to be faster
-        # (strictly conservative - never admits on a partial "faster").
-        vals = list(tc_by_shape.values())
-        classification = "faster" if all(v == "faster" for v in vals) else (
-            vals[0] if vals else None)
-    else:
-        classification = None
+    # Shared with gen_groups so the admitted classification and the one persisted on
+    # group candidates can never disagree. With no resolvable primary key EVERY
+    # measured shape must be faster - strictly conservative, never admitting on a
+    # partial "faster".
+    classification = primary_timing_classification(obs, task)
 
     cvs = (
         getattr(obs, "cv_pct", None),
@@ -439,14 +421,13 @@ def _win_admissible(obs, env, cfg) -> tuple[bool, dict]:
     cv_gate = all(_cv_ok(v) for v in cvs)
     admit = (classification == "faster") and cv_gate
 
-    baseline_type = getattr(getattr(env, "task", None), "comparison_baseline", None)
-    baseline_wall_us = None
-    base_ms = getattr(obs, "baseline_ms", None)
-    if base_ms is not None:
-        baseline_wall_us = float(base_ms) * 1000.0
     fields = {
-        "baseline_type": baseline_type,
-        "baseline_wall_us": baseline_wall_us,
+        # WHICH baseline this win beat: the declared comparison_baseline, its
+        # vendor/torch kind, and how that kind was established. Without the kind a
+        # torch_add-relative win is indistinguishable from an aiter_flash_attn-relative
+        # one and no aggregate vendor-beating claim is supportable.
+        **resolve_baseline_identity(task),
+        "baseline_wall_us": paired_baseline_wall_us(obs),
         "final_cv_pct": getattr(obs, "cv_pct", None),
         "baseline_cv_pct": getattr(obs, "baseline_cv_pct", None),
         "paired_ratio_cv_pct": getattr(obs, "paired_ratio_cv_pct", None),
@@ -611,9 +592,14 @@ def generate_wins(
         admit_obs = obs_by_src.get(built["final_source"], best_obs) \
             if built is not None else best_obs
         admissible, _admit_fields = (
-            _win_admissible(admit_obs, env, cfg) if built is not None
+            _win_admissible(admit_obs, env, cfg, task=task) if built is not None
             else (False, {}))
         is_win = (built is not None) and admissible
+        # The persisted ``speedup`` is the reconstructed footer, i.e. relative to
+        # THIS trajectory's own initial measurement -- admission is baseline-relative
+        # but the stored ratio is not, so the basis is declared explicitly and can
+        # never be pooled with the baseline-relative numbers reverify/evolve store.
+        credibility = speedup_credibility(self_speedup, cfg=cfg)
         log.metric(
             "wins_summary", task=task.task_id, turns=gens, is_win=is_win,
             speedup=(built["speedup"] if is_win else None),
@@ -625,6 +611,8 @@ def generate_wins(
             self_speedup=self_speedup,
             admissible=admissible,
             timing_classification=_admit_fields.get("timing_classification"),
+            baseline_kind=_admit_fields.get("baseline_kind"),
+            speedup_exceeds_credible=credibility["speedup_exceeds_credible"],
         )
         if not is_win:
             return []
@@ -649,5 +637,10 @@ def generate_wins(
                 paired_ci_half_width_pct=_admit_fields.get("paired_ci_half_width_pct"),
                 admit_cv_threshold_pct=_admit_fields.get("admit_cv_threshold_pct"),
                 timing_classification=_admit_fields.get("timing_classification"),
+                baseline_kind=_admit_fields.get("baseline_kind"),
+                baseline_identity_source=_admit_fields.get("baseline_identity_source"),
+                speedup_basis=SPEEDUP_BASIS_TRAJECTORY_INITIAL,
+                speedup_exceeds_credible=credibility["speedup_exceeds_credible"],
+                credible_speedup_max=credibility["credible_speedup_max"],
             )
         ]

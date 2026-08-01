@@ -3,6 +3,10 @@
 Runs the SAME verified kernel through both paths (fresh measurement, full rigor) N
 times each and compares the measured speedup distributions. The batched path is only
 safe to ship if its speedups match the legacy path within run-to-run variance.
+
+Exits non-zero when that does not hold (no comparable measurements, a run that
+failed validation, or a mean-speedup delta outside tolerance), so the A/B is a gate
+rather than a wall of numbers.
 """
 import json
 import os
@@ -52,7 +56,10 @@ def measure(task, src, bench_both: bool, n: int) -> list:
     return out
 
 
-def main():
+DELTA_TOLERANCE_PCT = 8.0
+
+
+def main() -> int:
     task_id = sys.argv[1] if len(sys.argv) > 1 else "gen_add_gelu_bf16"
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 3
     task = get_task(task_id)
@@ -72,11 +79,23 @@ def main():
 
     ls = summ("LEGACY  (per-impl processes)", legacy)
     bs = summ("BATCHED (--bench-both)      ", batched)
-    if ls and bs:
-        rel = abs(st.mean(bs) - st.mean(ls)) / st.mean(ls) * 100
-        print(f"\n=> mean speedup delta: {rel:.2f}%  "
-              f"({'PASS' if rel < 8 else 'REVIEW'}: batched vs legacy)")
+
+    invalid = [name for name, rows in (("legacy", legacy), ("batched", batched))
+               if not all(ok for ok, _ in rows)]
+    if invalid:
+        print(f"\n=> FAIL: an already-verified kernel failed validation on: "
+              f"{', '.join(invalid)}")
+        return 1
+    if not ls or not bs:
+        empty = "legacy" if not ls else "batched"
+        print(f"\n=> FAIL: no timed speedups on the {empty} path; nothing to compare")
+        return 1
+
+    rel = abs(st.mean(bs) - st.mean(ls)) / st.mean(ls) * 100
+    verdict = "PASS" if rel < DELTA_TOLERANCE_PCT else "REVIEW"
+    print(f"\n=> mean speedup delta: {rel:.2f}%  ({verdict}: batched vs legacy)")
+    return 0 if verdict == "PASS" else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

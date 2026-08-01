@@ -1,7 +1,8 @@
 #!/bin/bash
-# Partition + submit a FRONTIER STAGE (reverify|evolve) across up to 16 nodes:
-# 8 DEDICATED (amd-general-qos, non-preemptible) + 8 BURST (amd-burst-qos, bonus).
-# Both stages are resumable, so burst preemption/requeue is harmless.
+# Partition + submit a FRONTIER STAGE (reverify|evolve).
+# By default: 8 DEDICATED nodes on amd-general-qos (non-preemptible), no burst.
+# An optional best-effort BURST wave on amd-burst-qos can be requested explicitly;
+# both stages are resumable, so burst preemption/requeue is harmless when it works.
 #
 # Usage: scripts/spur_submit_stage.sh <reverify|evolve> [SHARDS] [DED_NODES] [BURST_NODES]
 # Re-running repartitions CURRENT remaining work (completed tasks disappear).
@@ -10,7 +11,12 @@ set -euo pipefail
 STAGE="${1:?stage: reverify|evolve}"
 SHARDS="${2:-16}"
 DED_NODES="${3:-8}"
-BURST_NODES="${4:-8}"
+# Opt-in, default 0. amd-burst-qos was removed cluster-side (see 173dbbf) and its
+# current availability is unconfirmed; when it is absent the burst sbatch is
+# refused and the stage silently runs at half the intended width, visible only as
+# a stderr warning. Defaulting to 0 makes the requested node count the real one.
+# Pass a 4th argument to request a best-effort burst wave explicitly.
+BURST_NODES="${4:-0}"
 
 REPO="${KORE_REPO:-/home/shasriva/Kore-RL/KORE}"
 PY="${KORE_PY:-/home/shasriva/kore-venv/bin/python}"

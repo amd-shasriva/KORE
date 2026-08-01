@@ -18,6 +18,15 @@ reader and is intended for quarantine/migration tooling.
 but durable: it writes a unique temporary file in the destination directory,
 flushes and fsyncs it, atomically replaces the destination, then fsyncs the
 directory. Known KORE records are stamped with the current schema version.
+
+A stored measurement is only as honest as the reference it names, so this module
+also owns the vocabulary that keeps the references distinguishable:
+``BASELINE_KIND_*`` (was the bar a production vendor kernel or torch?),
+``SPEEDUP_BASIS_*`` (is a ``speedup`` baseline-, trajectory- or parent-relative?)
+and the credible-speedup ceiling (a ratio recorded truthfully but flagged as not
+supporting a kernel-skill claim). :func:`resolve_baseline_identity`,
+:func:`baseline_relative_speedup` and :func:`speedup_credibility` are the shared
+entry points every win-producing path uses.
 """
 
 from __future__ import annotations
@@ -41,9 +50,90 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger(__name__)
 
 GPU_DEFAULT = "gfx950"  # KORE target = MI350X/CDNA4 (matches registry.TRAIN_ARCH)
+# Stays at 2. The baseline-identity / speedup-basis / speedup-credibility columns
+# added below are OPTIONAL and default to None, exactly like the v1->v2 timing-rigor
+# block, so every shipped v2 shard keeps validating unchanged AND every shard
+# receipt stays valid (``parallel_datagen._validate_receipt`` pins a receipt's
+# ``record_schema_version`` to EQUAL this constant, so a bump would invalidate the
+# completion receipts of the already-generated corpus). Bump only for a change that
+# a v2 reader cannot interpret.
 RECORD_SCHEMA_VERSION = 2
 SCHEMA_VERSION_FIELD = "schema_version"
 LEGACY_QUARANTINE_LANE = "kore-legacy-quarantine-v1"
+
+# --------------------------------------------------------------------------- #
+# Baseline identity: WHICH baseline a measurement was taken against.
+# --------------------------------------------------------------------------- #
+# ``baseline_type`` is the baseline the task DECLARES (task.yaml
+# ``targets.comparison_baseline``, e.g. ``aiter_flash_attn`` / ``torch_add``);
+# ``baseline_kind`` is that declaration reduced to the only distinction a
+# performance claim may rest on - was the bar a production vendor kernel or a
+# torch bar?  Without it a torch_add-relative win is indistinguishable from an
+# aiter_flash_attn-relative one and no aggregate "beats vendor" claim is supportable.
+BASELINE_KIND_VENDOR = "vendor"              # AITER / hipBLASLt / rocBLAS / CK
+BASELINE_KIND_TORCH_COMPILE = "torch_compile"  # compiler-fused torch bar
+BASELINE_KIND_TORCH = "torch"                # plain torch eager / framework op
+BASELINE_KIND_UNKNOWN = "unknown"            # not declared / not classifiable
+BASELINE_KINDS = frozenset((
+    BASELINE_KIND_VENDOR, BASELINE_KIND_TORCH_COMPILE,
+    BASELINE_KIND_TORCH, BASELINE_KIND_UNKNOWN,
+))
+
+# How ``baseline_kind`` was obtained. Deliberately NO "runtime_confirmed" value:
+# the AITER wrappers fall back to torch when the runtime is unavailable and only
+# announce it through the ``KORE_BASELINE_IMPL:<impl>`` stderr sentinel of the bench
+# subprocess, which the verifier does not surface on its Observation. So a vendor
+# kind means "the vendor code path was SELECTED", never "vendor kernels ran".
+BASELINE_IDENTITY_DECLARED = "declared"            # from task.comparison_baseline
+BASELINE_IDENTITY_STATIC = "static_resolution"     # from the generated-op resolver
+BASELINE_IDENTITY_SOURCES = frozenset((
+    BASELINE_IDENTITY_DECLARED, BASELINE_IDENTITY_STATIC,
+))
+
+# Generated-op families whose baseline callable is actually chosen by
+# ``kore.tasks._genops._vendor_baseline`` (and therefore whose kind that module
+# resolves authoritatively, env gates included). Every other family keeps the
+# declared string as its best available evidence.
+_STATICALLY_RESOLVED_FAMILIES = frozenset(("fusion", "gemm_fusion"))
+
+_VENDOR_MARKERS = ("aiter", "hipblaslt", "hipblas", "rocblas", "vendor", "ck_", "_ck")
+_TORCH_COMPILE_MARKERS = ("torch_compile", "torch.compile", "inductor", "compile")
+_TORCH_MARKERS = ("torch", "eager", "framework", "aten")
+
+# --------------------------------------------------------------------------- #
+# Speedup basis: WHAT a stored ``speedup`` is a ratio against.
+# --------------------------------------------------------------------------- #
+# Three different denominators are in use across the win-producing paths, and
+# pooling them silently corrupts every aggregate: reverified/evolve wins are
+# baseline-relative, gen_wins footers are relative to the trajectory's own first
+# measurement, and gold_wins mints a SIBLING/parent-relative ratio. Only records
+# that explicitly declare ``baseline`` may be pooled as production-relative.
+SPEEDUP_BASIS_BASELINE = "baseline"                  # vs the declared production baseline
+SPEEDUP_BASIS_TRAJECTORY_INITIAL = "trajectory_initial"  # vs this trajectory's own seed measurement
+SPEEDUP_BASIS_SEED = "seed"                          # vs the task's seed kernel
+SPEEDUP_BASIS_PARENT = "parent"                      # vs a sibling/parent candidate
+SPEEDUP_BASES = frozenset((
+    SPEEDUP_BASIS_BASELINE, SPEEDUP_BASIS_TRAJECTORY_INITIAL,
+    SPEEDUP_BASIS_SEED, SPEEDUP_BASIS_PARENT,
+))
+
+# --------------------------------------------------------------------------- #
+# Credible-speedup ceiling (physical plausibility of a PERSISTED win).
+# --------------------------------------------------------------------------- #
+# On fixed hardware the honest ceiling for a kernel rewrite is set by the
+# roofline: against a vendor kernel already at 60-90% of peak it is well under 2x,
+# and against a torch-eager bar the gain is bounded by the HBM round-trips and
+# kernel launches that fusion removes - order 10x for a long fused chain. A larger
+# ratio is real AS MEASURED but is no longer measuring kernel skill: it usually
+# means the "baseline" was not a single GPU kernel at all (e.g. the ~94 sequence/SSM
+# tasks benched against a Python ``for t in range(2048)`` interpreter loop, where
+# four-digit ratios are genuine and meaningless as a claim). 10.0 also keeps the
+# persisted corpus consistent with the reward module, which already refuses to
+# treat >``CONFIG.excessive_speedup_flag`` (10.0) as credible online: one number
+# governs both the live reward and the durable dataset. Overridable per call, via
+# ``KORE_CREDIBLE_SPEEDUP_MAX``, or via ``cfg.excessive_speedup_flag``.
+CREDIBLE_SPEEDUP_MAX_DEFAULT = 10.0
+CREDIBLE_SPEEDUP_MAX_ENV = "KORE_CREDIBLE_SPEEDUP_MAX"
 
 
 class JsonlReadMode(str, Enum):
@@ -117,6 +207,15 @@ class RankedGroupRecord:
     # PROFILE(parent)->...->MEASURE(best) delta instead of misattributing the winner's.
     parent_counters: dict | None = None
     parent_wall_us: float | None = None
+    # Measured wall of the PRODUCTION baseline this group's candidates were timed
+    # against (us). The group-level anchor for ``build_dpo``'s
+    # ``candidate_baseline_speedup``; candidates carry their own copy too.
+    baseline_wall_us: float | None = None
+    # WHICH baseline that was: the task's declared comparison_baseline and its
+    # vendor/torch kind. Also what ``gold_wins.mint_gold_win`` reads to stamp
+    # ``baseline_type`` on a gold-minted win.
+    baseline_type: str | None = None
+    baseline_kind: str | None = None
     schema_version: ClassVar[int] = RECORD_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
@@ -137,12 +236,24 @@ class RankedGroupRecord:
             counters=d.get("counters"),
             parent_counters=d.get("parent_counters"),
             parent_wall_us=d.get("parent_wall_us"),
+            baseline_wall_us=d.get("baseline_wall_us"),
+            baseline_type=d.get("baseline_type"),
+            baseline_kind=d.get("baseline_kind"),
         )
 
 
 @dataclass
 class WinRecord:
-    """A full winning multi-turn trajectory (initial -> final, wall improved)."""
+    """A full winning multi-turn trajectory (initial -> final, wall improved).
+
+    ``speedup`` is only interpretable together with ``speedup_basis``, which names
+    the denominator (see the ``SPEEDUP_BASIS_*`` constants). ``speedup_basis is
+    None`` means the writer never declared one - true of legacy v1/v2 shards and of
+    ``gold_wins.mint_gold_win``, which stores a SIBLING/parent-relative ratio (and
+    puts the parent's wall in ``baseline_wall_us``). Such records must never be
+    pooled with baseline-relative numbers; use :func:`baseline_relative_speedup`,
+    which returns a value only for an explicitly baseline-anchored record.
+    """
 
     task_id: str
     trajectory: list[dict]      # list of chat messages across turns
@@ -159,7 +270,7 @@ class WinRecord:
     shape: str | None = None
     # Timing-rigor provenance (frontier-baselines upgrade). All optional so
     # existing v1 shards round-trip unchanged (defaults None on read).
-    baseline_type: str | None = None
+    baseline_type: str | None = None      # DECLARED targets.comparison_baseline
     baseline_wall_us: float | None = None
     final_cv_pct: float | None = None
     baseline_cv_pct: float | None = None
@@ -167,6 +278,18 @@ class WinRecord:
     paired_ci_half_width_pct: float | None = None
     admit_cv_threshold_pct: float | None = None
     timing_classification: str | None = None
+    # Baseline IDENTITY (vendor vs torch) + how it was established, so a
+    # vendor-beating claim can be separated from a torch-beating one.
+    baseline_kind: str | None = None
+    baseline_identity_source: str | None = None
+    # Which reference ``speedup`` is a ratio against (SPEEDUP_BASIS_*).
+    speedup_basis: str | None = None
+    # Physical-plausibility flag on the PERSISTED number: True when ``speedup``
+    # exceeds ``credible_speedup_max``. The value is kept truthfully; flagged
+    # records are excluded from exemplar selection and from aggregates instead of
+    # being deleted (many are real as measured against a non-kernel baseline).
+    speedup_exceeds_credible: bool | None = None
+    credible_speedup_max: float | None = None
     schema_version: ClassVar[int] = RECORD_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
@@ -196,7 +319,162 @@ class WinRecord:
             paired_ci_half_width_pct=d.get("paired_ci_half_width_pct"),
             admit_cv_threshold_pct=d.get("admit_cv_threshold_pct"),
             timing_classification=d.get("timing_classification"),
+            # Baseline-identity / speedup-basis / credibility columns; absent in
+            # every already-shipped shard -> default None (never inferred).
+            baseline_kind=d.get("baseline_kind"),
+            baseline_identity_source=d.get("baseline_identity_source"),
+            speedup_basis=d.get("speedup_basis"),
+            speedup_exceeds_credible=d.get("speedup_exceeds_credible"),
+            credible_speedup_max=d.get("credible_speedup_max"),
         )
+
+
+# --------------------------------------------------------------------------- #
+# Baseline identity / speedup semantics helpers (pure; no GPU, no torch).
+# --------------------------------------------------------------------------- #
+def _get(record: Any, key: str) -> Any:
+    """Read ``key`` off a record dataclass or a raw record dict."""
+    if isinstance(record, dict):
+        return record.get(key)
+    return getattr(record, key, None)
+
+
+def classify_baseline_kind(declared: Any) -> str:
+    """Reduce a DECLARED ``comparison_baseline`` to a :data:`BASELINE_KINDS` value.
+
+    Vendor markers (``aiter_*``, ``hipblaslt``, ``rocblas``, ``vendor``, CK) mean the
+    bar is a production kernel; ``torch_compile``/inductor is the compiler-fused torch
+    bar; anything else torch-ish is the eager/framework bar. Unrecognised or missing
+    declarations stay ``unknown`` - never silently promoted to a vendor claim.
+    """
+    if not isinstance(declared, str) or not declared.strip():
+        return BASELINE_KIND_UNKNOWN
+    text = declared.strip().lower()
+    if any(marker in text for marker in _VENDOR_MARKERS):
+        return BASELINE_KIND_VENDOR
+    if any(marker in text for marker in _TORCH_COMPILE_MARKERS):
+        return BASELINE_KIND_TORCH_COMPILE
+    if any(marker in text for marker in _TORCH_MARKERS):
+        return BASELINE_KIND_TORCH
+    return BASELINE_KIND_UNKNOWN
+
+
+def resolve_baseline_identity(task: Any) -> dict:
+    """Best-available identity of the baseline ``task`` is measured against.
+
+    Returns the ``baseline_type`` / ``baseline_kind`` / ``baseline_identity_source``
+    columns. For the GENERATED fusion + gemm_fusion families the kind comes from
+    ``kore.tasks._genops._vendor_baseline_kind``, which is the same function that
+    selects the baseline callable and which accounts for the
+    ``KORE_USE_VENDOR_BASELINE`` / ``KORE_COMPILE_BASELINE`` gates - i.e. the
+    RESOLVED code path, not merely the declaration. Every other family has no
+    static resolver, so its declared string is classified instead and the source is
+    reported as ``declared``.
+
+    A ``vendor`` kind states that the vendor code path was selected. The AITER
+    wrappers degrade to torch when the runtime is missing and only report it through
+    the ``KORE_BASELINE_IMPL:`` stderr sentinel of the bench subprocess, which the
+    verifier does not put on its Observation, so this function never claims runtime
+    confirmation.
+    """
+    declared = _get(task, "comparison_baseline")
+    declared = declared.strip() if isinstance(declared, str) and declared.strip() else None
+    kind = classify_baseline_kind(declared)
+    source = BASELINE_IDENTITY_DECLARED
+    family = _get(task, "source_family")
+    operation = _get(task, "operation")
+    dtype = _get(task, "dtype")
+    if (isinstance(family, str) and family in _STATICALLY_RESOLVED_FAMILIES
+            and isinstance(operation, str) and isinstance(dtype, str)):
+        try:
+            from kore.tasks._genops import _vendor_baseline_kind
+
+            resolved = _vendor_baseline_kind(operation, family, dtype)
+        except Exception:  # noqa: BLE001 - identity is provenance, never fatal
+            resolved = None
+        mapped = {
+            "vendor": BASELINE_KIND_VENDOR,
+            "torch_compile": BASELINE_KIND_TORCH_COMPILE,
+            "eager": BASELINE_KIND_TORCH,
+        }.get(resolved)
+        if mapped is not None:
+            kind = mapped
+            source = BASELINE_IDENTITY_STATIC
+    return {
+        "baseline_type": declared,
+        "baseline_kind": kind,
+        "baseline_identity_source": source,
+    }
+
+
+def credible_speedup_max(cfg: Any = None, threshold: Any = None) -> float:
+    """The credible-speedup ceiling: explicit arg > env > ``cfg`` > default."""
+    for candidate in (threshold,
+                      os.environ.get(CREDIBLE_SPEEDUP_MAX_ENV),
+                      _get(cfg, "excessive_speedup_flag") if cfg is not None else None):
+        if candidate is None or isinstance(candidate, bool):
+            continue
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0:
+            return value
+    return CREDIBLE_SPEEDUP_MAX_DEFAULT
+
+
+def speedup_credibility(speedup: Any, *, cfg: Any = None,
+                        threshold: Any = None) -> dict:
+    """The ``speedup_exceeds_credible`` / ``credible_speedup_max`` columns.
+
+    The measured value is never altered: a ratio above the ceiling is recorded as
+    measured and flagged, so it stays auditable while being excluded from exemplar
+    selection and from aggregate claims. An unmeasurable speedup flags ``None``
+    (unknown), never ``False``.
+    """
+    ceiling = credible_speedup_max(cfg, threshold)
+    exceeds: bool | None = None
+    if not isinstance(speedup, bool) and isinstance(speedup, (int, float)):
+        value = float(speedup)
+        if math.isfinite(value):
+            exceeds = value > ceiling
+    return {"speedup_exceeds_credible": exceeds, "credible_speedup_max": ceiling}
+
+
+def is_baseline_relative_speedup(basis: Any) -> bool:
+    """True only for an EXPLICIT baseline-relative basis (None is never assumed)."""
+    return basis == SPEEDUP_BASIS_BASELINE
+
+
+def baseline_relative_speedup(record: Any) -> float | None:
+    """A record's speedup ONLY when it declares a baseline-relative basis.
+
+    The one safe way to pool speedups across win-producing paths: a gold-minted
+    parent-relative ratio, a trajectory-initial footer and an undeclared legacy
+    number all return None instead of contaminating the aggregate.
+    """
+    if not is_baseline_relative_speedup(_get(record, "speedup_basis")):
+        return None
+    speedup = _get(record, "speedup")
+    if isinstance(speedup, bool) or not isinstance(speedup, (int, float)):
+        return None
+    value = float(speedup)
+    return value if math.isfinite(value) else None
+
+
+def is_credible_win(record: Any, *, cfg: Any = None, threshold: Any = None) -> bool:
+    """Is this win's persisted speedup within the credible-speedup ceiling?
+
+    Uses the flag the writer persisted when present; otherwise re-derives the
+    verdict from ``speedup`` so the already-shipped (unflagged) wins are graded too.
+    An unmeasurable speedup counts as credible (there is no implausible claim).
+    """
+    flag = _get(record, "speedup_exceeds_credible")
+    if isinstance(flag, bool):
+        return not flag
+    verdict = speedup_credibility(_get(record, "speedup"), cfg=cfg,
+                                  threshold=threshold)
+    return verdict["speedup_exceeds_credible"] is not True
 
 
 Record = Union[
@@ -323,6 +601,25 @@ def _validate_optional_number(mapping: dict, key: str, path: str,
         raise _validation_error(f"{path}.{key}", "must be positive")
 
 
+def _validate_optional_string(mapping: dict, key: str, path: str,
+                              *, allowed: Any = None) -> None:
+    value = mapping.get(key)
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise _validation_error(f"{path}.{key}", "must be a string or null")
+    if allowed is not None and value not in allowed:
+        raise _validation_error(
+            f"{path}.{key}", f"unknown value {value!r}; expected one of "
+            f"{sorted(allowed)}")
+
+
+def _validate_optional_bool(mapping: dict, key: str, path: str) -> None:
+    value = mapping.get(key)
+    if value is not None and not isinstance(value, bool):
+        raise _validation_error(f"{path}.{key}", "must be a boolean or null")
+
+
 def _validate_messages(value: Any, path: str) -> None:
     # Empty transcripts remain representable for source-only champion records and
     # failed/no-turn episodes; every message that is present is fully validated.
@@ -385,6 +682,11 @@ def _validate_ranked_group(d: dict) -> None:
             "wall_us", "snr_db", "speedup", "baseline_wall_us",
         ):
             _validate_optional_number(candidate, numeric_key, candidate_path)
+        # A manufactured reward-hack negative carries its ``reward_hack:<kind>``
+        # label here (hard_negatives.build_hard_negative_group); validating it as a
+        # first-class optional column is what lets the label survive to disk and
+        # into the emitted DPO provenance instead of being incidental extra data.
+        _validate_optional_string(candidate, "hard_negative", candidate_path)
 
     expected_ranks = set(range(len(candidates)))
     if set(ranks) != expected_ranks or len(set(ranks)) != len(ranks):
@@ -420,6 +722,9 @@ def _validate_ranked_group(d: dict) -> None:
             raise _validation_error(
                 f"record.{optional_dict}", "must be an object or null")
     _validate_optional_number(d, "parent_wall_us", "record")
+    _validate_optional_number(d, "baseline_wall_us", "record")
+    _validate_optional_string(d, "baseline_type", "record")
+    _validate_optional_string(d, "baseline_kind", "record", allowed=BASELINE_KINDS)
     candidate_schema = d.get("candidate_outcome_schema")
     if candidate_schema is not None:
         candidate_schema = _require_dict(
@@ -478,6 +783,15 @@ def _validate_win_v2(d: dict) -> None:
         if value is not None and not isinstance(value, str):
             raise _validation_error(
                 f"record.{string_key}", "must be a string or null")
+    # Baseline identity, speedup basis and speedup credibility. Absent on every
+    # shipped v2 record (-> null, no meaning inferred); when PRESENT the value must
+    # come from the closed vocabulary so a typo can never ship as a new "kind".
+    _validate_optional_string(d, "baseline_kind", "record", allowed=BASELINE_KINDS)
+    _validate_optional_string(d, "baseline_identity_source", "record",
+                              allowed=BASELINE_IDENTITY_SOURCES)
+    _validate_optional_string(d, "speedup_basis", "record", allowed=SPEEDUP_BASES)
+    _validate_optional_bool(d, "speedup_exceeds_credible", "record")
+    _validate_optional_number(d, "credible_speedup_max", "record", positive=True)
 
 
 def _validate_agentic(d: dict) -> None:
@@ -1123,6 +1437,16 @@ def read_jsonl_legacy(
 
 
 __all__ = [
+    "BASELINE_IDENTITY_DECLARED",
+    "BASELINE_IDENTITY_SOURCES",
+    "BASELINE_IDENTITY_STATIC",
+    "BASELINE_KINDS",
+    "BASELINE_KIND_TORCH",
+    "BASELINE_KIND_TORCH_COMPILE",
+    "BASELINE_KIND_UNKNOWN",
+    "BASELINE_KIND_VENDOR",
+    "CREDIBLE_SPEEDUP_MAX_DEFAULT",
+    "CREDIBLE_SPEEDUP_MAX_ENV",
     "GPU_DEFAULT",
     "JsonlValidationError",
     "JsonlReadMode",
@@ -1132,16 +1456,28 @@ __all__ = [
     "RepairRecord",
     "RankedGroupRecord",
     "SCHEMA_VERSION_FIELD",
+    "SPEEDUP_BASES",
+    "SPEEDUP_BASIS_BASELINE",
+    "SPEEDUP_BASIS_PARENT",
+    "SPEEDUP_BASIS_SEED",
+    "SPEEDUP_BASIS_TRAJECTORY_INITIAL",
     "ShardValidation",
     "WinRecord",
     "atomic_write_bytes",
     "atomic_write_json",
+    "baseline_relative_speedup",
+    "classify_baseline_kind",
+    "credible_speedup_max",
+    "is_baseline_relative_speedup",
+    "is_credible_win",
     "read_jsonl",
     "read_jsonl_legacy",
     "record_from_dict",
     "record_to_dict",
     "register_candidate_outcome_schema",
     "register_record_schema",
+    "resolve_baseline_identity",
+    "speedup_credibility",
     "stamp_legacy_record_unknown",
     "stamp_production_record",
     "stamp_source_only_record",

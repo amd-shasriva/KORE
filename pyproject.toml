@@ -7,7 +7,13 @@ name = "kore"
 version = "0.1.0"
 description = "KORE: multi-turn verifiable-reward RL for AMD ROCm kernel generation"
 readme = "README.md"
+license = { text = "LicenseRef-AMD-Proprietary-Internal" }
+license-files = ["LICENSE", "THIRD_PARTY.md"]
 requires-python = ">=3.10"
+classifiers = [
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3.10",
+]
 dependencies = [
     "pyyaml>=6.0",
 ]

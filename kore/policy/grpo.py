@@ -1051,33 +1051,598 @@ def _truncate_prompt_ids(ids, config):
     return ids
 
 
-def _save_grpo_checkpoint(model, tok, config, step):
-    """Fix 3 (save_steps): write a periodic checkpoint.
+# --------------------------------------------------------------------------- #
+# Periodic checkpointing + full resume (preemption safety)
+#
+# GRPO runs on a preemptible Slurm QoS with --requeue, so a 2000-step run that is
+# preempted at step 1900 MUST come back at step 1900, not at step 0. Both training
+# loops therefore write a periodic checkpoint carrying everything needed to
+# continue (weights, optimizer, LR schedule, RNG, step counter) and both look for
+# one at startup.
+#
+# Two safety properties the naive version does not have:
+#   * ATOMIC publish. The checkpoint is written into a dot-prefixed STAGING dir
+#     and renamed into place only once it is complete and re-validated, so a save
+#     killed half-way leaves nothing that discovery can mistake for a checkpoint.
+#   * FAIL-CLOSED discovery. If checkpoints exist but none can be restored we
+#     raise. Silently restarting a preempted long run from zero - burning the GPU
+#     budget while looking healthy - is the exact failure this path prevents.
+# --------------------------------------------------------------------------- #
+_GRPO_STATE_FILE = "trainer_state.json"          # also the configs.latest_checkpoint marker
+_GRPO_OPTIM_FILE = "optimizer.pt"
+_GRPO_SCHED_FILE = "scheduler.pt"
+_GRPO_RNG_FILE = "rng_state.pth"
+# Dot-prefixed so a staging dir matches neither ``checkpoint-*`` here nor the same
+# glob in ``configs.latest_checkpoint``: an interrupted save is invisible to both.
+_GRPO_STAGING_PREFIX = ".incomplete-checkpoint-"
 
-    Keeps only the MOST RECENT periodic checkpoint (save_total_limit=1 semantics):
-    a 14B model is ~56GB/ckpt, so a long GRPO run or the 2-phase curriculum would
-    otherwise fill the disk with stale checkpoints (this exact bloat crashed the
-    DPO save). Rotation is per-output_dir, so curriculum phases don't cross-delete,
-    and the stage's FINAL top-level save (save_pretrained(output_dir)) is untouched.
+
+def _grpo_save_total_limit(config) -> int:
+    """How many periodic checkpoints to retain (configurable, never below 2).
+
+    Retaining exactly one is unsafe: rotation would delete the only resumable
+    checkpoint, so a crash during the NEXT save leaves nothing to resume from.
+    Two is the smallest count where a bad save always still has a predecessor.
+    ``GRPOConfig`` has no ``save_total_limit`` field yet, so this reads it
+    defensively and falls back to the safe default.
     """
-    import os, glob, shutil
-
-    out_dir = getattr(config, "output_dir", "runs/grpo")
-    ckpt = os.path.join(out_dir, f"checkpoint-{step}")
+    limit = getattr(config, "save_total_limit", None)
     try:
-        model.save_pretrained(ckpt)
-        tok.save_pretrained(ckpt)
-        _write_grpo_foundations_state(ckpt, config)
-        log.info("grpo periodic checkpoint saved", step=step, path=ckpt)
-        for old in glob.glob(os.path.join(out_dir, "checkpoint-*")):
-            if os.path.isdir(old) and os.path.abspath(old) != os.path.abspath(ckpt):
-                shutil.rmtree(old, ignore_errors=True)
+        limit = int(limit) if limit is not None else 2
+    except (TypeError, ValueError):
+        limit = 2
+    return max(2, limit)
+
+
+def _grpo_checkpoint_dirs(output_dir) -> list:
+    """``(step, path)`` for every ``checkpoint-<step>`` dir in ``output_dir``, oldest first."""
+    import glob
+    import os
+
+    found = []
+    for path in glob.glob(os.path.join(str(output_dir), "checkpoint-*")):
+        if not os.path.isdir(path):
+            continue
+        try:
+            step = int(os.path.basename(path).rsplit("-", 1)[1])
+        except (ValueError, IndexError):
+            continue  # not a step-numbered checkpoint; not ours to read or rotate
+        found.append((step, path))
+    return sorted(found)
+
+
+def _read_grpo_trainer_state(ckpt):
+    """Parsed ``trainer_state.json`` iff ``ckpt`` is a COMPLETE checkpoint, else None.
+
+    Completeness is checked against the manifest the writer recorded
+    (``kore_grpo_files``: the weight shards, tokenizer, optimizer, scheduler and
+    RNG files that were present when the state file was written), so a directory
+    that lost or never received one of them is rejected rather than resumed into a
+    half-restored run.
+    """
+    import json
+    import os
+
+    path = os.path.join(str(ckpt), _GRPO_STATE_FILE)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    step = state.get("global_step")
+    if not isinstance(step, int) or isinstance(step, bool) or step < 0:
+        return None
+    manifest = state.get("kore_grpo_files")
+    if not isinstance(manifest, list) or not manifest:
+        return None
+    for name in manifest:
+        if not isinstance(name, str) or not os.path.exists(os.path.join(str(ckpt), name)):
+            return None
+    return state
+
+
+def _find_grpo_resume_checkpoint(config):
+    """Newest fully-written checkpoint in ``output_dir`` as ``(path, state)``, or None.
+
+    Scans newest-first and returns the first checkpoint that validates, so a
+    damaged newest directory falls back to the previous good one -
+    ``configs.latest_checkpoint`` inspects only the highest-numbered dir and would
+    report "nothing to resume" in that case, which is precisely the silent
+    restart-from-zero we must never do.
+
+    Raises when checkpoint directories exist but NONE of them is resumable.
+    """
+    output_dir = getattr(config, "output_dir", "runs/grpo")
+    candidates = _grpo_checkpoint_dirs(output_dir)
+    for _step, path in reversed(candidates):
+        state = _read_grpo_trainer_state(path)
+        if state is not None:
+            return path, state
+    if candidates:
+        raise RuntimeError(
+            f"GRPO found {len(candidates)} checkpoint director"
+            f"{'y' if len(candidates) == 1 else 'ies'} under {str(output_dir)!r} but none "
+            f"is resumable (no valid {_GRPO_STATE_FILE}): "
+            + ", ".join(p for _s, p in candidates)
+            + ". Refusing to silently restart from step 0 - move or delete them to "
+              "start a genuinely fresh run.")
+    return None
+
+
+def _discover_grpo_resume(config, accelerator=None):
+    """Resolve the resume checkpoint ONCE on rank 0 and broadcast it to every rank.
+
+    Ranks must agree: a rank that resumed while another started fresh would train
+    two different policies under one optimizer. The fail-closed error is broadcast
+    as a VALUE and re-raised everywhere rather than raised on rank 0 alone, which
+    would leave the other ranks blocked on the next collective instead of failing.
+    """
+    rank = getattr(accelerator, "process_index", 0) if accelerator is not None else 0
+    payload = None
+    if rank == 0:
+        try:
+            payload = {"ok": True, "resume": _find_grpo_resume_checkpoint(config)}
+        except Exception as e:  # noqa: BLE001 - re-raised identically on every rank below
+            payload = {"ok": False, "error": str(e)}
+    payload = _broadcast_rank0_object(payload, accelerator)
+    if not payload["ok"]:
+        raise RuntimeError(payload["error"])
+    return payload["resume"]
+
+
+def _grpo_rng_state() -> dict:
+    """This process's RNG state (python + torch, and numpy/CUDA when present)."""
+    import random
+
+    import torch
+
+    state = {"python": random.getstate(), "torch": torch.get_rng_state()}
+    try:
+        import numpy as np
+        state["numpy"] = np.random.get_state()
+    except Exception:  # noqa: BLE001 - numpy is optional for RNG fidelity
+        pass
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_grpo_rng_state(state) -> None:
+    """Restore one process's RNG state produced by :func:`_grpo_rng_state`."""
+    import random
+
+    import torch
+
+    if not isinstance(state, dict):
+        return
+    if state.get("python") is not None:
+        random.setstate(state["python"])
+    if state.get("torch") is not None:
+        torch.set_rng_state(state["torch"].cpu() if hasattr(state["torch"], "cpu")
+                            else state["torch"])
+    if state.get("numpy") is not None:
+        try:
+            import numpy as np
+            np.random.set_state(state["numpy"])
+        except Exception:  # noqa: BLE001 - numpy absent / state from another build
+            pass
+    if state.get("cuda") is not None and torch.cuda.is_available():
+        try:
+            torch.cuda.set_rng_state_all(state["cuda"])
+        except Exception:  # noqa: BLE001 - device count changed between runs
+            pass
+
+
+def _fsdp_module(model):
+    """``model`` iff it is an FSDP-wrapped module, else None (torch-free safe)."""
+    try:
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    except Exception:  # noqa: BLE001 - no torch.distributed build
+        return None
+    return model if isinstance(model, FSDP) else None
+
+
+def _fsdp_full_state_ctx(model):
+    """FULL_STATE_DICT + rank0-only context for the model AND optimizer state dicts.
+
+    Matches the plugin's ``state_dict_type="FULL_STATE_DICT"`` and the rank0-only
+    gather ``accelerator.get_state_dict`` already performs, so the optimizer state
+    lands consolidated on rank 0 and is offloaded to host RAM instead of pinning a
+    second copy of the 14B optimizer on the accelerator.
+    """
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp import (
+        FullOptimStateDictConfig,
+        FullStateDictConfig,
+        StateDictType,
+    )
+
+    return FSDP.state_dict_type(
+        model, StateDictType.FULL_STATE_DICT,
+        FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+        FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True))
+
+
+def _gather_full_optim_state(model, optimizer, accelerator=None):
+    """Consolidated optimizer state for ``model``, gathered onto the main process.
+
+    MUST be called by EVERY rank: ``FSDP.optim_state_dict`` is a collective that
+    all-gathers each rank's optimizer shard, so a rank that skips it leaves the
+    others blocked inside it. Returns the full state on rank 0 and (under FSDP
+    rank0-only) an empty mapping elsewhere.
+
+    Returns ``None`` for a sharded engine we cannot consolidate (DeepSpeed ZeRO
+    keeps optimizer state inside its own engine); the caller records that in the
+    checkpoint so a later resume fails closed instead of restoring a partial
+    optimizer.
+    """
+    if optimizer is None:
+        return None
+    inner = getattr(optimizer, "optimizer", optimizer)  # unwrap AcceleratedOptimizer
+    fsdp = _fsdp_module(model)
+    if fsdp is not None:
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+        with _fsdp_full_state_ctx(fsdp):
+            return FSDP.optim_state_dict(fsdp, inner)
+    if accelerator is not None and getattr(accelerator, "num_processes", 1) > 1:
+        log.warn("grpo checkpoint: optimizer state not consolidated for this backend "
+                 "(resume from this checkpoint will fail closed)",
+                 backend=type(model).__name__)
+        return None
+    return inner.state_dict()
+
+
+def _load_full_optim_state(model, optimizer, full_osd, accelerator=None) -> None:
+    """Load a consolidated optimizer state back into a (possibly sharded) optimizer.
+
+    Like the save side this is a COLLECTIVE under FSDP - rank 0 holds the full
+    state and ``optim_state_dict_to_load`` scatters it - so every rank calls it
+    unconditionally, with followers passing ``None``.
+    """
+    inner = getattr(optimizer, "optimizer", optimizer)
+    fsdp = _fsdp_module(model)
+    if fsdp is not None:
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+        with _fsdp_full_state_ctx(fsdp):
+            sharded = FSDP.optim_state_dict_to_load(fsdp, inner, full_osd)
+        inner.load_state_dict(sharded)
+        return
+    if full_osd is None:
+        raise RuntimeError("GRPO resume: no consolidated optimizer state to load")
+    inner.load_state_dict(full_osd)
+
+
+def _stage_grpo_checkpoint_dir(out_dir, step) -> str:
+    """Create (and clear) the staging dir the new checkpoint is assembled in."""
+    import os
+    import shutil
+
+    staging = os.path.join(str(out_dir), f"{_GRPO_STAGING_PREFIX}{step}")
+    shutil.rmtree(staging, ignore_errors=True)   # drop a stale dir from a killed save
+    os.makedirs(staging, exist_ok=True)
+    return staging
+
+
+def _write_grpo_resume_state(staging, config, step, *, optim_state, scheduler,
+                             rng_states, extra=None) -> None:
+    """Write the resume payload + the completeness manifest into a staging dir.
+
+    ``trainer_state.json`` is written LAST and lists every other file, so a
+    truncated save can never present itself as complete: either the manifest is
+    absent (dir rejected) or every file it names is on disk.
+    """
+    import json
+    import os
+
+    import torch
+
+    files = []
+    if optim_state is not None:
+        torch.save(optim_state, os.path.join(staging, _GRPO_OPTIM_FILE))
+        files.append(_GRPO_OPTIM_FILE)
+    if scheduler is not None:
+        torch.save(scheduler.state_dict(), os.path.join(staging, _GRPO_SCHED_FILE))
+        files.append(_GRPO_SCHED_FILE)
+    if rng_states is not None:
+        torch.save(rng_states, os.path.join(staging, _GRPO_RNG_FILE))
+        files.append(_GRPO_RNG_FILE)
+    # Everything save_pretrained/the foundations writer already produced (weight
+    # shards, tokenizer, ledger) joins the manifest, so a lost weight shard is
+    # caught by the same check as a lost optimizer file.
+    files.extend(sorted(
+        name for name in os.listdir(staging)
+        if name not in files and name != _GRPO_STATE_FILE
+        and os.path.isfile(os.path.join(staging, name))))
+    state = {
+        "global_step": int(step),
+        "total_steps": int(getattr(config, "total_steps", 0) or 0),
+        "optimizer_state_saved": optim_state is not None,
+        "kore_grpo_files": files,
+    }
+    if extra:
+        state.update(extra)
+    with open(os.path.join(staging, _GRPO_STATE_FILE), "w") as f:
+        json.dump(state, f, indent=2, sort_keys=True, default=str)
+
+
+def _publish_grpo_checkpoint(config, staging, step) -> str:
+    """Validate the staging dir, atomically rename it into place, THEN rotate.
+
+    Ordering is the whole point: the previous checkpoint is deleted only after its
+    replacement is on disk under its final name and has passed the same
+    completeness check discovery will apply, so there is no window in which the
+    run has no resumable checkpoint.
+    """
+    import os
+    import shutil
+
+    if _read_grpo_trainer_state(staging) is None:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise RuntimeError(f"GRPO checkpoint at step {step} failed its completeness "
+                           "check before publish; nothing was rotated")
+    ckpt = os.path.join(str(getattr(config, "output_dir", "runs/grpo")), f"checkpoint-{step}")
+    shutil.rmtree(ckpt, ignore_errors=True)      # a same-step retry replaces itself
+    os.replace(staging, ckpt)
+    if _read_grpo_trainer_state(ckpt) is None:   # re-validate under the FINAL name
+        raise RuntimeError(f"GRPO checkpoint {ckpt} did not validate after publish")
+    _rotate_grpo_checkpoints(config, ckpt)
+    return ckpt
+
+
+def _rotate_grpo_checkpoints(config, keep_path) -> list:
+    """Delete the oldest VALID checkpoints beyond the retention limit.
+
+    Only complete checkpoints are counted or removed, and ``keep_path`` (the one
+    just published) is never a rotation candidate. Returns the removed paths.
+    """
+    import os
+    import shutil
+
+    limit = _grpo_save_total_limit(config)
+    valid = [(step, path)
+             for step, path in _grpo_checkpoint_dirs(getattr(config, "output_dir", "runs/grpo"))
+             if _read_grpo_trainer_state(path) is not None]
+    removed = []
+    for _step, path in valid[:max(0, len(valid) - limit)]:
+        if os.path.abspath(path) == os.path.abspath(keep_path):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        removed.append(path)
+    return removed
+
+
+def _save_grpo_checkpoint(model, tok, config, step, *, optimizer=None, scheduler=None):
+    """Fix 3 (save_steps): write a periodic, RESUMABLE checkpoint (single-process).
+
+    Assembled in a staging dir and published atomically by
+    :func:`_publish_grpo_checkpoint`, which also rotates out anything beyond
+    ``save_total_limit`` (>=2) once the new checkpoint is proven complete. A 14B
+    checkpoint is large, so retention is bounded - but never down to the single
+    copy the original rotation kept.
+    """
+    try:
+        out_dir = getattr(config, "output_dir", "runs/grpo")
+        staging = _stage_grpo_checkpoint_dir(out_dir, step)
+        model.save_pretrained(staging)
+        tok.save_pretrained(staging)
+        _write_grpo_foundations_state(staging, config)
+        _write_grpo_resume_state(
+            staging, config, step,
+            optim_state=_gather_full_optim_state(model, optimizer),
+            scheduler=scheduler, rng_states=[_grpo_rng_state()])
+        ckpt = _publish_grpo_checkpoint(config, staging, step)
+        log.info("grpo periodic checkpoint saved", step=step, path=ckpt,
+                 keep=_grpo_save_total_limit(config))
+        return ckpt
     except Exception as e:  # noqa: BLE001 - legacy warns; strict resume fails closed
         log.warn("grpo periodic checkpoint failed", step=step, error=repr(e))
         if bool(getattr(config, "strict_feature_validation", False)) or bool(
                 getattr(config, "resume_state_required", False)):
             raise
+    return None  # save did not land; the caller must not treat this step as saved
+
+
+def _save_grpo_checkpoint_distributed(model, tok, config, step, *, accelerator,
+                                      optimizer=None, scheduler=None):
+    """Periodic resumable checkpoint for the sharded loop.
+
+    THE rank-safety rule here: every collective runs OUTSIDE the rank guard. The
+    weight gather (``get_state_dict``), the optimizer gather
+    (:func:`_gather_full_optim_state`), the RNG all-gather and the barriers are
+    executed unconditionally by all ranks; only the file WRITES and the
+    rename/rotate are rank-0. Hiding a gather behind ``if is_main`` would park
+    rank 0 inside a collective the others never enter - the classic FSDP save
+    deadlock.
+
+    Failures are raised on EVERY rank (the decision is broadcast) so a save that
+    goes wrong stops the job instead of desynchronizing it.
+    """
+    import os
+
+    is_main = bool(getattr(accelerator, "is_main_process", True))
+    out_dir = getattr(config, "output_dir", "runs/grpo")
+    staging = os.path.join(str(out_dir), f"{_GRPO_STAGING_PREFIX}{step}")
+
+    accelerator.wait_for_everyone()
+    # ---- collectives: all ranks, unconditionally ---- #
+    state_dict = accelerator.get_state_dict(model)
+    optim_state = _gather_full_optim_state(model, optimizer, accelerator)
+    rng_states = _all_gather_object(_grpo_rng_state(), accelerator)
+    unwrapped = accelerator.unwrap_model(model)
+
+    if is_main:
+        _stage_grpo_checkpoint_dir(out_dir, step)
+    accelerator.wait_for_everyone()              # staging dir exists before any writer
+    # Called on every rank exactly like the final save: the rank-0 gate lives
+    # inside save_pretrained/accelerator.save, and followers hold an empty
+    # rank0-only state dict, so they write nothing.
+    unwrapped.save_pretrained(staging, is_main_process=is_main,
+                              save_function=accelerator.save, state_dict=state_dict)
+
+    ckpt = os.path.join(str(out_dir), f"checkpoint-{step}")
+    err = None
+    if is_main:
+        try:
+            tok.save_pretrained(staging)
+            _write_grpo_foundations_state(staging, config)
+            _write_grpo_resume_state(staging, config, step, optim_state=optim_state,
+                                     scheduler=scheduler, rng_states=rng_states,
+                                     extra={"world_size": int(getattr(accelerator,
+                                                                      "num_processes", 1))})
+            ckpt = _publish_grpo_checkpoint(config, staging, step)
+            log.info("grpo(dist) periodic checkpoint saved", step=step, path=ckpt,
+                     keep=_grpo_save_total_limit(config))
+        except Exception as e:  # noqa: BLE001 - surfaced to every rank below
+            err = repr(e)
+    # Broadcast rank 0's verdict so all ranks fail together (or none do).
+    err = _broadcast_rank0_object(err, accelerator)
+    accelerator.wait_for_everyone()
+    if err is not None:
+        raise RuntimeError(f"GRPO distributed checkpoint at step {step} failed: {err}")
     return ckpt
+
+
+def _restore_grpo_training_state(resume, config, *, optimizer, scheduler,
+                                 model=None, accelerator=None) -> int:
+    """Restore optimizer / LR schedule / RNG / step counter; return the start step.
+
+    Model WEIGHTS are not restored here - the caller loads the policy directly
+    from the checkpoint dir via ``from_pretrained``, which is the one form that
+    works unchanged for the single-process model and for the FSDP path (the shard
+    happens later, in ``accelerator.prepare``).
+
+    FAIL CLOSED: any missing or unreadable piece raises. A run that restored the
+    weights but quietly dropped the optimizer and step counter would look healthy
+    while restarting the LR schedule and re-burning every preempted step.
+    """
+    import os
+
+    import torch
+
+    ckpt, state = resume
+    step = int(state["global_step"])
+    rank = getattr(accelerator, "process_index", 0) if accelerator is not None else 0
+
+    if optimizer is not None:
+        if not state.get("optimizer_state_saved"):
+            raise RuntimeError(
+                f"GRPO resume: {ckpt} carries no consolidated optimizer state "
+                "(written by a backend that cannot gather it). Refusing to resume "
+                "with a reinitialized optimizer.")
+        opt_path = os.path.join(ckpt, _GRPO_OPTIM_FILE)
+        # Under FSDP only rank 0 reads the consolidated state and
+        # _load_full_optim_state scatters it - a collective every rank must enter.
+        # An unsharded optimizer has nothing to scatter, so every rank reads its own
+        # copy; that keeps the load path symmetric instead of raising on followers.
+        full_osd = (torch.load(opt_path, map_location="cpu", weights_only=False)
+                    if rank == 0 or _fsdp_module(model) is None else None)
+        _load_full_optim_state(model, optimizer, full_osd, accelerator)
+
+    if scheduler is not None:
+        sched_path = os.path.join(ckpt, _GRPO_SCHED_FILE)
+        scheduler.load_state_dict(
+            torch.load(sched_path, map_location="cpu", weights_only=False))
+
+    rng_path = os.path.join(ckpt, _GRPO_RNG_FILE)
+    if os.path.exists(rng_path):
+        rng_states = torch.load(rng_path, map_location="cpu", weights_only=False)
+        # Per-rank states, saved rank-ordered. A different world size makes them
+        # unmappable; RNG fidelity is a nicety, so log and carry on rather than
+        # fail an otherwise complete resume.
+        if isinstance(rng_states, list) and rank < len(rng_states):
+            _restore_grpo_rng_state(rng_states[rank])
+        else:
+            log.warn("grpo resume: RNG state not restored (world size changed)",
+                     saved=len(rng_states) if isinstance(rng_states, list) else None,
+                     rank=rank)
+
+    log.info("grpo resume: restored training state", path=ckpt, start_step=step,
+             total_steps=getattr(config, "total_steps", None),
+             optimizer=optimizer is not None, scheduler=scheduler is not None)
+    return step
+
+
+def _grpo_should_save(step: int, last_saved: int, config) -> bool:
+    """True when a periodic checkpoint is due after completing ``step`` (0-indexed).
+
+    Measures distance from the LAST SUCCESSFUL save rather than ``(step+1) %
+    save_steps``, so a step that was skipped (collapsed groups / no learnable
+    samples) exactly on the save boundary does not push the next checkpoint a
+    whole period out. The final step is excluded - the loop's exit save covers it.
+
+    Every input is rank-invariant, so all ranks take the same branch and enter the
+    save's collectives together.
+    """
+    save_every = int(getattr(config, "save_steps", 0) or 0)
+    if save_every <= 0 or step == int(getattr(config, "total_steps", 0) or 0) - 1:
+        return False
+    return (step + 1) - int(last_saved) >= save_every
+
+
+def _overlong_masked(n_tok: int, config) -> bool:
+    """Config-aware DAPO overlong test, shared by BOTH loops so they agree.
+
+    Inert unless ``overlong_buffer_len`` is a genuine MARGIN below the generation
+    cap. With ``buffer >= max_response_length`` the :func:`is_overlong` threshold
+    collapses to one token and every response - truncated or not - would be masked
+    out of the policy loss, silently emptying the batch. That is a
+    misconfiguration, not a batch of truncations, so the filter stands down.
+    """
+    if not getattr(config, "overlong_mask", False):
+        return False
+    cap = int(getattr(config, "max_response_length", 0) or 0)
+    buf = int(getattr(config, "overlong_buffer_len", 0) or 0)
+    if cap <= 0 or buf >= cap:
+        return False
+    return is_overlong(n_tok, cap, buf)
+
+
+def _apply_overlong_mask(kept_groups, config) -> int:
+    """DAPO Overlong Filtering for the single-process loop; returns #masked samples.
+
+    A response that ran into the generation cap was almost certainly truncated, so
+    its token log-probs are a biased gradient (:func:`is_overlong`). The sample is
+    dropped by clearing ``gen_inputs`` - the same field
+    :func:`_accumulate_grpo_grads` tests for learnability - rather than by removing
+    it, so its RETURN still counts toward the group's advantage baseline. That is
+    exactly the distributed loop's semantics, which masks after computing the
+    cross-rank advantages.
+    """
+    if not getattr(config, "overlong_mask", False):
+        return 0
+    masked = 0
+    for samples in kept_groups:
+        for s in samples:
+            if not s[1]:
+                continue
+            if _overlong_masked(max(int(_sample_field(s, 4, 1) or 1), 1), config):
+                s[1] = None
+                masked += 1
+    return masked
+
+
+def _build_step_controller(config):
+    """Adaptive training horizon (or None when a fixed ``total_steps`` is wanted).
+
+    The monitored metric MUST be cross-rank identical (see
+    :mod:`kore.policy.dynamic`); both loops feed it the group reward mean, which
+    on the sharded path is derived from the gathered full-group scores.
+    """
+    if not getattr(config, "adaptive_steps", False):
+        return None
+    from kore.policy.dynamic import DynamicStepController
+
+    return DynamicStepController(
+        min_steps=int(getattr(config, "min_steps", 100)),
+        max_steps=int(config.total_steps),
+        patience=int(getattr(config, "plateau_patience", 40)),
+        min_delta=float(getattr(config, "plateau_min_delta", 1e-3)))
 
 
 def _verified_gate_on() -> bool:
@@ -1273,6 +1838,11 @@ def _train_grpo_fallback(config, tasks):
     # must NOT use device_map="auto" - accelerate/FSDP owns placement (same as
     # sft.py). Single-GPU / CPU full-parameter runs keep device_map="auto".
     use_fsdp = fsdp_enabled(config)
+    # Preemption resume: continue the newest complete checkpoint in output_dir. The
+    # policy is loaded FROM it (below); the optimizer/scheduler/RNG/step counter are
+    # restored once they exist. Fails closed when a checkpoint is present but broken.
+    resume = _discover_grpo_resume(config)
+    model_src = resume[0] if resume is not None else config.model_id
     log.info("grpo fallback: starting", model=config.model_id, total_steps=config.total_steps,
              agentic=bool(config.agentic), use_lora=bool(config.use_lora), n_tasks=len(tasks),
              tasks_per_step=max(1, getattr(config, "tasks_per_step", 1)),
@@ -1290,7 +1860,7 @@ def _train_grpo_fallback(config, tasks):
                     "attn_implementation": "sdpa"}
     if not use_fsdp:
         model_kwargs["device_map"] = "auto"
-    model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
+    model = AutoModelForCausalLM.from_pretrained(model_src, **model_kwargs)
     model.config.use_cache = False
     if getattr(config, "gradient_checkpointing", True):
         # NON-REENTRANT so FSDP re-gathers params during the backward recompute
@@ -1304,6 +1874,11 @@ def _train_grpo_fallback(config, tasks):
     trainable = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable, lr=config.learning_rate)
     sched = _build_lr_scheduler(opt, config)  # Fix 3: real LR warmup + scheduler
+    start_step = 0
+    if resume is not None:
+        start_step = _restore_grpo_training_state(resume, config, optimizer=opt,
+                                                  scheduler=sched)
+        print(f"[grpo] resuming from {model_src} at step {start_step}/{config.total_steps}")
 
     # ---- ref-model (KL anchor) gating: only pay the ~ref-model memory when a KL
     #      anchor is actually applied. The per-turn KL anchor is now ACTIVE on the
@@ -1330,6 +1905,9 @@ def _train_grpo_fallback(config, tasks):
     ppo_epochs = max(1, getattr(config, "ppo_epochs", 1))
     task_cursor = 0
     registered_scheduler = _build_registered_scheduler(config, tasks)
+    # Adaptive horizon + periodic-save bookkeeping, matching the distributed loop.
+    step_ctrl = _build_step_controller(config)
+    last_saved_step = start_step
 
     # ---- Open-ended verified co-evolution curriculum (optional, in-process) ---- #
     controller = None
@@ -1436,7 +2014,7 @@ def _train_grpo_fallback(config, tasks):
                 "solve_rate": solve_rate, "best_speedup": best_speedup,
                 "best_kernel_src": best_kernel_src}
 
-    for step in range(config.total_steps):
+    for step in range(start_step, config.total_steps):
         # ---- 1. DAPO dynamic sampling: OVERSAMPLE-AND-REFILL (item 2) ---- #
         # Instead of drop-and-shrink (roll exactly tasks_per_step, then drop the
         # collapsed groups), keep rolling task-groups until ``target_groups``
@@ -1566,6 +2144,10 @@ def _train_grpo_fallback(config, tasks):
         # the global token-mean loss, while only ONE sample's graph is ever alive.
         # ``ppo_epochs`` minibatch passes reuse the detached rollout ``old_logp``.
         kept_groups = [group_samples[gi] for gi in keep]
+        # DAPO overlong filtering, same contract as the distributed loop: truncated
+        # responses keep their return in the advantage baseline but are dropped from
+        # the policy loss.
+        n_overlong = _apply_overlong_mask(kept_groups, config)
 
         def _logp_fn(gen_inputs):
             return _recompute_logp(model, tok, gen_inputs, config.temperature) if gen_inputs else None
@@ -1597,7 +2179,8 @@ def _train_grpo_fallback(config, tasks):
         if n_terms == 0:
             print(f"[grpo] step {step}: no learnable samples; skip")
             log.info("grpo step: no learnable samples - skipping", step=step,
-                     n_kept_groups=len(keep), reason="all kept samples had empty gen_inputs")
+                     n_kept_groups=len(keep), n_overlong_masked=n_overlong,
+                     reason="all kept samples had empty gen_inputs")
             log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
             continue
         sched.step()  # Fix 3: advance the LR schedule once per real training step
@@ -1629,13 +2212,20 @@ def _train_grpo_fallback(config, tasks):
                       # Fix 3: the active anchor is ref_anchor_coef - the log used to
                       # mislabel it as ``kl_coef`` (a flag that never existed here).
                       kl=kl_val, ref_anchor_coef=config.ref_anchor_coef, n_kl_samples=n_kl_samples,
+                      n_overlong_masked=n_overlong,
                       loss=loss_value, grad_norm=grad_norm_val, lr=lr_val, **gpu_mem_snapshot())
-        # Fix 3: periodic checkpoint every save_steps (skips the final step - the
-        # full model is saved below on loop exit).
-        save_every = int(getattr(config, "save_steps", 0) or 0)
-        if save_every > 0 and (step + 1) % save_every == 0 and step != config.total_steps - 1:
-            _save_grpo_checkpoint(model, tok, config, step + 1)
+        # Fix 3: periodic RESUMABLE checkpoint every save_steps (skips the final
+        # step - the full model is saved below on loop exit).
+        if _grpo_should_save(step, last_saved_step, config):
+            if _save_grpo_checkpoint(model, tok, config, step + 1,
+                                     optimizer=opt, scheduler=sched):
+                last_saved_step = step + 1   # a failed save must be retried, not skipped
         log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
+
+        if step_ctrl is not None and step_ctrl.update(step, mean_r):
+            log.info("grpo: adaptive early-stop", step=step + 1,
+                     reason=step_ctrl.stopped_reason, best=step_ctrl.best)
+            break
 
     # LoRA was removed (full-parameter fine-tuning only): the in-process model is a
     # plain AutoModelForCausalLM, so ALWAYS save full weights. (The old use_lora
@@ -2258,12 +2848,21 @@ def _train_grpo_distributed(config, tasks):
     _initialize_optional_features(config, build_distill_sink=False)
     tok = AutoTokenizer.from_pretrained(config.model_id)
 
+    # Preemption resume (this stage runs on a requeued, preemptible QoS): rank 0
+    # picks the newest complete checkpoint and BROADCASTS it, so every rank loads
+    # the same policy and starts at the same step - or the whole job fails closed.
+    resume = _discover_grpo_resume(config, accelerator)
+    model_src = resume[0] if resume is not None else config.model_id
+    if resume is not None and is_main:
+        log.info("grpo distributed: resuming from checkpoint", path=model_src,
+                 start_step=resume[1].get("global_step"), total_steps=config.total_steps)
+
     # SDPA (not flash_attention_2) for the RL policy: GRPO does generation AND
     # padded logprob forwards over prompt+response batches, and the ROCm
     # FlashAttention-2 kernel hard-faults ("GPU coredump" / SIGABRT) on those
     # padded/variable-length layouts (same failure DPO hit). SDPA handles them; with
     # reentrant checkpointing it is also immune to the saved-tensor-count check.
-    model = AutoModelForCausalLM.from_pretrained(config.model_id, torch_dtype=_model_dtype(config),
+    model = AutoModelForCausalLM.from_pretrained(model_src, torch_dtype=_model_dtype(config),
                                                  attn_implementation="sdpa")
     model.config.use_cache = False
     if getattr(config, "gradient_checkpointing", True):
@@ -2282,6 +2881,13 @@ def _train_grpo_distributed(config, tasks):
     # Shard params + optimizer state across ranks (ZeRO-3-equivalent).
     model, opt = accelerator.prepare(model, opt)
     sched = _build_lr_scheduler(opt, config)
+    start_step = 0
+    if resume is not None:
+        # Weights came in via from_pretrained above (before the shard); the
+        # optimizer scatter inside here is a COLLECTIVE, so every rank calls it.
+        start_step = _restore_grpo_training_state(
+            resume, config, optimizer=opt, scheduler=sched, model=model,
+            accelerator=accelerator)
 
     ref_model = None
     if getattr(config, "ref_anchor_coef", 0.0) > 0:
@@ -2311,7 +2917,7 @@ def _train_grpo_distributed(config, tasks):
     # PURELY LOCALLY on it. Zero FSDP collectives during generation => ragged decode
     # can never deadlock, and the embedding/lm_head are always full 2-D tensors.
     gen_replica = AutoModelForCausalLM.from_pretrained(
-        config.model_id, torch_dtype=_model_dtype(config), attn_implementation="sdpa")
+        model_src, torch_dtype=_model_dtype(config), attn_implementation="sdpa")
     gen_replica = gen_replica.to(accelerator.device).eval()
     gen_replica.config.use_cache = True
     for _p in gen_replica.parameters():
@@ -2325,6 +2931,7 @@ def _train_grpo_distributed(config, tasks):
     ppo_epochs = max(1, getattr(config, "ppo_epochs", 1))
     task_cursor = 0
     last_mean_r = None
+    last_saved_step = start_step
     registered_scheduler = _build_registered_scheduler(config, tasks)
 
     # ---- Open-ended verified co-evolution curriculum (optional, distributed) ---- #
@@ -2422,15 +3029,8 @@ def _train_grpo_distributed(config, tasks):
     # total_steps is the hard cap; the controller may stop earlier. Decisions are
     # identical on every rank (mean_r is derived from gathered scores), so ranks
     # break in lockstep.
-    _step_ctrl = None
-    if getattr(config, "adaptive_steps", False):
-        from kore.policy.dynamic import DynamicStepController
-        _step_ctrl = DynamicStepController(
-            min_steps=int(getattr(config, "min_steps", 100)),
-            max_steps=int(config.total_steps),
-            patience=int(getattr(config, "plateau_patience", 40)),
-            min_delta=float(getattr(config, "plateau_min_delta", 1e-3)))
-    for step in range(config.total_steps):
+    _step_ctrl = _build_step_controller(config)
+    for step in range(start_step, config.total_steps):
         # Summon FULL policy params ONCE for the entire rollout phase of this step
         # (all dynamic-sampling groups). generate() bypasses FSDP's forward hook, so
         # params must be explicitly un-sharded; doing it once per step (not per group)
@@ -2538,8 +3138,7 @@ def _train_grpo_distributed(config, tasks):
                     continue
                 n_tok = max(int(_sample_field(sample, 4, 1) or 1), 1)
                 # DAPO overlong filtering: drop truncated responses (noisy gradient).
-                if getattr(config, "overlong_mask", False) and is_overlong(
-                        n_tok, config.max_response_length, config.overlong_buffer_len):
+                if _overlong_masked(n_tok, config):
                     n_overlong += 1
                     continue
                 local_terms.append((adv, sample))
@@ -2579,10 +3178,22 @@ def _train_grpo_distributed(config, tasks):
         if is_main:
             print(f"[grpo/dist] step {step} kept={len(keep)}/{len(groups)} world={world} "
                   f"epochs={ppo_epochs} meanR={mean_r:.3f} loss={loss_value:.4f}")
-            log.event("grpo_step_dist", step=step, backend=backend, world=world,
-                      n_groups=len(groups), n_kept_groups=len(keep), n_attempts=attempts,
-                      reward_mean=mean_r, loss=loss_value, global_tokens=global_total_tokens,
-                      n_overlong_masked=n_overlong, **gpu_mem_snapshot())
+            # Throttled to logging_steps, matching the single-process loop (this
+            # used to emit a metrics event on every one of the 2000 steps).
+            log_every = max(1, int(getattr(config, "logging_steps", 1) or 1))
+            if step % log_every == 0 or step == config.total_steps - 1:
+                log.event("grpo_step_dist", step=step, backend=backend, world=world,
+                          n_groups=len(groups), n_kept_groups=len(keep), n_attempts=attempts,
+                          reward_mean=mean_r, loss=loss_value,
+                          global_tokens=global_total_tokens,
+                          n_overlong_masked=n_overlong, **gpu_mem_snapshot())
+        # Periodic resumable checkpoint. The predicate reads only rank-invariant
+        # values, so every rank enters (or skips) the save's collectives together.
+        if _grpo_should_save(step, last_saved_step, config):
+            _save_grpo_checkpoint_distributed(model, tok, config, step + 1,
+                                              accelerator=accelerator, optimizer=opt,
+                                              scheduler=sched)
+            last_saved_step = step + 1
         log.progress(step + 1, config.total_steps, "grpo", t_start=t_start)
 
         if _step_ctrl is not None and _step_ctrl.update(step, mean_r):

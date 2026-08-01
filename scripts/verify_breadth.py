@@ -13,7 +13,9 @@ on, in a clean subprocess (so the 66 reference modules never collide in
      ``baseline_fn`` (the perf bar a fused kernel must beat) must run + print
      ``median_ms``.
 
-Non-destructive: every ``kernel.py`` it creates is removed. Writes
+Non-destructive: the worktree is never written to at all -- each task is staged
+into ``TMPDIR`` and the candidate ``kernel.py`` is created there. Exits non-zero if
+any verified task fails either gate, so it can be used as a gate. Writes
 ``runs/breadth_verify_report.json``. Run from the repo root on a FREE gpu (not the
 factory's 3,4,6, not a container's), with the KORE venv:
 
@@ -29,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 
 REPO = os.getcwd()
@@ -81,7 +84,6 @@ def verify(tdir: str) -> dict:
     res = {"task": tid}
     seed = os.path.join(tdir, "seed_triton.py")
     drv = os.path.join(tdir, "driver.py")
-    kern = os.path.join(tdir, "kernel.py")
     if not (os.path.exists(seed) and os.path.exists(drv)):
         res["status"] = "NO_SEED_OR_DRIVER"
         return res
@@ -89,9 +91,19 @@ def verify(tdir: str) -> dict:
     res["snr_gate"] = gate
     res["shape"] = shape_str or "default"
     shape_args = ["--shape", shape_str] if shape_str else []
-    shutil.copy(seed, kern)
+    # ``_genops._load_candidate`` imports ``kernel.py`` from the driver's OWN
+    # directory, so the whole task dir is staged into TMPDIR and the seed is
+    # installed as the candidate there. Nothing is ever written inside the
+    # worktree: a SIGKILL used to leave an untracked kore/tasks/genb_*/kernel.py
+    # behind, which dirties `git status -- kore scripts tests` and makes
+    # spur_submit_datagen.sh refuse every subsequent production submission.
+    workdir = tempfile.mkdtemp(prefix=f"kore-verify-{tid}-")
     try:
-        rc, out, err = _run([PY, drv, *shape_args])
+        staged = os.path.join(workdir, tid)
+        shutil.copytree(tdir, staged, ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy(seed, os.path.join(staged, "kernel.py"))
+        staged_drv = os.path.join(staged, "driver.py")
+        rc, out, err = _run([PY, staged_drv, *shape_args])
         m = re.search(r"SNR:\s*([-\d.]+)", out)
         res["snr"] = float(m.group(1)) if m else None
         m = re.search(r"allclose:\s*(True|False)", out)
@@ -101,7 +113,8 @@ def verify(tdir: str) -> dict:
         if res["snr"] is None and not res["cand_error"]:
             res["cand_error"] = _last_err(err) or "no SNR printed (driver failure)"
 
-        rc2, out2, err2 = _run([PY, drv, "--bench-mode", "--impl", "reference", *shape_args])
+        rc2, out2, err2 = _run(
+            [PY, staged_drv, "--bench-mode", "--impl", "reference", *shape_args])
         res["baseline_runs"] = (rc2 == 0 and "median_ms" in out2)
         if not res["baseline_runs"]:
             res["baseline_error"] = _last_err(err2) or _last_err(out2)
@@ -109,12 +122,11 @@ def verify(tdir: str) -> dict:
         corr_ok = bool(res["allclose"]) and res["snr"] is not None and res["snr"] >= gate
         res["status"] = "PASS" if corr_ok else "FAIL"
     finally:
-        if os.path.exists(kern):
-            os.remove(kern)
+        shutil.rmtree(workdir, ignore_errors=True)
     return res
 
 
-def main():
+def main() -> int:
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--glob", default="kore/tasks/genb_*/",
@@ -159,6 +171,24 @@ def main():
     print(f"  status breakdown: {dict(Counter(r['status'] for r in results))}")
     print(f"  report: {a.out}")
 
+    # Fail closed so callers (scripts/spur_gpu_smoke.sbatch) can gate on this.
+    # A run that verified nothing is a failure too: an empty selection means the
+    # glob or the shard index is wrong, not that the breadth suite is healthy.
+    if not results:
+        print(f"\n  VERIFY FAILED: no tasks matched {a.glob} "
+              f"(shard {a.shard}/{a.nshards})")
+        return 1
+    failures = [r for r in results
+                if r["status"] != "PASS" or not r.get("baseline_runs")]
+    if failures:
+        print(f"\n  VERIFY FAILED: {len(failures)}/{len(results)} task(s) failed a gate")
+        for r in failures:
+            reason = "correctness" if r["status"] != "PASS" else "baseline"
+            print(f"    {r['task']}: {reason}")
+        return 1
+    print(f"\n  VERIFY OK: {len(results)}/{len(results)} task(s) passed both gates")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

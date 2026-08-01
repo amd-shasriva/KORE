@@ -44,9 +44,10 @@ TASKS="$(cat "$SHARD_FILE" 2>/dev/null || true)"
 
 mkdir -p runs
 source /home/shasriva/kore-venv/bin/activate
-set -a
-source "$REPO/.env.local"
-set +a
+# The gateway credential lives in .env.local on a shared multi-user cluster, so
+# refuse a symlink, a foreign owner, or group/other-writable modes before sourcing.
+source "$REPO/scripts/lib/ops_runtime.sh"
+kore_secure_source_env "$REPO/.env.local"
 
 # Read tuning knobs AFTER .env.local so it can override them.
 #
@@ -150,11 +151,24 @@ handle_termination() {
     echo "[frontier-worker] signal received; completed shards are safe; exiting for requeue"
     exit 143
 }
+# SPUR's scontrol exits 0 even when it cannot reach the controller (verified:
+# `scontrol ping` prints "failed to connect to spurctld" and still returns 0),
+# so the exit status alone cannot confirm the requeue landed.
+requeue_self() {
+    local out rc
+    out="$(scontrol requeue "$SLURM_JOB_ID" 2>&1)"
+    rc=$?
+    if ((rc == 0)) && ! grep -qiE 'error|failed|unavailable|no leader|refused' <<<"$out"; then
+        return 0
+    fi
+    printf '%s\n' "$out" >&2
+    return 1
+}
 handle_requeue_warning() {
     trap - USR1 TERM INT
     echo "[frontier-worker] USR1 time-limit warning; draining and requesting requeue"
     terminate_child
-    if scontrol requeue "$SLURM_JOB_ID"; then exit 0; fi
+    if requeue_self; then exit 0; fi
     echo "[frontier-worker] FATAL explicit requeue failed" >&2
     exit 143
 }

@@ -164,13 +164,20 @@ def test_each_negative_caught_by_its_layer(kind):
 
 
 def test_layer_A_kinds_are_the_scan_for_hacks_ones():
-    """Document exactly which hacks reward.scan_for_hacks catches today."""
+    """Document exactly which hacks reward.scan_for_hacks catches today.
+
+    Every Layer-B static heuristic is now folded into the primary scanner, so
+    Layer A catches eight of the nine kinds. ``wrong_dtype_accum`` is the sole
+    exception and is deliberately left to Layer C: a bf16 accumulator "looks
+    close", and the only sound discriminator is the strict runtime SNR gate --
+    a static `tl.zeros(..., dtype=tl.bfloat16)` smell would charge the -1.5 hack
+    floor to any kernel that legitimately accumulates in a reduced precision.
+    """
     caught = {k for k in hn.HARD_NEGATIVE_KINDS
               if scan_for_hacks(hn.make_hard_negative(k, GEMM_SRC)[0]) is not None}
-    # copy_reference is now folded into Layer A (parent closed the gap): a kernel
-    # that returns the oracle output passes the SNR gate, so it must be rejected
-    # statically. It is still additionally covered by Layer B static_hack_scan.
-    assert caught == {"vendor_call", "torch_delegation", "try_except_fallback", "copy_reference"}
+    assert caught == set(hn.HARD_NEGATIVE_KINDS) - {"wrong_dtype_accum"}
+    assert {k for k in hn.HARD_NEGATIVE_KINDS if hn.DETECTION_LAYER[k] == "C"} == {
+        "wrong_dtype_accum"}
 
 
 def test_static_hack_scan_catches_layer_B_kinds():
@@ -192,7 +199,7 @@ def test_static_hack_scan_clean_on_correct_source():
 
 
 # --------------------------------------------------------------------------- #
-# hard negatives: documented scan_for_hacks GAPS (xfail until parent closes)
+# hard negatives: the documented scan_for_hacks GAPS are now CLOSED
 # --------------------------------------------------------------------------- #
 def test_scan_for_hacks_gaps_are_documented():
     """Every hack NOT caught by Layer A must have a documented gap entry so the
@@ -207,15 +214,41 @@ def test_copy_reference_should_be_caught_by_scan_for_hacks():
     assert scan_for_hacks(src) is not None
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="GAP: scan_for_hacks does not flag output-recycling (returns a "
-    "pre-allocated buffer with no tl.store / no kernel launch). Primary gate is "
-    "runtime (candidate-runs-first + NaN-poisoned out); a static smell is a bonus.",
-)
-def test_reference_recycling_should_be_caught_by_scan_for_hacks():
+def test_reference_recycling_is_caught_by_scan_for_hacks():
+    """GAP CLOSED (was xfail): the recycling smell is folded into scan_for_hacks.
+
+    Returning the harness's pre-allocated output buffer with no ``tl.store`` and
+    no kernel launch is now rejected statically, so the runtime
+    candidate-runs-first / NaN-poisoned-output gate is a second line of defence
+    rather than the only one.
+    """
     src, _ = hn.make_hard_negative("reference_recycling", GEMM_SRC)
     assert scan_for_hacks(src) is not None
+
+
+def test_documented_gaps_are_closed_except_the_runtime_only_one():
+    """Every ``SCAN_FOR_HACKS_GAPS`` entry is now closed in the PRIMARY scanner,
+    except ``wrong_dtype_accum`` which is unsound to adjudicate statically.
+
+    ``kore/data/hard_negatives.py`` is the maintainers' machine-readable catalogue
+    of what ``scan_for_hacks`` used to miss; its Layer-B ``static_hack_scan`` had no
+    non-test caller, so those detections never protected a training run. They now
+    live in ``scan_for_hacks`` itself.
+    """
+    still_open = {
+        kind for kind in hn.SCAN_FOR_HACKS_GAPS
+        if scan_for_hacks(hn.make_hard_negative(kind, GEMM_SRC)[0]) is None
+    }
+    assert still_open == {"wrong_dtype_accum"}
+
+
+def test_scan_for_hacks_covers_every_static_hack_scan_detection():
+    """Layer A must now dominate Layer B: anything ``static_hack_scan`` rejects,
+    the primary scanner rejects too (so nothing depends on the uncalled helper)."""
+    for kind in hn.HARD_NEGATIVE_KINDS:
+        src, _ = hn.make_hard_negative(kind, GEMM_SRC)
+        if hn.static_hack_scan(src) is not None:
+            assert scan_for_hacks(src) is not None, kind
 
 
 # --------------------------------------------------------------------------- #

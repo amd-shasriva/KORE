@@ -11,6 +11,51 @@
   "production_datagen_entrypoint": "scripts/spur_supervise_datagen.py",
   "scripts": [
     {
+      "path": "logs/reli.sh",
+      "classification": "destructive",
+      "lifecycle": "deprecated",
+      "replacement": "isolated scheduler test job",
+      "deletes_artifacts": true
+    },
+    {
+      "path": "scripts/_factory_smoke.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/_kf_split.py",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scripts/spur_partition.py"
+    },
+    {
+      "path": "scripts/_kf_verify.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "strict SPUR and maintenance verifier"
+    },
+    {
+      "path": "scripts/_kf_worker.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scripts/spur_datagen_array.sbatch"
+    },
+    {
+      "path": "scripts/_maxed_smoke.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/_repro_grpo_step.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
+      "path": "scripts/_validate_benchboth.py",
+      "classification": "diagnostic",
+      "lifecycle": "active"
+    },
+    {
       "path": "scripts/complete_base.py",
       "classification": "active",
       "lifecycle": "active",
@@ -34,9 +79,10 @@
       "lifecycle": "active"
     },
     {
-      "path": "scripts/_factory_smoke.py",
-      "classification": "diagnostic",
-      "lifecycle": "active"
+      "path": "scripts/evolve_wins.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "SPUR-compatible evolutionary wins worker (additive .evolve.jsonl shards)"
     },
     {
       "path": "scripts/factory_supervise.sh",
@@ -54,24 +100,6 @@
       "path": "scripts/grpo_smoke.py",
       "classification": "diagnostic",
       "lifecycle": "active"
-    },
-    {
-      "path": "scripts/_kf_split.py",
-      "classification": "deprecated",
-      "lifecycle": "deprecated",
-      "replacement": "scripts/spur_partition.py"
-    },
-    {
-      "path": "scripts/_kf_verify.py",
-      "classification": "active",
-      "lifecycle": "active",
-      "role": "strict SPUR and maintenance verifier"
-    },
-    {
-      "path": "scripts/_kf_worker.sh",
-      "classification": "deprecated",
-      "lifecycle": "deprecated",
-      "replacement": "scripts/spur_datagen_array.sbatch"
     },
     {
       "path": "scripts/kore_monitor.py",
@@ -112,16 +140,23 @@
       "entrypoint": false
     },
     {
-      "path": "scripts/_maxed_smoke.py",
-      "classification": "diagnostic",
-      "lifecycle": "active"
-    },
-    {
       "path": "scripts/merge_datagen_roots.py",
       "classification": "destructive",
       "lifecycle": "active",
       "side_effect_free_by_default": true,
       "mutation_requires": "--apply"
+    },
+    {
+      "path": "scripts/migrate_jsonl_shards.py",
+      "classification": "destructive",
+      "lifecycle": "active",
+      "role": "dry-run-first JSONL shard migration CLI (writes gated behind --apply)"
+    },
+    {
+      "path": "scripts/preflight_qwen3_32b.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "offline fail-closed Qwen3-32B model/resource preflight (read-only)"
     },
     {
       "path": "scripts/prove_dense_reward.py",
@@ -134,9 +169,10 @@
       "lifecycle": "active"
     },
     {
-      "path": "scripts/_repro_grpo_step.py",
-      "classification": "diagnostic",
-      "lifecycle": "active"
+      "path": "scripts/quarantine_heldout_wins.py",
+      "classification": "destructive",
+      "lifecycle": "active",
+      "role": "move held-out/eval-leaked win/repair/groups shards to _quarantine (dry-run default, --apply to move)"
     },
     {
       "path": "scripts/run_campaign.py",
@@ -169,16 +205,16 @@
       "replacement": "scheduler GRPO job with explicit GPU allocation"
     },
     {
-      "path": "scripts/run_sft_gate_dynamic.sh",
-      "classification": "deprecated",
-      "lifecycle": "deprecated",
-      "replacement": "scheduler retention-gate job"
-    },
-    {
       "path": "scripts/run_sft_gate.py",
       "classification": "deprecated",
       "lifecycle": "deprecated",
       "replacement": "supported campaign retention gate"
+    },
+    {
+      "path": "scripts/run_sft_gate_dynamic.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scheduler retention-gate job"
     },
     {
       "path": "scripts/run_v2_reuse_14b.sh",
@@ -209,16 +245,78 @@
       "production": true
     },
     {
+      "path": "scripts/spur_gpu_smoke.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "one-node gfx950 GPU smoke validating the merged verifier/reward + genb seeds + accelerator-gated tests"
+    },
+    {
+      "path": "scripts/spur_midtrain_1node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "single-node 8-rank midtrain launcher (defaults to midtrain_8gpu.json)"
+    },
+    {
+      "path": "scripts/spur_midtrain_3node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "3-node 24-rank FSDP midtrain launcher (defaults to midtrain_24gpu.json)"
+    },
+    {
+      "path": "scripts/spur_midtrain_3node_dedicated.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "3-node 24-rank FSDP midtrain launcher on the dedicated non-preemptible allocation"
+    },
+    {
+      "path": "scripts/spur_midtrain_4node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "4-node 32-rank FSDP midtrain launcher (defaults to midtrain_32gpu.json)"
+    },
+    {
+      "path": "scripts/spur_midtrain_8node_dedicated.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "8-node 64-rank FSDP midtrain launcher on the dedicated non-preemptible allocation"
+    },
+    {
+      "path": "scripts/spur_midtrain_multinode.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "N-node 64-rank FSDP midtrain launcher (defaults to midtrain_64gpu.json)"
+    },
+    {
       "path": "scripts/spur_partition.py",
       "classification": "active",
       "lifecycle": "active",
       "production": true
     },
     {
+      "path": "scripts/spur_stage_array.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "one full-node frontier-stage (reverify|evolve) array element"
+    },
+    {
       "path": "scripts/spur_submit_datagen.sh",
       "classification": "active",
       "lifecycle": "active",
       "production": true
+    },
+    {
+      "path": "scripts/spur_submit_stage.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "partition and submit a frontier stage (reverify|evolve) across dedicated plus burst waves"
     },
     {
       "path": "scripts/spur_supervise_datagen.py",
@@ -244,51 +342,21 @@
       "replacement": "scripts/spur_supervise_datagen.py"
     },
     {
-      "path": "scripts/_validate_benchboth.py",
+      "path": "scripts/verify_breadth.py",
       "classification": "diagnostic",
       "lifecycle": "active"
     },
     {
-      "path": "scripts/verify_breadth.py",
+      "path": "scripts/verify_tasks_gpu.py",
       "classification": "diagnostic",
-      "lifecycle": "active"
+      "lifecycle": "active",
+      "role": "execute every registered task seed on real GPU hardware and record a per-task verdict (read-only w.r.t. the repo)"
     },
     {
       "path": "scripts/wins_deepen_supervise.sh",
       "classification": "deprecated",
       "lifecycle": "deprecated",
       "replacement": "scripts/spur_supervise_datagen.py"
-    },
-    {
-      "path": "logs/reli.sh",
-      "classification": "destructive",
-      "lifecycle": "deprecated",
-      "replacement": "isolated scheduler test job",
-      "deletes_artifacts": true
-    },
-    {
-      "path": "scripts/preflight_qwen3_32b.py",
-      "classification": "diagnostic",
-      "lifecycle": "active",
-      "role": "offline fail-closed Qwen3-32B model/resource preflight (read-only)"
-    },
-    {
-      "path": "scripts/migrate_jsonl_shards.py",
-      "classification": "destructive",
-      "lifecycle": "active",
-      "role": "dry-run-first JSONL shard migration CLI (writes gated behind --apply)"
-    },
-    {
-      "path": "scripts/spur_gpu_smoke.sbatch",
-      "classification": "diagnostic",
-      "lifecycle": "active",
-      "role": "one-node gfx950 GPU smoke validating the merged verifier/reward + genb seeds + accelerator-gated tests"
-    },
-    {
-      "path": "scripts/quarantine_heldout_wins.py",
-      "classification": "destructive",
-      "lifecycle": "active",
-      "role": "move held-out/eval-leaked win/repair/groups shards to _quarantine (dry-run default, --apply to move)"
     }
   ]
 }

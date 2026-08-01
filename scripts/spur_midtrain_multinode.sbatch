@@ -5,7 +5,7 @@
 #SBATCH --job-name=kore-midtrain
 #SBATCH --account=amd-general
 #SBATCH --partition=amd-spur
-#SBATCH --qos=amd-burst-qos
+#SBATCH --qos=amd-general-qos
 #SBATCH --nodes=8
 #SBATCH --ntasks=8
 #SBATCH --gpus-per-node=mi355x:8

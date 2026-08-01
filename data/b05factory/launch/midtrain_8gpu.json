@@ -1,0 +1,11 @@
+{
+  "model_id": "Qwen/Qwen3-14B",
+  "corpus_path": "data/b05factory/midtrain/corpus.jsonl",
+  "output_dir": "runs/midtrain_14b_8gpu",
+  "use_lora": false, "distributed": true, "bf16": true, "gradient_checkpointing": true,
+  "per_device_train_batch_size": 4, "gradient_accumulation_steps": 4,
+  "num_train_epochs": 1.0, "learning_rate": 1e-05, "lr_scheduler_type": "cosine",
+  "warmup_ratio": 0.05, "max_seq_length": 8192, "general_replay_frac": 0.3,
+  "fsdp": "full_shard auto_wrap", "fsdp_transformer_layer_cls": null, "fsdp_cpu_offload": false,
+  "save_total_limit": 1
+}

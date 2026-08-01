@@ -37,9 +37,26 @@ EXPECTED_PRODUCT_COUNTS = {
     "sparse": 16,
     "training": 168,
 }
+# Content-addressed over the versioned rules plus every live task assignment,
+# which now includes each task's contamination state. Recording that the midtrain
+# corpus saw 11 held-out tasks changes the payload, so the digest moves and every
+# manifest authored before the finding is correctly stale.
 EXPECTED_TAXONOMY_DIGEST = (
-    "770e13ea3391a5574b6f0d1f1f8a5c63d9054b6a80f176814b824fa5d972c712"
+    "cd5c7769cd7597fe59232a6ee89778ff65d6ca38184a2eb953f104fc7127ac5c"
 )
+CONTAMINATED_HELDOUT_TASKS = frozenset({
+    "genb_cv_conv2d_1x1_s2_fp16",
+    "genb_cv_depthwise_conv2d_5x5_s1_bf16",
+    "genb_norm_rmsnorm_h16384_bf16",
+    "genb_qx_int4_unpack_group_bf16",
+    "genb_qx_quant_fp8_block2d_fp8",
+    "genb_red_log_softmax_bwd_fp32",
+    "genb_red_rms_bf16",
+    "genb_smp_repetition_penalty_bf16",
+    "genb_ssm_gated_retention_c128_bf16",
+    "genb_ssm_lightning_attn_bf16",
+    "genb_tr_rmsprop_centered_momentum_fp32",
+})
 
 
 def test_whole_registry_has_complete_stable_classification():
@@ -50,6 +67,26 @@ def test_whole_registry_has_complete_stable_classification():
     assert set(counts) == set(taxonomy.PRODUCT_FAMILIES)
     assert registry.taxonomy_digest() == EXPECTED_TAXONOMY_DIGEST
     assert len(registry.operation_family_map()) < len(tasks)
+
+
+def test_contamination_state_is_inside_the_content_address(monkeypatch):
+    """Dropping a contamination record must move the digest, not pass silently.
+
+    The pinned digest is only meaningful if the contamination exclusions are part
+    of the payload it addresses; otherwise the 11 leaked tasks could be quietly
+    un-marked while every manifest still validated.
+    """
+    tasks = registry.all_tasks()
+    payload = taxonomy.taxonomy_payload(tasks)
+    assert set(payload["contaminated_tasks"]) == set(CONTAMINATED_HELDOUT_TASKS)
+    assert all(
+        entry["contaminated"] is (entry["task_id"] in CONTAMINATED_HELDOUT_TASKS)
+        for entry in payload["assignments"]
+    )
+
+    monkeypatch.setattr(taxonomy, "CONTAMINATION_RECORDS", {})
+    monkeypatch.setattr(taxonomy, "CONTAMINATED_TASK_IDS", frozenset())
+    assert taxonomy.taxonomy_digest(tasks) != EXPECTED_TAXONOMY_DIGEST
 
 
 def test_attention_precedence_and_task_level_near_probes():
@@ -63,6 +100,9 @@ def test_attention_precedence_and_task_level_near_probes():
     by_id = {task.task_id: task for task in registry.all_tasks()}
     assert set(taxonomy.NEAR_GENERALIZATION_TASK_IDS) <= set(by_id)
     assert len(taxonomy.NEAR_GENERALIZATION_TASK_IDS) == 43
+    # Contamination is recorded alongside the reservation, never instead of it:
+    # all 43 keep ``near_probe`` as the reason they are held out.
+    assert CONTAMINATED_HELDOUT_TASKS <= set(taxonomy.NEAR_GENERALIZATION_TASK_IDS)
     assert all(
         registry.split_decision(by_id[task_id]).reason == "near_probe"
         for task_id in taxonomy.NEAR_GENERALIZATION_TASK_IDS
@@ -93,6 +133,11 @@ def test_split_manifest_is_immutable_complete_and_lineage_disjoint():
     manifest = registry.build_split_manifest()
     assert len(manifest.train_ids) == 1_289
     assert len(manifest.eval_ids) == 45
+    # Contaminated tasks stay in the held-out reservation and leave only the
+    # zero-shot claim: 45 held out, 34 of them still scoreable.
+    assert set(manifest.contaminated_eval_ids) == CONTAMINATED_HELDOUT_TASKS
+    assert len(manifest.generalization_eval_ids) == 34
+    assert set(manifest.contaminated_eval_ids) <= set(manifest.eval_ids)
     assert isinstance(manifest.train_ids, tuple)
     assert not (set(manifest.train_ids) & set(manifest.eval_ids))
     train_roots = set(dict(manifest.train_provenance_roots).values())

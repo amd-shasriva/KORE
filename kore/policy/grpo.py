@@ -13,7 +13,9 @@ fit is a separate measured preflight requirement. GRPO LoRA is unsupported.
 from __future__ import annotations
 
 import math
+import os
 import time
+from pathlib import Path
 from typing import Optional
 
 from kore.obs import configure, get_logger, gpu_mem_snapshot
@@ -478,10 +480,18 @@ def _make_rollout_env(task, config=None, gpu=None, serial=True):
     ``serial=False`` (the agentic path, which does NOT add a rollout-side dense
     bonus) leaves KoreEnv's internal profiling untouched, preserving its exact prior
     behavior. When the dense reward is OFF (the default), or anything goes wrong,
-    KoreEnv is built exactly as before (no extra args) so behavior is byte-for-byte
-    unchanged and lightweight test doubles that accept only ``task`` keep working.
+    KoreEnv is built with the same config as before.
+
+    The strict profile's :class:`~kore.policy.budget.BudgetLedgerV1` is threaded in
+    here because ``KoreEnv.evaluate`` is the only funnel that can see what an
+    evaluation physically did - in particular whether it was served from the replay
+    cache. An UNBUDGETED rollout passes no ledger argument at all rather than an
+    explicit ``None``, so the env is constructed exactly as before and lightweight
+    test doubles that accept only ``task`` keep working.
     """
     from kore.env.kore_env import KoreEnv
+    ledger = _budget_ledger(config)
+    budget = {"budget_ledger": ledger} if ledger is not None else {}
     if serial and _dense_profile_weight(config) > 0.0:
         cfg0 = None
         try:
@@ -491,9 +501,10 @@ def _make_rollout_env(task, config=None, gpu=None, serial=True):
         except Exception:  # noqa: BLE001 - fall back to default env construction
             cfg0 = None
         if cfg0 is not None:
-            return (KoreEnv(task, config=cfg0, gpu=gpu) if gpu is not None
-                    else KoreEnv(task, config=cfg0))
-    return KoreEnv(task, gpu=gpu) if gpu is not None else KoreEnv(task)
+            return (KoreEnv(task, config=cfg0, gpu=gpu, **budget) if gpu is not None
+                    else KoreEnv(task, config=cfg0, **budget))
+    return (KoreEnv(task, gpu=gpu, **budget) if gpu is not None
+            else KoreEnv(task, **budget))
 
 
 def _dense_profile_bonus(env, task, code, obs, config):
@@ -693,6 +704,133 @@ def default_grpo_task_ids() -> list[str]:
     """Authoritative train-only default for direct GRPO invocations."""
     from kore.tasks.registry import train_tasks
     return [task.task_id for task in train_tasks()]
+
+
+# --------------------------------------------------------------------------- #
+# Held-out shape lane: frozen HERE, at training time, consumed at certification
+#
+# ``kore.eval.champion.held_out_shapes`` can only CONSUME a manifest that already
+# exists on disk - it hard-raises otherwise - because the entire guarantee behind
+# a hidden-shape claim is that the lane was chosen before the champion was known.
+# Training is therefore the only correct place to write it.
+#
+# Two callers, both real training entrypoints: ``scripts/run_campaign.py`` freezes
+# once at campaign startup (covering every stage, including an in-process GRPO),
+# and :func:`_main` freezes on every rank of a sharded ``accelerate`` launch. The
+# writer is idempotent, so the second call re-validates and reuses the first
+# call's lane, and both resolve the same directory through
+# ``KORE_SHAPE_SPLIT_DIR``.
+# --------------------------------------------------------------------------- #
+SHAPE_SPLIT_DIR_ENV = "KORE_SHAPE_SPLIT_DIR"
+SHAPE_SPLIT_DIRNAME = "shape_splits"
+# A follower rank has no way to distinguish "rank 0 is still writing 1300
+# manifests" from "rank 0 died", so the filesystem barrier is bounded and loud.
+_SHAPE_SPLIT_BARRIER_TIMEOUT_S = 900.0
+_SHAPE_SPLIT_POLL_S = 0.25
+
+
+def shape_split_directory(config=None) -> Path:
+    """Directory holding this run's frozen train/hidden shape manifests.
+
+    ``KORE_SHAPE_SPLIT_DIR`` wins so a campaign can publish ONE lane for every
+    stage and for the certification gate that runs afterwards (the launcher passes
+    the environment straight through to every rank). Otherwise the lane lives
+    beside the checkpoints it belongs to.
+    """
+    explicit = os.environ.get(SHAPE_SPLIT_DIR_ENV, "").strip()
+    if explicit:
+        return Path(explicit)
+    return Path(str(getattr(config, "output_dir", "") or ".")) / SHAPE_SPLIT_DIRNAME
+
+
+def _distributed_rank_world() -> tuple[int, int]:
+    """``(rank, world_size)`` from the launcher environment.
+
+    Read from the environment rather than ``torch.distributed`` because this runs
+    BEFORE the accelerator builds the process group (the same reason
+    ``train_grpo`` already reads ``RANK`` for the feature manifest).
+    """
+    def _int(name: str, default: int) -> int:
+        try:
+            return int(os.environ.get(name, str(default)))
+        except (TypeError, ValueError):
+            return default
+
+    return _int("RANK", 0), max(1, _int("WORLD_SIZE", 1))
+
+
+def _await_shape_split_receipt(receipt: Path, *, timeout: float) -> None:
+    """Block until rank 0 has published the directory receipt."""
+    deadline = time.monotonic() + timeout
+    while not receipt.exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"timed out after {timeout:g}s waiting for the training-time frozen "
+                f"shape split receipt at {receipt}; rank 0 never published it, so "
+                "champion certification on hidden shapes would be unreachable")
+        time.sleep(_SHAPE_SPLIT_POLL_S)
+
+
+def _shape_split_barrier(receipt: Path, world: int) -> None:
+    """Hold every rank until the frozen lane is fully published.
+
+    Prefers a real collective when one exists; otherwise waits for the receipt,
+    which ``freeze_shape_splits`` writes LAST and atomically, so its presence
+    proves every manifest it lists is already on disk.
+    """
+    try:
+        import torch.distributed as dist
+    except Exception:  # noqa: BLE001 - torch-free path (CPU tests, plain scripts)
+        dist = None
+    if dist is not None and dist.is_available() and dist.is_initialized():
+        dist.barrier()
+        return
+    if world > 1:
+        _await_shape_split_receipt(
+            receipt, timeout=_SHAPE_SPLIT_BARRIER_TIMEOUT_S)
+
+
+def freeze_training_shape_splits(config, task_ids) -> Path:
+    """Freeze the held-out shape lane for ``task_ids`` before any rollout runs.
+
+    RANK 0 WRITES, THEN EVERY RANK WAITS. Under a sharded launch all ranks execute
+    this identical code over the identical task list, so letting them all write
+    would race on one directory: individual manifests are published atomically, but
+    the receipt is not one of them - a rank that enumerates the directory while
+    another is still mid-way through it publishes an index that OMITS the manifests
+    the other rank adds afterwards, and whichever such index lands last is the one
+    :func:`kore.tasks.shape_policy.load_frozen_shape_splits` will reject at
+    certification time ("frozen shape manifests absent from the split index"). One
+    writer removes the interleaving entirely.
+
+    The barrier is what makes rank 0's failure everyone's failure: freezing REJECTS
+    a task whose policy, declarations or code identity moved since its manifest was
+    written, and that must stop the run rather than let the other ranks train
+    against a lane nobody could certify against.
+
+    Idempotent by construction - an existing manifest is re-validated and reused,
+    never re-derived - so a resumed or re-run campaign keeps the hidden lane it
+    started with. Seed and hidden-shape count are deliberately left at the writer's
+    defaults so every caller (this one, the campaign, the
+    ``python -m kore.tasks.shape_policy freeze`` CLI) agrees without a shared
+    constant to drift.
+    """
+    from kore.tasks.registry import get_task
+    from kore.tasks.shape_policy import SPLIT_INDEX_FILENAME, freeze_shape_splits
+
+    directory = shape_split_directory(config)
+    rank, world = _distributed_rank_world()
+    receipt = directory / SPLIT_INDEX_FILENAME
+    if rank == 0:
+        index = freeze_shape_splits(
+            [get_task(task_id) for task_id in task_ids], directory)
+        log.info("frozen held-out shape lane published",
+                 directory=str(directory), tasks=len(index.entries),
+                 hidden_shapes=index.hidden_shapes, seed=index.seed,
+                 hidden_max_shapes=index.hidden_max_shapes,
+                 code_identity=index.code_identity)
+    _shape_split_barrier(receipt, world)
+    return directory
 
 
 def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inprocess"):
@@ -1005,6 +1143,21 @@ def _model_dtype(config):
     import torch
 
     return torch.bfloat16 if getattr(config, "bf16", True) else torch.float32
+
+
+def _grpo_identity(config, model_source):
+    """Resolve the pinned model identity for one GRPO load target.
+
+    ``model_source`` is either ``config.model_id`` (the pinned Hub base) or a
+    resume/reference checkpoint directory. A directory has no Hub revision, so
+    the resolver returns empty ``load_kwargs`` for it and a resumed run loads
+    exactly as it did before this was wired.
+    """
+    from kore.policy.model_spec import model_identity_for_config, resolve_model_identity
+
+    if model_source == getattr(config, "model_id", None):
+        return model_identity_for_config(config, stage="grpo")
+    return resolve_model_identity(model_source, stage="grpo")
 
 
 def _build_lr_scheduler(opt, config):
@@ -1853,14 +2006,22 @@ def _train_grpo_fallback(config, tasks):
     # Optional modules are not called or imported when disabled.  This makes an
     # off feature auditable, rather than relying on a callee to no-op.
     _initialize_optional_features(config, build_distill_sink=False)
-    tok = AutoTokenizer.from_pretrained(config.model_id)
+    # Tokenizer loads the pinned base; weights may load a resume checkpoint dir,
+    # so the two need separate identities and must not share one revision.
+    from kore.policy.model_spec import log_model_identity
+
+    _identity = _grpo_identity(config, config.model_id)
+    _weights = _identity if model_src == config.model_id else _grpo_identity(config, model_src)
+    log_model_identity(log, _identity)
+    tok = AutoTokenizer.from_pretrained(config.model_id, **_identity.load_kwargs)
     # SDPA (see the distributed path): flash_attention_2 hard-faults on GRPO's
     # padded generation/logp batches on ROCm; SDPA + reentrant checkpointing is safe.
     model_kwargs = {"torch_dtype": _model_dtype(config),  # Fix 3: honor bf16
                     "attn_implementation": "sdpa"}
     if not use_fsdp:
         model_kwargs["device_map"] = "auto"
-    model = AutoModelForCausalLM.from_pretrained(model_src, **model_kwargs)
+    _weights.validate_before_load()
+    model = AutoModelForCausalLM.from_pretrained(model_src, **_weights.load_kwargs, **model_kwargs)
     model.config.use_cache = False
     if getattr(config, "gradient_checkpointing", True):
         # NON-REENTRANT so FSDP re-gathers params during the backward recompute
@@ -2846,13 +3007,20 @@ def _train_grpo_distributed(config, tasks):
                  "rank desyncs)", agentic=True, max_tool_turns=config.max_tool_turns)
 
     _initialize_optional_features(config, build_distill_sink=False)
-    tok = AutoTokenizer.from_pretrained(config.model_id)
+    from kore.policy.model_spec import log_model_identity
+
+    _identity = _grpo_identity(config, config.model_id)
+    if is_main:
+        log_model_identity(log, _identity)
+    tok = AutoTokenizer.from_pretrained(config.model_id, **_identity.load_kwargs)
 
     # Preemption resume (this stage runs on a requeued, preemptible QoS): rank 0
     # picks the newest complete checkpoint and BROADCASTS it, so every rank loads
     # the same policy and starts at the same step - or the whole job fails closed.
     resume = _discover_grpo_resume(config, accelerator)
     model_src = resume[0] if resume is not None else config.model_id
+    # A resume dir carries no Hub revision, so this yields empty load_kwargs there.
+    _weights = _identity if model_src == config.model_id else _grpo_identity(config, model_src)
     if resume is not None and is_main:
         log.info("grpo distributed: resuming from checkpoint", path=model_src,
                  start_step=resume[1].get("global_step"), total_steps=config.total_steps)
@@ -2862,7 +3030,9 @@ def _train_grpo_distributed(config, tasks):
     # FlashAttention-2 kernel hard-faults ("GPU coredump" / SIGABRT) on those
     # padded/variable-length layouts (same failure DPO hit). SDPA handles them; with
     # reentrant checkpointing it is also immune to the saved-tensor-count check.
-    model = AutoModelForCausalLM.from_pretrained(model_src, torch_dtype=_model_dtype(config),
+    _weights.validate_before_load()
+    model = AutoModelForCausalLM.from_pretrained(model_src, **_weights.load_kwargs,
+                                                 torch_dtype=_model_dtype(config),
                                                  attn_implementation="sdpa")
     model.config.use_cache = False
     if getattr(config, "gradient_checkpointing", True):
@@ -2916,8 +3086,11 @@ def _train_grpo_distributed(config, tasks):
     # model via summon+copy (copies only, no forward -> safe) and generate/logp
     # PURELY LOCALLY on it. Zero FSDP collectives during generation => ragged decode
     # can never deadlock, and the embedding/lm_head are always full 2-D tensors.
+    # Same weights as the policy, so reuse its identity (and skip a second
+    # re-fingerprint: validate_before_load already ran on this source above).
     gen_replica = AutoModelForCausalLM.from_pretrained(
-        model_src, torch_dtype=_model_dtype(config), attn_implementation="sdpa")
+        model_src, **_weights.load_kwargs,
+        torch_dtype=_model_dtype(config), attn_implementation="sdpa")
     gen_replica = gen_replica.to(accelerator.device).eval()
     gen_replica.config.use_cache = True
     for _p in gen_replica.parameters():
@@ -3246,7 +3419,8 @@ def _load_ref_model(config):
                       "attn_implementation": "sdpa"}
         if not fsdp_enabled(config):
             ref_kwargs["device_map"] = "auto"
-        ref = AutoModelForCausalLM.from_pretrained(ref_id, **ref_kwargs)
+        ref = AutoModelForCausalLM.from_pretrained(
+            ref_id, **_grpo_identity(config, ref_id).load_kwargs, **ref_kwargs)
         ref.eval()
         for p in ref.parameters():
             p.requires_grad_(False)
@@ -3715,10 +3889,18 @@ def grpo_config_from_dict(d: dict):
     """
     from kore.policy.configs import GRPOConfig
 
+    from kore.policy.model_spec import IDENTITY_CONFIG_KEYS, apply_runtime_settings, split_runtime_settings
+    from kore.policy.resources import PREFLIGHT_CONFIG_KEYS
+
     d = dict(d)
     d.pop("tasks", None)          # handled by _main -> train_grpo(tasks=...)
     d.pop("lora", None)           # GRPO is full-FT only; ignore any stale LoRA block
+    # Identity/preflight keys are not GRPOConfig fields; split them off before the
+    # strict construction so a pinned launch JSON does not raise, and re-attach
+    # them as attributes. The strict parse stays strict for every other key.
+    d, _runtime_settings = split_runtime_settings(d, IDENTITY_CONFIG_KEYS + PREFLIGHT_CONFIG_KEYS)
     config = GRPOConfig(**d)
+    apply_runtime_settings(config, _runtime_settings)
     # Validation is deliberately explicit rather than __post_init__-based so old
     # configs remain inspectable, while a launch JSON cannot enter training with
     # unsupported LoRA or malformed budget/feature topology.
@@ -3741,7 +3923,14 @@ def _main(argv: Optional[list] = None) -> int:
     raw.setdefault("distributed", True)
     tasks = raw.get("tasks")      # optional train-split task ids threaded by the campaign
     cfg = grpo_config_from_dict(raw)
-    out = train_grpo(cfg, tasks=tasks)
+    # Resolve the task list HERE so the frozen held-out lane and the training set
+    # are provably the same list, then freeze it before training can start. This
+    # entry is what ``scripts/launch_distributed.sh`` runs on EVERY rank, which is
+    # why the rank-0 guard and the barrier live here rather than in ``train_grpo``
+    # (a routing shim that never sees a rank).
+    task_ids = list(tasks) if tasks else default_grpo_task_ids()
+    freeze_training_shape_splits(cfg, task_ids)
+    out = train_grpo(cfg, tasks=task_ids)
     print(f"[grpo] -> {out}")
     return 0
 

@@ -532,10 +532,16 @@ def format_vs_opus_report(res: dict) -> str:
 # Thin CLI hook: python -m kore.eval.vs_opus --kore-ckpt <ckpt> [...]
 # --------------------------------------------------------------------------- #
 def _resolve_tasks(task_ids: Optional[str]):
-    """Held-out generalization split by default; else the named task ids."""
+    """Held-out generalization scope by default; else the named task ids.
+
+    Uses ``generalization_tasks()`` rather than ``heldout_tasks()``: this
+    win-rate is reported as a held-out claim, and a task whose kernel leaked
+    into pretraining cannot carry one. It stays held out for training and
+    decontamination; it is only struck from the scored scope.
+    """
     if not task_ids:
-        from kore.tasks.registry import heldout_tasks
-        return heldout_tasks()
+        from kore.tasks.registry import generalization_tasks
+        return generalization_tasks()
     from kore.tasks.registry import get_task
     out = []
     for tid in [t.strip() for t in task_ids.split(",") if t.strip()]:

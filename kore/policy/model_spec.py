@@ -11,9 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from dataclasses import asdict, dataclass, is_dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional
 
 
@@ -28,6 +29,10 @@ class ModelSpecError(ValueError):
 
 class FloatingRevisionError(ModelSpecError):
     """Raised when a branch, tag, or unresolved revision is supplied."""
+
+
+class UnpinnedModelError(ModelSpecError):
+    """Raised when a production load supplies no immutable revision at all."""
 
 
 class ArchitectureMismatchError(ModelSpecError):
@@ -468,6 +473,31 @@ def read_safetensors_metadata(path: str | Path) -> tuple[TensorMetadata, ...]:
     return tuple(sorted(tensors, key=lambda tensor: tensor.name))
 
 
+def _contained_checkpoint_path(root: Path, name: str) -> Path:
+    """Join an index-declared shard name to ``root`` without resolving symlinks.
+
+    Containment is enforced on the declared name, which is the only part an
+    untrusted index controls: an absolute path or any ``..`` component is
+    rejected. The link target is deliberately not required to live under the
+    checkpoint, because a Hugging Face cache snapshot is a farm of symlinks into
+    a sibling ``blobs/`` directory - resolving them would reject every offline
+    snapshot the training jobs actually load.
+    """
+
+    declared = PurePosixPath(str(name))
+    if (
+        not name
+        or declared.is_absolute()
+        or not declared.parts
+        or ".." in declared.parts
+        or "\\" in str(name)
+    ):
+        raise CheckpointCompatibilityError(
+            f"unsafe shard path in safetensors index: {name!r}"
+        )
+    return root.joinpath(*declared.parts)
+
+
 def inspect_safetensors_checkpoint(model_path: str | Path) -> CheckpointMetadata:
     """Inventory an indexed or single-shard checkpoint using headers only."""
 
@@ -522,13 +552,7 @@ def inspect_safetensors_checkpoint(model_path: str | Path) -> CheckpointMetadata
 
     all_tensors: dict[str, TensorMetadata] = {}
     for shard_name in shard_names:
-        candidate = (root / shard_name).resolve()
-        try:
-            candidate.relative_to(root)
-        except ValueError as exc:
-            raise CheckpointCompatibilityError(
-                f"unsafe shard path in safetensors index: {shard_name!r}"
-            ) from exc
+        candidate = _contained_checkpoint_path(root, shard_name)
         if not candidate.is_file():
             raise CheckpointCompatibilityError(
                 f"safetensors index references missing shard {shard_name!r}"
@@ -733,6 +757,104 @@ def validate_checkpoint_compatibility(
         )
 
 
+def _expected_fields(
+    expected: Optional["ModelProfile | ArchitectureSpec"],
+) -> tuple[Optional[str], Optional[ArchitectureSpec], Optional[int], Optional[str]]:
+    """Unpack (revision, architecture, parameter count, model id) expectations."""
+
+    if isinstance(expected, ModelProfile):
+        parameter_count = (
+            expected.expected_parameter_count
+            if isinstance(expected.expected_parameter_count, int)
+            and not isinstance(expected.expected_parameter_count, bool)
+            else None
+        )
+        return (
+            expected.revision,
+            expected.architecture,
+            parameter_count,
+            expected.model_id,
+        )
+    if isinstance(expected, ArchitectureSpec):
+        return None, expected, None, None
+    return None, None, None, None
+
+
+@dataclass(frozen=True)
+class CheckpointInspection:
+    """Header-only inspection of a local checkpoint: no hashing, no GPU imports.
+
+    This is the cheap tier of local verification. It reads ``config.json`` and
+    the safetensors headers, so it still rejects a wrong architecture, a missing
+    decoder layer, or a truncated shard before a multi-hour job loads 14B of
+    weights - but it reads no tensor bytes, so it deliberately does NOT establish
+    content identity. Only :class:`ModelSpec` does that, and only :class:`ModelSpec`
+    may back a production claim.
+    """
+
+    model_id: str
+    revision: Optional[str]
+    checkpoint_path: str
+    architecture: ArchitectureSpec
+    checkpoint: CheckpointMetadata
+
+    @property
+    def parameter_count(self) -> int:
+        return self.checkpoint.parameter_count
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "kind": "checkpoint-inspection",
+            "model_id": self.model_id,
+            "revision": self.revision,
+            "checkpoint_path": self.checkpoint_path,
+            "architecture": asdict(self.architecture),
+            "parameter_count": self.parameter_count,
+            "tensor_storage_bytes": self.checkpoint.tensor_storage_bytes,
+            "shard_paths": list(self.checkpoint.shard_paths),
+        }
+
+
+def inspect_local_checkpoint(
+    model_path: str | Path,
+    *,
+    revision: Optional[str] = None,
+    expected: Optional["ModelProfile | ArchitectureSpec"] = None,
+    model_id: Optional[str] = None,
+) -> CheckpointInspection:
+    """Validate architecture and checkpoint shapes without hashing any bytes."""
+
+    (
+        _expected_revision,
+        expected_architecture,
+        expected_parameter_count,
+        expected_model_id,
+    ) = _expected_fields(expected)
+    root = Path(model_path).expanduser().resolve()
+    config = _read_json(root / "config.json", description="model config")
+    architecture = ArchitectureSpec.from_config(config)
+    if expected_architecture is not None:
+        architecture.assert_matches(expected_architecture)
+    checkpoint = inspect_safetensors_checkpoint(root)
+    validate_checkpoint_compatibility(architecture, checkpoint, config)
+    if (
+        expected_parameter_count is not None
+        and checkpoint.parameter_count != expected_parameter_count
+    ):
+        raise CheckpointCompatibilityError(
+            "checkpoint parameter count does not match expected profile: "
+            f"{checkpoint.parameter_count} != {expected_parameter_count}"
+        )
+    return CheckpointInspection(
+        model_id=model_id or expected_model_id or root.name,
+        revision=validate_pinned_revision(revision) if revision is not None else None,
+        checkpoint_path=str(root),
+        architecture=architecture,
+        checkpoint=checkpoint,
+    )
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     """Fully resolved, locally verified model identity."""
@@ -762,19 +884,7 @@ class ModelSpec:
     ) -> "ModelSpec":
         """Inspect and validate a local checkpoint with no network/GPU imports."""
 
-        expected_revision: Optional[str] = None
-        expected_architecture: Optional[ArchitectureSpec] = None
-        expected_parameter_count: Optional[int] = None
-        expected_model_id: Optional[str] = None
-        if isinstance(expected, ModelProfile):
-            expected_revision = expected.revision
-            expected_architecture = expected.architecture
-            expected_model_id = expected.model_id
-            if isinstance(expected.expected_parameter_count, int):
-                expected_parameter_count = expected.expected_parameter_count
-        elif isinstance(expected, ArchitectureSpec):
-            expected_architecture = expected
-
+        expected_revision, _, _, _ = _expected_fields(expected)
         resolved_revision = validate_pinned_revision(
             revision if revision is not None else expected_revision
         )
@@ -787,29 +897,20 @@ class ModelSpec:
                 "explicit revision does not match the expected model profile"
             )
 
-        root = Path(model_path).expanduser().resolve()
-        config = _read_json(root / "config.json", description="model config")
-        architecture = ArchitectureSpec.from_config(config)
-        if expected_architecture is not None:
-            architecture.assert_matches(expected_architecture)
-
-        checkpoint = inspect_safetensors_checkpoint(root)
-        validate_checkpoint_compatibility(architecture, checkpoint, config)
-        if (
-            expected_parameter_count is not None
-            and checkpoint.parameter_count != expected_parameter_count
-        ):
-            raise CheckpointCompatibilityError(
-                "checkpoint parameter count does not match expected profile: "
-                f"{checkpoint.parameter_count} != {expected_parameter_count}"
-            )
-        files = fingerprint_model_files(root, checkpoint)
-        return cls(
-            model_id=model_id or expected_model_id or root.name,
+        inspection = inspect_local_checkpoint(
+            model_path,
             revision=resolved_revision,
-            checkpoint_path=str(root),
-            architecture=architecture,
-            checkpoint=checkpoint,
+            expected=expected,
+            model_id=model_id,
+        )
+        root = Path(inspection.checkpoint_path)
+        files = fingerprint_model_files(root, inspection.checkpoint)
+        return cls(
+            model_id=inspection.model_id,
+            revision=resolved_revision,
+            checkpoint_path=inspection.checkpoint_path,
+            architecture=inspection.architecture,
+            checkpoint=inspection.checkpoint,
             files=files,
         )
 
@@ -906,25 +1007,591 @@ def load_model_spec(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Model identity for training entrypoints
+#
+# The training stages load their model with ``from_pretrained(model_id)``, which
+# resolves to whatever the Hugging Face cache happens to hold. This layer turns
+# that into an explicit, auditable decision:
+#
+#   * PRODUCTION requires an immutable commit, requires it to be resolvable from
+#     a local snapshot (the jobs run with ``HF_HUB_OFFLINE=1``), and verifies the
+#     checkpoint's content fingerprint. Anything missing is a hard failure with
+#     an actionable message.
+#   * DEVELOPMENT reports the same facts and keeps going. A config with no
+#     revision loads exactly as it did before this module existed, so a job that
+#     is already in flight cannot be broken by resuming into this code.
+#
+# An explicitly configured revision that is *malformed* (a branch, a tag, a short
+# hash) fails in BOTH modes: that is a config bug, not a missing pin.
+# --------------------------------------------------------------------------- #
+PRODUCTION = "production"
+DEVELOPMENT = "development"
+_IDENTITY_MODES = (DEVELOPMENT, PRODUCTION)
+
+VERIFY_NONE = "none"
+VERIFY_METADATA = "metadata"
+VERIFY_FINGERPRINT = "fingerprint"
+_VERIFY_LEVELS = (VERIFY_NONE, VERIFY_METADATA, VERIFY_FINGERPRINT)
+
+REVISION_ENV = "KORE_MODEL_REVISION"
+REF_REVISION_ENV = "KORE_REF_MODEL_REVISION"
+IDENTITY_MODE_ENV = "KORE_MODEL_IDENTITY_MODE"
+IDENTITY_VERIFY_ENV = "KORE_MODEL_IDENTITY_VERIFY"
+_OFFLINE_ENV = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+_HF_CACHE_ENV = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE")
+
+# Launch-config keys that configure identity instead of being stage dataclass
+# fields. The stage builders pop these before ``Config(**payload)`` so a pinned
+# config cannot crash the strict dataclass parse.
+IDENTITY_CONFIG_KEYS = (
+    "model_revision",
+    "ref_model_revision",
+    "model_identity_mode",
+    "model_identity_verify",
+)
+
+
+def _environ(environ: Optional[Mapping[str, str]]) -> Mapping[str, str]:
+    return os.environ if environ is None else environ
+
+
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def hub_offline(environ: Optional[Mapping[str, str]] = None) -> bool:
+    """True when the Hub is unreachable by policy, so a pin must resolve locally."""
+
+    env = _environ(environ)
+    return any(_truthy(env.get(key)) for key in _OFFLINE_ENV)
+
+
+def resolve_identity_mode(
+    mode: Optional[str] = None, *, environ: Optional[Mapping[str, str]] = None
+) -> str:
+    """Resolve the identity mode; ``production`` is a one-way opt-in.
+
+    Either the launch config or ``KORE_MODEL_IDENTITY_MODE`` can ask for
+    production, and neither can silently downgrade the other.
+    """
+
+    env = _environ(environ)
+    selected = []
+    for value in (mode, env.get(IDENTITY_MODE_ENV)):
+        text = str(value or "").strip().lower()
+        if not text:
+            continue
+        if text not in _IDENTITY_MODES:
+            raise ModelSpecError(
+                "model identity mode must be one of "
+                f"{list(_IDENTITY_MODES)}; got {value!r}"
+            )
+        selected.append(text)
+    return PRODUCTION if PRODUCTION in selected else DEVELOPMENT
+
+
+def resolve_verify_level(
+    verify: Optional[str] = None,
+    *,
+    mode: str = DEVELOPMENT,
+    environ: Optional[Mapping[str, str]] = None,
+) -> str:
+    """Resolve how deeply a local checkpoint is checked.
+
+    Production fingerprints the checkpoint (every identity-bearing file is
+    hashed, which is what makes the pre-load re-check meaningful). Development
+    defaults to the header-only tier so startup stays cheap.
+    """
+
+    env = _environ(environ)
+    raw = verify if verify not in (None, "") else env.get(IDENTITY_VERIFY_ENV)
+    text = str(raw or "").strip().lower()
+    if not text:
+        return VERIFY_FINGERPRINT if mode == PRODUCTION else VERIFY_METADATA
+    if text not in _VERIFY_LEVELS:
+        raise ModelSpecError(
+            "model identity verification must be one of "
+            f"{list(_VERIFY_LEVELS)}; got {raw!r}"
+        )
+    return text
+
+
+def hf_cache_roots(
+    environ: Optional[Mapping[str, str]] = None,
+) -> tuple[Path, ...]:
+    """Candidate Hugging Face hub cache roots, in resolution order."""
+
+    env = _environ(environ)
+    candidates: list[Path] = []
+    for key in _HF_CACHE_ENV:
+        value = str(env.get(key) or "").strip()
+        if value:
+            candidates.append(Path(value).expanduser())
+    home = str(env.get("HF_HOME") or "").strip()
+    if home:
+        candidates.append(Path(home).expanduser() / "hub")
+    xdg = str(env.get("XDG_CACHE_HOME") or "").strip()
+    base = Path(xdg).expanduser() if xdg else Path("~/.cache").expanduser()
+    candidates.append(base / "huggingface" / "hub")
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            roots.append(candidate)
+    return tuple(roots)
+
+
+def hf_repo_cache_dirname(model_id: str) -> str:
+    """Cache directory name for a Hub repo id (``org/name`` -> ``models--org--name``)."""
+
+    return "models--" + str(model_id).strip().strip("/").replace("/", "--")
+
+
+def resolve_local_snapshot(
+    model_id: str,
+    revision: str,
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+) -> Optional[Path]:
+    """Map an immutable Hub commit to its local snapshot directory, offline.
+
+    Returns ``None`` when no cache root holds that exact commit, which is the
+    fact a fail-closed production preflight needs: ``HF_HUB_OFFLINE=1`` means a
+    revision that is not already on disk cannot be loaded at all.
+    """
+
+    pinned = validate_pinned_revision(revision)
+    dirname = hf_repo_cache_dirname(model_id)
+    for root in hf_cache_roots(environ):
+        candidate = root / dirname / "snapshots" / pinned
+        if (candidate / "config.json").is_file():
+            return candidate
+    return None
+
+
+@dataclass(frozen=True)
+class ModelIdentity:
+    """The resolved answer to "exactly which weights is this stage loading?"."""
+
+    role: str
+    stage: str
+    model_id: str
+    mode: str
+    verify: str
+    revision: Optional[str]
+    pin_load: bool
+    local_path: Optional[str]
+    inspection: Optional[CheckpointInspection]
+    spec: Optional[ModelSpec]
+    notes: tuple[str, ...]
+
+    @property
+    def pinned(self) -> bool:
+        return self.revision is not None
+
+    @property
+    def load_kwargs(self) -> dict[str, str]:
+        """Kwargs to splat into every ``from_pretrained`` call for this model.
+
+        Empty when nothing is pinned, so an unconfigured stage keeps its exact
+        pre-existing load behaviour.
+        """
+
+        if self.pin_load and self.revision:
+            return {"revision": self.revision}
+        return {}
+
+    def validate_before_load(self) -> None:
+        """Re-verify the checkpoint immediately before the framework loads it.
+
+        Closes the preflight-to-load TOCTOU window via
+        :meth:`ModelSpec.validate_for_load`, which re-fingerprints the directory
+        and rejects any file that changed since verification. A no-op when no
+        fingerprint was taken (development, or a Hub id with no local snapshot),
+        so it can be called unconditionally.
+        """
+
+        if self.spec is None:
+            return
+        self.spec.validate_for_load(
+            self.spec.checkpoint_path, revision=self.revision
+        )
+
+    def log_fields(self) -> dict[str, Any]:
+        return {
+            "role": self.role,
+            "model_id": self.model_id,
+            "mode": self.mode,
+            "verify": self.verify,
+            "revision": self.revision,
+            "revision_pinned_at_load": self.pin_load,
+            "local_path": self.local_path,
+            "parameter_count": (
+                self.inspection.parameter_count
+                if self.inspection is not None
+                else None
+            ),
+            "model_profile_hash": (
+                self.spec.profile_hash if self.spec is not None else None
+            ),
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "kind": "model-identity",
+            **self.log_fields(),
+            "stage": self.stage,
+            "notes": list(self.notes),
+            "inspection": (
+                self.inspection.to_dict() if self.inspection is not None else None
+            ),
+        }
+
+
+def _local_directory_identity(
+    directory: Path,
+    *,
+    model_id: str,
+    configured_revision: Optional[str],
+    stage: str,
+    role: str,
+    mode: str,
+    verify: Optional[str],
+    expected: Optional[ModelProfile | ArchitectureSpec],
+    environ: Mapping[str, str],
+) -> ModelIdentity:
+    """Identity for a local checkpoint directory, e.g. a previous stage's output.
+
+    A directory has no Hub commit and ``transformers`` ignores ``revision`` for
+    it, so a configured Hub revision is reported as ignored rather than claimed
+    as this checkpoint's identity - the ``midtrain -> sft -> dpo`` handoff must
+    not be labelled with the base model's commit. The path is the identity here;
+    what preflight adds is architecture and shape verification of the handoff,
+    which is what catches loading the wrong stage's output.
+    """
+
+    notes: list[str] = []
+    if configured_revision not in (None, "", UNRESOLVED):
+        notes.append(
+            f"{model_id!r} is a local checkpoint directory, so the configured "
+            f"revision {str(configured_revision)[:12]}... is IGNORED: a directory "
+            "has no Hub commit and from_pretrained does not accept one for it. "
+            "Identity here is the path plus the verified architecture"
+        )
+    verify_level = resolve_verify_level(verify, mode=mode, environ=environ)
+    if verify_level == VERIFY_FINGERPRINT:
+        # A fingerprint is only meaningful against a recorded baseline, and KORE
+        # mints no immutable id for stage outputs, so there is nothing to compare.
+        verify_level = VERIFY_METADATA
+        notes.append(
+            "fingerprint verification needs an immutable revision to bind to; "
+            "a local checkpoint directory is verified at the metadata tier"
+        )
+    inspection: Optional[CheckpointInspection] = None
+    if verify_level != VERIFY_NONE:
+        try:
+            inspection = inspect_local_checkpoint(
+                directory, expected=expected, model_id=model_id
+            )
+        except (ModelSpecError, OSError) as exc:
+            if mode == PRODUCTION:
+                raise
+            notes.append(
+                f"local checkpoint verification ({verify_level}) failed and was "
+                f"skipped in development mode: {exc}"
+            )
+            verify_level = VERIFY_NONE
+    return ModelIdentity(
+        role=role,
+        stage=stage,
+        model_id=model_id,
+        mode=mode,
+        verify=verify_level,
+        revision=None,
+        pin_load=False,
+        local_path=str(directory.resolve()),
+        inspection=inspection,
+        spec=None,
+        notes=tuple(notes),
+    )
+
+
+def resolve_model_identity(
+    model_id: str,
+    *,
+    revision: Optional[str] = None,
+    stage: str = "train",
+    role: str = "policy",
+    mode: Optional[str] = None,
+    verify: Optional[str] = None,
+    expected: Optional[ModelProfile | ArchitectureSpec] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> ModelIdentity:
+    """Resolve, and in production enforce, the identity of one model to load.
+
+    A Hub repo id must name an immutable commit that resolves to a local snapshot
+    (production) or is reported as unpinned (development). A local checkpoint
+    directory is identified by its path and verified architecture instead - see
+    :func:`_local_directory_identity`.
+    """
+
+    env = _environ(environ)
+    resolved_mode = resolve_identity_mode(mode, environ=env)
+    revision_env = REF_REVISION_ENV if role == "reference" else REVISION_ENV
+    revision_key = "ref_model_revision" if role == "reference" else "model_revision"
+    raw_revision = revision if revision not in (None, "") else env.get(revision_env)
+    notes: list[str] = []
+
+    # An empty model id must not be read as the working directory.
+    resolved_id = str(model_id or "").strip()
+    candidate_dir = Path(resolved_id).expanduser() if resolved_id else None
+    if candidate_dir is not None and candidate_dir.is_dir():
+        return _local_directory_identity(
+            candidate_dir,
+            model_id=resolved_id,
+            configured_revision=raw_revision,
+            stage=stage,
+            role=role,
+            mode=resolved_mode,
+            verify=verify,
+            expected=expected,
+            environ=env,
+        )
+
+    if raw_revision in (None, "", UNRESOLVED):
+        message = (
+            f"no immutable revision is configured for the {role} model "
+            f"{model_id!r}: set the launch-config key {revision_key!r} or "
+            f"${revision_env} to the full 40-hex Hub commit the training data "
+            "was built for (DATASET_STATUS.md records it)"
+        )
+        if resolved_mode == PRODUCTION:
+            raise UnpinnedModelError(
+                f"{stage}: {message}. Production mode refuses to load whatever "
+                "the Hugging Face cache happens to hold."
+            )
+        notes.append(
+            message
+            + "; development mode loads the cache's default snapshot unpinned"
+        )
+        return ModelIdentity(
+            role=role,
+            stage=stage,
+            model_id=str(model_id),
+            mode=resolved_mode,
+            verify=VERIFY_NONE,
+            revision=None,
+            pin_load=False,
+            local_path=None,
+            inspection=None,
+            spec=None,
+            notes=tuple(notes),
+        )
+
+    # A configured-but-mutable ref is a config defect, so it fails in both modes.
+    pinned = validate_pinned_revision(raw_revision)
+
+    pin_load = True
+    local_path: Optional[Path] = resolve_local_snapshot(
+        model_id, pinned, environ=env
+    )
+    if local_path is None:
+        searched = ", ".join(str(root) for root in hf_cache_roots(env))
+        message = (
+            f"revision {pinned} of {model_id!r} is not present in any local "
+            f"Hugging Face cache (searched: {searched})"
+        )
+        if resolved_mode == PRODUCTION:
+            raise ModelSpecError(
+                f"{stage}: {message}. Download that exact commit, or point "
+                "$HF_HOME/$HF_HUB_CACHE at the cache that holds it."
+            )
+        if hub_offline(env):
+            # Pinning an uncached commit under HF_HUB_OFFLINE=1 would turn a
+            # working development run into a hard load failure, so degrade.
+            pin_load = False
+            notes.append(
+                message
+                + " and the Hub is offline; proceeding UNPINNED instead of "
+                "failing the load (set KORE_MODEL_IDENTITY_MODE=production "
+                "to make this fatal)"
+            )
+        else:
+            notes.append(
+                message + "; keeping the pin so the Hub resolves that exact commit"
+            )
+
+    verify_level = resolve_verify_level(verify, mode=resolved_mode, environ=env)
+    if local_path is None and verify_level != VERIFY_NONE:
+        notes.append(
+            "no local checkpoint directory to verify; identity assurance is "
+            "limited to the revision pin itself"
+        )
+        verify_level = VERIFY_NONE
+
+    inspection: Optional[CheckpointInspection] = None
+    spec: Optional[ModelSpec] = None
+    if verify_level != VERIFY_NONE:
+        try:
+            if verify_level == VERIFY_FINGERPRINT:
+                spec = ModelSpec.from_local_checkpoint(
+                    local_path,
+                    revision=pinned,
+                    expected=expected,
+                    model_id=str(model_id),
+                )
+                inspection = CheckpointInspection(
+                    model_id=spec.model_id,
+                    revision=spec.revision,
+                    checkpoint_path=spec.checkpoint_path,
+                    architecture=spec.architecture,
+                    checkpoint=spec.checkpoint,
+                )
+            else:
+                inspection = inspect_local_checkpoint(
+                    local_path,
+                    revision=pinned,
+                    expected=expected,
+                    model_id=str(model_id),
+                )
+        except (ModelSpecError, OSError) as exc:
+            if resolved_mode == PRODUCTION:
+                raise
+            notes.append(
+                f"local checkpoint verification ({verify_level}) failed and was "
+                f"skipped in development mode: {exc}"
+            )
+            verify_level = VERIFY_NONE
+            inspection = None
+            spec = None
+
+    return ModelIdentity(
+        role=role,
+        stage=stage,
+        model_id=str(model_id),
+        mode=resolved_mode,
+        verify=verify_level,
+        revision=pinned,
+        pin_load=pin_load,
+        local_path=str(local_path) if local_path is not None else None,
+        inspection=inspection,
+        spec=spec,
+        notes=tuple(notes),
+    )
+
+
+def model_identity_for_config(
+    config: Any,
+    *,
+    stage: str,
+    role: str = "policy",
+    model_id: Optional[str] = None,
+    expected: Optional[ModelProfile | ArchitectureSpec] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> ModelIdentity:
+    """Resolve identity from a stage config's optional identity attributes.
+
+    The stage dataclasses in :mod:`kore.policy.configs` carry no identity fields,
+    so every attribute is read with a ``getattr`` default: a config written before
+    the pin existed - including one an in-flight job restarts from - resolves to
+    an unpinned development identity and loads exactly as it did before.
+    """
+
+    attribute = "ref_model_revision" if role == "reference" else "model_revision"
+    resolved_id = model_id if model_id is not None else getattr(config, "model_id", "")
+    return resolve_model_identity(
+        resolved_id,
+        revision=getattr(config, attribute, None),
+        stage=stage,
+        role=role,
+        mode=getattr(config, "model_identity_mode", None),
+        verify=getattr(config, "model_identity_verify", None),
+        expected=expected,
+        environ=environ,
+    )
+
+
+def log_model_identity(logger: Any, identity: ModelIdentity) -> None:
+    """Emit one structured identity line, plus every degradation as a warning."""
+
+    logger.info("model identity resolved", **identity.log_fields())
+    for note in identity.notes:
+        logger.warn(
+            "model identity is not fully pinned",
+            role=identity.role,
+            model_id=identity.model_id,
+            mode=identity.mode,
+            note=note,
+        )
+
+
+def split_runtime_settings(
+    payload: Mapping[str, Any], keys: tuple[str, ...]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split a launch-config mapping into dataclass fields and runtime settings."""
+
+    settings = {key: payload[key] for key in keys if key in payload}
+    fields = {key: value for key, value in payload.items() if key not in settings}
+    return fields, settings
+
+
+def apply_runtime_settings(config: Any, settings: Mapping[str, Any]) -> Any:
+    """Attach runtime settings to a stage config as plain attributes."""
+
+    for key, value in settings.items():
+        if value is not None:
+            setattr(config, key, value)
+    return config
+
+
 __all__ = [
+    "DEVELOPMENT",
+    "IDENTITY_CONFIG_KEYS",
+    "IDENTITY_MODE_ENV",
+    "IDENTITY_VERIFY_ENV",
+    "PRODUCTION",
+    "REF_REVISION_ENV",
+    "REVISION_ENV",
     "UNRESOLVED",
+    "VERIFY_FINGERPRINT",
+    "VERIFY_METADATA",
+    "VERIFY_NONE",
     "ArchitectureMismatchError",
     "ArchitectureSpec",
     "CheckpointCompatibilityError",
+    "CheckpointInspection",
     "CheckpointMetadata",
     "FileDigest",
     "FloatingRevisionError",
     "ModelFileFingerprints",
+    "ModelIdentity",
     "ModelProfile",
     "ModelSpec",
     "ModelSpecError",
     "QWEN3_32B_PROFILE",
     "TensorMetadata",
+    "UnpinnedModelError",
+    "apply_runtime_settings",
     "canonical_profile_hash",
     "fingerprint_model_files",
+    "hf_cache_roots",
+    "hf_repo_cache_dirname",
+    "hub_offline",
+    "inspect_local_checkpoint",
     "inspect_safetensors_checkpoint",
     "load_model_spec",
+    "log_model_identity",
+    "model_identity_for_config",
     "read_safetensors_metadata",
+    "resolve_identity_mode",
+    "resolve_local_snapshot",
+    "resolve_model_identity",
+    "resolve_verify_level",
+    "split_runtime_settings",
     "validate_checkpoint_compatibility",
     "validate_pinned_revision",
 ]

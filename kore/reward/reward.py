@@ -66,6 +66,12 @@ class Observation:
     snr_db: Optional[float] = None
     wall_ms: Optional[float] = None
     baseline_ms: Optional[float] = None
+    # Which baseline the driver actually timed, from its KORE_BASELINE_IMPL
+    # sentinel ("aiter_vendor" / "hipblaslt_vendor" / "framework"). None when the
+    # driver emitted none. This is the ONLY runtime evidence distinguishing a real
+    # vendor kernel from a silent torch fallback, so provenance must prefer it
+    # over the task's declared comparison_baseline.
+    baseline_impl: Optional[str] = None
     wall_by_shape: dict[str, float] = field(default_factory=dict)
     baseline_by_shape: dict[str, float] = field(default_factory=dict)
     snr_by_shape: dict[str, float] = field(default_factory=dict)

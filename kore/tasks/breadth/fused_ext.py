@@ -708,7 +708,9 @@ def _{op}_gate(g_ptr, u_ptr, h_ptr, Ntot, BLOCK: tl.constexpr):
 
 _ACT_TL = {
     "silu": "g * tl.sigmoid(g)",
-    "gelu": "0.5 * g * (1.0 + tl.math.tanh(0.7978845608028654 * (g + 0.044715 * g * g * g)))",
+    # tanh via 2*sigmoid(2x)-1: tl.math.tanh was removed in Triton 3.6 and the
+    # repo convention is libdevice-free activations on ROCm (see _genops.py).
+    "gelu": "0.5 * g * (1.0 + (2.0 * tl.sigmoid(2.0 * (0.7978845608028654 * (g + 0.044715 * g * g * g))) - 1.0))",
     "relu": "tl.maximum(g, 0.0)",
 }
 
@@ -1119,7 +1121,7 @@ def _{op}_kernel(x_ptr, {mask_ptr}y_ptr, Ncol, cap, BLOCK: tl.constexpr):
     offs = tl.arange(0, BLOCK)
     mask = offs < Ncol
     x = tl.load(x_ptr + row * Ncol + offs, mask=mask, other=0.0).to(tl.float32)
-    s = cap * tl.math.tanh(x / cap)
+    s = cap * (2.0 * tl.sigmoid(2.0 * (x / cap)) - 1.0)
 {mask_add}    s = tl.where(mask, s, -1e30)
     mx = tl.max(s, axis=0)
     e = tl.exp(s - mx)

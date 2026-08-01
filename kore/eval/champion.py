@@ -12,6 +12,10 @@ strictly harder conditions than training and only certifies the ones that surviv
 
   * HELD-OUT shapes - semantics-preserving, non-power-of-two "odd" variants from
     a lane frozen away from every training augmentation (catches shape overfit).
+    The lane comes from the manifests
+    :func:`kore.tasks.shape_policy.freeze_shape_splits` wrote before training;
+    this gate can only CONSUME them, never derive one, so a hidden shape can
+    never be chosen once the champion is known.
   * VERIFIED correctness - the enumerated adversarial gate + determinism re-check
     (KORE_VERIFIED_CORRECTNESS=1) + more reseeded trials.
   * HONEST baseline - the compiler-fused bar (KORE_COMPILE_BASELINE=1) so a
@@ -32,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -164,9 +169,21 @@ class Champion:
 
 def reeval_champion(champ: Champion, *, max_shapes: int = 8,
                     min_speedup: float = 1.0, collapse_ratio: float = 0.7,
-                    config=None, shape_manifest=None) -> ChampionVerdict:
-    """Re-evaluate ONE champion under maximum scrutiny on held-out shapes."""
+                    config=None, shape_manifest=None, ledger=None) -> ChampionVerdict:
+    """Re-evaluate ONE champion under maximum scrutiny on held-out shapes.
+
+    ``ledger`` is an optional :class:`~kore.policy.budget.BudgetLedgerV1`.  When
+    supplied, the certification re-evaluation is pre-flighted against its hard
+    limits and then charged for the correctness, timing and profiling work it
+    physically performed, so certification compute is accounted exactly like
+    training compute.
+    """
     from kore.env.kore_env import KoreEnv
+    from kore.policy.budget import (
+        EvaluationWork,
+        charge_evaluation_work,
+        check_evaluation_budget,
+    )
     from kore.reward.reward import compute_reward
     from kore.tasks.registry import get_task
 
@@ -187,8 +204,22 @@ def reeval_champion(champ: Champion, *, max_shapes: int = 8,
                                  correct=False, hack_free=True, high_variance=False)
             v.reason = "task has no augmentable held-out shapes"
             return v
+        # Refuse to spend GPU time a hard limit already forbids. A certification
+        # re-eval always verifies and always benchmarks (``do_bench=True``).
+        check_evaluation_budget(
+            ledger, EvaluationWork(correctness_calls=1, fresh_timed_calls=1))
         env = KoreEnv(task, config=cfg, use_replay=False)
+        started = time.perf_counter()
         obs = env.evaluate(task, champ.source, shapes=shapes, do_bench=True)
+        elapsed = time.perf_counter() - started
+        # Cold cache + no replay: every re-eval is fresh, so the whole interval is
+        # verifier time except the profiler passes the env reports separately.
+        profiler_seconds = float(getattr(env, "last_profiler_seconds", 0.0) or 0.0)
+        charge_evaluation_work(ledger, EvaluationWork.from_observation(
+            obs,
+            verifier_seconds=max(0.0, elapsed - profiler_seconds),
+            profiler_seconds=profiler_seconds,
+        ))
         rr = compute_reward(obs, champ.source, dtype=task.dtype,
                             snr_threshold=getattr(task, "snr_threshold", None))
         hack_free = not bool(getattr(obs, "flagged_hack", False))
@@ -243,14 +274,15 @@ class ChampionReport:
 def run_champion_reeval(champions: list[Champion], *, max_shapes: int = 8,
                         min_speedup: float = 1.0, collapse_ratio: float = 0.7,
                         out_path: Optional[str] = None, config=None,
-                        shape_manifests: Optional[Mapping[str, object]] = None
-                        ) -> ChampionReport:
+                        shape_manifests: Optional[Mapping[str, object]] = None,
+                        ledger=None) -> ChampionReport:
     """Re-evaluate all champions and write a JSON certification report."""
     verdicts: list[ChampionVerdict] = []
     for champ in champions:
         try:
             v = reeval_champion(champ, max_shapes=max_shapes, min_speedup=min_speedup,
                                collapse_ratio=collapse_ratio, config=config,
+                               ledger=ledger,
                                shape_manifest=(
                                    shape_manifests.get(champ.task_id)
                                    if shape_manifests else None))
@@ -273,17 +305,20 @@ def run_champion_reeval(champions: list[Champion], *, max_shapes: int = 8,
     return report
 
 
-def load_shape_manifests(path: str) -> dict[str, object]:
-    """Load one frozen split JSON per task from a lineage artifact directory."""
-    from kore.tasks.augment import FrozenShapeSplit
+def load_shape_manifests(path: str, *, tasks=None,
+                         require_index: bool = False) -> dict[str, object]:
+    """Load the training-time frozen splits written by ``freeze_shape_splits``.
 
-    manifests: dict[str, object] = {}
-    for manifest_path in sorted(Path(path).glob("*.json")):
-        manifest = FrozenShapeSplit.read(manifest_path)
-        if manifest.task_id in manifests:
-            raise ValueError(f"duplicate shape manifest for {manifest.task_id!r}")
-        manifests[manifest.task_id] = manifest
-    return manifests
+    The directory receipt (``shape_split_index.json``) is enforced whenever it is
+    present, so a hidden lane cannot be added, swapped or dropped for one task
+    after training.  ``require_index=True`` additionally refuses a directory that
+    was not produced by the writer at all, and ``tasks`` asserts that every task
+    about to be certified actually has a manifest that still validates.
+    """
+    from kore.tasks.shape_policy import load_frozen_shape_splits
+
+    return dict(load_frozen_shape_splits(
+        path, tasks=tasks, require_index=require_index))
 
 
 # --------------------------------------------------------------------------- #
@@ -323,10 +358,15 @@ def main(argv=None) -> int:  # pragma: no cover - CLI
     p.add_argument("--min-speedup", type=float, default=1.0)
     p.add_argument("--collapse-ratio", type=float, default=0.7)
     p.add_argument("--shape-manifests",
-                   help="directory of training-time frozen shape manifests")
+                   help="directory written by `python -m kore.tasks.shape_policy "
+                        "freeze` at training time")
+    p.add_argument("--require-shape-index", action="store_true",
+                   help="refuse manifests that carry no writer receipt")
     a = p.parse_args(argv)
     champs = load_champions(a.champions)
-    manifests = load_shape_manifests(a.shape_manifests) if a.shape_manifests else {}
+    manifests = load_shape_manifests(
+        a.shape_manifests, require_index=a.require_shape_index
+    ) if a.shape_manifests else {}
     report = run_champion_reeval(
         champs, max_shapes=a.max_shapes, min_speedup=a.min_speedup,
         collapse_ratio=a.collapse_ratio, out_path=a.out,

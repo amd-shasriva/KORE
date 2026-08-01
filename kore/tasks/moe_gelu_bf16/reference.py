@@ -78,6 +78,12 @@ def baseline_output(shape, inputs):
     import torch
     import torch.nn.functional as F
 
+    from kore.tasks.aiter_ref import _mark_baseline
+
+    # Without this the runtime baseline identity is unknowable for this task, and
+    # nothing downstream can arbitrate between the declaration and what ran.
+    _mark_baseline("hipblaslt_vendor")
+
     hidden, w1, w2, tw, ti = inputs
     M, D = hidden.shape
     topk = ti.shape[1]

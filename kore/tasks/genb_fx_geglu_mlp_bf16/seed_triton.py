@@ -28,7 +28,7 @@ def _fx_geglu_mlp_gate(g_ptr, u_ptr, h_ptr, Ntot, BLOCK: tl.constexpr):
     mask = offs < Ntot
     g = tl.load(g_ptr + offs, mask=mask, other=0.0).to(tl.float32)
     u = tl.load(u_ptr + offs, mask=mask, other=0.0).to(tl.float32)
-    tl.store(h_ptr + offs, ((0.5 * g * (1.0 + tl.math.tanh(0.7978845608028654 * (g + 0.044715 * g * g * g)))) * u).to(tl.bfloat16), mask=mask)
+    tl.store(h_ptr + offs, ((0.5 * g * (1.0 + (2.0 * tl.sigmoid(2.0 * (0.7978845608028654 * (g + 0.044715 * g * g * g))) - 1.0))) * u).to(tl.bfloat16), mask=mask)
 
 
 def fx_geglu_mlp(x, wg, wu, wd):

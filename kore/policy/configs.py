@@ -242,13 +242,11 @@ class GRPOConfig(DistributedMixin):
     # --- Rollout shape (Kevin: m=16 trajectories x n=4 turns) ---
     num_trajectories: int = 16             # m: group size per task
     num_turns: int = 4                     # n: refinement turns per trajectory
-    serial_refine: bool = True             # serial > parallel (Kevin)
     tasks_per_step: int = 8
 
     # --- Kevin per-turn reward + credit ---
     correctness_weight: float = 0.3        # S = 0.3*1{correct} + speedup*1{correct}
     gamma: float = 0.4                     # discounted-sum look-ahead across turns
-    per_turn_as_sample: bool = True
 
     # --- GRPO objective (DAPO clip-higher + importance ratio + multi-epoch) ---
     # NB: ``kl_coef`` was REMOVED - the only KL/anchor the native loop applies is

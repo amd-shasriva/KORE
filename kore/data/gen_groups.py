@@ -21,7 +21,11 @@ from typing import Callable, Optional
 from kore.config import CONFIG
 from kore.data.amd_knowledge import live_system_prompt
 from kore.data.prompts import SYSTEM_PROMPT, build_turn_prompt, extract_kernel
-from kore.data.schemas import RankedGroupRecord, resolve_baseline_identity
+from kore.data.schemas import (
+    BASELINE_IDENTITY_OBSERVED,
+    RankedGroupRecord,
+    resolve_baseline_identity,
+)
 from kore.data.teacher import TeacherClient
 from kore.env.replay import kernel_hash
 from kore.obs import get_logger
@@ -182,6 +186,9 @@ def paired_baseline_wall_us(obs) -> Optional[float]:
 
 def _evaluate(env, task, source: str, cfg) -> dict:
     """Run one candidate through the verifier + reward into a result dict."""
+    # Declared identity only, for the exception path below: nothing ran, so there
+    # is no runtime evidence to prefer. The success path re-resolves against the
+    # observation so a silent AITER->torch fallback is recorded as torch.
     identity = resolve_baseline_identity(task)
     try:
         obs = env.step(source, full_validation=True, multi_shape=True)
@@ -200,6 +207,7 @@ def _evaluate(env, task, source: str, cfg) -> dict:
                                    # genuine correctness verdict (see reverify keep-on-infra)
         }
     rr = compute_reward(obs, source, dtype=task.dtype, cfg=cfg)
+    identity = resolve_baseline_identity(task, getattr(obs, "baseline_impl", None))
     wall_us = obs.wall_ms * 1000.0 if obs.wall_ms is not None else None
     return {
         "source": source,
@@ -353,6 +361,15 @@ def generate_groups(
                             parent_wall_us = float(rep["wall_us"])
                         except Exception:  # noqa: BLE001
                             parent_counters = None
+            # Every candidate in a group is timed against the same baseline, so a
+            # single candidate's runtime sentinel settles it for the group. Prefer
+            # that over the pre-run declaration: on a node where the AITER build
+            # failed the declaration would still say "vendor".
+            group_identity = next(
+                (r for r in results
+                 if r.get("baseline_identity_source") == BASELINE_IDENTITY_OBSERVED),
+                None,
+            ) or _identity
             record = RankedGroupRecord(
                 task_id=task.task_id,
                 parent_id=kernel_hash(parent_src),
@@ -365,8 +382,8 @@ def generate_groups(
                 parent_counters=parent_counters,
                 parent_wall_us=parent_wall_us,
                 baseline_wall_us=group_baseline_wall_us,
-                baseline_type=_identity["baseline_type"],
-                baseline_kind=_identity["baseline_kind"],
+                baseline_type=group_identity["baseline_type"],
+                baseline_kind=group_identity["baseline_kind"],
             )
             records.append(record)
             if on_record is not None:

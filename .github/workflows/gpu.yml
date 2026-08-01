@@ -1,0 +1,97 @@
+name: GPU verifier suite
+
+# Manual dispatch ONLY, deliberately.
+#
+# The `gpu` suite needs a real gfx950 (MI350X/MI355X) card plus ROCm, which no
+# GitHub-hosted runner has, so this workflow is never attached to `push` or
+# `pull_request`: a job pinned to a self-hosted label with no matching runner
+# would queue until it timed out, which is a red PR rather than a clean skip.
+# Dispatch it against a registered ROCm runner, or run the suite directly on a
+# node (see tests/README.md).
+#
+# Two independent layers keep a GPU-less runner green rather than broken:
+#   1. the `preflight` step below detects the absence of an AMD GPU and turns the
+#      remaining steps off, reporting a notice instead of a failure;
+#   2. the suite itself skips every `gpu` test when no card answers - the
+#      `gpu_harness` fixture in conftest.py probes a child process and calls
+#      `pytest.skip` with the reason, so `pytest -m gpu` still exits 0.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner label with an AMD GPU and ROCm installed
+        required: false
+        default: self-hosted
+      gpu:
+        description: Physical GPU id for the suite (KORE_TEST_GPU)
+        required: false
+        default: "6"
+      alt_gpu:
+        description: Second GPU id, used only for visible-device mapping checks
+        required: false
+        default: "7"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  gpu-tests:
+    name: GPU / verifier and timing protocol
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Detect an AMD GPU
+        id: preflight
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [[ -e /dev/kfd ]] && command -v rocm-smi >/dev/null 2>&1 \
+              && rocm-smi --showid >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            rocm-smi --showid || true
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=GPU suite skipped::no /dev/kfd or rocm-smi here; the gpu-marked suite needs a gfx950 card with ROCm"
+          fi
+
+      - name: Set up Python
+        if: steps.preflight.outputs.available == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+
+      - name: Install the test environment
+        if: steps.preflight.outputs.available == 'true'
+        run: |
+          python -m pip install "pip==26.1.2"
+          python -m pip install --editable ".[test]"
+
+      - name: Run the gpu-marked suite
+        if: steps.preflight.outputs.available == 'true'
+        env:
+          KORE_TEST_GPU: ${{ inputs.gpu }}
+          KORE_TEST_GPU_ALT: ${{ inputs.alt_gpu }}
+          KORE_RUNS_DIR: ${{ runner.temp }}/kore-runs
+          GPU_TARGET: gfx950
+        run: python -m pytest -m gpu -p no:warnings -rs --durations=10
+
+      - name: Report that the suite was skipped
+        if: steps.preflight.outputs.available != 'true'
+        run: |
+          echo "### GPU suite skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "No AMD GPU was detected on this runner, so \`pytest -m gpu\` was" \
+            "not run. Dispatch this workflow against a ROCm runner, or run the" \
+            "suite on a node as documented in tests/README.md." \
+            >> "$GITHUB_STEP_SUMMARY"

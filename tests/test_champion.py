@@ -17,7 +17,9 @@ from kore.eval.champion import (
     held_out_shapes,
     load_champions,
     load_shape_manifests,
+    reeval_champion,
 )
+from kore.policy.budget import BudgetLedgerV1
 from kore.tasks.augment import (
     FrozenShapeSplit,
     boundary_regime,
@@ -27,6 +29,7 @@ from kore.tasks.augment import (
 )
 from kore.tasks.base import Shape
 from kore.tasks.registry import get_task
+from kore.tasks.shape_policy import freeze_shape_splits
 
 
 def test_certified_when_survives():
@@ -175,6 +178,58 @@ def test_manifest_rejects_content_and_code_tampering(tmp_path):
     incomplete = replace(incomplete, content_hash=incomplete.computed_hash())
     with pytest.raises(ValueError, match="train/augmentation universe"):
         validate_frozen_split(task, incomplete)
+
+
+def test_certification_evaluates_exactly_the_frozen_hidden_lane(tmp_path, monkeypatch):
+    from kore.reward.reward import Observation
+
+    task = get_task("softmax_bf16")
+    freeze_shape_splits([task], tmp_path)
+    manifest = load_shape_manifests(
+        str(tmp_path), tasks=[task], require_index=True)[task.task_id]
+
+    evaluated: dict[str, object] = {}
+
+    class _Env:
+        def __init__(self, task, config=None, use_replay=True, **kwargs):
+            evaluated["use_replay"] = use_replay
+            self.last_profiler_seconds = 0.0
+
+        def evaluate(self, task, source, shapes=None, do_bench=True):
+            evaluated["shapes"] = list(shapes or ())
+            evaluated["do_bench"] = do_bench
+            names = [shape.name for shape in evaluated["shapes"]]
+            return Observation(
+                compiled=True, dtype=task.dtype, validation_passed=True,
+                timing_requested=True, requested_shapes=names,
+                snr_by_shape={name: 61.0 for name in names},
+                wall_by_shape={name: 1.0 for name in names},
+                baseline_by_shape={name: 2.0 for name in names})
+
+    monkeypatch.setattr("kore.env.kore_env.KoreEnv", _Env)
+    ledger = BudgetLedgerV1()
+    verdict = reeval_champion(
+        Champion(task_id=task.task_id, source="def kernel(x):\n    return x\n"),
+        shape_manifest=manifest, ledger=ledger)
+
+    # The gate re-benchmarks the stored hidden lane, cold and un-replayed, and
+    # never touches a shape the policy was trained on.
+    assert evaluated["shapes"] == list(manifest.hidden_shapes)
+    assert evaluated["do_bench"] is True
+    assert evaluated["use_replay"] is False
+    assert {shape_key(shape) for shape in evaluated["shapes"]}.isdisjoint(
+        manifest.train_keys | manifest.prompt_keys)
+    assert verdict.n_heldout_shapes == len(manifest.hidden_shapes) == 8
+    assert verdict.correct
+    assert ledger.correctness_calls == 1 and ledger.fresh_timed_calls == 1
+
+
+def test_shape_manifest_loader_demands_one_manifest_per_task(tmp_path):
+    tasks = [get_task("softmax_bf16"), get_task("gemm_bf16")]
+    freeze_shape_splits(tasks[:1], tmp_path)
+    assert sorted(load_shape_manifests(str(tmp_path))) == ["softmax_bf16"]
+    with pytest.raises(ValueError, match="no training-time frozen shape manifest"):
+        load_shape_manifests(str(tmp_path), tasks=tasks)
 
 
 def test_manifest_rejects_task_file_change(tmp_path):

@@ -56,6 +56,12 @@ from kore.env.evaluation_contract import (
 )
 from kore.env.replay import ReplayCache
 from kore.obs import get_logger
+from kore.policy.budget import (
+    BudgetLedgerV1,
+    EvaluationWork,
+    charge_evaluation_work,
+    check_evaluation_budget,
+)
 from kore.reward.reward import Observation, scan_for_hacks
 from kore.reward.reward import _worst_speedup
 from kore.reward.stats import cv_pct as _cv_pct
@@ -68,6 +74,23 @@ from kore.tasks._genops import (
     PUBLICATION_GUARANTEES,
 )
 from kore.tasks.base import Shape, Task
+from kore.verify.production import (
+    DEFAULT_MAX_ELEMENTS,
+    RUNNER_SHIM_NAME,
+    RUNNER_SHIM_SOURCE,
+    MetamorphicPlan,
+    OracleReport,
+    ProngStatus,
+    build_oracle_report,
+    expected_output_elements,
+    generic_adversarial_families,
+    metamorphic_plan_for_task,
+    parse_metamorphic_report,
+    sanitize_detail,
+    select_metamorphic_shape,
+    shape_spec,
+    task_output_op_class,
+)
 
 _LOG = get_logger("env")
 
@@ -139,6 +162,37 @@ def _sandbox_requested(config) -> bool:
     return bool(getattr(config, "sandbox_enabled", False))
 
 
+_METAMORPHIC_ENV = "KORE_METAMORPHIC"
+_TRUTHY = ("1", "true", "yes", "on")
+_FALSY = ("0", "false", "no", "off")
+
+
+def _metamorphic_gate() -> tuple[bool, bool]:
+    """``(enabled, described_by_the_evaluation_contract)`` for the 3rd prong.
+
+    The metamorphic prong costs one extra candidate-only subprocess, so it rides
+    the SAME operator switch as the driver's enumerated adversarial battery,
+    ``KORE_VERIFIED_CORRECTNESS=1`` - one honest "verified correctness" gate for
+    both deterministic value/structure prongs, and one that
+    :func:`kore.env.evaluation_contract.build_evaluation_contract` already
+    records, so a cached verdict can never have been produced under a different
+    prong set.
+
+    ``KORE_METAMORPHIC=0/1`` overrides it for A/B measurement and for disabling a
+    single prong in an emergency. That override is NOT part of the contract, so
+    whenever it disagrees with the gate the contract describes, this returns
+    ``described=False`` and the caller must refuse to read or write the replay
+    cache rather than let two different oracles share one cache key.
+    """
+    default_on = os.environ.get("KORE_VERIFIED_CORRECTNESS") == "1"
+    raw = os.environ.get(_METAMORPHIC_ENV, "").strip().lower()
+    if raw in _TRUTHY:
+        return True, default_on
+    if raw in _FALSY:
+        return False, not default_on
+    return default_on, True
+
+
 def _ev(level: str, name: str, **fields) -> None:
     """Emit a structured event at an explicit level (JSONL always).
 
@@ -192,6 +246,16 @@ def _open_private_lockfile(path: Path) -> Optional[int]:
 _SNR = re.compile(r"SNR:\s*([-\d.eE]+)")
 _ALLCLOSE = re.compile(r"allclose:\s*(True|False)", re.IGNORECASE)
 _MEDIAN = re.compile(r"median_ms:\s*([-\d.eE]+)")
+# Which baseline the driver ACTUALLY timed. Every aiter_ref wrapper degrades to
+# torch on an import/JIT failure and emits this sentinel; without parsing it a
+# node where AITER fails to build still records baseline_kind="vendor" for
+# numbers that came from eager torch -- i.e. a fabricated vendor-beating claim.
+_BASELINE_IMPL = re.compile(r"^KORE_BASELINE_IMPL:\s*(\w+)\s*$", re.M)
+# The driver names the enumerated regime it failed on, which is what lets the
+# oracle report separate the adversarial prong from the random one (both share
+# one ``allclose:`` verdict). A candidate cannot forge itself a PASS with this
+# marker - printing it can only produce a rejection - so it is safe evidence.
+_ADV_FAIL = re.compile(r"^ADVERSARIAL_(?:FAIL|ERROR)\[([^\]]{0,80})\]", re.MULTILINE)
 _TIMING_PAIR = re.compile(r"^KORE_TIMING_PAIR:\s*(\{[^\n]+\})\s*$",
                           re.MULTILINE)
 _DRIVER_CAPS = re.compile(r"^KORE_DRIVER_CAPABILITIES:\s*(\{[^\n]+\})\s*$",
@@ -373,7 +437,8 @@ class KoreEnv:
                  isolation_controller: Optional["IsolationController"] = None,
                  sandbox_config: Optional["SandboxConfig"] = None,
                  verdict_verifier: Optional["VerdictSignatureVerifier"] = None,
-                 runtime_identity: Optional[Mapping[str, Any]] = None):
+                 runtime_identity: Optional[Mapping[str, Any]] = None,
+                 budget_ledger: Optional[BudgetLedgerV1] = None):
         self.task = task
         self.cfg = config
         self.correctness_timeout = correctness_timeout
@@ -406,6 +471,9 @@ class KoreEnv:
         self._active_source: Optional[str] = None
         self._active_task: Optional[Task] = None
         self._task_descriptor_cache: dict[str, dict] = {}
+        # Which correctness prongs actually ran for the most recent candidate,
+        # and the honest statistical false-accept bound behind the verdict.
+        self._last_oracle_report: Optional[OracleReport] = None
         # The in-process "trusted-code-only" isolation controller is ALWAYS
         # constructed when kore.sandbox is available: it needs no external broker,
         # provides ambient-secret scrubbing + a trusted backend label, and is the
@@ -436,6 +504,20 @@ class KoreEnv:
             if runtime_identity is not None
             else getattr(config, "runtime_identity", None)
         )
+        # Set from the bench subprocess's KORE_BASELINE_IMPL sentinel; reset per
+        # evaluation so a stale value can never be attributed to a later one.
+        self._last_baseline_impl: Optional[str] = None
+        # Compute ledger for the five evaluation counters, or None for an
+        # unbudgeted environment. Passed EXPLICITLY rather than derived from
+        # ``config``: the ledger lives on the GRPOConfig, while every KoreEnv on
+        # the rollout path is handed ``kore.config.CONFIG`` (or a copy of it), so a
+        # config-derived ledger would find nothing exactly where it matters and
+        # the counters would stay zero while looking wired.
+        self._budget_ledger = budget_ledger
+        # Wall time the rocprofv3 passes of the most recent evaluation spent, so
+        # profiler seconds are attributed separately from verifier seconds instead
+        # of being inferred from a count.
+        self._last_profiler_seconds = 0.0
         self._cache_obj = ReplayCache(self.cfg.runs_dir / f"replay_{task.task_id}.jsonl") \
             if use_replay else None
 
@@ -448,6 +530,20 @@ class KoreEnv:
         return float(t) if t else self.cfg.snr_threshold_for(task.dtype)
 
     @property
+    def last_profiler_seconds(self) -> float:
+        """PUBLIC: wall seconds the last evaluation spent inside the profiler.
+
+        The rocprofv3 candidate+reference passes run INSIDE one ``evaluate`` call,
+        so a caller timing that call cannot separate profiler time from verifier
+        time on its own. This is the measured carve-out
+        (:mod:`kore.eval.champion` reads it to attribute ``profiler_gpu_seconds``
+        without double-counting the interval), and it is ``0.0`` whenever the
+        profiler did not run: bonus off, replay hit, or an evaluation that ended
+        before the timed tier.
+        """
+        return self._last_profiler_seconds
+
+    @property
     def last_execution_status(self):
         """Typed status from the most recent sandbox-controlled subprocess.
 
@@ -455,6 +551,25 @@ class KoreEnv:
         typed execution status.
         """
         return self._last_execution_status
+
+    @property
+    def last_oracle_report(self) -> Optional[OracleReport]:
+        """PUBLIC: what the correctness oracle actually checked, last evaluation.
+
+        Carries one :class:`~kore.verify.production.ProngStatus` per prong -
+        random, adversarial, metamorphic, determinism - saying whether it passed,
+        failed, was gated off, or does not apply to this task, together with the
+        exact evidence source for each, and the ``(1-p)**m`` false-accept bound
+        over the random prong's element comparisons.
+
+        ``None`` when no oracle verdict was reached for the last call: nothing
+        evaluated yet, a replay-cache hit, or an evaluation that ended before the
+        prongs could report (hack rejection, compile failure, or an infra failure
+        during the per-shape correctness runs). It is deliberately NOT stored on
+        :class:`~kore.reward.reward.Observation`: that object is the replay-cached
+        payload, and a report describes one physical run.
+        """
+        return self._last_oracle_report
 
     # ------------------------------------------------------------------ #
     def step(self, source: str, full_validation: bool = True,
@@ -488,6 +603,11 @@ class KoreEnv:
         shapes = list(shapes or task.shapes or [Shape("default", {})])
         source_sha = _sha12(source)
         n_shapes = len(shapes)
+        # A report describes one physical run; a replayed or short-circuited
+        # verdict must not appear to carry fresh oracle evidence, and no later
+        # evaluation may inherit this one's profiler attribution.
+        self._last_oracle_report = None
+        self._last_profiler_seconds = 0.0
         _ev("INFO", "eval_start", task=task.task_id, n_shapes=n_shapes,
             source_sha=source_sha, do_bench=do_bench)
 
@@ -524,23 +644,55 @@ class KoreEnv:
             gpu_selection=self._gpu_selection(task),
             runtime_identity=self._runtime_identity,
         )
-        replay_ready = contract_is_cacheable(contract)
+        # The metamorphic override is outside the contract, so a run that uses it
+        # is not describable by the replay key: fail closed to no caching rather
+        # than let a 3-prong and a 4-prong verdict share one entry.
+        _, gate_in_contract = _metamorphic_gate()
+        if not gate_in_contract:
+            _ev("WARN", "eval_replay_disabled", task=task.task_id,
+                reason=f"{_METAMORPHIC_ENV} overrides the contract-recorded "
+                       "verified-correctness gate")
+        replay_ready = contract_is_cacheable(contract) and gate_in_contract
         if self.use_replay and self._cache_obj is not None and replay_ready:
             cached = self._cache_obj.get(task.task_id, source, context=contract)
             if cached is not None:
                 _LOG.debug("cache hit", task=task.task_id, source_sha=source_sha,
                            compiled=cached.compiled, correct=cached.validation_passed)
+                # This is the ONLY place a replay hit is observable, so it is the
+                # only place ``replay_hits`` can be charged. A hit ran nothing, so
+                # it is charged as a hit and nothing else.
+                charge_evaluation_work(
+                    self._budget_ledger, EvaluationWork(replay_hits=1))
                 self._log_eval_done(task, cached, cached=True)
                 return cached
+
+        # Pre-flight BEFORE anything launches: charging afterwards still binds a
+        # limit, but only once the GPU time is already gone. A ``correctness_calls``
+        # limit of 0 must refuse to start this evaluation, not report it.
+        check_evaluation_budget(
+            self._budget_ledger, self._planned_work(do_bench=do_bench))
 
         workdir = Path(tempfile.mkdtemp(prefix=f"kore_{task.task_id}_"))
         previous_source, previous_task = self._active_source, self._active_task
         self._active_source, self._active_task = source, task
+        started = time.perf_counter()
         try:
             obs = self._run(task, source, shapes, workdir, do_bench)
         finally:
+            elapsed = time.perf_counter() - started
             self._active_source, self._active_task = previous_source, previous_task
             shutil.rmtree(workdir, ignore_errors=True)
+
+        # Charge what physically happened, splitting the ONE measured interval into
+        # the profiler passes ``_run`` timed and the verifier work that is the rest.
+        # Splitting (rather than timing the profiler separately) is what keeps the
+        # two second-counters from double-counting the same wall time.
+        profiler_seconds = min(self._last_profiler_seconds, elapsed)
+        charge_evaluation_work(self._budget_ledger, EvaluationWork.from_observation(
+            obs,
+            verifier_seconds=max(0.0, elapsed - profiler_seconds),
+            profiler_seconds=profiler_seconds,
+        ))
 
         # Only cache DETERMINISTIC terminal verdicts - never transient infra errors,
         # and never a timing verdict that only this run's measurement noise produced.
@@ -566,6 +718,27 @@ class KoreEnv:
                 self._cache_obj.put(task.task_id, source, obs, context=contract)
         self._log_eval_done(task, obs, cached=False)
         return obs
+
+    def _planned_work(self, *, do_bench: bool) -> EvaluationWork:
+        """The work an evaluation is ABOUT to do, for the pre-flight check.
+
+        The CALL counts are exactly known before launching. The SECONDS are not,
+        but they are known to be positive: a launched evaluation always spends
+        verifier wall time, and it spends profiler wall time whenever the counter
+        bonus is on for a timed run. So the claim here is the smallest amount the
+        ledger can register - enough to refuse a launch under an EXHAUSTED (in
+        particular zero) seconds budget, and small enough that at any nonzero
+        remaining budget the float addition absorbs it and the pre-flight cannot
+        invent a duration it has no way to predict.
+        """
+        floor = math.ulp(0.0)
+        profiling = do_bench and getattr(self.cfg, "profile_reward_weight", 0.0) > 0.0
+        return EvaluationWork(
+            correctness_calls=1,
+            fresh_timed_calls=1 if do_bench else 0,
+            verifier_gpu_seconds=floor,
+            profiler_gpu_seconds=floor if profiling else 0.0,
+        )
 
     def _log_eval_done(self, task: Task, obs: Observation, cached: bool) -> None:
         """Final per-candidate verdict at INFO (structured), covering every path."""
@@ -876,6 +1049,10 @@ class KoreEnv:
 
     def _run(self, task: Task, source: str, shapes: list[Shape], workdir: Path,
              do_bench: bool) -> Observation:
+        # Clear per-evaluation runtime evidence so a previous candidate's baseline
+        # identity - or profiler attribution - can never be attributed to this one.
+        self._last_baseline_impl = None
+        self._last_profiler_seconds = 0.0
         # stage isolated sources; make the oracle/driver READ-ONLY so a kernel
         # cannot corrupt reference.py for future evals.
         task_sources = list(task.dir.glob("*.py"))
@@ -909,6 +1086,7 @@ class KoreEnv:
         compiled = True
         validation_passed = True
         last_err: Optional[str] = None
+        adv_failures: list[str] = []
 
         for i, sh in enumerate(shapes):
             t_sh = time.perf_counter()
@@ -940,6 +1118,11 @@ class KoreEnv:
             if not m and not ac:
                 validation_passed = False
                 last_err = _tail(out)
+            # Which enumerated regime (if any) the adversarial prong rejected, so
+            # the oracle report can attribute the driver's single verdict.
+            adv_failures.extend(
+                f"{sh.name}:{sanitize_detail(hit.group(1), 40)}"
+                for hit in _ADV_FAIL.finditer(out))
 
         # Verifier stricter correctness gate: validation passed AND the benchmarked
         # shape set EXACTLY covers the requested shapes (no dupes, no missing/extra)
@@ -952,6 +1135,14 @@ class KoreEnv:
             and set(snr_by_shape) == requested_set
             and all(v >= thr for v in snr_by_shape.values())
         )
+
+        # The driver publishes ONE ``allclose:`` per shape covering both the
+        # reseeded random trials and (when gated on) the enumerated adversarial
+        # regimes, so attribute the two prongs before anything downstream mutates
+        # ``correct``.
+        random_ok = correct
+        determinism_ran = False
+        determinism_ok = False
 
         # Anti-hack determinism re-check: re-run the primary shape once and require
         # a stable verdict, so a kernel cannot be rewarded for passing the SNR gate
@@ -981,11 +1172,70 @@ class KoreEnv:
                 stable, reason = _determinism_stable(snr_by_shape.get(sh0.name), snr2, ok2, tol)
             _ev("DEBUG", "verify_determinism", task=task.task_id, shape=sh0.name,
                 snr1=snr_by_shape.get(sh0.name), snr2=snr2, stable=stable)
+            determinism_ran, determinism_ok = True, bool(stable)
             if not stable:
                 _ev("WARN", "eval_nondeterministic", task=task.task_id,
                     source_sha=_sha12(source), reason=reason)
                 correct = False
                 last_err = reason
+
+        # ---- prong 3: metamorphic (candidate-only structural identities) ---- #
+        # Deterministic algebraic relations the TRUE operator satisfies for any
+        # input (permutation equivariance / locality / reshape for elementwise;
+        # order-invariance + row independence for reductions). They need no
+        # second oracle evaluation, and they reject a class the random prong
+        # structurally cannot see: a kernel that is right on every sampled value
+        # but wrong about which elements may influence which outputs.
+        plan = metamorphic_plan_for_task(task)
+        gate_on, _ = _metamorphic_gate()
+        meta_payload: Optional[dict] = None
+        if not gate_on:
+            metamorphic = ProngStatus(
+                "metamorphic", "metamorphic", "off",
+                f"gated off: set KORE_VERIFIED_CORRECTNESS=1 (or "
+                f"{_METAMORPHIC_ENV}=1) to run it",
+                plan.reason)
+        elif not plan.applicable:
+            metamorphic = ProngStatus(
+                "metamorphic", "metamorphic", "not-applicable",
+                "kore.verify.production.metamorphic_plan_for_task", plan.reason)
+        elif not correct:
+            metamorphic = ProngStatus(
+                "metamorphic", "metamorphic", "off",
+                "not run: the candidate was already rejected by an earlier prong",
+                plan.reason)
+        else:
+            metamorphic, meta_infra, meta_payload = self._metamorphic_prong(
+                task, plan, shapes, workdir, env)
+            if meta_infra is not None:
+                # Fail-CLOSED: a prong that was supposed to run and could not is
+                # never a pass. There is no trustworthy correctness evidence for
+                # this candidate, so the evaluation is inconclusive (infra) -
+                # never cached, never fed to the policy as a kernel signal.
+                _ev("WARN", "eval_metamorphic_inconclusive", task=task.task_id,
+                    source_sha=_sha12(source), reason=_tail(meta_infra, 300))
+                obs = Observation(
+                    compiled=True, dtype=task.dtype, validation_passed=False,
+                    infra_error=True,
+                    error_text=f"infra: metamorphic prong inconclusive: {meta_infra}")
+                self._publish_oracle_report(
+                    task, shapes, verified=False, random_ok=random_ok,
+                    adv_failures=adv_failures, metamorphic=metamorphic,
+                    determinism_ran=determinism_ran, determinism_ok=determinism_ok,
+                    do_bench=False, meta_payload=meta_payload,
+                    detail="evaluation abandoned: metamorphic prong inconclusive")
+                return obs
+            if metamorphic.state == "fail":
+                _ev("WARN", "eval_metamorphic_violation", task=task.task_id,
+                    source_sha=_sha12(source), detail=_tail(metamorphic.detail, 300))
+                correct = False
+                last_err = f"metamorphic violation: {metamorphic.detail}"
+
+        self._publish_oracle_report(
+            task, shapes, verified=correct, random_ok=random_ok,
+            adv_failures=adv_failures, metamorphic=metamorphic,
+            determinism_ran=determinism_ran, determinism_ok=determinism_ok,
+            do_bench=do_bench, meta_payload=meta_payload)
 
         obs = Observation(
             compiled=compiled, dtype=task.dtype,
@@ -1117,6 +1367,9 @@ class KoreEnv:
         # Retain raw/summary evidence even when admission subsequently fails.
         obs.wall_by_shape = wall_by_shape
         obs.baseline_by_shape = base_by_shape
+        # Runtime baseline identity, so a silent AITER->torch degradation cannot
+        # be recorded as a vendor-beating win.
+        obs.baseline_impl = self._last_baseline_impl
         obs.cv_pct = max(candidate_cvs) if candidate_cvs else None
         obs.baseline_cv_pct = max(baseline_cvs) if baseline_cvs else None
         obs.paired_ratio_cv_pct = max(ratio_cvs) if ratio_cvs else None
@@ -1170,11 +1423,17 @@ class KoreEnv:
         # hiccup leaves profile_efficiency=None and never affects the correctness/
         # speedup verdict. Collected once on the primary shape only (rocprof is slow).
         if getattr(self.cfg, "profile_reward_weight", 0.0) > 0.0:
+            # Measured, not inferred: the two rocprofv3 passes are the profiler's
+            # entire GPU cost, and ``last_profiler_seconds`` is how the caller
+            # charges them to ``profiler_gpu_seconds`` instead of to the verifier.
+            profile_started = time.perf_counter()
             try:
                 obs.profile_efficiency = self._collect_profile(driver, shapes[0], workdir, env)
             except Exception as e:  # pragma: no cover - GPU/rocprof only
                 _ev("DEBUG", "profile_error", task=task.task_id, error=str(e)[:200])
                 obs.profile_efficiency = None
+            finally:
+                self._last_profiler_seconds = time.perf_counter() - profile_started
             # Two rocprofv3 runs produced a number; the reward's P5 gate additionally
             # needs the empirical evidence backing counter shaping to exist and pass.
             passed, fingerprint = self._profile_evidence(task, obs.profile_efficiency)
@@ -1183,6 +1442,225 @@ class KoreEnv:
             _ev("DEBUG", "profile_evidence", task=task.task_id, passed=passed,
                 fingerprint=fingerprint, efficiency=obs.profile_efficiency)
         return obs
+
+    # ------------------------------------------------------------------ #
+    # Correctness oracle: the metamorphic prong + the consumer-visible report
+    # ------------------------------------------------------------------ #
+    def _metamorphic_prong(self, task: Task, plan: MetamorphicPlan,
+                           shapes: list[Shape], workdir: Path,
+                           env: dict) -> tuple[ProngStatus, Optional[str], Optional[dict]]:
+        """Run the structural prong in its own subprocess in the staged workdir.
+
+        Returns ``(status, inconclusive_reason, diagnostic_payload)``. The
+        verdict is read ONLY from the ``allclose:`` / ``SNR:`` literals the
+        runner prints after the candidate has finished: those are the same
+        literals the task driver uses, so ``kore.reward.scan_for_hacks`` already
+        rejects any candidate whose source contains them, and the last-match rule
+        already beats an in-run print. The ``KORE_METAMORPHIC:`` JSON is
+        diagnostic and is discarded whenever it disagrees with that verdict, so
+        forging it can never turn a rejection into an acceptance.
+
+        ``inconclusive_reason`` is non-``None`` exactly when the prong was meant
+        to run and produced no verdict; the caller must then refuse to call the
+        candidate verified.
+        """
+        name, kind = "metamorphic", "metamorphic"
+        dims, declared, note = select_metamorphic_shape(
+            shapes, max_elements=DEFAULT_MAX_ELEMENTS)
+        if dims is None:
+            # A property of the task's declared shapes, not of this run: report
+            # it as "does not apply" rather than failing an honest candidate.
+            return (ProngStatus(name, kind, "not-applicable",
+                                "kore.verify.production.select_metamorphic_shape",
+                                note),
+                    None, None)
+
+        shim = workdir / RUNNER_SHIM_NAME
+        try:
+            # Staged read-only like driver.py/reference.py. Re-staging tolerates
+            # the read-only mode a previous run (or a task source of the same
+            # name) left behind, so a second call in one workdir is not an error.
+            if shim.exists():
+                os.chmod(shim, 0o644)
+            shim.write_text(RUNNER_SHIM_SOURCE)
+            os.chmod(shim, 0o444)
+        except OSError as exc:
+            reason = f"could not stage {RUNNER_SHIM_NAME}: {exc}"
+            return ProngStatus(name, kind, "inconclusive", "staging", reason), reason, None
+
+        spec = shape_spec(dims)
+        declared_spec = shape_spec(declared or dims)
+        cmd = [sys.executable, str(shim),
+               "--shape", spec,
+               "--op-class", plan.op_class,
+               "--source-family", plan.source_family,
+               "--dtype", plan.dtype,
+               "--shape-declared", declared_spec]
+        t0 = time.perf_counter()
+        with _LOG.timer("verify_metamorphic", task=task.task_id, shape=spec):
+            rc, out, timed = self._exec(cmd, workdir, env, self.correctness_timeout)
+        took_s = round(time.perf_counter() - t0, 3)
+        run_kind, msg = self._classify(out, rc, timed)
+        evidence = (
+            f"kore.verify.runner subprocess in the staged workdir, shape {spec}"
+            + (f" (stands in for {declared_spec})" if spec != declared_spec else "")
+            + f", op_class={plan.op_class}, relations={len(plan.relations)}; verdict "
+              "from the driver-protocol allclose:/SNR: literals (last match)")
+
+        if run_kind == "infra":
+            reason = f"runner hit an infrastructure failure: {_tail(msg, 200)}"
+            return ProngStatus(name, kind, "inconclusive", evidence, reason), reason, None
+        ac = _last(_ALLCLOSE, out)
+        if rc != 0 or ac is None:
+            reason = (f"runner published no verdict (rc={rc}, "
+                      f"allclose_line={'yes' if ac else 'no'}): {_tail(out, 300)}")
+            return ProngStatus(name, kind, "inconclusive", evidence, reason), reason, None
+
+        passed = ac.group(1).lower() == "true"
+        payload = parse_metamorphic_report(out)
+        if payload is not None and (payload.get("state") != "verdict"
+                                    or bool(payload.get("verified")) is not passed):
+            _ev("WARN", "metamorphic_payload_inconsistent", task=task.task_id,
+                verdict=passed)
+            payload = None
+        detail = ""
+        if payload is not None:
+            failures = payload.get("failures") or []
+            detail = "; ".join(str(f) for f in failures)[:400]
+            # The reported false-accept bound models the output extent from the
+            # shape; if the candidate's own output disagrees with that model the
+            # bound would be wrong, so mark it unusable instead of publishing it.
+            observed = payload.get("output_elements")
+            expected = expected_output_elements(plan.op_class, dims)
+            payload["element_model_ok"] = (
+                observed is None or expected is None or int(observed) == int(expected))
+        if not detail and not passed:
+            detail = _tail(out, 300)
+        _ev("DEBUG", "verify_metamorphic", task=task.task_id, shape=spec,
+            op_class=plan.op_class, passed=passed, took_s=took_s,
+            relations=len(plan.relations))
+        return (ProngStatus(name, kind, "pass" if passed else "fail", evidence,
+                            sanitize_detail(detail, 400) if detail else ""),
+                None, payload)
+
+    def _publish_oracle_report(self, task: Task, shapes: list[Shape], *,
+                               verified: bool, random_ok: bool,
+                               adv_failures: list[str], metamorphic: ProngStatus,
+                               determinism_ran: bool, determinism_ok: bool,
+                               do_bench: bool,
+                               meta_payload: Optional[dict] = None,
+                               detail: str = "") -> OracleReport:
+        """Record which prongs ran, and the honest false-accept bound.
+
+        Published on :attr:`last_oracle_report` and as one structured JSONL
+        event, because a four-prong claim is only meaningful if a consumer can
+        see which prongs were live for a given candidate and how large the
+        residual statistical risk behind the verdict is.
+        """
+        n_shapes = len(shapes)
+        gate_on = os.environ.get("KORE_VERIFIED_CORRECTNESS") == "1"
+
+        # -- random ------------------------------------------------------- #
+        random_evidence = (
+            f"driver stdout (allclose:/SNR:, last match): reseeded random trials "
+            f"per shape against the fp32 reference, {n_shapes} shape(s), every "
+            f"per-shape SNR vs the task threshold")
+        if random_ok:
+            random_state, random_detail = "pass", ""
+        elif adv_failures:
+            # One combined verdict per shape: an adversarial regime failed, so the
+            # random trials' own contribution is not separable from this output.
+            random_state = "inconclusive"
+            random_detail = ("not separable: the driver publishes one allclose: "
+                             "verdict per shape and an adversarial regime failed")
+        else:
+            random_state, random_detail = "fail", "no adversarial regime failed"
+
+        # -- adversarial --------------------------------------------------- #
+        family = ""
+        raw = getattr(task, "raw", None)
+        if isinstance(raw, Mapping):
+            family = str(raw.get("op_family") or "")
+        battery = (meta_payload or {}).get("adversarial_battery")
+        if battery is None:
+            battery = ("generic" if family in generic_adversarial_families()
+                       else "unknown")
+        adv_evidence = (
+            "driver stdout: the enumerated adversarial fills share the same "
+            f"allclose: verdict; ADVERSARIAL_FAIL[...] names a failing regime "
+            f"(battery={battery})")
+        if not gate_on:
+            adversarial = ProngStatus(
+                "adversarial", "adversarial", "off",
+                "gated off: set KORE_VERIFIED_CORRECTNESS=1 to run the driver's "
+                "enumerated adversarial battery", "")
+        elif adv_failures:
+            adversarial = ProngStatus(
+                "adversarial", "adversarial", "fail", adv_evidence,
+                "regimes: " + ", ".join(adv_failures[:8]))
+        elif battery == "unknown":
+            adversarial = ProngStatus(
+                "adversarial", "adversarial", "unknown", adv_evidence,
+                "the environment cannot observe whether this reference supplies "
+                "an adversarial battery to the driver")
+        elif battery == "none":
+            adversarial = ProngStatus(
+                "adversarial", "adversarial", "not-applicable", adv_evidence,
+                "the driver has no adversarial battery for this reference")
+        else:
+            adversarial = ProngStatus(
+                "adversarial", "adversarial", "pass" if random_ok else "fail",
+                adv_evidence, "" if random_ok else "no regime named a failure")
+
+        # -- determinism ---------------------------------------------------- #
+        det_evidence = (
+            "environment: identical-input correctness re-run compared under "
+            "determinism_snr_tol_db"
+            + (" (plus the driver's post-timing re-verification on the cached "
+               "candidate module)" if do_bench else ""))
+        if not getattr(self.cfg, "verifier_determinism_check", False):
+            determinism = ProngStatus(
+                "determinism", "determinism", "off", det_evidence,
+                "CONFIG.verifier_determinism_check is off")
+        elif not determinism_ran:
+            determinism = ProngStatus(
+                "determinism", "determinism", "off", det_evidence,
+                "not run: the candidate was already rejected by an earlier prong")
+        else:
+            determinism = ProngStatus(
+                "determinism", "determinism",
+                "pass" if determinism_ok else "fail", det_evidence, "")
+
+        op_class = task_output_op_class(task)
+        if meta_payload is not None and meta_payload.get("element_model_ok") is False:
+            op_class = "generic"  # observed output extent contradicts the model
+        extra: dict[str, Any] = {}
+        if meta_payload is not None:
+            extra["metamorphic"] = {
+                k: meta_payload.get(k)
+                for k in ("op_class", "shape_used", "relations", "worst_rel_err",
+                          "worst_snr_db", "metamorphic_rtol",
+                          "metamorphic_snr_db_min", "candidate_calls")
+            }
+        report = build_oracle_report(
+            task_id=task.task_id, verified=verified,
+            prongs=(ProngStatus("random", "random", random_state,
+                                random_evidence, random_detail),
+                    adversarial, metamorphic, determinism),
+            op_class=op_class,
+            shape_dims=[dict(sh.dims) for sh in shapes],
+            detail=detail, extra=extra)
+        self._last_oracle_report = report
+        # One line per candidate, so the long static ``bound_basis`` prose rides
+        # only when it is explaining why there is NO number; everything needed to
+        # reconstruct the bound (p, m, trials) is on the line either way.
+        payload = {k: v for k, v in report.to_dict().items()
+                   if k not in ("prongs", "bound_basis", "extra")}
+        if report.false_accept_bound is None:
+            payload["bound_basis"] = report.bound_basis
+        _ev("INFO", "oracle_report", task=task.task_id, **payload,
+            prong_states={p.name: p.state for p in report.prongs})
+        return report
 
     def _profile_evidence(self, task: Task,
                           efficiency: Optional[float]) -> tuple[bool, Optional[str]]:
@@ -1465,6 +1943,11 @@ class KoreEnv:
         if timed or rc != 0:
             _ev("DEBUG", "bench_all", task=self.task.task_id, ok=False, rc=rc)
             return {}, False
+        # Emitted once per bench process, before the per-shape blocks, so read it
+        # off the whole output. This is the only runtime evidence of which
+        # baseline was really timed.
+        _impl = _last(_BASELINE_IMPL, out)
+        self._last_baseline_impl = _impl.group(1) if _impl else None
         blocks = out.split("SHAPE_BEGIN")[1:]  # per-shape, in the order we passed them
         if len(blocks) != len(shapes):
             return {}, False

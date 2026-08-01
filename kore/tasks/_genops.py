@@ -21,6 +21,13 @@ ROCm serving path for elementwise/reduction ops, exactly like the shipped
 gelu_tanh/softmax tasks). Every generated op is verifiable by construction: the
 Triton seed computes the same math (fp32) as the torch oracle.
 
+For the multi-op ``fusion`` / ``gemm_fusion`` families the honest bar is the
+COMPILER-FUSED kernel, and that is the DEFAULT (see ``compile_baseline_status``):
+a candidate that fuses an elementwise chain must beat ``torch.compile``, not the
+unfused eager chain, or the "speedup" is just the absence of a compiler. Dropping
+back to the eager bar requires an explicit falsey ``KORE_COMPILE_BASELINE`` and is
+recorded (``baseline_kind``, ``baseline_compile_opt_out``, and a process warning).
+
 All pure/CPU-importable (torch/triton imported lazily inside the GPU paths) so
 registry discovery never needs a GPU.
 """
@@ -61,13 +68,57 @@ def _torch_dtype(name: str):
 # torch.compile'd baseline cache (one per fusion/gemm_fusion op+dtype).
 _FUSED_BASELINE_CACHE: dict = {}
 
+COMPILE_BASELINE_ENV = "KORE_COMPILE_BASELINE"
+_TRUTHY = ("1", "true", "yes", "on")
+_FALSEY = ("0", "false", "no", "off")
+_OPT_OUT_ANNOUNCED: set = set()
+
+
+def compile_baseline_status() -> dict:
+    """Resolve the fusion/gemm_fusion baseline bar, and say WHERE it came from.
+
+    The compiler-fused kernel is the bar a practitioner already has for free, so
+    it is the DEFAULT: grading a fused-kernel candidate against unfused eager
+    torch measures the absence of ``torch.compile``, not the candidate (this
+    module's own docstring history called that speedup inflation).
+
+    Opting back down to the eager bar is possible but must be DELIBERATE: only an
+    explicitly falsey ``KORE_COMPILE_BASELINE`` disables it.  Unset, empty, and
+    unrecognized values all fail CLOSED onto the honest bar rather than silently
+    reverting to the inflated one, and the opt-out is reported in the returned
+    status (which lands in the reference namespace as ``baseline_kind`` /
+    ``baseline_compile_opt_out``) and warned about once per process.
+    """
+    raw = os.environ.get(COMPILE_BASELINE_ENV)
+    text = (raw or "").strip().lower()
+    if text in _FALSEY:
+        return {"enabled": False, "declared": raw, "source": "env_opt_out"}
+    if text in _TRUTHY:
+        return {"enabled": True, "declared": raw, "source": "env"}
+    if text:
+        return {"enabled": True, "declared": raw, "source": "unrecognized_value"}
+    return {"enabled": True, "declared": raw, "source": "default"}
+
 
 def _compile_baseline_enabled() -> bool:
-    """Grade fusion/gemm_fusion against the COMPILER-FUSED baseline (honest bar)
-    when KORE_COMPILE_BASELINE is truthy - closes the 'beat unfused eager' speedup
-    inflation. Off by default so unit tests / CPU dry-runs stay eager + cheap."""
-    return os.environ.get("KORE_COMPILE_BASELINE", "").strip().lower() in (
-        "1", "true", "yes", "on")
+    """Whether fusion/gemm_fusion grade against the COMPILER-FUSED baseline.
+
+    Default ON (see :func:`compile_baseline_status`).  A deliberate opt-out is
+    announced once per process so an eager-bar run is never silent.
+    """
+    status = compile_baseline_status()
+    if not status["enabled"] and "opt_out" not in _OPT_OUT_ANNOUNCED:
+        _OPT_OUT_ANNOUNCED.add("opt_out")
+        import warnings
+        warnings.warn(
+            f"{COMPILE_BASELINE_ENV}={status['declared']!r} disables the "
+            "compiler-fused baseline: fusion / gemm_fusion tasks will be timed "
+            "against UNFUSED eager torch, which inflates every measured speedup. "
+            "The resolver reports 'eager', which records as "
+            "baseline_kind='torch' (schemas.BASELINE_KIND_TORCH) -- 'eager' "
+            "never appears in a stored record.",
+            RuntimeWarning, stacklevel=3)
+    return status["enabled"]
 
 
 def _fused_baseline(fn, key: str):
@@ -75,7 +126,11 @@ def _fused_baseline(fn, key: str):
 
     Compilation is the honest multi-kernel-fusion bar (the compiler fuses the
     elementwise chain / GEMM epilogue), so the candidate must beat the FUSED kernel
-    rather than unfused eager. Any compile failure degrades to eager (never fatal)."""
+    rather than unfused eager. Any compile failure degrades to eager (never fatal).
+
+    ``fn`` must be a PURE tensor function: dynamo traces whatever it is handed, so
+    wrapping a callable that itself re-reads the environment makes tracing fail.
+    """
     if not _compile_baseline_enabled():
         return fn
     if key not in _FUSED_BASELINE_CACHE:
@@ -351,6 +406,244 @@ def _parse_shape(shape_str: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Parallel-scan primitives for the sequence / state-space breadth baselines
+# --------------------------------------------------------------------------- #
+# The breadth sequence engines (``kore.tasks.breadth.seq`` and ``ssm_ext``) grade
+# a candidate against ``baseline_fn``.  Writing that baseline as the SAME eager
+# ``for t in range(L)`` recurrence the fp32 oracle uses makes the performance bar
+# a Python interpreter loop: thousands of tiny kernel launches for one op, so any
+# correct fused kernel "wins" by orders of magnitude.  That is measurement
+# inflation, not a speedup.
+#
+# These helpers are the torch formulations a practitioner actually runs - the
+# chunked / parallel-scan forms used by Mamba-2's ``ssd_minimal_discrete`` and by
+# the chunked linear-attention kernels - so the bar is bandwidth-bound torch
+# instead of launch-bound Python.  Each is mathematically the SAME recurrence
+# with a different association order, and each accumulates in fp32 (the precision
+# a real scan kernel keeps its state in), so the baseline stays numerically
+# equivalent to the oracle: a faster baseline cannot become a wrong baseline.
+#
+# All torch imports are lazy (module stays CPU/GPU-free at registry-discovery
+# time) and every helper works on arbitrary leading batch dimensions.
+
+def _tril_mask(T: int, device):
+    import torch
+    return torch.ones((T, T), dtype=torch.bool, device=device).tril()
+
+
+def _segsum_exp(log_decay):
+    """``M[..., j, i] = exp(sum_{r=i+1..j} log_decay[..., r])`` for ``i <= j``, else 0.
+
+    The causal decay matrix of a scalar-decay recurrence.  Built from a cumulative
+    sum so the masked-in entries always have a NON-POSITIVE exponent (the decays
+    are <= 1), which is what keeps the chunked forms overflow-free.
+    """
+    import torch
+    T = log_decay.shape[-1]
+    cs = torch.cumsum(log_decay, dim=-1)
+    m = cs[..., :, None] - cs[..., None, :]
+    return torch.exp(torch.where(_tril_mask(T, m.device), m,
+                                 torch.full_like(m, float("-inf"))))
+
+
+def _assoc_scan_lastdim(a, b):
+    """Inclusive scan ``h_t = a_t * h_{t-1} + b_t`` (h_{-1}=0) over the LAST dim.
+
+    Hillis-Steele doubling on the associative pair operator
+    ``(a1, b1) . (a2, b2) = (a1 * a2, a2 * b1 + b2)`` - ceil(log2(L)) vectorized
+    steps instead of L sequential ones.  Deliberately uses only the multiplies and
+    adds of the recurrence itself (no log/exp, no division), so it stays exact for
+    a gate of exactly 0 (a segment reset) and needs no bound on the gate
+    magnitude, unlike a cumulative-product-quotient formulation.
+    """
+    import torch
+    L = a.shape[-1]
+    a = a.to(torch.float32, copy=True)
+    h = b.to(torch.float32, copy=True).expand_as(a).contiguous()
+    d = 1
+    while d < L:
+        a_prev = a[..., : L - d].clone()
+        h_prev = h[..., : L - d].clone()
+        h[..., d:] += a[..., d:] * h_prev
+        a[..., d:] *= a_prev
+        d *= 2
+    return h
+
+
+def _chunk_scalar_decay_scan(log_decay, K, V, Q, chunk: int = 64):
+    """Chunked, loop-free form of the SCALAR-decay state-space recurrence
+
+        S_t = exp(log_decay_t) * S_{t-1} + K_t (outer) V_t ;   y_t = Q_t^T S_t
+
+    ``log_decay[..., L]``, ``K``/``Q`` ``[..., L, N]``, ``V[..., L, P]`` ->
+    ``y[..., L, P]``.  Intra-chunk is the decay-weighted causal score matmul;
+    inter-chunk is a decay-weighted sum over per-chunk states.  This is the
+    Mamba-2 SSD / chunkwise-retention formulation.  EVERY exponent evaluated is
+    <= 0, so nothing can overflow at any chunk size or sequence length.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    L = log_decay.shape[-1]
+    C = max(1, min(int(chunk), L))
+    nc = (L + C - 1) // C
+    pad = nc * C - L
+    la, Kf, Vf, Qf = (t.float() for t in (log_decay, K, V, Q))
+    if pad:
+        # Zero-pad the TAIL only (decay 1, zero inputs): the recurrence is causal,
+        # so padded steps cannot influence any of the first L outputs.
+        la = F.pad(la, (0, pad))
+        Kf, Vf, Qf = (F.pad(t, (0, 0, 0, pad)) for t in (Kf, Vf, Qf))
+    bat = tuple(la.shape[:-1])
+    N, P = Kf.shape[-1], Vf.shape[-1]
+    la = la.reshape(*bat, nc, C)
+    Kf = Kf.reshape(*bat, nc, C, N)
+    Vf = Vf.reshape(*bat, nc, C, P)
+    Qf = Qf.reshape(*bat, nc, C, N)
+
+    cs = torch.cumsum(la, dim=-1)                             # [..., nc, C]
+    y = ((Qf @ Kf.transpose(-1, -2)) * _segsum_exp(la)) @ Vf  # intra-chunk
+
+    Kd = Kf * torch.exp(cs[..., -1:] - cs).unsqueeze(-1)      # decay to chunk end
+    U = Kd.transpose(-1, -2) @ Vf                             # [..., nc, N, P]
+    S_end = torch.einsum("...cd,...dnp->...cnp", _segsum_exp(cs[..., -1]), U)
+    S_in = torch.cat([torch.zeros_like(S_end[..., :1, :, :]),
+                      S_end[..., :-1, :, :]], dim=-3)         # state entering chunk
+    y = y + (Qf * torch.exp(cs).unsqueeze(-1)) @ S_in         # inter-chunk
+    return y.reshape(*bat, nc * C, P)[..., :L, :]
+
+
+def _chunk_dimgated_scan(log_decay, K, V, Q, chunk: int = 32):
+    """Chunked, loop-free form of the PER-KEY-DIM gated recurrence
+
+        S_t[i, j] = exp(log_decay_t[i]) * S_{t-1}[i, j] + K_t[i] * V_t[j]
+        y_t[j]    = sum_i Q_t[i] * S_t[i, j]
+
+    ``log_decay``/``K``/``Q`` ``[..., L, N]``, ``V[..., L, P]`` -> ``y[..., L, P]``
+    (Gated Linear Attention / HGRN2).  Unlike the scalar-decay case the intra-chunk
+    score matmul needs the factorization ``exp(cs_j - cs_i) = exp(cs_j) exp(-cs_i)``,
+    whose second factor grows with the chunk length; the default chunk of 32 keeps
+    it far inside fp32 range while the (unbounded) inter-chunk term stays in the
+    overflow-free ``exp(<= 0)`` form.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    L = log_decay.shape[-2]
+    C = max(1, min(int(chunk), L))
+    nc = (L + C - 1) // C
+    pad = nc * C - L
+    la, Kf, Vf, Qf = (t.float() for t in (log_decay, K, V, Q))
+    if pad:
+        la, Kf, Vf, Qf = (F.pad(t, (0, 0, 0, pad)) for t in (la, Kf, Vf, Qf))
+    bat = tuple(la.shape[:-2])
+    N, P = Kf.shape[-1], Vf.shape[-1]
+    la = la.reshape(*bat, nc, C, N)
+    Kf = Kf.reshape(*bat, nc, C, N)
+    Vf = Vf.reshape(*bat, nc, C, P)
+    Qf = Qf.reshape(*bat, nc, C, N)
+
+    cs = torch.cumsum(la, dim=-2)                             # [..., nc, C, N]
+    Qe = Qf * torch.exp(cs)
+    Ke = Kf * torch.exp(-cs)
+    A = (Qe @ Ke.transpose(-1, -2)) * _tril_mask(C, cs.device)
+    y = A @ Vf                                                # intra-chunk
+
+    gl = cs[..., -1:, :]                                      # [..., nc, 1, N]
+    U = (Kf * torch.exp(gl - cs)).transpose(-1, -2) @ Vf      # [..., nc, N, P]
+    G = torch.cumsum(gl.squeeze(-2), dim=-2)                  # [..., nc, N]
+    M = torch.exp(G[..., :, None, :] - G[..., None, :, :]) * \
+        _tril_mask(nc, G.device).unsqueeze(-1)
+    S_end = torch.einsum("...cdn,...dnp->...cnp", M, U)
+    S_in = torch.cat([torch.zeros_like(S_end[..., :1, :, :]),
+                      S_end[..., :-1, :, :]], dim=-3)
+    y = y + Qe @ S_in                                         # inter-chunk
+    return y.reshape(*bat, nc * C, P)[..., :L, :]
+
+
+def _lti_fft_conv(kernel, u):
+    """Causal LTI convolution ``y[..., t] = sum_{s<=t} kernel[..., t-s] u[..., s]``.
+
+    The S4/S4D production path: a time-INVARIANT diagonal SSM is a long causal
+    convolution, evaluated in O(L log L) with a zero-padded FFT rather than by
+    stepping the recurrence.  ``kernel`` broadcasts against ``u`` over the leading
+    dims; both carry time on the last axis.
+    """
+    import torch
+    L = u.shape[-1]
+    n = 1
+    while n < 2 * L:
+        n *= 2
+    yf = torch.fft.rfft(kernel.float(), n=n) * torch.fft.rfft(u.float(), n=n)
+    return torch.fft.irfft(yf, n=n)[..., :L]
+
+
+def _blocked_selective_scan(dt, x, A, B_, C_):
+    """Mamba-1 selective SSM core, as a BLOCKED scan.
+
+        h_t[d, n] = exp(dt_t[d] A[d, n]) h_{t-1}[d, n] + dt_t[d] B_t[n] x_t[d]
+        y_t[d]    = sum_n C_t[n] h_t[d, n]
+
+    ``dt``/``x`` ``[B, L, D]`` (dt already softplus'd), ``A[D, N]``,
+    ``B_``/``C_`` ``[B, L, N]`` -> ``y[B, L, D]``.
+
+    The decay varies with BOTH d and n, so - unlike the scalar-decay (Mamba-2 SSD)
+    case - there is no [C, C] score matrix to chunk with, and a fully materialized
+    parallel scan would need multi-gigabyte [B, L, D, N] intermediates.  This is
+    what torch can honestly do instead: run all ``L/C`` chunks in parallel for
+    ``C`` steps, scan the ``L/C`` chunk-boundary states, then add each chunk's
+    carried-in contribution - O(2C + L/C) launches instead of O(L).  It is exactly
+    the recurrence, reassociated, in fp32.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    Bs, L, D = x.shape
+    N = A.shape[1]
+    C = 32 if L <= 4096 else 64
+    C = max(1, min(C, L))
+    nc = (L + C - 1) // C
+    pad = nc * C - L
+    dtf, xf, Af = dt.float(), x.float(), A.float()
+    Bf, Cf = B_.float(), C_.float()
+    if pad:  # decay 1 (dt=0) and zero input on the causal tail
+        dtf, xf = (F.pad(t, (0, 0, 0, pad)) for t in (dtf, xf))
+        Bf, Cf = (F.pad(t, (0, 0, 0, pad)) for t in (Bf, Cf))
+    dt4 = dtf.reshape(Bs, nc, C, D)
+    x4 = xf.reshape(Bs, nc, C, D)
+    B4 = Bf.reshape(Bs, nc, C, N)
+    C4 = Cf.reshape(Bs, nc, C, N)
+
+    dev, f32 = x.device, torch.float32
+    h = torch.zeros(Bs, nc, D, N, dtype=f32, device=dev)
+    dA = torch.empty_like(h)                           # reused decay scratch
+    y = torch.empty(C, Bs, nc, D, dtype=f32, device=dev)   # time-major: contiguous
+    for j in range(C):                                 # all chunks, in parallel
+        dtj = dt4[:, :, j]
+        torch.mul(dtj.unsqueeze(-1), Af, out=dA).exp_()
+        h.mul_(dA).addcmul_((dtj * x4[:, :, j]).unsqueeze(-1),
+                            B4[:, :, j].unsqueeze(-2))
+        y[j] = torch.matmul(h, C4[:, :, j].unsqueeze(-1)).squeeze(-1)
+
+    if nc > 1:                                         # otherwise nothing is carried
+        a_end = torch.exp(dt4.sum(dim=2).unsqueeze(-1) * Af)   # per-chunk decay
+        h_in = torch.zeros_like(h)
+        carry = torch.zeros(Bs, D, N, dtype=f32, device=dev)
+        for c in range(nc):                            # scan the chunk boundaries
+            h_in[:, c] = carry
+            carry = a_end[:, c] * carry + h[:, c]
+
+        # carried-in contribution: exp(P_j * A) * h_in accumulates the SAME
+        # per-step decay, so it rides the recurrence instead of re-exponentiating
+        # a prefix (which would need an unmaterializable [B, L, D, N] tensor).
+        for j in range(C):
+            torch.mul(dt4[:, :, j].unsqueeze(-1), Af, out=dA).exp_()
+            h_in.mul_(dA)
+            y[j] += torch.matmul(h_in, C4[:, :, j].unsqueeze(-1)).squeeze(-1)
+    return y.permute(1, 2, 0, 3).reshape(Bs, nc * C, D)[:, :L]
+
+
+# --------------------------------------------------------------------------- #
 # Vendor-baseline resolution (Wave1 aiter_ref wrappers)
 # --------------------------------------------------------------------------- #
 # The honest performance bar for a generated op is the kernel the production
@@ -396,13 +689,20 @@ def _vendor_baseline_kind(op: str, family: str, dtype: str) -> str:
     return "eager"
 
 
-def _vendor_baseline(op: str, family: str, dtype: str, torch_baseline):
+def _vendor_baseline(op: str, family: str, dtype: str, torch_baseline,
+                     eager_fn=None):
     """Return the baseline callable for a generated op.
 
     When ``KORE_USE_VENDOR_BASELINE`` is on AND a production kernel exists for
     this (family, dtype), return a closure that calls the vendor wrapper (imports
     lazily; any failure degrades to ``torch_baseline`` so a missing aiter runtime
-    never breaks a bench).  Otherwise return ``torch_baseline`` unchanged."""
+    never breaks a bench).  Otherwise return ``torch_baseline`` unchanged.
+
+    ``eager_fn`` is the PURE torch composition behind ``torch_baseline`` (which
+    already resolves the compile gate itself).  The hipBLASLt epilogue path
+    compiles ``eager_fn``, never ``torch_baseline`` - handing dynamo a callable
+    that re-reads ``os.environ`` makes tracing fail outright, so double-wrapping
+    would break every gemm_fusion bench the moment the fused bar is on."""
     if not _use_vendor_baseline():
         return torch_baseline
 
@@ -452,18 +752,19 @@ def _vendor_baseline(op: str, family: str, dtype: str, torch_baseline):
 
             return _vendor_scaled_mm
 
+        # The eager matmul+bias+act epilogue authored by the caller (identical math
+        # to the torch bar) - a pure tensor function, so compile can fuse it.
+        torch_baseline_gemm = eager_fn if eager_fn is not None else torch_baseline
+
         def _vendor_hipblaslt_epilogue(*xs):
             # bf16/fp16: torch.matmul dispatches to the hipBLASLt tuned GEMM (the
             # production dense-GEMM library); the bias+activation epilogue is the
             # fused-epilogue bar.  torch.compile fuses the epilogue INTO the GEMM
-            # when KORE_COMPILE_BASELINE is on (still hipBLASLt underneath).
+            # (default; still hipBLASLt underneath).
             from kore.tasks.aiter_ref import _mark_baseline
             _mark_baseline("hipblaslt_vendor")
             return _fused_baseline(torch_baseline_gemm, f"gemm_fusion:{op}:{dtype}")(*xs)
 
-        # torch_baseline_gemm is the eager matmul+bias+act epilogue captured by the
-        # caller (identical math to the torch bar), reused so compile still fuses it.
-        torch_baseline_gemm = torch_baseline
         return _vendor_hipblaslt_epilogue
 
     # No vendor kernel: keep the torch baseline (eager/torch_compile).
@@ -544,10 +845,10 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
             return s.torch_fn(*[t.float() for t in xs]).to(xs[0].dtype)
 
         def baseline_fn(*xs):
-            # Honest fused bar: torch.compile FUSES the elementwise chain into one
-            # kernel (when KORE_COMPILE_BASELINE=1), so the candidate must beat the
-            # COMPILER, not unfused eager (which would inflate the speedup). Falls
-            # back to eager multi-kernel when compile is off/unavailable.
+            # Honest fused bar (DEFAULT): torch.compile FUSES the elementwise chain
+            # into one kernel, so the candidate must beat the COMPILER, not unfused
+            # eager (which would inflate the speedup). Eager multi-kernel only on a
+            # deliberate opt-out or if compile is unavailable.
             return _fused_baseline(s.torch_fn, f"fusion:{op}:{dtype}")(*xs)
 
         baseline_fn = _vendor_baseline(op, family, dtype, baseline_fn)
@@ -583,13 +884,14 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
             return act(y)
 
         def baseline_fn(*xs):
-            # Honest fused bar: torch.compile fuses the bias+activation EPILOGUE into
-            # the hipBLASLt GEMM (when KORE_COMPILE_BASELINE=1), so the candidate must
-            # beat the compiler-fused epilogue-GEMM, not the unfused matmul+bias+act
-            # chain (which would inflate the speedup). Falls back to eager otherwise.
+            # Honest fused bar (DEFAULT): torch.compile fuses the bias+activation
+            # EPILOGUE into the hipBLASLt GEMM, so the candidate must beat the
+            # compiler-fused epilogue-GEMM, not the unfused matmul+bias+act chain
+            # (which would inflate the speedup). Eager only on a deliberate opt-out.
             return _fused_baseline(_eager_gemm_epilogue, f"gemm_fusion:{op}:{dtype}")(*xs)
 
-        baseline_fn = _vendor_baseline(op, family, dtype, baseline_fn)
+        baseline_fn = _vendor_baseline(op, family, dtype, baseline_fn,
+                                       eager_fn=_eager_gemm_epilogue)
         baseline_kind = _vendor_baseline_kind(op, family, dtype)
         arity = 3 if s.has_bias else 2
     else:
@@ -605,6 +907,12 @@ def make_reference(op: str, family: str, dtype: str) -> dict:
         "dtype_name": dtype,
         "family": family,
         "baseline_kind": baseline_kind,
+        # True only when an explicit falsey KORE_COMPILE_BASELINE dropped a
+        # fusion/gemm_fusion task back to the unfused eager bar, so a run graded
+        # against the inflated baseline carries that fact on the reference itself.
+        "baseline_compile_opt_out": (
+            family in ("fusion", "gemm_fusion")
+            and compile_baseline_status()["source"] == "env_opt_out"),
         "mutates_input": False,
     }
     ns[f"{op}_ref"] = ref_fn   # conventional alias

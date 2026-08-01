@@ -1,0 +1,65 @@
+{
+  "architecture": "gfx950",
+  "calibration_id": "mi350x-stream-matmul-n8192-hbm512mb",
+  "compute_flops_per_s": {
+    "bf16": 1296279859686624.8,
+    "fp16": 2300000000000000.0,
+    "fp32": 144200000000000.0,
+    "fp4": 9200000000000000.0,
+    "fp6": 9200000000000000.0,
+    "fp64": 72100000000000.0,
+    "fp8": 4600000000000000.0,
+    "int8": 4600000000000000.0,
+    "tf32": 1153000000000000.0
+  },
+  "datasheet": {
+    "bf16_flops_per_s": 2300000000000000.0,
+    "fp16_flops_per_s": 2300000000000000.0,
+    "fp32_flops_per_s": 144200000000000.0,
+    "fp4_flops_per_s": 9200000000000000.0,
+    "fp64_flops_per_s": 72100000000000.0,
+    "fp6_flops_per_s": 9200000000000000.0,
+    "fp8_flops_per_s": 4600000000000000.0,
+    "hbm_bytes_per_s": 8000000000000.0,
+    "int8_flops_per_s": 4600000000000000.0,
+    "tf32_flops_per_s": 1153000000000000.0
+  },
+  "datasheet_dtypes": [
+    "fp16",
+    "fp32",
+    "fp4",
+    "fp6",
+    "fp64",
+    "fp8",
+    "int8",
+    "tf32"
+  ],
+  "hbm_bytes_per_s": 4763380423061.707,
+  "hbm_triad_mb": 512,
+  "matmul_n": 8192,
+  "measured": {
+    "bf16_flops_per_s": 1296279859686624.8,
+    "fp8_flops_per_s": null,
+    "hbm_bytes_per_s": 4763380423061.707
+  },
+  "measured_dtypes": [
+    "bf16"
+  ],
+  "measured_over_datasheet": {
+    "bf16": 0.5635999389941847,
+    "fp8": null,
+    "hbm": 0.5954225528827134
+  },
+  "model_fingerprint": "sha256:a6e01795829dd9a1c11752e12ff84825241f1e7d1e752c47dd2d926f7b858c7a",
+  "runtime": {
+    "device_name": "AMD Instinct MI350X",
+    "gcn_arch": "gfx950:sramecc+:xnack-",
+    "hip": "7.0.51831",
+    "host": "cv350-tnndh2-b05-1.tnn.dcgpu",
+    "python": "3.10.14",
+    "torch": "2.10.0+rocm7.0"
+  },
+  "schema": "kore.runtime-calibration.v1",
+  "sku": "MI350X",
+  "source": "runtime-measured-stream-matmul"
+}

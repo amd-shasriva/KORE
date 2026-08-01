@@ -383,13 +383,13 @@ python -m pytest kore
 python -m pytest --collect-only -q
 
 # opt-in groups when their resources are provisioned
-python -m pytest -m gpu
-python -m pytest -m model
-python -m pytest -m network
-python -m pytest -m dependency
+python -m pytest -m gpu       # real verifier on an MI350-class gfx950 device
+python -m pytest -m release   # licensing, seed-scan, generator determinism
 ```
 
-The default marker expression excludes GPU, model, network, optional-dependency, and release-only contracts. Release checks are deliberately separate because missing legal metadata and any generated seed-scanner finding must block publication. See [`tests/README.md`](tests/README.md).
+The default marker expression excludes only GPU and release-only contracts. Release checks are deliberately separate because missing legal metadata and any generated seed-scanner finding must block publication. See [`tests/README.md`](tests/README.md).
+
+> `model`, `network` and `dependency` markers were declared for years and applied to **zero** tests, so the deselection was a no-op that read as coverage. They are removed, and `tests/test_marker_contract.py` now fails the default suite if any declared marker selects nothing — a decorative marker cannot come back silently.
 
 ---
 

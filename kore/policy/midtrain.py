@@ -31,6 +31,18 @@ from kore.policy.configs import (
     fsdp_enabled,
     preferred_attn_impl,
 )
+from kore.policy.model_spec import (
+    IDENTITY_CONFIG_KEYS,
+    apply_runtime_settings,
+    log_model_identity,
+    model_identity_for_config,
+    split_runtime_settings,
+)
+from kore.policy.resources import (
+    PREFLIGHT_CONFIG_KEYS,
+    log_stage_preflight,
+    run_stage_preflight,
+)
 
 log = get_logger("policy.midtrain")
 
@@ -88,7 +100,17 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
         wraps it via ``fsdp``/``fsdp_config``.
       * **LoRA** / **single-GPU full-FT smoke** - keep the legacy
         ``device_map="auto"`` path unchanged.
+
+    Model identity is resolved BEFORE the heavy imports so a wrong or unpinned
+    checkpoint is caught in milliseconds rather than after a multi-minute 14B
+    load on every rank.
     """
+    identity = model_identity_for_config(config, stage="midtrain")
+    log_model_identity(log, identity)
+    log_stage_preflight(log, run_stage_preflight(
+        stage="midtrain", config=config, model_spec=identity.spec,
+        inspection=identity.inspection))
+
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
     from trl import SFTConfig as TRLSFTConfig
@@ -97,7 +119,7 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
     use_fsdp = fsdp_enabled(config)
     fsdp_kwargs = build_fsdp_kwargs(config)
 
-    tok = AutoTokenizer.from_pretrained(config.model_id)
+    tok = AutoTokenizer.from_pretrained(config.model_id, **identity.load_kwargs)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     _attn_impl = preferred_attn_impl()
@@ -105,7 +127,13 @@ def _train_single_process(config: MidTrainConfig, corpus_path: str) -> str:
                     "attn_implementation": _attn_impl}
     if not use_fsdp:
         model_kwargs["device_map"] = "auto"
-    model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
+    # Re-fingerprint immediately before the load: the preflight above verified a
+    # snapshot, and this rejects any file that changed in between (no-op when
+    # nothing was fingerprinted).
+    identity.validate_before_load()
+    model = AutoModelForCausalLM.from_pretrained(config.model_id,
+                                                 **identity.load_kwargs,
+                                                 **model_kwargs)
     # Activation checkpointing (routed through fsdp_config) is INCOMPATIBLE with
     # the KV cache: the cache changes the tensor count between forward and
     # recompute -> torch.utils.checkpoint CheckpointError. HF's Trainer only
@@ -264,8 +292,17 @@ def midtrain_config_from_dict(d: dict) -> MidTrainConfig:
     ``save_total_limit``) that must travel with the values they justify. Every
     other unknown key still raises, so a misspelled field is caught before a 14B
     model load instead of being silently ignored.
+
+    Identity/preflight keys (``model_revision``, ``resource_preflight``, ...) are
+    not ``MidTrainConfig`` fields, so they are split off and attached as
+    attributes: the strict dataclass parse stays strict, and a pinned config
+    still parses.
     """
-    return MidTrainConfig(**{k: v for k, v in d.items() if not k.startswith("_")})
+    fields, runtime = split_runtime_settings(
+        {k: v for k, v in d.items() if not k.startswith("_")},
+        IDENTITY_CONFIG_KEYS + PREFLIGHT_CONFIG_KEYS,
+    )
+    return apply_runtime_settings(MidTrainConfig(**fields), runtime)
 
 
 def _main(argv: Optional[list[str]] = None) -> int:

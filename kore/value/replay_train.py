@@ -151,15 +151,20 @@ def load_groups_from_dir(groups_dir: str, cap: Optional[int] = None) -> list[lis
 
 def train_value_from_groups(groups_dir: str, out_path: str, *,
                             cap: Optional[int] = None,
+                            top_k: int = 1,
                             use_sklearn: Optional[bool] = None) -> dict:
     """Train + save a schedule-conditioned ValueModel from real ranked groups.
 
-    Returns metrics incl. the mean within-group Spearman rank-corr on a held-out
-    split (the measurement-efficiency signal). Fails safe: raises only if there is
-    literally no usable group data (caller can then skip the prefilter).
+    Returns metrics incl. the mean within-group Spearman rank-corr AND the mean
+    within-group top-``k`` recall on a held-out split (the two measurement-efficiency
+    signals: how well the whole order is recovered, and how often the candidates the
+    bench prefilter would actually measure are the right ones). Fails safe: raises
+    only if there is literally no usable group data (caller can then skip the
+    prefilter).
     """
     from kore.value.train_value import (
         groupwise_rank_corr,
+        groupwise_top_k_recall,
         train_ranking,
     )
     from kore.value.rerank import score_candidates
@@ -181,6 +186,8 @@ def train_value_from_groups(groups_dir: str, out_path: str, *,
         return score_candidates(metas, model=model)
 
     rc = groupwise_rank_corr(_score, test_groups)
+    k = max(1, int(top_k))
+    recall = groupwise_top_k_recall(_score, test_groups, k)
     metrics = {
         "backend": getattr(model, "backend", "?"),
         "n_groups": len(groups),
@@ -188,6 +195,9 @@ def train_value_from_groups(groups_dir: str, out_path: str, *,
         "n_test_groups": len(test_groups),
         "n_candidates": sum(len(g) for g in groups),
         "heldout_group_rank_corr": round(float(rc), 4),
+        "heldout_group_top_k_recall": round(float(recall), 4),
+        "top_k": k,
+        "ranker_fitted": bool(getattr(getattr(model, "ranker", None), "fitted", False)),
         "out_path": out_path,
     }
     log.event("value_trained_from_groups", **metrics)
@@ -201,5 +211,8 @@ if __name__ == "__main__":  # pragma: no cover - CLI
     ap.add_argument("--groups-dir", default="data/full14b/groups")
     ap.add_argument("--out", default="runs/value/value_model.pkl")
     ap.add_argument("--cap", type=int, default=None)
+    ap.add_argument("--top-k", type=int, default=1,
+                    help="k for the held-out top-k recall metric "
+                         "(match GRPOConfig.value_prefilter_k)")
     a = ap.parse_args()
-    print(train_value_from_groups(a.groups_dir, a.out, cap=a.cap))
+    print(train_value_from_groups(a.groups_dir, a.out, cap=a.cap, top_k=a.top_k))

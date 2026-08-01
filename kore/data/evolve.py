@@ -52,6 +52,7 @@ from kore.data.prompts import (
     normalize_assistant,
 )
 from kore.data.schemas import (
+    BASELINE_IDENTITY_OBSERVED,
     SPEEDUP_BASIS_BASELINE,
     SPEEDUP_BASIS_SEED,
     RankedGroupRecord,
@@ -505,6 +506,13 @@ def evolve_task(
                 ]
                 prefs = build_preferences(results)
                 if prefs:
+                    # All candidates share one baseline, so a single runtime
+                    # sentinel settles the group; prefer it over the declaration.
+                    grp_identity = next(
+                        (r for r in results
+                         if r.get("baseline_identity_source") == BASELINE_IDENTITY_OBSERVED),
+                        None,
+                    ) or identity
                     groups.append(RankedGroupRecord(
                         task_id=task.task_id,
                         parent_id=kernel_hash(parent_src),
@@ -516,8 +524,8 @@ def evolve_task(
                         baseline_wall_us=next(
                             (r["baseline_wall_us"] for r in results
                              if r.get("baseline_wall_us") is not None), None),
-                        baseline_type=identity["baseline_type"],
-                        baseline_kind=identity["baseline_kind"],
+                        baseline_type=grp_identity["baseline_type"],
+                        baseline_kind=grp_identity["baseline_kind"],
                     ))
 
             # ----- periodic ring migration between islands -----
@@ -591,6 +599,11 @@ def evolve_task(
             # is relative to (baseline under the frontier gate, seed under the stub
             # fallback -- never pooled by accident), and whether the ratio is within
             # the credible-speedup ceiling.
+            # Re-resolve against the winning observation: its runtime sentinel
+            # demotes a declared vendor bar to torch when AITER silently fell back,
+            # so this win cannot claim a vendor kernel that never ran.
+            win_identity = resolve_baseline_identity(
+                task, getattr(best_obs, "baseline_impl", None))
             wins.append(WinRecord(
                 task_id=task.task_id,
                 trajectory=win_trajectory,
@@ -602,9 +615,9 @@ def evolve_task(
                 gpu=getattr(task, "gpu_target", "gfx950"),
                 operation=getattr(task, "operation", None),
                 arch=getattr(task, "gpu_target", None),
-                baseline_type=identity["baseline_type"],
-                baseline_kind=identity["baseline_kind"],
-                baseline_identity_source=identity["baseline_identity_source"],
+                baseline_type=win_identity["baseline_type"],
+                baseline_kind=win_identity["baseline_kind"],
+                baseline_identity_source=win_identity["baseline_identity_source"],
                 baseline_wall_us=paired_baseline_wall_us(best_obs),
                 final_cv_pct=getattr(best_obs, "cv_pct", None),
                 baseline_cv_pct=getattr(best_obs, "baseline_cv_pct", None),

@@ -8,7 +8,7 @@ def _fx_softcap_mask_softmax_kernel(x_ptr, am_ptr, y_ptr, Ncol, cap, BLOCK: tl.c
     offs = tl.arange(0, BLOCK)
     mask = offs < Ncol
     x = tl.load(x_ptr + row * Ncol + offs, mask=mask, other=0.0).to(tl.float32)
-    s = cap * tl.math.tanh(x / cap)
+    s = cap * (2.0 * tl.sigmoid(2.0 * (x / cap)) - 1.0)
     am = tl.load(am_ptr + row * Ncol + offs, mask=mask, other=0.0).to(tl.float32)
     s = s + am
     s = tl.where(mask, s, -1e30)

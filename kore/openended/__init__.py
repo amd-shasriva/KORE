@@ -22,8 +22,10 @@ functions, when the underlying op registries need it), so the whole task
 frontier is unit-testable without a GPU. The GRPO-facing adapter
 (:class:`kore.openended.controller.CoevolutionController`) wires this frontier
 into multi-turn GRPO when ``coevolve`` is enabled (see
-``configs/grpo_14b_full.json``); the standalone :mod:`kore.openended.coevolve`
-loop stays runner-agnostic for offline study.
+``configs/grpo_14b_full.json``). :class:`~kore.openended.controller.CoevolutionController`
+is the only co-evolution driver; a standalone offline loop in
+:mod:`kore.openended.coevolve` duplicated it and was removed, leaving only the
+``_headroom_regret`` scorer that the controller imports.
 """
 
 from __future__ import annotations

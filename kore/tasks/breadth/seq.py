@@ -49,7 +49,13 @@ discovery never needs a GPU).
 
 from __future__ import annotations
 
-from kore.tasks._genops import DTYPES, _parse_shape
+from kore.tasks._genops import (DTYPES, _assoc_scan_lastdim,
+                                _blocked_selective_scan,
+                                _chunk_scalar_decay_scan, _parse_shape)
+
+# Chunk length for the chunked (parallel) scan baselines. Every exponent these
+# forms evaluate is <= 0, so this is a throughput knob only, never a numerics one.
+_SCAN_CHUNK = 64
 
 # --------------------------------------------------------------------------- #
 # task catalog
@@ -213,7 +219,10 @@ def make_reference(op: str, dtype: str) -> dict:
             return _core(a.float(), b.float()).to(a.dtype)
 
         def baseline_fn(a, b):
-            return _core(a, b)
+            # Hillis-Steele associative scan on the (gate, value) pair: log2(L)
+            # vectorized steps. Deliberately multiply/add only, so a gate of
+            # exactly 0 (the segment boundary this op is FOR) stays exact.
+            return _assoc_scan_lastdim(a.float(), b.float()).to(a.dtype)
 
         arity = 2
 
@@ -255,8 +264,14 @@ def make_reference(op: str, dtype: str) -> dict:
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(u, delta, A, B_, C, D_):
+            # exp(dt*A) varies with both channel and state dim, so there is no
+            # scalar-decay chunk form; the blocked scan (all L/C chunks stepped in
+            # parallel, then a scan over the chunk boundaries) is the honest
+            # torch bar for the Mamba-1 core.
+            y = _blocked_selective_scan(F.softplus(delta.float()), u.float(),
+                                        A, B_, C)
+            return (y + u.float() * D_.float()).to(u.dtype)
 
         arity = 6
 
@@ -288,8 +303,13 @@ def make_reference(op: str, dtype: str) -> dict:
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(x, a, B_, C):
+            # SCALAR decay -> the Mamba-2 SSD chunked scan: a masked score matmul
+            # per chunk plus a decay-weighted sum over chunk states, no
+            # sequential step at all.
+            return _chunk_scalar_decay_scan(torch.log(a.float()), B_.float(),
+                                            x.float(), C.float(),
+                                            _SCAN_CHUNK).to(x.dtype)
 
         arity = 4
 
@@ -320,8 +340,14 @@ def make_reference(op: str, dtype: str) -> dict:
         def ref_fn(*xs):
             return _core(*[t.float() for t in xs]).to(xs[0].dtype)
 
-        def baseline_fn(*xs):
-            return _core(*xs)
+        def baseline_fn(q, k, v):
+            # chunked causal linear attention (decay == 1): the intra-chunk
+            # causal score matmul plus a running [Dh, Dh] chunk state.
+            pq = F.elu(q.float()) + 1.0
+            pk = F.elu(k.float()) + 1.0
+            la = torch.zeros(q.shape[:-1], dtype=torch.float32, device=q.device)
+            return _chunk_scalar_decay_scan(la, pk, v.float(), pq,
+                                            _SCAN_CHUNK).to(q.dtype)
 
         arity = 3
 

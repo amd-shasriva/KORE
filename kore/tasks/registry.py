@@ -6,10 +6,11 @@ import random
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
 
 from kore.tasks.base import Task
-from kore.tasks import taxonomy
+from kore.tasks import taxonomy, verification
 
 TASKS_DIR = Path(__file__).resolve().parent
 
@@ -24,6 +25,9 @@ HELDOUT_TASKS = frozenset(
     set(NEAR_GENERALIZATION_TASKS)
     | {"mla_decode_bf16", "paged_attn_decode_bf16"}
 )
+# Held out AND already seen by the pretrained model: still never trainable, and
+# additionally not scoreable as zero-shot generalization.
+CONTAMINATED_TASKS = taxonomy.CONTAMINATED_TASK_IDS
 TAXONOMY_VERSION = taxonomy.TAXONOMY_VERSION
 
 
@@ -39,6 +43,10 @@ class StaleSplitManifestError(SplitManifestError):
     """A manifest was authored under a different taxonomy/task inventory."""
 
 
+class ContaminatedGeneralizationError(ValueError):
+    """A generalization claim included a task whose source leaked into training."""
+
+
 @dataclass(frozen=True)
 class SplitManifest:
     """Immutable IDs and lineage roots under one taxonomy digest."""
@@ -51,6 +59,15 @@ class SplitManifest:
     eval_provenance_roots: tuple[tuple[str, str], ...]
     whole_family_holdouts: tuple[str, ...]
     near_generalization_ids: tuple[str, ...]
+    contaminated_eval_ids: tuple[str, ...] = ()
+
+    @property
+    def generalization_eval_ids(self) -> tuple[str, ...]:
+        """Eval IDs that may back a zero-shot claim (held out and never seen)."""
+        contaminated = set(self.contaminated_eval_ids)
+        return tuple(
+            task_id for task_id in self.eval_ids if task_id not in contaminated
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +86,11 @@ class SplitManifest:
                 "near_generalization_ids": list(self.near_generalization_ids),
                 "train_architectures": sorted(TRAIN_ARCHS),
                 "train_dtypes": sorted(TRAIN_DTYPES),
+                # Serialized so a manifest authored before the leak was found
+                # fails validation instead of silently scoring 45 eval tasks.
+                "contaminated_task_ids": sorted(CONTAMINATED_TASKS),
+                "contaminated_eval_ids": list(self.contaminated_eval_ids),
+                "generalization_eval_ids": list(self.generalization_eval_ids),
             },
         }
 
@@ -91,6 +113,15 @@ def split_decision(task: Task) -> taxonomy.SplitDecision:
 
 def is_heldout(task: Task) -> bool:
     return split_decision(task).heldout
+
+
+def is_contaminated(task: Task) -> bool:
+    """True when this task's source reached the pretraining corpus."""
+    return split_decision(task).contaminated
+
+
+def contamination_record(task: Task) -> Optional[taxonomy.ContaminationRecord]:
+    return split_decision(task).contamination
 
 
 @lru_cache(maxsize=1)
@@ -117,6 +148,13 @@ def _discover() -> dict[str, Task]:
             taxonomy.validate_task_assignments(tasks.values())
         except Exception as exc:  # noqa: BLE001
             errors.append(str(exc))
+        # A contamination exclusion naming a task the registry no longer has is
+        # unenforceable, so it aborts the registry like any other malformed entry.
+        missing = taxonomy.validate_contamination_coverage(tasks)
+        if missing:
+            errors.append(
+                "contaminated tasks are absent from the registry: " + ", ".join(missing)
+            )
     if errors:
         raise TaskRegistryError(
             "task registry validation failed:\n  - " + "\n  - ".join(errors)
@@ -252,6 +290,167 @@ def heldout_families() -> set[str]:
     return set(taxonomy.WHOLE_FAMILY_HOLDOUTS)
 
 
+# --------------------------------------------------------------------------- #
+# Zero-shot generalization scope (held-out MINUS contaminated)
+# --------------------------------------------------------------------------- #
+def contaminated_tasks() -> list[Task]:
+    """Held-out tasks whose source already reached the pretraining corpus."""
+    return [task for task in all_tasks() if is_contaminated(task)]
+
+
+def generalization_tasks() -> list[Task]:
+    """Held-out tasks that can still support a zero-shot generalization claim.
+
+    This is the correct scope for any zero-shot number.  ``heldout_tasks()``
+    deliberately keeps returning the full reservation, because a contaminated task
+    must stay untrainable and must stay in the decontamination gate.
+    """
+    return [task for task in all_tasks() if split_decision(task).generalization_eligible]
+
+
+def generalization_eval_ids() -> tuple[str, ...]:
+    return tuple(task.task_id for task in generalization_tasks())
+
+
+def generalization_exclusions(
+    task_ids: Optional[Iterable[str]] = None,
+) -> Mapping[str, str]:
+    """``{task_id: contamination_reason}`` for IDs barred from a zero-shot claim.
+
+    Defaults to the whole held-out reservation.  Unregistered IDs are reported as
+    unknown rather than silently admitted, so a claim can never be built over an
+    identity this registry cannot adjudicate.
+    """
+
+    if task_ids is None:
+        candidates = [task.task_id for task in heldout_tasks()]
+    else:
+        candidates = [str(task_id or "").strip() for task_id in task_ids]
+    out: dict[str, str] = {}
+    for task_id in candidates:
+        if not task_id:
+            raise ContaminatedGeneralizationError(
+                "generalization scope contains an empty task id"
+            )
+        task = find_task(task_id)
+        if task is None:
+            out[task_id] = "unregistered_task"
+            continue
+        record = contamination_record(task)
+        if record is not None:
+            out[task_id] = record.reason
+    return MappingProxyType(dict(sorted(out.items())))
+
+
+def assert_generalization_scope(task_ids: Iterable[str]) -> tuple[str, ...]:
+    """Fail closed on a zero-shot claim built over contaminated/unknown tasks."""
+
+    requested = tuple(str(task_id or "").strip() for task_id in task_ids)
+    excluded = generalization_exclusions(requested)
+    if excluded:
+        detail = ", ".join(f"{task_id} ({reason})" for task_id, reason in excluded.items())
+        raise ContaminatedGeneralizationError(
+            f"zero-shot generalization scope includes {len(excluded)} task(s) that "
+            f"cannot support the claim: {detail}"
+        )
+    return requested
+
+
+def filter_generalization_scope(
+    task_ids: Iterable[str],
+) -> tuple[tuple[str, ...], Mapping[str, str]]:
+    """Split ``task_ids`` into (scoreable, {dropped: reason})."""
+
+    requested = [str(task_id or "").strip() for task_id in task_ids]
+    excluded = generalization_exclusions(requested)
+    kept = tuple(task_id for task_id in requested if task_id not in excluded)
+    return kept, excluded
+
+
+def generalization_claim_report(
+    task_ids: Optional[Iterable[str]] = None,
+) -> dict[str, Any]:
+    """Auditable record of which held-out tasks a zero-shot claim may use."""
+
+    if task_ids is None:
+        requested = [task.task_id for task in heldout_tasks()]
+    else:
+        requested = [str(task_id or "").strip() for task_id in task_ids]
+    kept, excluded = filter_generalization_scope(requested)
+    return {
+        "taxonomy_version": TAXONOMY_VERSION,
+        "taxonomy_digest": taxonomy_digest(),
+        "requested": len(requested),
+        "scoreable": len(kept),
+        "excluded": len(excluded),
+        "scoreable_task_ids": list(kept),
+        "excluded_task_ids": dict(excluded),
+        "contamination_evidence": dict(taxonomy.MIDTRAIN_CURRICULUM_CONTAMINATION),
+        "contamination_records": {
+            task_id: record.as_dict()
+            for task_id, record in sorted(taxonomy.CONTAMINATION_RECORDS.items())
+        },
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Hardware-verification eligibility (TRAINING SELECTION ONLY)
+# --------------------------------------------------------------------------- #
+def hardware_verdict(task_id: str) -> verification.HardwareVerdict:
+    """gfx950 verdict for ``task_id``; an unmeasured task is UNKNOWN, not PASS."""
+    return verification.verdict_for(task_id)
+
+
+def hardware_verdicts() -> Mapping[str, verification.HardwareVerdict]:
+    """Verdicts for every registered task, including synthesized UNKNOWNs."""
+    return MappingProxyType(
+        {task_id: verification.verdict_for(task_id) for task_id in sorted(task_ids())}
+    )
+
+
+def hardware_verification_coverage() -> dict[str, Any]:
+    """How much of the registry the gfx950 sweep actually measured."""
+    return verification.coverage(task_ids())
+
+
+def train_eligibility_exclusions(
+    policy: Optional[verification.EligibilityPolicy | str] = None,
+) -> Mapping[str, str]:
+    """``{task_id: reason}`` for train tasks this policy would not select.
+
+    The train split itself is unchanged; this is the explicit, opt-in view.
+    """
+    return verification.exclusions(
+        (task.task_id for task in train_tasks()), policy
+    )
+
+
+def eligible_train_tasks(
+    policy: Optional[verification.EligibilityPolicy | str] = None,
+) -> list[Task]:
+    """Train tasks admitted by a hardware-eligibility policy.
+
+    Defaults to :data:`kore.tasks.verification.DEFAULT_ELIGIBILITY_POLICY`, which
+    drops the tasks whose own seed is structurally broken or misses its declared
+    SNR gate by more than :data:`~kore.tasks.verification.NEAR_GATE_MARGIN_DB`.
+    Callers that must cover the entire registry train set keep using
+    ``train_tasks()``; this function is never applied implicitly.
+    """
+    excluded = train_eligibility_exclusions(policy)
+    return [task for task in train_tasks() if task.task_id not in excluded]
+
+
+def hardware_eligibility_report(
+    policy: Optional[verification.EligibilityPolicy | str] = None,
+) -> dict[str, Any]:
+    """Auditable eligibility report over the registry train split."""
+    resolved = verification.resolve_policy(policy)
+    report = verification.describe((task.task_id for task in train_tasks()), resolved)
+    report["train_tasks"] = len(train_tasks())
+    report["taxonomy_digest"] = taxonomy_digest()
+    return report
+
+
 def _canonical_tasks(items: Iterable[Task], label: str) -> tuple[Task, ...]:
     ids: list[str] = []
     for item in items:
@@ -306,6 +505,13 @@ def build_split_manifest(
     wrong_eval = [
         task.task_id for task in eval_items if split_decision(task).split != "eval"
     ]
+    contaminated_train = [
+        task.task_id for task in train_items if is_contaminated(task)
+    ]
+    if contaminated_train:
+        raise SplitManifestError(
+            f"contaminated tasks placed in train: {contaminated_train}"
+        )
     if wrong_train:
         raise SplitManifestError(f"eval-only tasks placed in train: {wrong_train}")
     if wrong_eval:
@@ -334,6 +540,9 @@ def build_split_manifest(
         eval_provenance_roots=eval_roots,
         whole_family_holdouts=tuple(sorted(taxonomy.WHOLE_FAMILY_HOLDOUTS)),
         near_generalization_ids=tuple(sorted(taxonomy.NEAR_GENERALIZATION_TASK_IDS)),
+        contaminated_eval_ids=tuple(
+            task.task_id for task in eval_items if is_contaminated(task)
+        ),
     )
 
 

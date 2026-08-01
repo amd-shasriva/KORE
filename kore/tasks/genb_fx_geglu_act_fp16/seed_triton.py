@@ -9,7 +9,7 @@ def _fx_geglu_act_kernel(x_ptr, y_ptr, sm, sy, H, BLOCK: tl.constexpr):
     mask = offs < H
     g = tl.load(x_ptr + row * sm + offs, mask=mask, other=0.0).to(tl.float32)
     u = tl.load(x_ptr + row * sm + H + offs, mask=mask, other=0.0).to(tl.float32)
-    tl.store(y_ptr + row * sy + offs, ((0.5 * g * (1.0 + tl.math.tanh(0.7978845608028654 * (g + 0.044715 * g * g * g)))) * u).to(tl.float16), mask=mask)
+    tl.store(y_ptr + row * sy + offs, ((0.5 * g * (1.0 + (2.0 * tl.sigmoid(2.0 * (0.7978845608028654 * (g + 0.044715 * g * g * g))) - 1.0))) * u).to(tl.float16), mask=mask)
 
 
 def fx_geglu_act(x):

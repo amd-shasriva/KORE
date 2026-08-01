@@ -20,4 +20,8 @@ shapes:
     - {M: 64, E: 32, topk: 8, D: 4096, I: 768}           # small-batch 0-token edge
 targets:
   snr_db: 25.0
-  comparison_baseline: aiter_fused_moe   # AITER CK fused MoE, ActivationType.Gelu
+  # Names the kernel that ACTUALLY runs. AITER's fused_moe with ActivationType.Gelu
+  # fails to JIT-build on gfx950, so baseline_output times per-expert hipBLASLt
+  # matmuls instead. Declaring aiter_fused_moe here labelled every win against this
+  # task as beating a kernel that never executed.
+  comparison_baseline: hipblaslt_moe_gelu

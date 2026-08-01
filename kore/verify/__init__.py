@@ -67,6 +67,27 @@ from kore.verify.adversarial import (
 )
 from kore.verify.metamorphic import MetamorphicRelation, metamorphic_relations
 
+# PRODUCTION WIRING: which task families have a provable metamorphic identity,
+# the runner wire protocol, and the consumer-visible oracle report (prong states
+# + the honest false-accept bound). Pure CPU/stdlib; the GPU side lives in
+# ``kore.verify.runner``, which is executed as a subprocess and is deliberately
+# NOT imported here.
+from kore.verify.production import (
+    GENOPS_METAMORPHIC_OP_CLASS,
+    METAMORPHIC_DTYPES,
+    PRONG_STATES,
+    MetamorphicPlan,
+    OracleReport,
+    ProngStatus,
+    build_oracle_report,
+    driver_random_trials,
+    expected_output_elements,
+    metamorphic_plan_for_task,
+    parse_metamorphic_report,
+    select_metamorphic_shape,
+    task_output_op_class,
+)
+
 # Safe, throttled GRPO-loop bridge for the co-evolved adversarial verifier (additive,
 # OFF unless KORE_ADVERSARIAL_COEVOLVE=1). Imported AFTER equivalence + adversarial so
 # there is no cycle; nothing above depends on it.
@@ -102,6 +123,20 @@ __all__ = [
     "dtype_max",
     "metamorphic_relations",
     "MetamorphicRelation",
+    # production wiring (kore/env/kore_env.py consumes these)
+    "metamorphic_plan_for_task",
+    "MetamorphicPlan",
+    "GENOPS_METAMORPHIC_OP_CLASS",
+    "METAMORPHIC_DTYPES",
+    "select_metamorphic_shape",
+    "expected_output_elements",
+    "task_output_op_class",
+    "driver_random_trials",
+    "parse_metamorphic_report",
+    "build_oracle_report",
+    "OracleReport",
+    "ProngStatus",
+    "PRONG_STATES",
     # coevolutionary adversarial test-case generation (additive, off by default)
     "TestCase",
     "list_families",

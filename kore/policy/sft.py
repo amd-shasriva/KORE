@@ -33,6 +33,18 @@ from kore.policy.configs import (
     fsdp_enabled,
     preferred_attn_impl,
 )
+from kore.policy.model_spec import (
+    IDENTITY_CONFIG_KEYS,
+    apply_runtime_settings,
+    log_model_identity,
+    model_identity_for_config,
+    split_runtime_settings,
+)
+from kore.policy.resources import (
+    PREFLIGHT_CONFIG_KEYS,
+    log_stage_preflight,
+    run_stage_preflight,
+)
 
 log = get_logger("policy.sft")
 
@@ -244,6 +256,15 @@ def _filter_overlong(ds, tok, max_length: int):
 
 
 def train_sft(config: SFTConfig, dataset_path: Path) -> str:
+    # Resolve WHICH weights this stage trains before importing the heavy stack, so
+    # an unpinned production run or a changed checkpoint fails in milliseconds
+    # instead of after a multi-minute 14B load on every rank.
+    identity = model_identity_for_config(config, stage="sft")
+    log_model_identity(log, identity)
+    log_stage_preflight(log, run_stage_preflight(
+        stage="sft", config=config, model_spec=identity.spec,
+        inspection=identity.inspection))
+
     import torch
     from peft import LoraConfig
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -258,7 +279,7 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
     use_fsdp = fsdp_enabled(config)
     fsdp_kwargs = build_fsdp_kwargs(config)
 
-    tok = AutoTokenizer.from_pretrained(config.model_id)
+    tok = AutoTokenizer.from_pretrained(config.model_id, **identity.load_kwargs)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
@@ -290,7 +311,12 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
                     "attn_implementation": _attn_impl}
     if not use_fsdp:
         model_kwargs["device_map"] = "auto"
-    model = AutoModelForCausalLM.from_pretrained(config.model_id, **model_kwargs)
+    # Re-fingerprint immediately before the load, closing the window between
+    # preflight and load (no-op when nothing was fingerprinted).
+    identity.validate_before_load()
+    model = AutoModelForCausalLM.from_pretrained(config.model_id,
+                                                 **identity.load_kwargs,
+                                                 **model_kwargs)
 
     # Packing safety guard (audit R2 / THEME B): TRL bfd packing needs a FLASH-ATTN
     # backend to build the block-diagonal (per-document) attention mask. On the SDPA
@@ -431,13 +457,20 @@ def sft_config_from_dict(d: dict) -> tuple[SFTConfig, str]:
 
     ``dataset_path`` falls back to ``config.dataset_path`` when not given at the
     top level. A nested ``lora`` mapping is turned into a :class:`LoRAConfig`.
+    Identity/preflight keys (``model_revision``, ``resource_preflight``, ...) are
+    not ``SFTConfig`` fields, so they are split off and attached as attributes -
+    the strict dataclass parse stays strict and a pinned config still parses.
     """
     d = dict(d)
     lora = d.pop("lora", None)
+    d, runtime = split_runtime_settings(
+        d, IDENTITY_CONFIG_KEYS + PREFLIGHT_CONFIG_KEYS
+    )
     # dataset_path is a real SFTConfig field, so keep it on the config too.
     cfg = SFTConfig(**d)
     if lora is not None:
         cfg.lora = LoRAConfig(**lora)
+    apply_runtime_settings(cfg, runtime)
     return cfg, cfg.dataset_path
 
 

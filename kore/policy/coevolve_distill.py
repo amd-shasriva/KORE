@@ -93,7 +93,8 @@ def _build_trajectory(task_id: str, operation: Optional[str], final_source: str)
 class DistillationSink:
     """A ``distill_fn`` that funnels verified co-evolution wins into an RFT JSONL.
 
-    Pass an instance directly as ``coevolve.run_generation(..., distill_fn=sink)``:
+    Pass an instance directly as the distillation sink of a co-evolution round
+    (``kore.openended.controller.CoevolutionController`` drives that loop):
     :meth:`__call__` is :meth:`record`. Each call filters, maps, dedups and
     persists; it returns the number of NEW unique kernels written.
     """

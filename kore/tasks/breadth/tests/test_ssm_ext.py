@@ -86,6 +86,19 @@ def _small_shape(op):
     raise AssertionError(f"no small shape for {op!r}")
 
 
+def _shape_with_len(op, L):
+    """``_small_shape`` at an explicit sequence length.
+
+    L = 71 is deliberately awkward for the chunked/parallel BASELINES: it spans
+    several chunks at every configured chunk size and divides none of them, so the
+    causal tail padding, the inter-chunk state carry and the chunk-boundary scan
+    are all exercised rather than degenerating to a single chunk.
+    """
+    sh = dict(_small_shape(op))
+    sh["L"] = L
+    return sh
+
+
 def _close(a, b, atol=2e-4, rtol=2e-3):
     return torch.allclose(a.double(), b.double(), atol=atol, rtol=rtol)
 
@@ -445,13 +458,49 @@ def test_ref_matches_independent_second_seed(op):
 
 @pytest.mark.parametrize("op", S.OPS)
 def test_baseline_matches_ref(op):
-    """The torch eager baseline (fp32) agrees with the fp32 oracle (same math)."""
+    """The torch perf baseline (fp32) agrees with the fp32 oracle (same math)."""
     ns = S.make_reference(op, "fp32")
     inputs = ns["get_inputs"](_small_shape(op), device="cpu", seed=1)
     out = ns["baseline_fn"](*inputs)
     ref = ns["ref_fn"](*inputs)
     assert out.shape == ref.shape
     assert _close(out, ref)
+
+
+@pytest.mark.parametrize("op", S.OPS)
+def test_baseline_matches_ref_across_chunk_boundaries(op):
+    """A FASTER baseline must not become a WRONG baseline.
+
+    The perf baseline is no longer the oracle's eager recurrence - it is the
+    chunked / associative-scan / native-op formulation a practitioner would run -
+    so its agreement with the oracle is now load-bearing and is asserted here at a
+    length that spans several chunks and divides none of them (so the tail
+    padding, the inter-chunk carry and the boundary scan all take effect), on more
+    than one input draw."""
+    ns = S.make_reference(op, "fp32")
+    shape = _shape_with_len(op, 71)
+    for seed in (0, 5):
+        inputs = ns["get_inputs"](shape, device="cpu", seed=seed)
+        out = ns["baseline_fn"](*inputs)
+        ref = ns["ref_fn"](*inputs)
+        assert out.shape == ref.shape, f"{op}: {tuple(out.shape)} vs {tuple(ref.shape)}"
+        assert _close(out, ref), (
+            f"{op} (seed {seed}): baseline deviates from the oracle by "
+            f"{(out.double() - ref.double()).abs().max().item():.3e}")
+
+
+@pytest.mark.parametrize("op", S.OPS)
+@pytest.mark.parametrize("dtype", ["bf16", "fp16"])
+def test_baseline_preserves_dtype_and_tracks_ref(op, dtype):
+    """In the task dtype the baseline keeps the oracle's dtype AND its values
+    (both accumulate in fp32 and cast back, so only rounding separates them)."""
+    ns = S.make_reference(op, dtype)
+    inputs = ns["get_inputs"](_shape_with_len(op, 40), device="cpu", seed=3)
+    out = ns["baseline_fn"](*inputs)
+    ref = ns["ref_fn"](*inputs)
+    tdt = getattr(torch, DTYPES[dtype][0])
+    assert out.dtype == tdt == ref.dtype
+    assert _close(out, ref, atol=5e-2, rtol=5e-2)
 
 
 @pytest.mark.parametrize("op", S.OPS)

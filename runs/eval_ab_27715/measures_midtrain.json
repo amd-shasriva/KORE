@@ -1,0 +1,874 @@
+{
+  "schema": "kore.checkpoint-ab-measures.v1",
+  "arm": "midtrain",
+  "generations_meta": {
+    "schema": "kore.checkpoint-ab-generations.v1",
+    "n_records": 34,
+    "arm": "midtrain",
+    "backend": {
+      "model_id": "/home/shasriva/Kore-RL/KORE/runs/midtrain_14b_frontier",
+      "dtype": "bfloat16",
+      "revision": null,
+      "enable_thinking": false,
+      "padding_side": "left",
+      "config_dtype": "torch.bfloat16",
+      "n_parameters": 14768307200,
+      "vocab_size": 151936,
+      "device": "cuda:0",
+      "backend": "hf-batch"
+    },
+    "samples": 1,
+    "max_tokens": 4096,
+    "temperature": 0.0,
+    "scope": {
+      "taxonomy_version": "1.0.0",
+      "taxonomy_digest": "cd5c7769cd7597fe59232a6ee89778ff65d6ca38184a2eb953f104fc7127ac5c",
+      "n_heldout_reservation": 45,
+      "n_generalization_scope": 34,
+      "n_scored": 34,
+      "scored_task_ids": [
+        "genb_attn2_cross_gqa_step_fp16",
+        "genb_attn2_decode_mqa_hd256_bf16",
+        "genb_attn2_varlen_gqa_causal_bf16",
+        "genb_attn_fp8_mha_hd128_causal_fp8",
+        "genb_attn_mha_hd128_noncausal_fp16",
+        "genb_attn_mqa_hd64_causal_bf16",
+        "genb_cv_conv2d_7x7_s1_d1_fp16",
+        "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+        "genb_fx_embed_scale_bf16",
+        "genb_fx_reglu_act_fp16",
+        "genb_fx_rope_qk_half_qknorm_bf16",
+        "genb_gemm_bf16_residual_bf16",
+        "genb_gemm_fp8_channelwise_fp8",
+        "genb_gemm_int4_asym_group_fp16",
+        "genb_gemm_int8_pertensor_int8",
+        "genb_moe_block_silu_k8_e256_bf16",
+        "genb_moe_fused_moe_silu_fp16",
+        "genb_moe_grouped_mlp_gelu_bf16",
+        "genb_moe_sigmoid_topk_norenorm_fp16",
+        "genb_norm_groupnorm_bf16",
+        "genb_norm_layernorm_bwd_fp32",
+        "genb_norm_layernorm_quant_fp8_fp8",
+        "genb_qx_quant_int8_pertoken_int8",
+        "genb_red_entropy_bf16",
+        "genb_red_topk256_bf16",
+        "genb_smp_rope_yarn_bf16",
+        "genb_smp_topk_sample_bf16",
+        "genb_ssm_mamba2_ssd_c128_n128_bf16",
+        "genb_ssm_retnet_c64_bf16",
+        "genb_tr_adamw_8bit_bf16",
+        "genb_tr_foreach_sgd_bf16",
+        "genb_tr_ls_ce_bwd_bf16",
+        "mla_decode_bf16",
+        "paged_attn_decode_bf16"
+      ],
+      "excluded_contaminated": {
+        "genb_cv_conv2d_1x1_s2_fp16": "midtrain_curriculum_tier4_win_source",
+        "genb_cv_depthwise_conv2d_5x5_s1_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_norm_rmsnorm_h16384_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_qx_int4_unpack_group_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_qx_quant_fp8_block2d_fp8": "midtrain_curriculum_tier4_win_source",
+        "genb_red_log_softmax_bwd_fp32": "midtrain_curriculum_tier4_win_source",
+        "genb_red_rms_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_smp_repetition_penalty_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_ssm_gated_retention_c128_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_ssm_lightning_attn_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_tr_rmsprop_centered_momentum_fp32": "midtrain_curriculum_tier4_win_source"
+      },
+      "contamination_evidence": {
+        "reason": "midtrain_curriculum_tier4_win_source",
+        "detector": "kore.data.decontam.analyze_text_contamination",
+        "match_kind": "directional_containment",
+        "generator": "data/release/generators/gen_curriculum.py::tier4",
+        "corpus": "data/b05factory/midtrain/corpus.jsonl (source=kernel_curriculum)",
+        "chunks_analyzed": 9956,
+        "hits": 17,
+        "tasks": 11,
+        "containment_min": 0.795,
+        "containment_max": 0.943,
+        "public_benchmark_hits": 0,
+        "reference_pattern": "kore-task:<task_id>:seed_triton.py"
+      },
+      "families": {
+        "activation": [
+          "genb_fx_embed_scale_bf16",
+          "genb_fx_reglu_act_fp16",
+          "genb_fx_rope_qk_half_qknorm_bf16"
+        ],
+        "attention": [
+          "genb_attn2_cross_gqa_step_fp16",
+          "genb_attn2_decode_mqa_hd256_bf16",
+          "genb_attn2_varlen_gqa_causal_bf16",
+          "genb_attn_fp8_mha_hd128_causal_fp8",
+          "genb_attn_mha_hd128_noncausal_fp16",
+          "genb_attn_mqa_hd64_causal_bf16",
+          "mla_decode_bf16",
+          "paged_attn_decode_bf16"
+        ],
+        "convolution": [
+          "genb_cv_conv2d_7x7_s1_d1_fp16",
+          "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16"
+        ],
+        "gemm": [
+          "genb_gemm_bf16_residual_bf16",
+          "genb_gemm_fp8_channelwise_fp8",
+          "genb_gemm_int4_asym_group_fp16",
+          "genb_gemm_int8_pertensor_int8"
+        ],
+        "moe": [
+          "genb_moe_block_silu_k8_e256_bf16",
+          "genb_moe_fused_moe_silu_fp16",
+          "genb_moe_grouped_mlp_gelu_bf16",
+          "genb_moe_sigmoid_topk_norenorm_fp16"
+        ],
+        "norm": [
+          "genb_norm_groupnorm_bf16",
+          "genb_norm_layernorm_bwd_fp32",
+          "genb_norm_layernorm_quant_fp8_fp8"
+        ],
+        "quant": [
+          "genb_qx_quant_int8_pertoken_int8"
+        ],
+        "reduction": [
+          "genb_red_entropy_bf16",
+          "genb_red_topk256_bf16"
+        ],
+        "sampling": [
+          "genb_smp_rope_yarn_bf16",
+          "genb_smp_topk_sample_bf16"
+        ],
+        "sequence": [
+          "genb_ssm_mamba2_ssd_c128_n128_bf16",
+          "genb_ssm_retnet_c64_bf16"
+        ],
+        "training": [
+          "genb_tr_adamw_8bit_bf16",
+          "genb_tr_foreach_sgd_bf16",
+          "genb_tr_ls_ce_bwd_bf16"
+        ]
+      }
+    },
+    "wall_seconds": 921.9
+  },
+  "summary": {
+    "arm": "midtrain",
+    "n": 34,
+    "budget": 1,
+    "mode": "parallel",
+    "counts": {
+      "contract_ok": 33,
+      "compiled": 4,
+      "correct": 0,
+      "timed": 0,
+      "faster": 0,
+      "infra_error": 0
+    },
+    "rates": {
+      "contract_ok": {
+        "k": 33,
+        "n": 34,
+        "rate": 0.9705882352941176,
+        "lo": 0.8508409778365519,
+        "hi": 0.9947892280744034,
+        "z": 1.96
+      },
+      "compiled": {
+        "k": 4,
+        "n": 34,
+        "rate": 0.11764705882352941,
+        "lo": 0.04671370973436122,
+        "hi": 0.26621174796298774,
+        "z": 1.96
+      },
+      "correct": {
+        "k": 0,
+        "n": 34,
+        "rate": 0.0,
+        "lo": 0.0,
+        "hi": 0.10151790621961015,
+        "z": 1.96
+      },
+      "timed": {
+        "k": 0,
+        "n": 34,
+        "rate": 0.0,
+        "lo": 0.0,
+        "hi": 0.10151790621961015,
+        "z": 1.96
+      },
+      "faster": {
+        "k": 0,
+        "n": 34,
+        "rate": 0.0,
+        "lo": 0.0,
+        "hi": 0.10151790621961015,
+        "z": 1.96
+      },
+      "infra_error": {
+        "k": 0,
+        "n": 34,
+        "rate": 0.0,
+        "lo": 0.0,
+        "hi": 0.10151790621961015,
+        "z": 1.96
+      }
+    },
+    "fast_p": {
+      "0.0": 0.0,
+      "0.5": 0.0,
+      "1.0": 0.0,
+      "1.5": 0.0,
+      "2.0": 0.0
+    },
+    "geometric_mean_speedup": 0.0,
+    "median_response_chars": 4174.0,
+    "per_task": [
+      {
+        "task_id": "genb_attn2_cross_gqa_step_fp16",
+        "contract_ok": true,
+        "response_chars": 5035,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": " in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line ",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn2_decode_mqa_hd256_bf16",
+        "contract_ok": true,
+        "response_chars": 5028,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "n _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 99",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn2_varlen_gqa_causal_bf16",
+        "contract_ok": true,
+        "response_chars": 13335,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "pe)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genop",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn_fp8_mha_hd128_causal_fp8",
+        "contract_ok": true,
+        "response_chars": 5121,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "rectness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 991, in exec",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn_mha_hd128_noncausal_fp16",
+        "contract_ok": true,
+        "response_chars": 5073,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": " _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 991",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn_mqa_hd64_causal_bf16",
+        "contract_ok": true,
+        "response_chars": 4874,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_exte",
+        "faster": false
+      },
+      {
+        "task_id": "genb_cv_conv2d_7x7_s1_d1_fp16",
+        "contract_ok": true,
+        "response_chars": 4609,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "ore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen impor",
+        "faster": false
+      },
+      {
+        "task_id": "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+        "contract_ok": true,
+        "response_chars": 4768,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "ile \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec",
+        "faster": false
+      },
+      {
+        "task_id": "genb_fx_embed_scale_bf16",
+        "contract_ok": true,
+        "response_chars": 1528,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": -2.43,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_fx_reglu_act_fp16",
+        "contract_ok": true,
+        "response_chars": 1988,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "e \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_m",
+        "faster": false
+      },
+      {
+        "task_id": "genb_fx_rope_qk_half_qknorm_bf16",
+        "contract_ok": true,
+        "response_chars": 2695,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": ", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_exter",
+        "faster": false
+      },
+      {
+        "task_id": "genb_gemm_bf16_residual_bf16",
+        "contract_ok": true,
+        "response_chars": 4513,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_",
+        "faster": false
+      },
+      {
+        "task_id": "genb_gemm_fp8_channelwise_fp8",
+        "contract_ok": true,
+        "response_chars": 11882,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "                                                                                                                                                                                                                                                                                                            ",
+        "faster": false
+      },
+      {
+        "task_id": "genb_gemm_int4_asym_group_fp16",
+        "contract_ok": true,
+        "response_chars": 4278,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_ex",
+        "faster": false
+      },
+      {
+        "task_id": "genb_gemm_int8_pertensor_int8",
+        "contract_ok": true,
+        "response_chars": 12569,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": " shape)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_g",
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_block_silu_k8_e256_bf16",
+        "contract_ok": true,
+        "response_chars": 7060,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mo",
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_fused_moe_silu_fp16",
+        "contract_ok": true,
+        "response_chars": 2816,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", li",
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_grouped_mlp_gelu_bf16",
+        "contract_ok": true,
+        "response_chars": 6456,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "hack"
+        ],
+        "error_head": "reward-hack: uses the @ matmul operator (delegates to the vendor GEMM)",
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_sigmoid_topk_norenorm_fp16",
+        "contract_ok": true,
+        "response_chars": 2585,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 991, in exec_module\n ",
+        "faster": false
+      },
+      {
+        "task_id": "genb_norm_groupnorm_bf16",
+        "contract_ok": true,
+        "response_chars": 2359,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": -999.0,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_norm_layernorm_bwd_fp32",
+        "contract_ok": true,
+        "response_chars": 3881,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": ", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_exter",
+        "faster": false
+      },
+      {
+        "task_id": "genb_norm_layernorm_quant_fp8_fp8",
+        "contract_ok": true,
+        "response_chars": 2269,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "ome/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module",
+        "faster": false
+      },
+      {
+        "task_id": "genb_qx_quant_int8_pertoken_int8",
+        "contract_ok": true,
+        "response_chars": 4070,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen impo",
+        "faster": false
+      },
+      {
+        "task_id": "genb_red_entropy_bf16",
+        "contract_ok": true,
+        "response_chars": 2065,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_can",
+        "faster": false
+      },
+      {
+        "task_id": "genb_red_topk256_bf16",
+        "contract_ok": true,
+        "response_chars": 2098,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._boo",
+        "faster": false
+      },
+      {
+        "task_id": "genb_smp_rope_yarn_bf16",
+        "contract_ok": true,
+        "response_chars": 2588,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": -999.0,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_smp_topk_sample_bf16",
+        "contract_ok": true,
+        "response_chars": 2460,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in g",
+        "faster": false
+      },
+      {
+        "task_id": "genb_ssm_mamba2_ssd_c128_n128_bf16",
+        "contract_ok": false,
+        "response_chars": 7174,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "r (b,h,p), loading B/C per timestep and scanning over N with tl.sum. On MI350X this is hopelessly latency-bound: each program touches only P=128 elements per L step, B_/C are reloaded every step, and tl.sum over N incurs a serial dependency chain per program. With B,L,H,P=8,64,8,128 the launch is 65",
+        "faster": false
+      },
+      {
+        "task_id": "genb_ssm_retnet_c64_bf16",
+        "contract_ok": true,
+        "response_chars": 3525,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<fro",
+        "faster": false
+      },
+      {
+        "task_id": "genb_tr_adamw_8bit_bf16",
+        "contract_ok": true,
+        "response_chars": 3370,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.e",
+        "faster": false
+      },
+      {
+        "task_id": "genb_tr_foreach_sgd_bf16",
+        "contract_ok": true,
+        "response_chars": 2439,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "e-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<f",
+        "faster": false
+      },
+      {
+        "task_id": "genb_tr_ls_ce_bwd_bf16",
+        "contract_ok": true,
+        "response_chars": 3263,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": -999.0,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "mla_decode_bf16",
+        "contract_ok": true,
+        "response_chars": 5766,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "e, a.mode)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/kore_mla_decode_bf16_2ds7u8k7/driver.py\", line 92, in run_correctness\n    fn = _load_candidate()\n         ^^^^^^^^^^^^^^^^^\n  File \"/tmp/kore_mla_decode_bf16_2ds7u8k7/driver.py\", line 35, in _load_candidate\n    spec.loader.exec_module",
+        "faster": false
+      },
+      {
+        "task_id": "paged_attn_decode_bf16",
+        "contract_ok": true,
+        "response_chars": 5581,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "run_correctness(shape, a.mode)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/kore_paged_attn_decode_bf16_j_owvp1w/driver.py\", line 108, in run_correctness\n    fn = _load_candidate()\n         ^^^^^^^^^^^^^^^^^\n  File \"/tmp/kore_paged_attn_decode_bf16_j_owvp1w/driver.py\", line 39, in _load_ca",
+        "faster": false
+      }
+    ]
+  }
+}

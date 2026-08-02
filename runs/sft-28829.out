@@ -1,0 +1,530 @@
+[sft-1node] compile scratch: node-local /tmp (89G free)
+[sft-1node] START job=28829 host=crsuse2-m2m-176 gpus=8
+[sft-1node] HEAD=35808350 branch=master
+[sft-1node] cfg=/home/shasriva/Kore-RL/KORE/configs/sft_14b_full.json from=/home/shasriva/Kore-RL/KORE/runs/midtrain_14b_1ep out=/home/shasriva/Kore-RL/KORE/runs/sft_14b_frontier
+[sft-1node] controller reachable: Slurmctld(primary) at crs-m2m-cpu-spur-005 is UP. Version=0.6.0
+[resolve] stage=sft config=/home/shasriva/Kore-RL/KORE/configs/sft_14b_full.json -> /home/shasriva/Kore-RL/KORE/runs/sft-28829.resolved.json
+[resolve]   model_id: 'Qwen/Qwen3-14B' -> '/home/shasriva/Kore-RL/KORE/runs/midtrain_14b_1ep'
+[resolve]   output_dir: 'runs/sft_14b_full' -> '/home/shasriva/Kore-RL/KORE/runs/sft_14b_frontier'
+[resolve] model_id='/home/shasriva/Kore-RL/KORE/runs/midtrain_14b_1ep' output_dir='/home/shasriva/Kore-RL/KORE/runs/sft_14b_frontier'
+[sft-1node] resume_from=None output_dir=/home/shasriva/Kore-RL/KORE/runs/sft_14b_frontier
+[launch_distributed] stage=sft config=/home/shasriva/Kore-RL/KORE/runs/sft-28829.resolved.json accel=/home/shasriva/Kore-RL/KORE/configs/accelerate_fsdp.yaml
+[launch_distributed] PYTHONPATH=/home/shasriva/Kore-RL/KORE accelerate launch --config_file /home/shasriva/Kore-RL/KORE/configs/accelerate_fsdp.yaml -m kore.policy.sft /home/shasriva/Kore-RL/KORE/runs/sft-28829.resolved.json
+[Gloo] Rank 0[Gloo] Rank  is connected to 7 peer ranks. Expected number of connected peer ranks is : [Gloo] Rank 71
+ is connected to 2[Gloo] Rank 7 is connected to  peer ranks. 7Expected number of connected peer ranks is :  peer ranks. [Gloo] Rank 7Expected number of connected peer ranks is : 37
+ is connected to [Gloo] Rank 
+4[Gloo] Rank 7[Gloo] Rank  is connected to 65 peer ranks. 77 is connected to  is connected to Expected number of connected peer ranks is :  is connected to  peer ranks. 7777Expected number of connected peer ranks is :  peer ranks.  peer ranks. 
+ peer ranks. 7Expected number of connected peer ranks is : 
+Expected number of connected peer ranks is : Expected number of connected peer ranks is : 777
+
+
+
+[2026-08-02 14:25:49] crsuse2-m2m-176:481:481 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/init.cc:161 NCCL WARN Missing "iommu=pt" from kernel command line which can lead to system instablity or hang!
+
+[2026-08-02 14:25:49] crsuse2-m2m-176:481:481 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/init.cc:161 NCCL WARN Missing "iommu=pt" from kernel command line which can lead to system instablity or hang!
+RCCL version : 2.26.6-HEAD:64f48b6
+HIP version  : 7.0.51831-7c9236b16
+ROCm version : 7.0.2.0-56-9428210
+Hostname     : crsuse2-m2m-176
+Librccl path : /home/shasriva/kore-venv/lib/python3.12/site-packages/torch/lib/librccl.so
+
+[2026-08-02 14:25:49] crsuse2-m2m-176:484:484 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/init.cc:161 NCCL WARN Missing "iommu=pt" from kernel command line which can lead to system instablity or hang!
+
+[2026-08-02 14:25:49] crsuse2-m2m-176:485:485 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/init.cc:161 NCCL WARN Missing "iommu=pt" from kernel command line which can lead to system instablity or hang!
+
+[2026-08-02 14:25:49] crsuse2-m2m-176:486:486 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/init.cc:161 NCCL WARN Missing "iommu=pt" from kernel command line which can lead to system instablity or hang!
+
+[2026-08-02 14:25:49] crsuse2-m2m-176:483:483 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/init.cc:161 NCCL WARN Missing "iommu=pt" from kernel command line which can lead to system instablity or hang!
+
+[2026-08-02 14:25:49] crsuse2-m2m-176:482:482 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/init.cc:161 NCCL WARN Missing "iommu=pt" from kernel command line which can lead to system instablity or hang!
+
+[2026-08-02 14:25:49] crsuse2-m2m-176:487:487 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/init.cc:161 NCCL WARN Missing "iommu=pt" from kernel command line which can lead to system instablity or hang!
+
+[2026-08-02 14:25:49] crsuse2-m2m-176:488:488 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/init.cc:161 NCCL WARN Missing "iommu=pt" from kernel command line which can lead to system instablity or hang!
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:58] crsuse2-m2m-176:486:2821 [5] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:483:2822 [2] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:487:2824 [6] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:484:2818 [3] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:482:2823 [1] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:485:2819 [4] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 1 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:481:2817 [0] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 6 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 5 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 3 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 4 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 7 to net.
+
+[2026-08-02 14:25:59] crsuse2-m2m-176:488:2820 [7] /longer_pathname_so_that_rpms_can_support_packaging_the_debug_info_for_all_os_profiles/src/out/almalinux-8.10/8.10/build/rccl/hipify/src/graph/topo.cc:1550 NCCL WARN Could not find any local path from gpu 2 to net.
+{'loss': 0.9799, 'grad_norm': 14.169132232666016, 'learning_rate': 1.7647058823529414e-06, 'entropy': 1.9609814524650573, 'num_tokens': 5180781.0, 'mean_token_accuracy': 0.8022087462246418, 'epoch': 0.02}
+{'loss': 0.7184, 'grad_norm': 1.7778794765472412, 'learning_rate': 3.7254901960784316e-06, 'entropy': 1.4419382244348526, 'num_tokens': 9361802.0, 'mean_token_accuracy': 0.8389453321695328, 'epoch': 0.04}
+{'loss': 0.4734, 'grad_norm': 1.5909826755523682, 'learning_rate': 5.686274509803922e-06, 'entropy': 1.0622491382062436, 'num_tokens': 13140416.0, 'mean_token_accuracy': 0.8878459692001343, 'epoch': 0.05}
+{'loss': 0.4001, 'grad_norm': 1.4183591604232788, 'learning_rate': 7.647058823529411e-06, 'entropy': 1.0073523432016374, 'num_tokens': 17631303.0, 'mean_token_accuracy': 0.8990830615162849, 'epoch': 0.07}
+{'loss': 0.4002, 'grad_norm': 1.1320865154266357, 'learning_rate': 9.607843137254903e-06, 'entropy': 0.8810003660619259, 'num_tokens': 20873598.0, 'mean_token_accuracy': 0.9014902032911778, 'epoch': 0.09}
+{'loss': 0.348, 'grad_norm': 0.5451701283454895, 'learning_rate': 9.999402730965894e-06, 'entropy': 0.9258403889834881, 'num_tokens': 25799138.0, 'mean_token_accuracy': 0.9131548561155796, 'epoch': 0.11}
+{'loss': 0.4206, 'grad_norm': 0.6727191209793091, 'learning_rate': 9.99697657006811e-06, 'entropy': 0.8168816965073347, 'num_tokens': 30150607.0, 'mean_token_accuracy': 0.8980162419378758, 'epoch': 0.13}
+{'loss': 0.3035, 'grad_norm': 1.2061091661453247, 'learning_rate': 9.992685092954347e-06, 'entropy': 0.8078280109912157, 'num_tokens': 34113360.0, 'mean_token_accuracy': 0.9192762151360512, 'epoch': 0.14}
+{'loss': 0.3411, 'grad_norm': 0.25198572874069214, 'learning_rate': 9.98652990158566e-06, 'entropy': 0.7889281284064055, 'num_tokens': 38901840.0, 'mean_token_accuracy': 0.9103552773594856, 'epoch': 0.16}
+{'loss': 0.3459, 'grad_norm': 0.6757789850234985, 'learning_rate': 9.978513293627068e-06, 'entropy': 0.7887576438486577, 'num_tokens': 42365180.0, 'mean_token_accuracy': 0.9120242811739445, 'epoch': 0.18}
+{'loss': 0.3149, 'grad_norm': 0.33992210030555725, 'learning_rate': 9.968638261589866e-06, 'entropy': 0.7999910678714514, 'num_tokens': 47453386.0, 'mean_token_accuracy': 0.9188696034252644, 'epoch': 0.2}
+{'loss': 0.3865, 'grad_norm': 0.24800553917884827, 'learning_rate': 9.956908491714552e-06, 'entropy': 0.7124862298369408, 'num_tokens': 51509292.0, 'mean_token_accuracy': 0.9063879281282425, 'epoch': 0.21}
+{'loss': 0.2787, 'grad_norm': 0.8251531720161438, 'learning_rate': 9.943328362594788e-06, 'entropy': 0.7683872323483228, 'num_tokens': 55313444.0, 'mean_token_accuracy': 0.9229335829615593, 'epoch': 0.23}
+{'loss': 0.3474, 'grad_norm': 0.2897116243839264, 'learning_rate': 9.927902943542932e-06, 'entropy': 0.7314513340592385, 'num_tokens': 60244767.0, 'mean_token_accuracy': 0.9120611600577831, 'epoch': 0.25}
+{'loss': 0.3287, 'grad_norm': 0.5102258324623108, 'learning_rate': 9.910637992697707e-06, 'entropy': 0.7540862899273634, 'num_tokens': 63696361.0, 'mean_token_accuracy': 0.9150675058364868, 'epoch': 0.27}
+{'loss': 0.327, 'grad_norm': 0.3730003237724304, 'learning_rate': 9.891539954874758e-06, 'entropy': 0.778166938573122, 'num_tokens': 68850419.0, 'mean_token_accuracy': 0.9135838769376278, 'epoch': 0.29}
+{'loss': 0.3944, 'grad_norm': 0.24623773992061615, 'learning_rate': 9.870615959160876e-06, 'entropy': 0.6990035653114319, 'num_tokens': 73209925.0, 'mean_token_accuracy': 0.9019752465188503, 'epoch': 0.3}
+{'loss': 0.2774, 'grad_norm': 0.6256129145622253, 'learning_rate': 9.84787381625278e-06, 'entropy': 0.7548275008797646, 'num_tokens': 77136811.0, 'mean_token_accuracy': 0.9230482444167137, 'epoch': 0.32}
+{'loss': 0.3215, 'grad_norm': 0.23084738850593567, 'learning_rate': 9.823322015541474e-06, 'entropy': 0.7375361531972885, 'num_tokens': 81649589.0, 'mean_token_accuracy': 0.9151339732110501, 'epoch': 0.34}
+{'loss': 0.3337, 'grad_norm': 0.5136220455169678, 'learning_rate': 9.796969721943257e-06, 'entropy': 0.7423145238310098, 'num_tokens': 85095201.0, 'mean_token_accuracy': 0.9115754134953022, 'epoch': 0.36}
+{'loss': 0.3115, 'grad_norm': 0.34131646156311035, 'learning_rate': 9.76882677247855e-06, 'entropy': 0.7701400972902774, 'num_tokens': 90202057.0, 'mean_token_accuracy': 0.9171789601445198, 'epoch': 0.38}
+{'loss': 0.3743, 'grad_norm': 0.19578339159488678, 'learning_rate': 9.738903672599858e-06, 'entropy': 0.6937543667852879, 'num_tokens': 94454474.0, 'mean_token_accuracy': 0.9067660443484783, 'epoch': 0.39}
+{'loss': 0.2878, 'grad_norm': 0.4483289420604706, 'learning_rate': 9.707211592270183e-06, 'entropy': 0.7399841465055943, 'num_tokens': 98365261.0, 'mean_token_accuracy': 0.9169300325214863, 'epoch': 0.41}
+{'loss': 0.3258, 'grad_norm': 0.22290284931659698, 'learning_rate': 9.673762361793418e-06, 'entropy': 0.7118787884712219, 'num_tokens': 103184837.0, 'mean_token_accuracy': 0.9148131512105465, 'epoch': 0.43}
+{'loss': 0.3191, 'grad_norm': 0.5239326357841492, 'learning_rate': 9.638568467398215e-06, 'entropy': 0.7059971861541271, 'num_tokens': 106602462.0, 'mean_token_accuracy': 0.9153586804866791, 'epoch': 0.45}
+{'loss': 0.302, 'grad_norm': 0.3658406734466553, 'learning_rate': 9.601643046577014e-06, 'entropy': 0.7547215074300766, 'num_tokens': 111534365.0, 'mean_token_accuracy': 0.9197486713528633, 'epoch': 0.47}
+{'loss': 0.3888, 'grad_norm': 0.3379844129085541, 'learning_rate': 9.562999883181968e-06, 'entropy': 0.6939232148230076, 'num_tokens': 116268872.0, 'mean_token_accuracy': 0.9054903365671635, 'epoch': 0.48}
+{'loss': 0.2616, 'grad_norm': 0.4211864471435547, 'learning_rate': 9.52265340227957e-06, 'entropy': 0.7363183293491602, 'num_tokens': 120073539.0, 'mean_token_accuracy': 0.925967837870121, 'epoch': 0.5}
+{'loss': 0.3065, 'grad_norm': 0.3022380769252777, 'learning_rate': 9.480618664765956e-06, 'entropy': 0.7079798255115748, 'num_tokens': 124792964.0, 'mean_token_accuracy': 0.9156712107360363, 'epoch': 0.52}
+{'loss': 0.301, 'grad_norm': 0.5214942693710327, 'learning_rate': 9.436911361744817e-06, 'entropy': 0.7058106690645218, 'num_tokens': 128109895.0, 'mean_token_accuracy': 0.9216572187840939, 'epoch': 0.54}
+{'loss': 0.2801, 'grad_norm': 0.2726259231567383, 'learning_rate': 9.391547808670097e-06, 'entropy': 0.7453346662223339, 'num_tokens': 133133777.0, 'mean_token_accuracy': 0.9228794738650322, 'epoch': 0.55}
+{'loss': 0.3464, 'grad_norm': 0.17256943881511688, 'learning_rate': 9.344544939255608e-06, 'entropy': 0.6737806558609009, 'num_tokens': 137528802.0, 'mean_token_accuracy': 0.9152104884386063, 'epoch': 0.57}
+{'loss': 0.259, 'grad_norm': 0.46551117300987244, 'learning_rate': 9.295920299153863e-06, 'entropy': 0.7308897748589516, 'num_tokens': 141386939.0, 'mean_token_accuracy': 0.9266902774572372, 'epoch': 0.59}
+{'loss': 0.2935, 'grad_norm': 0.2265923172235489, 'learning_rate': 9.24569203940648e-06, 'entropy': 0.6972156282514334, 'num_tokens': 146099945.0, 'mean_token_accuracy': 0.9194224536418915, 'epoch': 0.61}
+{'loss': 0.3089, 'grad_norm': 0.5387133955955505, 'learning_rate': 9.193878909668591e-06, 'entropy': 0.7202326793223619, 'num_tokens': 149342714.0, 'mean_token_accuracy': 0.9222854405641556, 'epoch': 0.63}
+{'loss': 0.2932, 'grad_norm': 0.3429255485534668, 'learning_rate': 9.140500251209813e-06, 'entropy': 0.7606073901057243, 'num_tokens': 154430801.0, 'mean_token_accuracy': 0.9214586928486824, 'epoch': 0.64}
+{'loss': 0.3643, 'grad_norm': 0.23871147632598877, 'learning_rate': 9.085575989694358e-06, 'entropy': 0.6676684122532606, 'num_tokens': 158812289.0, 'mean_token_accuracy': 0.9083243608474731, 'epoch': 0.66}
+{'loss': 0.2675, 'grad_norm': 0.49178895354270935, 'learning_rate': 9.029126627743003e-06, 'entropy': 0.7504942543804646, 'num_tokens': 162689288.0, 'mean_token_accuracy': 0.925485123693943, 'epoch': 0.68}
+[sft-1node] signal received; the newest complete checkpoint is safe; exiting for requeue

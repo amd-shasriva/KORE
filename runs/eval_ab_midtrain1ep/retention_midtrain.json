@@ -1,0 +1,125 @@
+{
+  "benches": [
+    "mmlu",
+    "humaneval"
+  ],
+  "scores": {
+    "mmlu": 0.4166666666666667,
+    "humaneval": 0.0
+  },
+  "aggregate": 0.20833333333333334,
+  "per_bench": {
+    "mmlu": {
+      "score": 0.4166666666666667,
+      "accuracy": 0.4166666666666667,
+      "n": 12,
+      "correct": 5,
+      "source": "smoke",
+      "per_item": [
+        {
+          "id": "mmlu-0",
+          "pred": "B",
+          "gold": "B",
+          "correct": true
+        },
+        {
+          "id": "mmlu-1",
+          "pred": "A",
+          "gold": "C",
+          "correct": false
+        },
+        {
+          "id": "mmlu-2",
+          "pred": "A",
+          "gold": "D",
+          "correct": false
+        },
+        {
+          "id": "mmlu-3",
+          "pred": "A",
+          "gold": "A",
+          "correct": true
+        },
+        {
+          "id": "mmlu-4",
+          "pred": "A",
+          "gold": "B",
+          "correct": false
+        },
+        {
+          "id": "mmlu-5",
+          "pred": "C",
+          "gold": "C",
+          "correct": true
+        },
+        {
+          "id": "mmlu-6",
+          "pred": "A",
+          "gold": "B",
+          "correct": false
+        },
+        {
+          "id": "mmlu-7",
+          "pred": "A",
+          "gold": "C",
+          "correct": false
+        },
+        {
+          "id": "mmlu-8",
+          "pred": "A",
+          "gold": "A",
+          "correct": true
+        },
+        {
+          "id": "mmlu-9",
+          "pred": "B",
+          "gold": "C",
+          "correct": false
+        },
+        {
+          "id": "mmlu-10",
+          "pred": "C",
+          "gold": "B",
+          "correct": false
+        },
+        {
+          "id": "mmlu-11",
+          "pred": "D",
+          "gold": "D",
+          "correct": true
+        }
+      ]
+    },
+    "humaneval": {
+      "score": 0.0,
+      "pass@1": 0.0,
+      "n": 3,
+      "passed": 0,
+      "source": "smoke",
+      "per_item": [
+        {
+          "task_id": "HE/2",
+          "passed": false,
+          "detail": "  File \"/tmp/tmp0hgouthd/prog.py\", line 1\n    return number - int(number)riterion\n                               ^^^^^^^^\nSyntaxError: invalid syntax\n"
+        },
+        {
+          "task_id": "HE/53",
+          "passed": false,
+          "detail": "  File \"/tmp/tmpgcfl2go6/prog.py\", line 8\n    return x +\\<^M\n               ^\nSyntaxError: unexpected character after line continuation character\n"
+        },
+        {
+          "task_id": "HE/27",
+          "passed": false,
+          "detail": "  File \"/tmp/tmpwlezcfz4/prog.py\", line 6\n    Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar Kumar\n                               ^^^^^^\nSyntaxError: invalid syntax\n"
+        }
+      ]
+    }
+  },
+  "sources": {
+    "mmlu": "smoke",
+    "humaneval": "smoke"
+  },
+  "full": false,
+  "arm": "midtrain",
+  "wall_seconds": 40.7
+}

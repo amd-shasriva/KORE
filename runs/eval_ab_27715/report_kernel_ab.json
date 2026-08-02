@@ -1,0 +1,1968 @@
+{
+  "schema": "kore.checkpoint-ab-report.v1",
+  "meta": {
+    "candidate_measures": "/home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/measures_midtrain.json",
+    "reference_measures": "/home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/measures_base.json"
+  },
+  "scope": {
+    "taxonomy_version": "1.0.0",
+    "taxonomy_digest": "cd5c7769cd7597fe59232a6ee89778ff65d6ca38184a2eb953f104fc7127ac5c",
+    "n_heldout_reservation": 45,
+    "n_generalization_scope": 34,
+    "n_scored": 34,
+    "scored_task_ids": [
+      "genb_attn2_cross_gqa_step_fp16",
+      "genb_attn2_decode_mqa_hd256_bf16",
+      "genb_attn2_varlen_gqa_causal_bf16",
+      "genb_attn_fp8_mha_hd128_causal_fp8",
+      "genb_attn_mha_hd128_noncausal_fp16",
+      "genb_attn_mqa_hd64_causal_bf16",
+      "genb_cv_conv2d_7x7_s1_d1_fp16",
+      "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+      "genb_fx_embed_scale_bf16",
+      "genb_fx_reglu_act_fp16",
+      "genb_fx_rope_qk_half_qknorm_bf16",
+      "genb_gemm_bf16_residual_bf16",
+      "genb_gemm_fp8_channelwise_fp8",
+      "genb_gemm_int4_asym_group_fp16",
+      "genb_gemm_int8_pertensor_int8",
+      "genb_moe_block_silu_k8_e256_bf16",
+      "genb_moe_fused_moe_silu_fp16",
+      "genb_moe_grouped_mlp_gelu_bf16",
+      "genb_moe_sigmoid_topk_norenorm_fp16",
+      "genb_norm_groupnorm_bf16",
+      "genb_norm_layernorm_bwd_fp32",
+      "genb_norm_layernorm_quant_fp8_fp8",
+      "genb_qx_quant_int8_pertoken_int8",
+      "genb_red_entropy_bf16",
+      "genb_red_topk256_bf16",
+      "genb_smp_rope_yarn_bf16",
+      "genb_smp_topk_sample_bf16",
+      "genb_ssm_mamba2_ssd_c128_n128_bf16",
+      "genb_ssm_retnet_c64_bf16",
+      "genb_tr_adamw_8bit_bf16",
+      "genb_tr_foreach_sgd_bf16",
+      "genb_tr_ls_ce_bwd_bf16",
+      "mla_decode_bf16",
+      "paged_attn_decode_bf16"
+    ],
+    "excluded_contaminated": {
+      "genb_cv_conv2d_1x1_s2_fp16": "midtrain_curriculum_tier4_win_source",
+      "genb_cv_depthwise_conv2d_5x5_s1_bf16": "midtrain_curriculum_tier4_win_source",
+      "genb_norm_rmsnorm_h16384_bf16": "midtrain_curriculum_tier4_win_source",
+      "genb_qx_int4_unpack_group_bf16": "midtrain_curriculum_tier4_win_source",
+      "genb_qx_quant_fp8_block2d_fp8": "midtrain_curriculum_tier4_win_source",
+      "genb_red_log_softmax_bwd_fp32": "midtrain_curriculum_tier4_win_source",
+      "genb_red_rms_bf16": "midtrain_curriculum_tier4_win_source",
+      "genb_smp_repetition_penalty_bf16": "midtrain_curriculum_tier4_win_source",
+      "genb_ssm_gated_retention_c128_bf16": "midtrain_curriculum_tier4_win_source",
+      "genb_ssm_lightning_attn_bf16": "midtrain_curriculum_tier4_win_source",
+      "genb_tr_rmsprop_centered_momentum_fp32": "midtrain_curriculum_tier4_win_source"
+    },
+    "contamination_evidence": {
+      "reason": "midtrain_curriculum_tier4_win_source",
+      "detector": "kore.data.decontam.analyze_text_contamination",
+      "match_kind": "directional_containment",
+      "generator": "data/release/generators/gen_curriculum.py::tier4",
+      "corpus": "data/b05factory/midtrain/corpus.jsonl (source=kernel_curriculum)",
+      "chunks_analyzed": 9956,
+      "hits": 17,
+      "tasks": 11,
+      "containment_min": 0.795,
+      "containment_max": 0.943,
+      "public_benchmark_hits": 0,
+      "reference_pattern": "kore-task:<task_id>:seed_triton.py"
+    },
+    "families": {
+      "activation": [
+        "genb_fx_embed_scale_bf16",
+        "genb_fx_reglu_act_fp16",
+        "genb_fx_rope_qk_half_qknorm_bf16"
+      ],
+      "attention": [
+        "genb_attn2_cross_gqa_step_fp16",
+        "genb_attn2_decode_mqa_hd256_bf16",
+        "genb_attn2_varlen_gqa_causal_bf16",
+        "genb_attn_fp8_mha_hd128_causal_fp8",
+        "genb_attn_mha_hd128_noncausal_fp16",
+        "genb_attn_mqa_hd64_causal_bf16",
+        "mla_decode_bf16",
+        "paged_attn_decode_bf16"
+      ],
+      "convolution": [
+        "genb_cv_conv2d_7x7_s1_d1_fp16",
+        "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16"
+      ],
+      "gemm": [
+        "genb_gemm_bf16_residual_bf16",
+        "genb_gemm_fp8_channelwise_fp8",
+        "genb_gemm_int4_asym_group_fp16",
+        "genb_gemm_int8_pertensor_int8"
+      ],
+      "moe": [
+        "genb_moe_block_silu_k8_e256_bf16",
+        "genb_moe_fused_moe_silu_fp16",
+        "genb_moe_grouped_mlp_gelu_bf16",
+        "genb_moe_sigmoid_topk_norenorm_fp16"
+      ],
+      "norm": [
+        "genb_norm_groupnorm_bf16",
+        "genb_norm_layernorm_bwd_fp32",
+        "genb_norm_layernorm_quant_fp8_fp8"
+      ],
+      "quant": [
+        "genb_qx_quant_int8_pertoken_int8"
+      ],
+      "reduction": [
+        "genb_red_entropy_bf16",
+        "genb_red_topk256_bf16"
+      ],
+      "sampling": [
+        "genb_smp_rope_yarn_bf16",
+        "genb_smp_topk_sample_bf16"
+      ],
+      "sequence": [
+        "genb_ssm_mamba2_ssd_c128_n128_bf16",
+        "genb_ssm_retnet_c64_bf16"
+      ],
+      "training": [
+        "genb_tr_adamw_8bit_bf16",
+        "genb_tr_foreach_sgd_bf16",
+        "genb_tr_ls_ce_bwd_bf16"
+      ]
+    }
+  },
+  "arms": {
+    "midtrain": {
+      "arm": "midtrain",
+      "n": 34,
+      "budget": 1,
+      "mode": "parallel",
+      "counts": {
+        "contract_ok": 33,
+        "compiled": 4,
+        "correct": 0,
+        "timed": 0,
+        "faster": 0,
+        "infra_error": 0
+      },
+      "rates": {
+        "contract_ok": {
+          "k": 33,
+          "n": 34,
+          "rate": 0.9705882352941176,
+          "lo": 0.8508409778365519,
+          "hi": 0.9947892280744034,
+          "z": 1.96
+        },
+        "compiled": {
+          "k": 4,
+          "n": 34,
+          "rate": 0.11764705882352941,
+          "lo": 0.04671370973436122,
+          "hi": 0.26621174796298774,
+          "z": 1.96
+        },
+        "correct": {
+          "k": 0,
+          "n": 34,
+          "rate": 0.0,
+          "lo": 0.0,
+          "hi": 0.10151790621961015,
+          "z": 1.96
+        },
+        "timed": {
+          "k": 0,
+          "n": 34,
+          "rate": 0.0,
+          "lo": 0.0,
+          "hi": 0.10151790621961015,
+          "z": 1.96
+        },
+        "faster": {
+          "k": 0,
+          "n": 34,
+          "rate": 0.0,
+          "lo": 0.0,
+          "hi": 0.10151790621961015,
+          "z": 1.96
+        },
+        "infra_error": {
+          "k": 0,
+          "n": 34,
+          "rate": 0.0,
+          "lo": 0.0,
+          "hi": 0.10151790621961015,
+          "z": 1.96
+        }
+      },
+      "fast_p": {
+        "0.0": 0.0,
+        "0.5": 0.0,
+        "1.0": 0.0,
+        "1.5": 0.0,
+        "2.0": 0.0
+      },
+      "geometric_mean_speedup": 0.0,
+      "median_response_chars": 4174.0,
+      "per_task": [
+        {
+          "task_id": "genb_attn2_cross_gqa_step_fp16",
+          "contract_ok": true,
+          "response_chars": 5035,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": " in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line ",
+          "faster": false
+        },
+        {
+          "task_id": "genb_attn2_decode_mqa_hd256_bf16",
+          "contract_ok": true,
+          "response_chars": 5028,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "n _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 99",
+          "faster": false
+        },
+        {
+          "task_id": "genb_attn2_varlen_gqa_causal_bf16",
+          "contract_ok": true,
+          "response_chars": 13335,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "pe)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genop",
+          "faster": false
+        },
+        {
+          "task_id": "genb_attn_fp8_mha_hd128_causal_fp8",
+          "contract_ok": true,
+          "response_chars": 5121,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "rectness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 991, in exec",
+          "faster": false
+        },
+        {
+          "task_id": "genb_attn_mha_hd128_noncausal_fp16",
+          "contract_ok": true,
+          "response_chars": 5073,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": " _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 991",
+          "faster": false
+        },
+        {
+          "task_id": "genb_attn_mqa_hd64_causal_bf16",
+          "contract_ok": true,
+          "response_chars": 4874,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_exte",
+          "faster": false
+        },
+        {
+          "task_id": "genb_cv_conv2d_7x7_s1_d1_fp16",
+          "contract_ok": true,
+          "response_chars": 4609,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "ore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen impor",
+          "faster": false
+        },
+        {
+          "task_id": "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+          "contract_ok": true,
+          "response_chars": 4768,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "ile \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec",
+          "faster": false
+        },
+        {
+          "task_id": "genb_fx_embed_scale_bf16",
+          "contract_ok": true,
+          "response_chars": 1528,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": -2.43,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_fx_reglu_act_fp16",
+          "contract_ok": true,
+          "response_chars": 1988,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "e \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_m",
+          "faster": false
+        },
+        {
+          "task_id": "genb_fx_rope_qk_half_qknorm_bf16",
+          "contract_ok": true,
+          "response_chars": 2695,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": ", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_exter",
+          "faster": false
+        },
+        {
+          "task_id": "genb_gemm_bf16_residual_bf16",
+          "contract_ok": true,
+          "response_chars": 4513,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_",
+          "faster": false
+        },
+        {
+          "task_id": "genb_gemm_fp8_channelwise_fp8",
+          "contract_ok": true,
+          "response_chars": 11882,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "                                                                                                                                                                                                                                                                                                            ",
+          "faster": false
+        },
+        {
+          "task_id": "genb_gemm_int4_asym_group_fp16",
+          "contract_ok": true,
+          "response_chars": 4278,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_ex",
+          "faster": false
+        },
+        {
+          "task_id": "genb_gemm_int8_pertensor_int8",
+          "contract_ok": true,
+          "response_chars": 12569,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": " shape)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_g",
+          "faster": false
+        },
+        {
+          "task_id": "genb_moe_block_silu_k8_e256_bf16",
+          "contract_ok": true,
+          "response_chars": 7060,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mo",
+          "faster": false
+        },
+        {
+          "task_id": "genb_moe_fused_moe_silu_fp16",
+          "contract_ok": true,
+          "response_chars": 2816,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", li",
+          "faster": false
+        },
+        {
+          "task_id": "genb_moe_grouped_mlp_gelu_bf16",
+          "contract_ok": true,
+          "response_chars": 6456,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "hack"
+          ],
+          "error_head": "reward-hack: uses the @ matmul operator (delegates to the vendor GEMM)",
+          "faster": false
+        },
+        {
+          "task_id": "genb_moe_sigmoid_topk_norenorm_fp16",
+          "contract_ok": true,
+          "response_chars": 2585,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 991, in exec_module\n ",
+          "faster": false
+        },
+        {
+          "task_id": "genb_norm_groupnorm_bf16",
+          "contract_ok": true,
+          "response_chars": 2359,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": -999.0,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_norm_layernorm_bwd_fp32",
+          "contract_ok": true,
+          "response_chars": 3881,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": ", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_exter",
+          "faster": false
+        },
+        {
+          "task_id": "genb_norm_layernorm_quant_fp8_fp8",
+          "contract_ok": true,
+          "response_chars": 2269,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "ome/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module",
+          "faster": false
+        },
+        {
+          "task_id": "genb_qx_quant_int8_pertoken_int8",
+          "contract_ok": true,
+          "response_chars": 4070,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen impo",
+          "faster": false
+        },
+        {
+          "task_id": "genb_red_entropy_bf16",
+          "contract_ok": true,
+          "response_chars": 2065,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_can",
+          "faster": false
+        },
+        {
+          "task_id": "genb_red_topk256_bf16",
+          "contract_ok": true,
+          "response_chars": 2098,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._boo",
+          "faster": false
+        },
+        {
+          "task_id": "genb_smp_rope_yarn_bf16",
+          "contract_ok": true,
+          "response_chars": 2588,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": -999.0,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_smp_topk_sample_bf16",
+          "contract_ok": true,
+          "response_chars": 2460,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<frozen importlib._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in g",
+          "faster": false
+        },
+        {
+          "task_id": "genb_ssm_mamba2_ssd_c128_n128_bf16",
+          "contract_ok": false,
+          "response_chars": 7174,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "r (b,h,p), loading B/C per timestep and scanning over N with tl.sum. On MI350X this is hopelessly latency-bound: each program touches only P=128 elements per L step, B_/C are reloaded every step, and tl.sum over N incurs a serial dependency chain per program. With B,L,H,P=8,64,8,128 the launch is 65",
+          "faster": false
+        },
+        {
+          "task_id": "genb_ssm_retnet_c64_bf16",
+          "contract_ok": true,
+          "response_chars": 3525,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<fro",
+          "faster": false
+        },
+        {
+          "task_id": "genb_tr_adamw_8bit_bf16",
+          "contract_ok": true,
+          "response_chars": 3370,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.e",
+          "faster": false
+        },
+        {
+          "task_id": "genb_tr_foreach_sgd_bf16",
+          "contract_ok": true,
+          "response_chars": 2439,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "e-RL/KORE/kore/tasks/_genops.py\", line 1711, in _run_correctness\n    fn = _load_candidate(task_dir, ref.entry_name)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/shasriva/Kore-RL/KORE/kore/tasks/_genops.py\", line 1506, in _load_candidate\n    spec.loader.exec_module(mod)\n  File \"<f",
+          "faster": false
+        },
+        {
+          "task_id": "genb_tr_ls_ce_bwd_bf16",
+          "contract_ok": true,
+          "response_chars": 3263,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": -999.0,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "mla_decode_bf16",
+          "contract_ok": true,
+          "response_chars": 5766,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "e, a.mode)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/kore_mla_decode_bf16_2ds7u8k7/driver.py\", line 92, in run_correctness\n    fn = _load_candidate()\n         ^^^^^^^^^^^^^^^^^\n  File \"/tmp/kore_mla_decode_bf16_2ds7u8k7/driver.py\", line 35, in _load_candidate\n    spec.loader.exec_module",
+          "faster": false
+        },
+        {
+          "task_id": "paged_attn_decode_bf16",
+          "contract_ok": true,
+          "response_chars": 5581,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "run_correctness(shape, a.mode)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/kore_paged_attn_decode_bf16_j_owvp1w/driver.py\", line 108, in run_correctness\n    fn = _load_candidate()\n         ^^^^^^^^^^^^^^^^^\n  File \"/tmp/kore_paged_attn_decode_bf16_j_owvp1w/driver.py\", line 39, in _load_ca",
+          "faster": false
+        }
+      ]
+    },
+    "base": {
+      "arm": "base",
+      "n": 34,
+      "budget": 1,
+      "mode": "parallel",
+      "counts": {
+        "contract_ok": 32,
+        "compiled": 32,
+        "correct": 23,
+        "timed": 12,
+        "faster": 4,
+        "infra_error": 1
+      },
+      "rates": {
+        "contract_ok": {
+          "k": 32,
+          "n": 34,
+          "rate": 0.9411764705882353,
+          "lo": 0.8090606311053629,
+          "hi": 0.9837176869361576,
+          "z": 1.96
+        },
+        "compiled": {
+          "k": 32,
+          "n": 34,
+          "rate": 0.9411764705882353,
+          "lo": 0.8090606311053629,
+          "hi": 0.9837176869361576,
+          "z": 1.96
+        },
+        "correct": {
+          "k": 23,
+          "n": 34,
+          "rate": 0.6764705882352942,
+          "lo": 0.5084258404811939,
+          "hi": 0.8086854867354143,
+          "z": 1.96
+        },
+        "timed": {
+          "k": 12,
+          "n": 34,
+          "rate": 0.35294117647058826,
+          "lo": 0.21487714895296073,
+          "hi": 0.5208634116998658,
+          "z": 1.96
+        },
+        "faster": {
+          "k": 4,
+          "n": 34,
+          "rate": 0.11764705882352941,
+          "lo": 0.04671370973436122,
+          "hi": 0.26621174796298774,
+          "z": 1.96
+        },
+        "infra_error": {
+          "k": 1,
+          "n": 34,
+          "rate": 0.029411764705882353,
+          "lo": 0.005210771925596644,
+          "hi": 0.14915902216344817,
+          "z": 1.96
+        }
+      },
+      "fast_p": {
+        "0.0": 0.35294117647058826,
+        "0.5": 0.17647058823529413,
+        "1.0": 0.11764705882352941,
+        "1.5": 0.058823529411764705,
+        "2.0": 0.029411764705882353
+      },
+      "geometric_mean_speedup": 0.46738566219638883,
+      "median_response_chars": 5060.5,
+      "per_task": [
+        {
+          "task_id": "genb_attn2_cross_gqa_step_fp16",
+          "contract_ok": true,
+          "response_chars": 6137,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 0.15200607433108,
+          "speedup_raw": 0.15200607433108,
+          "snr_db": 88.29,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_attn2_decode_mqa_hd256_bf16",
+          "contract_ok": true,
+          "response_chars": 6417,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 76.57,
+          "baseline_impl": null,
+          "timing_grade": "screening",
+          "flags": [
+            "timing:screening"
+          ],
+          "error_head": "timing not admitted (measurement noise): minimal: baseline CV 3.023% exceeds 3.000%",
+          "faster": false
+        },
+        {
+          "task_id": "genb_attn2_varlen_gqa_causal_bf16",
+          "contract_ok": true,
+          "response_chars": 6384,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 0.7781541521028409,
+          "speedup_raw": 0.7781541521028409,
+          "snr_db": 86.46,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_attn_fp8_mha_hd128_causal_fp8",
+          "contract_ok": true,
+          "response_chars": 5455,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 86.97,
+          "baseline_impl": null,
+          "timing_grade": "screening",
+          "flags": [
+            "timing:screening"
+          ],
+          "error_head": "timing not admitted (measurement noise): minimal: baseline CV 4.511% exceeds 3.000%",
+          "faster": false
+        },
+        {
+          "task_id": "genb_attn_mha_hd128_noncausal_fp16",
+          "contract_ok": true,
+          "response_chars": 5380,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 90.54,
+          "baseline_impl": null,
+          "timing_grade": "screening",
+          "flags": [
+            "timing:screening"
+          ],
+          "error_head": "timing not admitted (measurement noise): minimal: paired ratio CV 5.047% exceeds 3.000%",
+          "faster": false
+        },
+        {
+          "task_id": "genb_attn_mqa_hd64_causal_bf16",
+          "contract_ok": false,
+          "response_chars": 20415,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "File \"<frozen importlib._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed",
+          "faster": false
+        },
+        {
+          "task_id": "genb_cv_conv2d_7x7_s1_d1_fp16",
+          "contract_ok": true,
+          "response_chars": 5083,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": -999.0,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+          "contract_ok": true,
+          "response_chars": 4188,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": -999.0,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_fx_embed_scale_bf16",
+          "contract_ok": true,
+          "response_chars": 2490,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 999.0,
+          "baseline_impl": null,
+          "timing_grade": "screening",
+          "flags": [
+            "timing:screening"
+          ],
+          "error_head": "timing not admitted (measurement noise): primary: candidate CV 5.940% exceeds 3.000%; validation_0: paired ratio CV 3.087% exceeds 3.000%",
+          "faster": false
+        },
+        {
+          "task_id": "genb_fx_reglu_act_fp16",
+          "contract_ok": true,
+          "response_chars": 2958,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 2.3625863429860705,
+          "speedup_raw": 2.3625863429860705,
+          "snr_db": 999.0,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [
+            "fast_p>=1.0",
+            "fast_p>=1.2",
+            "fast_p>=1.5"
+          ],
+          "error_head": null,
+          "faster": true
+        },
+        {
+          "task_id": "genb_fx_rope_qk_half_qknorm_bf16",
+          "contract_ok": true,
+          "response_chars": 3741,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 1.470723049476964,
+          "speedup_raw": 1.470723049476964,
+          "snr_db": 95.19,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [
+            "fast_p>=1.0",
+            "fast_p>=1.2"
+          ],
+          "error_head": null,
+          "faster": true
+        },
+        {
+          "task_id": "genb_gemm_bf16_residual_bf16",
+          "contract_ok": true,
+          "response_chars": 6290,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 51.5,
+          "baseline_impl": null,
+          "timing_grade": "screening",
+          "flags": [
+            "timing:screening"
+          ],
+          "error_head": "timing not admitted (measurement noise): minimal: baseline CV 4.432% exceeds 3.000%",
+          "faster": false
+        },
+        {
+          "task_id": "genb_gemm_fp8_channelwise_fp8",
+          "contract_ok": true,
+          "response_chars": 6026,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 0.18011115787986315,
+          "speedup_raw": 0.18011115787986315,
+          "snr_db": 48.54,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_gemm_int4_asym_group_fp16",
+          "contract_ok": true,
+          "response_chars": 6121,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 0.0,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_gemm_int8_pertensor_int8",
+          "contract_ok": true,
+          "response_chars": 6410,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 0.17774017453714142,
+          "speedup_raw": 0.17774017453714142,
+          "snr_db": 48.93,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_moe_block_silu_k8_e256_bf16",
+          "contract_ok": true,
+          "response_chars": 10172,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": -999.0,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_moe_fused_moe_silu_fp16",
+          "contract_ok": true,
+          "response_chars": 6545,
+          "compiled": true,
+          "infra_error": true,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 65.58,
+          "baseline_impl": null,
+          "timing_grade": "rejected",
+          "flags": [
+            "infra"
+          ],
+          "error_head": "infra: timing admission failed: candidate timing keys mismatch (missing=['minimal', 'primary', 'validation_0', 'validation_1', 'validation_2'], extra=[])",
+          "faster": false
+        },
+        {
+          "task_id": "genb_moe_grouped_mlp_gelu_bf16",
+          "contract_ok": true,
+          "response_chars": 6055,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 0.4071611518053732,
+          "speedup_raw": 0.4071611518053732,
+          "snr_db": 48.69,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_moe_sigmoid_topk_norenorm_fp16",
+          "contract_ok": true,
+          "response_chars": 5038,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 1.6513492605526514,
+          "speedup_raw": 1.6513492605526514,
+          "snr_db": 150.85,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [
+            "fast_p>=1.0",
+            "fast_p>=1.2",
+            "fast_p>=1.5"
+          ],
+          "error_head": null,
+          "faster": true
+        },
+        {
+          "task_id": "genb_norm_groupnorm_bf16",
+          "contract_ok": true,
+          "response_chars": 3302,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 1.0,
+          "speedup_raw": 1.0,
+          "snr_db": 95.76,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_norm_layernorm_bwd_fp32",
+          "contract_ok": true,
+          "response_chars": 3237,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 0.08315850000110483,
+          "speedup_raw": 0.08315850000110483,
+          "snr_db": 112.67,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_norm_layernorm_quant_fp8_fp8",
+          "contract_ok": true,
+          "response_chars": 3502,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": -999.0,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_qx_quant_int8_pertoken_int8",
+          "contract_ok": true,
+          "response_chars": 4771,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 999.0,
+          "baseline_impl": null,
+          "timing_grade": "screening",
+          "flags": [
+            "timing:screening"
+          ],
+          "error_head": "timing not admitted (measurement noise): minimal: candidate CV 5.833% exceeds 3.000%; validation_0: candidate CV 3.211% exceeds 3.000%",
+          "faster": false
+        },
+        {
+          "task_id": "genb_red_entropy_bf16",
+          "contract_ok": true,
+          "response_chars": 3274,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 80.02,
+          "baseline_impl": null,
+          "timing_grade": "screening",
+          "flags": [
+            "timing:screening"
+          ],
+          "error_head": "timing not admitted (measurement noise): primary: candidate CV 3.725% exceeds 3.000%",
+          "faster": false
+        },
+        {
+          "task_id": "genb_red_topk256_bf16",
+          "contract_ok": true,
+          "response_chars": 2173,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": -999.0,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_smp_rope_yarn_bf16",
+          "contract_ok": true,
+          "response_chars": 3680,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 1.2155115923771287,
+          "speedup_raw": 1.2155115923771287,
+          "snr_db": 999.0,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [
+            "fast_p>=1.0"
+          ],
+          "error_head": null,
+          "faster": true
+        },
+        {
+          "task_id": "genb_smp_topk_sample_bf16",
+          "contract_ok": true,
+          "response_chars": 3485,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 999.0,
+          "baseline_impl": null,
+          "timing_grade": "screening",
+          "flags": [
+            "timing:screening"
+          ],
+          "error_head": "timing not admitted (measurement noise): minimal: candidate CV 3.349% exceeds 3.000%",
+          "faster": false
+        },
+        {
+          "task_id": "genb_ssm_mamba2_ssd_c128_n128_bf16",
+          "contract_ok": true,
+          "response_chars": 3405,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": -999.0,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_ssm_retnet_c64_bf16",
+          "contract_ok": true,
+          "response_chars": 2900,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": true,
+          "speedup_gated": 0.12152404407786954,
+          "speedup_raw": 0.12152404407786954,
+          "snr_db": 89.12,
+          "baseline_impl": null,
+          "timing_grade": "publication",
+          "flags": [],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_tr_adamw_8bit_bf16",
+          "contract_ok": true,
+          "response_chars": 3382,
+          "compiled": true,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 44.77,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "incorrect",
+            "shaped"
+          ],
+          "error_head": null,
+          "faster": false
+        },
+        {
+          "task_id": "genb_tr_foreach_sgd_bf16",
+          "contract_ok": true,
+          "response_chars": 2979,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 76.04,
+          "baseline_impl": null,
+          "timing_grade": "screening",
+          "flags": [
+            "timing:screening"
+          ],
+          "error_head": "timing not admitted (measurement noise): primary: candidate CV 9.641% exceeds 3.000%",
+          "faster": false
+        },
+        {
+          "task_id": "genb_tr_ls_ce_bwd_bf16",
+          "contract_ok": false,
+          "response_chars": 21465,
+          "compiled": false,
+          "infra_error": false,
+          "correct": false,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": null,
+          "baseline_impl": null,
+          "timing_grade": "compat",
+          "flags": [
+            "compile_fail"
+          ],
+          "error_head": "a large number of memory loads and stores which may be inefficient for the given workload. The kernel is also using a large number of memory loads and stores which may be inefficient for the given workload. The kernel is also using a large number of memory loads and stores which may be inefficient f",
+          "faster": false
+        },
+        {
+          "task_id": "mla_decode_bf16",
+          "contract_ok": true,
+          "response_chars": 6419,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 49.1,
+          "baseline_impl": null,
+          "timing_grade": "ineligible",
+          "flags": [
+            "performance_ineligible"
+          ],
+          "error_head": "performance-ineligible: driver did not advertise a recognized timing protocol",
+          "faster": false
+        },
+        {
+          "task_id": "paged_attn_decode_bf16",
+          "contract_ok": true,
+          "response_chars": 5371,
+          "compiled": true,
+          "infra_error": false,
+          "correct": true,
+          "timed": false,
+          "speedup_gated": null,
+          "speedup_raw": null,
+          "snr_db": 83.95,
+          "baseline_impl": null,
+          "timing_grade": "ineligible",
+          "flags": [
+            "performance_ineligible"
+          ],
+          "error_head": "performance-ineligible: driver did not advertise a recognized timing protocol",
+          "faster": false
+        }
+      ]
+    }
+  },
+  "comparison": {
+    "schema": "kore.checkpoint-ab-report.v1",
+    "candidate": "midtrain",
+    "reference": "base",
+    "n_paired": 34,
+    "alpha": 0.05,
+    "binary": {
+      "contract_ok": {
+        "n": 34,
+        "effect_size": 0.029411764705882353,
+        "effect_kind": "mean_delta",
+        "ci": [
+          -0.058823529411764705,
+          0.11764705882352941
+        ],
+        "ci_level": 0.95,
+        "se": 0.05069683129862835,
+        "p_bootstrap": 0.7624237576242375,
+        "p_sign": 1.0,
+        "p_wilcoxon": 0.7728299926844475,
+        "p_value": 1.0,
+        "significant": false,
+        "direction": "kore_better",
+        "bootstrap": {
+          "effect_size": 0.029411764705882353,
+          "ci_lo": -0.058823529411764705,
+          "ci_hi": 0.11764705882352941,
+          "ci_level": 0.95,
+          "se": 0.05069683129862835,
+          "p_value": 0.7624237576242375,
+          "n": 34,
+          "n_boot": 10000,
+          "statistic": "mean"
+        },
+        "sign": {
+          "n_pos": 2,
+          "n_neg": 1,
+          "n_effective": 3,
+          "p_value": 1.0,
+          "prop_positive": 0.6666666666666666
+        },
+        "wilcoxon": {
+          "statistic": 4.0,
+          "z": 0.2886751345948129,
+          "p_value": 0.7728299926844475,
+          "n_effective": 3
+        },
+        "n_paired": 34,
+        "a_count": 33,
+        "b_count": 32,
+        "discordant_pairs": 3,
+        "a_only": 2,
+        "b_only": 1,
+        "test": "exact McNemar (sign test on paired binary deltas)"
+      },
+      "compiled": {
+        "n": 34,
+        "effect_size": -0.8235294117647058,
+        "effect_kind": "mean_delta",
+        "ci": [
+          -0.9411764705882353,
+          -0.6470588235294118
+        ],
+        "ci_level": 0.95,
+        "se": 0.07722809971161101,
+        "p_bootstrap": 9.999000099990002e-05,
+        "p_sign": 5.774199962615967e-08,
+        "p_wilcoxon": 3.391187297641096e-07,
+        "p_value": 5.774199962615967e-08,
+        "significant": true,
+        "direction": "baseline_better",
+        "bootstrap": {
+          "effect_size": -0.8235294117647058,
+          "ci_lo": -0.9411764705882353,
+          "ci_hi": -0.6470588235294118,
+          "ci_level": 0.95,
+          "se": 0.07722809971161101,
+          "p_value": 9.999000099990002e-05,
+          "n": 34,
+          "n_boot": 10000,
+          "statistic": "mean"
+        },
+        "sign": {
+          "n_pos": 1,
+          "n_neg": 29,
+          "n_effective": 30,
+          "p_value": 5.774199962615967e-08,
+          "prop_positive": 0.03333333333333333
+        },
+        "wilcoxon": {
+          "statistic": 15.5,
+          "z": -5.100298223650257,
+          "p_value": 3.391187297641096e-07,
+          "n_effective": 30
+        },
+        "n_paired": 34,
+        "a_count": 4,
+        "b_count": 32,
+        "discordant_pairs": 30,
+        "a_only": 1,
+        "b_only": 29,
+        "test": "exact McNemar (sign test on paired binary deltas)"
+      },
+      "correct": {
+        "n": 34,
+        "effect_size": -0.6764705882352942,
+        "effect_kind": "mean_delta",
+        "ci": [
+          -0.8235294117647058,
+          -0.5294117647058824
+        ],
+        "ci_level": 0.95,
+        "se": 0.08019164209990857,
+        "p_bootstrap": 9.999000099990002e-05,
+        "p_sign": 2.384185791015625e-07,
+        "p_wilcoxon": 1.7664700284747425e-06,
+        "p_value": 2.384185791015625e-07,
+        "significant": true,
+        "direction": "baseline_better",
+        "bootstrap": {
+          "effect_size": -0.6764705882352942,
+          "ci_lo": -0.8235294117647058,
+          "ci_hi": -0.5294117647058824,
+          "ci_level": 0.95,
+          "se": 0.08019164209990857,
+          "p_value": 9.999000099990002e-05,
+          "n": 34,
+          "n_boot": 10000,
+          "statistic": "mean"
+        },
+        "sign": {
+          "n_pos": 0,
+          "n_neg": 23,
+          "n_effective": 23,
+          "p_value": 2.384185791015625e-07,
+          "prop_positive": 0.0
+        },
+        "wilcoxon": {
+          "statistic": 0.0,
+          "z": -4.778455322141297,
+          "p_value": 1.7664700284747425e-06,
+          "n_effective": 23
+        },
+        "n_paired": 34,
+        "a_count": 0,
+        "b_count": 23,
+        "discordant_pairs": 23,
+        "a_only": 0,
+        "b_only": 23,
+        "test": "exact McNemar (sign test on paired binary deltas)"
+      },
+      "timed": {
+        "n": 34,
+        "effect_size": -0.35294117647058826,
+        "effect_kind": "mean_delta",
+        "ci": [
+          -0.5294117647058824,
+          -0.20588235294117646
+        ],
+        "ci_level": 0.95,
+        "se": 0.08215953424496539,
+        "p_bootstrap": 9.999000099990002e-05,
+        "p_sign": 0.00048828125,
+        "p_wilcoxon": 0.0006269252163284555,
+        "p_value": 0.00048828125,
+        "significant": true,
+        "direction": "baseline_better",
+        "bootstrap": {
+          "effect_size": -0.35294117647058826,
+          "ci_lo": -0.5294117647058824,
+          "ci_hi": -0.20588235294117646,
+          "ci_level": 0.95,
+          "se": 0.08215953424496539,
+          "p_value": 9.999000099990002e-05,
+          "n": 34,
+          "n_boot": 10000,
+          "statistic": "mean"
+        },
+        "sign": {
+          "n_pos": 0,
+          "n_neg": 12,
+          "n_effective": 12,
+          "p_value": 0.00048828125,
+          "prop_positive": 0.0
+        },
+        "wilcoxon": {
+          "statistic": 0.0,
+          "z": -3.419690055969322,
+          "p_value": 0.0006269252163284555,
+          "n_effective": 12
+        },
+        "n_paired": 34,
+        "a_count": 0,
+        "b_count": 12,
+        "discordant_pairs": 12,
+        "a_only": 0,
+        "b_only": 12,
+        "test": "exact McNemar (sign test on paired binary deltas)"
+      },
+      "faster": {
+        "n": 34,
+        "effect_size": -0.11764705882352941,
+        "effect_kind": "mean_delta",
+        "ci": [
+          -0.23529411764705882,
+          -0.029411764705882353
+        ],
+        "ci_level": 0.95,
+        "se": 0.05583523734785506,
+        "p_bootstrap": 0.05629437056294371,
+        "p_sign": 0.125,
+        "p_wilcoxon": 0.07186063822585176,
+        "p_value": 0.125,
+        "significant": false,
+        "direction": "baseline_better",
+        "bootstrap": {
+          "effect_size": -0.11764705882352941,
+          "ci_lo": -0.23529411764705882,
+          "ci_hi": -0.029411764705882353,
+          "ci_level": 0.95,
+          "se": 0.05583523734785506,
+          "p_value": 0.05629437056294371,
+          "n": 34,
+          "n_boot": 10000,
+          "statistic": "mean"
+        },
+        "sign": {
+          "n_pos": 0,
+          "n_neg": 4,
+          "n_effective": 4,
+          "p_value": 0.125,
+          "prop_positive": 0.0
+        },
+        "wilcoxon": {
+          "statistic": 0.0,
+          "z": -1.8,
+          "p_value": 0.07186063822585176,
+          "n_effective": 4
+        },
+        "n_paired": 34,
+        "a_count": 0,
+        "b_count": 4,
+        "discordant_pairs": 4,
+        "a_only": 0,
+        "b_only": 4,
+        "test": "exact McNemar (sign test on paired binary deltas)"
+      }
+    },
+    "speedup": null,
+    "fast_p": {
+      "candidate": {
+        "0.0": 0.0,
+        "0.5": 0.0,
+        "1.0": 0.0,
+        "1.5": 0.0,
+        "2.0": 0.0
+      },
+      "reference": {
+        "0.0": 0.35294117647058826,
+        "0.5": 0.17647058823529413,
+        "1.0": 0.11764705882352941,
+        "1.5": 0.058823529411764705,
+        "2.0": 0.029411764705882353
+      },
+      "delta": {
+        "0.0": -0.35294117647058826,
+        "0.5": -0.17647058823529413,
+        "1.0": -0.11764705882352941,
+        "1.5": -0.058823529411764705,
+        "2.0": -0.029411764705882353
+      }
+    },
+    "counts": {
+      "candidate": {
+        "contract_ok": 33,
+        "compiled": 4,
+        "correct": 0,
+        "timed": 0,
+        "faster": 0,
+        "infra_error": 0
+      },
+      "reference": {
+        "contract_ok": 32,
+        "compiled": 32,
+        "correct": 23,
+        "timed": 12,
+        "faster": 4,
+        "infra_error": 1
+      }
+    },
+    "rates": {
+      "candidate": {
+        "contract_ok": {
+          "k": 33,
+          "n": 34,
+          "rate": 0.9705882352941176,
+          "lo": 0.8508409778365519,
+          "hi": 0.9947892280744034,
+          "z": 1.96
+        },
+        "compiled": {
+          "k": 4,
+          "n": 34,
+          "rate": 0.11764705882352941,
+          "lo": 0.04671370973436122,
+          "hi": 0.26621174796298774,
+          "z": 1.96
+        },
+        "correct": {
+          "k": 0,
+          "n": 34,
+          "rate": 0.0,
+          "lo": 0.0,
+          "hi": 0.10151790621961015,
+          "z": 1.96
+        },
+        "timed": {
+          "k": 0,
+          "n": 34,
+          "rate": 0.0,
+          "lo": 0.0,
+          "hi": 0.10151790621961015,
+          "z": 1.96
+        },
+        "faster": {
+          "k": 0,
+          "n": 34,
+          "rate": 0.0,
+          "lo": 0.0,
+          "hi": 0.10151790621961015,
+          "z": 1.96
+        },
+        "infra_error": {
+          "k": 0,
+          "n": 34,
+          "rate": 0.0,
+          "lo": 0.0,
+          "hi": 0.10151790621961015,
+          "z": 1.96
+        }
+      },
+      "reference": {
+        "contract_ok": {
+          "k": 32,
+          "n": 34,
+          "rate": 0.9411764705882353,
+          "lo": 0.8090606311053629,
+          "hi": 0.9837176869361576,
+          "z": 1.96
+        },
+        "compiled": {
+          "k": 32,
+          "n": 34,
+          "rate": 0.9411764705882353,
+          "lo": 0.8090606311053629,
+          "hi": 0.9837176869361576,
+          "z": 1.96
+        },
+        "correct": {
+          "k": 23,
+          "n": 34,
+          "rate": 0.6764705882352942,
+          "lo": 0.5084258404811939,
+          "hi": 0.8086854867354143,
+          "z": 1.96
+        },
+        "timed": {
+          "k": 12,
+          "n": 34,
+          "rate": 0.35294117647058826,
+          "lo": 0.21487714895296073,
+          "hi": 0.5208634116998658,
+          "z": 1.96
+        },
+        "faster": {
+          "k": 4,
+          "n": 34,
+          "rate": 0.11764705882352941,
+          "lo": 0.04671370973436122,
+          "hi": 0.26621174796298774,
+          "z": 1.96
+        },
+        "infra_error": {
+          "k": 1,
+          "n": 34,
+          "rate": 0.029411764705882353,
+          "lo": 0.005210771925596644,
+          "hi": 0.14915902216344817,
+          "z": 1.96
+        }
+      }
+    },
+    "verdict": {
+      "direction": "reference_better",
+      "significant": true,
+      "p_value": 2.384185791015625e-07,
+      "statement": "correctness 0 vs 23 of 34; 23 discordant pair(s); exact McNemar p=2.38e-07 (significant at alpha=0.05)"
+    }
+  }
+}

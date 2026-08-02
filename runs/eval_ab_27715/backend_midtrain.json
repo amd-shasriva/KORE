@@ -1,0 +1,12 @@
+{
+  "model_id": "/home/shasriva/Kore-RL/KORE/runs/midtrain_14b_frontier",
+  "dtype": "bfloat16",
+  "revision": null,
+  "enable_thinking": false,
+  "padding_side": "left",
+  "config_dtype": "torch.bfloat16",
+  "n_parameters": 14768307200,
+  "vocab_size": 151936,
+  "device": "cuda:0",
+  "backend": "hf-batch"
+}

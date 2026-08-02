@@ -1,0 +1,25 @@
+[06:27:49] ================ pipeline driver start (HEAD 35808350) ================
+[06:27:49] midtrain: adopting running job 28119
+[13:24:07]   midtrain: job 28119 left the queue
+[13:24:07] midtrain: COMPLETE and verified
+[13:24:07] eval[midtrain1ep]: submitting (candidate=/home/shasriva/Kore-RL/KORE/runs/midtrain_14b_1ep arm=midtrain)
+[13:24:48]   eval-midtrain1ep: job 28669 RUNNING
+[14:17:08]   eval-midtrain1ep: job [13:24:48]   eval-midtrain1ep: job 28669 RUNNING
+28669 left the queue
+[14:17:08] eval[midtrain1ep]: COMPLETE -> /home/shasriva/Kore-RL/KORE/runs/eval_ab_midtrain1ep
+[14:17:08] sft: submitting from /home/shasriva/Kore-RL/KORE/runs/midtrain_14b_1ep
+[14:17:51]   sft: job 28829 RUNNING
+[16:25:23] ================ pipeline driver start (HEAD a34d6fe4) ================
+[16:25:24] midtrain: submitting
+[16:26:52] ================ pipeline driver start (HEAD 91c58766) ================
+[16:26:52] midtrain: adopting running job 28980
+[16:32:31] ================ pipeline driver start (HEAD e95ae557) ================
+[16:32:33] midtrain: submitting
+[16:33:13]   midtrain: attempt 1 held, retrying
+[16:37:53]   midtrain: attempt 2 held, retrying
+[16:38:06] ================ pipeline driver start (HEAD 2fddaba8) ================
+[16:38:06] midtrain: submitting
+[16:38:32]   midtrain: attempt 1 held, retrying
+[16:58:06] ================ pipeline driver start (HEAD 65d8c035) ================
+[16:58:06] midtrain: segment 1 (walltime 03:00:00)
+[16:58:32]   midtrain: job 29086 RUNNING

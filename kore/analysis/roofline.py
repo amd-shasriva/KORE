@@ -270,7 +270,7 @@ class PhysicalModel:
 
     def fingerprint_payload(self) -> dict[str, Any]:
         return {
-            "schema": "kore.physical-model.v1",
+            "schema": "kore.physical-model.v2",
             "architecture": self.architecture,
             "sku": self.sku,
             "calibration_source": self.calibration_source,
@@ -279,6 +279,12 @@ class PhysicalModel:
             "hbm_bytes_per_s": self.hbm_bytes_per_s,
             "compute_flops_per_s": dict(sorted(self.compute_flops_per_s.items())),
             "runtime": dict(sorted(self.runtime.items())),
+            # A roofline is peaks AND a work model. v1 fingerprinted only the
+            # peaks, so `--expect-model-fingerprint` would happily accept a run
+            # whose FLOPs/bytes estimator had been rewritten underneath it --
+            # which is exactly what widening the estimator to cover attention
+            # and MoE did. Binding the estimator closes that.
+            "work_model_digest": work_model_digest(),
         }
 
     @property
@@ -483,6 +489,23 @@ def _numel(dims: Mapping[str, int]) -> Optional[int]:
     return out
 
 
+def work_model_digest() -> str:
+    """Content digest of the FLOPs/bytes estimator itself.
+
+    Bound into the model fingerprint so a claim cannot be reproduced against a
+    silently different work model. Digesting the source of the estimator (and
+    the dtype helpers it depends on) rather than an enumeration of supported
+    operations means adding, removing, OR re-deriving an operation all move it.
+    """
+    import inspect
+
+    payload = "\n".join(
+        inspect.getsource(fn)
+        for fn in (estimate_work, canonical_dtype, dtype_bytes, _dim, _numel)
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 def estimate_work(
     operation: str,
     shape: ShapeLike,
@@ -502,13 +525,106 @@ def estimate_work(
     elem = dtype_bytes(dtype)
     if not op or canonical is None or dims is None or elem is None:
         return None
+    def work(flops: float, by: float, kind: str, *assumptions: str) -> WorkEstimate:
+        return WorkEstimate(op, canonical, flops, by, kind, tuple(assumptions))
+
+    # ---------------------------------------------------------------- #
+    # Attention / MoE / routing.
+    #
+    # These were blanket-excluded as indefensible, which is true of the
+    # family in general but not of these specific forms. Attention has a
+    # published mandatory-traffic bound: a tiled (FlashAttention-style)
+    # implementation never writes the S x S score matrix to HBM, so the
+    # floor is exactly Q + K + V read and O written, and the two matmuls
+    # give exact FLOPs. Excluding them dropped precisely the operators
+    # that dominate real serving from every physics claim, so each form
+    # below is modelled explicitly and everything else still gets None.
+    # ---------------------------------------------------------------- #
+    b = _dim(dims, "B", "batch")
+    h = _dim(dims, "H", "heads")
+    kv = _dim(dims, "KV", "kv_heads")
+    d = _dim(dims, "D", "head_dim")
+
+    if op in {"flash_attn_prefill", "flash_attn_noncausal_prefill",
+              "flash_attn_mha_prefill", "flash_attn_mqa_prefill"}:
+        s = _dim(dims, "S", "seqlen")
+        if not (b and h and kv and d and s):
+            return None
+        # Causal halves both matmuls; the non-causal task is a separate name.
+        causal = "noncausal" not in op
+        matmul_flops = 4.0 * b * h * (s ** 2) * d
+        flops = matmul_flops * (0.5 if causal else 1.0)
+        by = (2.0 * b * h * s * d + 2.0 * b * kv * s * d) * elem
+        return work(
+            flops, by, "mandatory-lower-bound",
+            "tiled attention: the S x S scores never reach HBM",
+            "Q read once, K/V read once (GQA: KV heads, not H)",
+            "O written once",
+            "causal masking halves both matmuls" if causal else "no causal mask",
+            "softmax normalization is lower-order and excluded from FLOPs",
+        )
+
+    if op in {"flash_attn_decode", "paged_attn_decode", "flash_attn_mqa_decode"}:
+        skv = _dim(dims, "Skv", "S_kv", "kv_len", "S")
+        if not (b and h and kv and d and skv):
+            return None
+        # One query position per sequence; the KV cache read dominates.
+        flops = 4.0 * b * h * skv * d
+        by = (2.0 * b * h * d + 2.0 * b * kv * skv * d) * elem
+        assumptions = [
+            "single decode step: one query position per sequence",
+            "K/V cache read once (GQA: KV heads, not H)",
+            "scores never reach HBM",
+        ]
+        if op.startswith("paged"):
+            assumptions.append(
+                "paged KV: block table indirection is metadata and excluded; "
+                "a partially filled final page reads no more than one extra block"
+            )
+        return work(flops, by, "mandatory-lower-bound", *assumptions)
+
+    if op in {"topk_softmax", "topk_softmax_router"}:
+        m_r, e_r = _dim(dims, "M", "m", "tokens"), _dim(dims, "E", "experts")
+        k_r = _dim(dims, "topk", "k")
+        if not (m_r and e_r and k_r):
+            return None
+        # Read the logits once; write the selected weights plus int32 indices.
+        by = m_r * e_r * elem + m_r * k_r * elem + m_r * k_r * 4.0
+        return work(
+            5.0 * m_r * e_r, by, "mandatory-lower-bound",
+            "softmax FLOPs counted as for the standalone softmax model",
+            "selection is comparison-based and contributes no FLOPs",
+            "int32 indices written alongside the gate weights",
+        )
+
+    if op in {"fused_moe_silu", "fused_moe_swiglu"}:
+        m_r, e_r = _dim(dims, "M", "m", "tokens"), _dim(dims, "E", "experts")
+        k_r = _dim(dims, "topk", "k")
+        d_r, i_r = _dim(dims, "D", "hidden"), _dim(dims, "I", "intermediate")
+        if not (m_r and e_r and k_r and d_r and i_r):
+            return None
+        # SwiGLU per token-expert: gate (D->I), up (D->I), down (I->D).
+        flops = 6.0 * m_r * k_r * d_r * i_r
+        # Weight traffic dominates at serving batch sizes and is the whole
+        # reason this operator is interesting: at most every expert is
+        # touched, and each touched expert's 3*I*D parameters must be read
+        # at least once.
+        activated = min(m_r * k_r, e_r)
+        by = (2.0 * m_r * d_r + 3.0 * activated * i_r * d_r) * elem
+        return work(
+            flops, by, "mandatory-lower-bound",
+            "SwiGLU expert: gate + up + down = 3 * I * D parameters",
+            "each activated expert's weights read exactly once (perfect grouping)",
+            f"activated experts = min(M*topk, E) = {activated}",
+            "routing metadata and the scatter/gather index traffic excluded",
+        )
+
+    # Everything else in these families stays unavailable: backward passes,
+    # MLA, unnamed attention or MoE variants, and generic routers.
     if "backward" in op or op.endswith("_bwd") or "attn" in op or "attention" in op or "moe" in op:
         return None
     if "topk" in op or "router" in op:
         return None
-
-    def work(flops: float, by: float, kind: str, *assumptions: str) -> WorkEstimate:
-        return WorkEstimate(op, canonical, flops, by, kind, tuple(assumptions))
 
     # GEMM: low-precision block scales/metadata are not yet modeled.
     if "gemm" in op or "matmul" in op or op in {"mm", "bmm"}:

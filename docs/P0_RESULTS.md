@@ -2,6 +2,12 @@
 
 **Verdict: `INTEGRITY_ONLY`. All three preregistered checks FAIL under the v2 analysis.**
 
+Three independent runs now agree: a re-analysis of the stored datasheet-peak artifact, a
+re-measurement on calibrated peaks over ten operators, and a re-measurement over **all fifteen**
+once attention and MoE became modellable. Coverage was the strongest remaining objection and it is
+now closed — including the operators that matter most made the model *worse*, and leave-one-family-out
+transfer on MoE is R² = −384. See "Full-coverage replication" below for the definitive result.
+
 An earlier revision of this document reported `PARTIAL`, with check (b) as a "decisive PASS" at
 R² = 0.978. That reading does not survive the controls this repository now implements. The stored
 artifact `data/p0_study_final.json` is a v1-schema report; re-running the current adjudicator
@@ -59,7 +65,69 @@ import json; from kore.analysis.p0_sol import reanalyze_report
 print(json.dumps(reanalyze_report(json.load(open('data/p0_study_final.json'))), indent=2)[:4000])"
 ```
 
-## Independent replication on measured peaks (`data/p0_study_calibrated.json`)
+## Full-coverage replication: attention and MoE included (`data/p0_study_v2_attention_moe.json`)
+
+The strongest objection to everything below was coverage. Five of the fifteen
+operators — `fused_moe_silu`, `topk_softmax`, `flash_attn_decode`,
+`flash_attn_prefill`, `paged_attn_decode` — had no roofline at all, because
+`estimate_work` blanket-excluded attention and MoE as indefensible. What
+survived to be tested was ten memory- or compute-bound primitives, and the
+operators that dominate real serving were simply absent.
+
+That exclusion was too broad. A tiled attention implementation never writes the
+S×S score matrix to HBM, so its mandatory traffic is exactly Q, K, V read and O
+written, and the two matmuls give exact FLOPs — defensible in precisely the
+sense this module requires. Those forms are now modelled (see
+`kore.analysis.roofline.estimate_work`), coverage is **15/15**, and the study
+was re-measured on the same calibrated peaks under the v2 fingerprint:
+
+```
+(a) roofline beyond Tcand : rho = 0.5682  Tcand-only = 0.7372  delta = -0.1691  q = 0.908 -> FAIL
+(b) normalized held-out   : R2  = 0.0230  Tcand-only  = -0.1915                  q = 0.005 -> FAIL
+    raw in-sample         : named 0.9597 | Tcand-only 0.9948 | null median 0.9711 (p = 0.992)
+(c) collection-order      : frac = 0.4190  43 pairs                              q = 0.908 -> FAIL
+DECISION: INTEGRITY_ONLY        135 measures, 15 rooflines, 0 unmodeled
+```
+
+**Adding the operators that matter most made the model worse, not better.** Check
+(a)'s deficit widens from −0.109 to −0.169 and the normalized held-out R² falls
+from 0.056 to 0.023. The raw in-sample R² of 0.960 again sits *below* the
+denominator-preserving null's median of 0.971, and the permutation test now
+fails to reject at p = 0.992 — random regressors sharing the same denominator
+are essentially always better.
+
+Leave-one-family-out transfer is where this becomes unambiguous:
+
+| held-out family | n | R² |
+| --- | ---: | ---: |
+| moe | 18 | **−384.0** |
+| positional | 9 | −24.7 |
+| norm | 27 | −7.2 |
+| quant | 9 | −1.6 |
+| attention | 27 | −1.3 |
+| reduction | 9 | −1.0 |
+| gemm | 18 | −0.1 |
+| activation | 18 | +0.06 |
+
+MoE is off the scale by two orders of magnitude, and that is physically
+coherent rather than a fitting artifact: a MoE kernel's cost is dominated by
+expert-weight traffic whose volume depends on the *routing*, which a static
+roofline cannot see. The model does not merely fail to generalize across
+families — on the family whose cost structure it least resembles, it is
+catastrophically wrong. All eight families return `FAIL`.
+
+Two studies on ten operators and one on all fifteen now agree on
+`INTEGRITY_ONLY`. The verdict is not an artifact of stale constants, and it is
+not an artifact of missing coverage.
+
+> **Fingerprint note.** The v1 payload bound only the peaks, so
+> `--expect-model-fingerprint` would have accepted a run whose FLOPs/bytes
+> estimator had been rewritten underneath it. It is now v2 and binds a content
+> digest of the estimator as well. `data/calibration_v1.json` was reissued under
+> the v2 fingerprint `sha256:74695c10…`; its measured peaks are unchanged and
+> were not re-measured. The `sha256:a6e01795…` cited below is the v1 value.
+
+## Earlier replication on measured peaks, 10 operators (`data/p0_study_calibrated.json`)
 
 The re-analysis above adjudicates a *stored* v1 artifact whose peaks were datasheet numbers. The
 obvious objection is that the model only fails because it was fed the wrong constants. It was
@@ -99,11 +167,11 @@ Two further findings sharpen the negative result:
 - **Leave-one-family-out transfer is catastrophic.** Holding out a family and predicting it scores
   activation +0.124, gemm −0.224, reduction −4.39, norm −5.23, quant −5.43, positional −14.87. The
   fit is family-local; it does not generalize to an operator class it has not seen.
-- **The model cannot express the operators that matter most.** Five of the fifteen requested
-  operators — `fused_moe_silu`, `topk_softmax`, `flash_attn_decode`, `flash_attn_prefill`,
-  `paged_attn_decode` — have no roofline at all and were dropped as *unsupported model*. What
-  survives to be tested is ten memory- or compute-bound primitives. Attention and MoE, the shapes
-  that dominate real LLM serving, are outside the model's domain entirely.
+- **At the time of this run the model could not express the operators that matter most.** Five of
+  the fifteen requested operators — `fused_moe_silu`, `topk_softmax`, `flash_attn_decode`,
+  `flash_attn_prefill`, `paged_attn_decode` — had no roofline and were dropped as *unsupported
+  model*, leaving ten memory- or compute-bound primitives. That gap is now closed: see the
+  full-coverage section above, where all fifteen are modelled and the verdict is unchanged.
 
 Both runs agree on `INTEGRITY_ONLY`, one from a stored artifact on datasheet peaks and one measured
 fresh on calibrated peaks under a verified fingerprint. The verdict is not an artifact of stale

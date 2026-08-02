@@ -95,6 +95,28 @@ export HF_HOME=/home/shasriva/.cache/huggingface
 export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
 # Intra-node RCCL only (one node, no IB fabric to pin).
 export NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+
+# Compile scratch. Triton and Inductor default to the compute node's local /tmp,
+# which is small and shared: mid-train job 28059 died on all 8 ranks within
+# seconds with "LLVM ERROR: IO failure on output stream: No space left on
+# device" while /home had 1.1 TB free. Node-local is faster when it has room, so
+# prefer it and fall back to shared home, logging which so a repeat is
+# diagnosable.
+KORE_SCRATCH_MIN_GB="${KORE_SCRATCH_MIN_GB:-60}"
+_avail="$(df -BG --output=avail /tmp 2>/dev/null | tail -1 | tr -dc '0-9')"; _avail="${_avail:-0}"
+if [ "$_avail" -ge "$KORE_SCRATCH_MIN_GB" ]; then
+    KORE_SCRATCH="/tmp/kore-${SLURM_JOB_ID:-$$}"
+    echo "[sft-1node] compile scratch: node-local /tmp (${_avail}G free)"
+else
+    KORE_SCRATCH="$REPO/runs/.scratch/${SLURM_JOB_ID:-$$}"
+    echo "[sft-1node] compile scratch: shared home (node /tmp only ${_avail}G < ${KORE_SCRATCH_MIN_GB}G)"
+fi
+mkdir -p "$KORE_SCRATCH/tmp" "$KORE_SCRATCH/triton" "$KORE_SCRATCH/inductor"
+export TMPDIR="$KORE_SCRATCH/tmp"
+export TRITON_CACHE_DIR="$KORE_SCRATCH/triton"
+export TORCHINDUCTOR_CACHE_DIR="$KORE_SCRATCH/inductor"
+trap 'rm -rf "$KORE_SCRATCH"' EXIT
+
 export FSDP_CPU_RAM_EFFICIENT_LOADING=1
 # report, NEVER strict: there is no measured peak profile for this workload, and
 # preflight cannot join DRM cards to HIP ordinals without KORE_HIP_INVENTORY_JSON,

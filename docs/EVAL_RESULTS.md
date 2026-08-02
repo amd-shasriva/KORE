@@ -535,9 +535,10 @@ Whole suite after this work: **7,972 passed, 4 skipped, 58 deselected** in 142 s
   valid syntax; none was tried, so "the checkpoint cannot emit valid Triton" is
   established only under **this** decoding configuration. That configuration is the
   one the campaign's own bake-off uses, which is why it was the one measured.
-- **A real general-capability verdict.** The retention smoke sets are 10-20 items
-  and the general LM probe is 578 tokens. Both point the same way as of now (the
-  loss probe significantly, the accuracy probe not at all), but the full splits need
+- **A real general-capability verdict.** The retention smoke sets are 12 MMLU items
+  and 3 HumanEval items; the general LM probe is 578 tokens. Both instruments point
+  the same way — the loss probe significantly (p = 0.037), the accuracy probe in the
+  same direction but far short of significance (p = 0.25) — and the full splits need
   HuggingFace egress this node does not have. Until then the section-2 regression is
   a signal, not a measurement.
 - **How much of result (1) is generalization versus template acquisition.**

@@ -532,15 +532,22 @@ _E2M1_LEVELS = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
 
 
 @triton.jit
-def _qx_q_kernel(x_ptr, inv_ptr, o_ptr, n, LO, HI, ROUND: tl.constexpr, BLOCK: tl.constexpr):
+def _qx_q_kernel(x_ptr, s_ptr, o_ptr, n, LO, HI, ROUND: tl.constexpr, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     m = offs < n
     x = tl.load(x_ptr + offs, mask=m, other=0.0).to(tl.float32)
-    inv = tl.load(inv_ptr + offs, mask=m, other=0.0).to(tl.float32)
-    v = x * inv
+    s = tl.load(s_ptr + offs, mask=m, other=1.0).to(tl.float32)
+    # DIVIDE by the scale, as the oracle does.  Multiplying by a precomputed
+    # 1/scale rounds twice and shifts values across the quantizer's rounding
+    # boundary, which for a packed int4 byte shows up as a 16-code jump.
+    v = x / s
     if ROUND:
-        v = tl.where(v >= 0, tl.floor(v + 0.5), tl.ceil(v - 0.5))
+        # round-half-to-EVEN, matching the torch.round oracle (see
+        # kore.tasks._genops.tl_round_half_even); half-away-from-zero is off by
+        # one code on every exact tie, of which a quantized tensor has ~0.3%.
+        d = tl.floor(v + 0.5)
+        v = tl.where(d - v == 0.5, 2.0 * tl.floor(d * 0.5), d)
     v = tl.minimum(tl.maximum(v, LO), HI)
     tl.store(o_ptr + offs, v.to(o_ptr.dtype.element_ty), mask=m)
 
@@ -555,13 +562,13 @@ def _qx_dq_kernel(c_ptr, s_ptr, o_ptr, n, BLOCK: tl.constexpr):
     tl.store(o_ptr + offs, (c * s).to(o_ptr.dtype.element_ty), mask=m)
 
 
-def _q_map(xf, inv, lo, hi, do_round, out_dtype):
-    xf, inv = xf.contiguous(), inv.contiguous()
+def _q_map(xf, scale, lo, hi, do_round, out_dtype):
+    xf, scale = xf.contiguous(), scale.contiguous()
     o = torch.empty(xf.shape, device=xf.device, dtype=out_dtype)
     n = xf.numel()
     BLOCK = 1024
     grid = (triton.cdiv(n, BLOCK),)
-    _qx_q_kernel[grid](xf, inv, o, n, lo, hi, ROUND=(1 if do_round else 0), BLOCK=BLOCK)
+    _qx_q_kernel[grid](xf, scale, o, n, lo, hi, ROUND=(1 if do_round else 0), BLOCK=BLOCK)
     return o
 
 
@@ -599,38 +606,38 @@ def _qz_lines(v: str, fmt: str, gran: str) -> list[str]:
     outdt = "torch.float8_e4m3fn" if fmt == "fp8" else "torch.int8"
     rnd = "False" if fmt == "fp8" else "True"
     lo, hi = f"(-{mx})", mx
-    qm = f"_q_map(xf, inv, {lo}, {hi}, {rnd}, {outdt})"
+    qm = f"_q_map(xf, sc, {lo}, {hi}, {rnd}, {outdt})"
     L = [f"    xf = {v}.float()"]
     if gran == "tensor":
         L += ["    amax = xf.abs().amax().clamp(min=1e-12)",
               f"    scale = (amax / {mx}).reshape(())",
-              "    inv = (1.0 / scale).expand_as(xf)",
+              "    sc = scale.expand_as(xf)",
               f"    codes = {qm}",
               "    scale = scale.to(torch.float32)"]
     elif gran == "token":
         L += ["    amax = xf.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)",
               f"    scale = amax / {mx}",
-              "    inv = (1.0 / scale).expand_as(xf)",
+              "    sc = scale.expand_as(xf)",
               f"    codes = {qm}",
               "    scale = scale.to(torch.float32)"]
     elif gran == "channel":
         L += ["    amax = xf.abs().amax(dim=0, keepdim=True).clamp(min=1e-12)",
               f"    scale = amax / {mx}",
-              "    inv = (1.0 / scale).expand_as(xf)",
+              "    sc = scale.expand_as(xf)",
               f"    codes = {qm}",
               "    scale = scale.to(torch.float32)"]
     elif gran == "block128":
         L += ["    M, K = xf.shape",
               "    xb = xf.reshape(M, K // BLK, BLK)",
               f"    sb = xb.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / {mx}",
-              "    inv = (1.0 / sb).expand(M, K // BLK, BLK).reshape(M, K)",
+              "    sc = sb.expand(M, K // BLK, BLK).reshape(M, K)",
               f"    codes = {qm}",
               "    scale = sb.squeeze(-1).to(torch.float32)"]
     else:  # block2d
         L += ["    M, K = xf.shape",
               "    xb = xf.reshape(M // BLK, BLK, K // BLK, BLK)",
               f"    sb = xb.abs().amax(dim=(1, 3), keepdim=True).clamp(min=1e-12) / {mx}",
-              "    inv = (1.0 / sb).expand(M // BLK, BLK, K // BLK, BLK).reshape(M, K)",
+              "    sc = sb.expand(M // BLK, BLK, K // BLK, BLK).reshape(M, K)",
               f"    codes = {qm}",
               "    scale = sb.squeeze(1).squeeze(-1).to(torch.float32)"]
     return L
@@ -660,9 +667,9 @@ def _seed_entry(cfg: dict, op: str) -> str:
         L += [_dq_scale_full(gran), "    return _dq_map(codes, sf, torch.bfloat16)"]
     elif kind == "kvquant":
         L += [f"    ks = k.float().abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / {mx}",
-              f"    kq = _q_map(k.float(), (1.0 / ks).expand_as(k.float()), {lo}, {hi}, {rnd}, {outdt})",
+              f"    kq = _q_map(k.float(), ks.expand_as(k.float()), {lo}, {hi}, {rnd}, {outdt})",
               f"    vs = v.float().abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / {mx}",
-              f"    vq = _q_map(v.float(), (1.0 / vs).expand_as(v.float()), {lo}, {hi}, {rnd}, {outdt})",
+              f"    vq = _q_map(v.float(), vs.expand_as(v.float()), {lo}, {hi}, {rnd}, {outdt})",
               "    return kq, ks.to(torch.float32), vq, vs.to(torch.float32)"]
     elif kind == "kvdequant":
         L += ["    ksf = ksc.float().expand(kq.shape[0], kq.shape[1])",
@@ -672,8 +679,8 @@ def _seed_entry(cfg: dict, op: str) -> str:
         L += [f"    wf = w.float(); N, K = wf.shape; g = {group}",
               "    wb = wf.reshape(N, K // g, g)",
               "    sb = wb.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 7.0",
-              "    inv = (1.0 / sb).expand(N, K // g, g).reshape(N, K)",
-              "    qf = _q_map(wf, inv, -8.0, 7.0, True, torch.float32)",
+              "    sc = sb.expand(N, K // g, g).reshape(N, K)",
+              "    qf = _q_map(wf, sc, -8.0, 7.0, True, torch.float32)",
               "    code = (qf.to(torch.int32) + 8).to(torch.uint8)",
               "    packed = (code[:, 0::2] | (code[:, 1::2] << 4)).contiguous()",
               "    return packed, sb.squeeze(-1).to(torch.float32)"]
@@ -690,8 +697,8 @@ def _seed_entry(cfg: dict, op: str) -> str:
               "    amax = xb.abs().amax(dim=-1, keepdim=True).clamp(min=1e-20)",
               "    exp = (torch.floor(torch.log2(amax)) - E2M1_EMAX).clamp(-127.0, 127.0)",
               "    e8m0 = (exp + 127.0).to(torch.uint8)",
-              "    inv = (1.0 / torch.exp2(exp)).expand(R, K // MX_BLOCK, MX_BLOCK).reshape(R, K)",
-              "    xqf = _q_map(xf, inv, -E2M1_MAX, E2M1_MAX, False, torch.float32)",
+              "    sc = torch.exp2(exp).expand(R, K // MX_BLOCK, MX_BLOCK).reshape(R, K)",
+              "    xqf = _q_map(xf, sc, -E2M1_MAX, E2M1_MAX, False, torch.float32)",
               "    codes = _e2m1_codes(xqf)",
               "    packed = (codes[:, 0::2] | (codes[:, 1::2] << 4)).contiguous()",
               "    return packed, e8m0.reshape(R, K // MX_BLOCK).contiguous()"]
@@ -709,31 +716,31 @@ def _seed_entry(cfg: dict, op: str) -> str:
         L += [f"    xf = x.float() / smooth.float().reshape(1, -1)",
               "    amax = xf.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)",
               f"    scale = amax / {mx}",
-              f"    codes = _q_map(xf, (1.0 / scale).expand_as(xf), {lo}, {hi}, {rnd}, {outdt})",
+              f"    codes = _q_map(xf, scale.expand_as(xf), {lo}, {hi}, {rnd}, {outdt})",
               "    return codes, scale.to(torch.float32)"]
     elif kind == "double":
         L += ["    xf = x.float(); M, K = xf.shape",
               "    xb = xf.reshape(M, K // BLK, BLK)",
               f"    sb = xb.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / {mx}",
-              "    inv = (1.0 / sb).expand(M, K // BLK, BLK).reshape(M, K)",
-              f"    codes = _q_map(xf, inv, {lo}, {hi}, {rnd}, {outdt})",
+              "    sc = sb.expand(M, K // BLK, BLK).reshape(M, K)",
+              f"    codes = _q_map(xf, sc, {lo}, {hi}, {rnd}, {outdt})",
               "    bscale = sb.squeeze(-1).to(torch.float32)",
               "    meta = (bscale.abs().amax().clamp(min=1e-12) / FP8_MAX).reshape(())",
-              "    sc_inv = (1.0 / meta).expand_as(bscale)",
-              "    sc_codes = _q_map(bscale, sc_inv, -FP8_MAX, FP8_MAX, False, torch.float8_e4m3fn)",
+              "    mc = meta.expand_as(bscale)",
+              "    sc_codes = _q_map(bscale, mc, -FP8_MAX, FP8_MAX, False, torch.float8_e4m3fn)",
               "    return codes, sc_codes, meta.to(torch.float32)"]
     elif kind == "stochastic" and fmt == "int8":
         L += ["    xf = x.float()",
               "    amax = xf.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)",
               "    scale = amax / 127.0",
-              "    v = _q_map(xf, (1.0 / scale).expand_as(xf), -1e30, 1e30, False, torch.float32)",
+              "    v = _q_map(xf, scale.expand_as(xf), -1e30, 1e30, False, torch.float32)",
               "    codes = torch.floor(v + noise).clamp(-127.0, 127.0).to(torch.int8)",
               "    return codes, scale.to(torch.float32)"]
     elif kind == "stochastic":  # fp8
         L += ["    xf = x.float()",
               "    amax = xf.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)",
               "    scale = amax / 448.0",
-              "    v = _q_map(xf, (1.0 / scale).expand_as(xf), -FP8_MAX, FP8_MAX, False, torch.float32)",
+              "    v = _q_map(xf, scale.expand_as(xf), -FP8_MAX, FP8_MAX, False, torch.float32)",
               "    lv = _fp8_levels(xf.device)",
               "    hi_idx = torch.searchsorted(lv, v, right=False).clamp(max=lv.numel() - 1)",
               "    lo_idx = (hi_idx - 1).clamp(min=0)",

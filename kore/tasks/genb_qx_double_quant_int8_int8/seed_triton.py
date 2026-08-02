@@ -18,15 +18,22 @@ _E2M1_LEVELS = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
 
 
 @triton.jit
-def _qx_q_kernel(x_ptr, inv_ptr, o_ptr, n, LO, HI, ROUND: tl.constexpr, BLOCK: tl.constexpr):
+def _qx_q_kernel(x_ptr, s_ptr, o_ptr, n, LO, HI, ROUND: tl.constexpr, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     m = offs < n
     x = tl.load(x_ptr + offs, mask=m, other=0.0).to(tl.float32)
-    inv = tl.load(inv_ptr + offs, mask=m, other=0.0).to(tl.float32)
-    v = x * inv
+    s = tl.load(s_ptr + offs, mask=m, other=1.0).to(tl.float32)
+    # DIVIDE by the scale, as the oracle does.  Multiplying by a precomputed
+    # 1/scale rounds twice and shifts values across the quantizer's rounding
+    # boundary, which for a packed int4 byte shows up as a 16-code jump.
+    v = x / s
     if ROUND:
-        v = tl.where(v >= 0, tl.floor(v + 0.5), tl.ceil(v - 0.5))
+        # round-half-to-EVEN, matching the torch.round oracle (see
+        # kore.tasks._genops.tl_round_half_even); half-away-from-zero is off by
+        # one code on every exact tie, of which a quantized tensor has ~0.3%.
+        d = tl.floor(v + 0.5)
+        v = tl.where(d - v == 0.5, 2.0 * tl.floor(d * 0.5), d)
     v = tl.minimum(tl.maximum(v, LO), HI)
     tl.store(o_ptr + offs, v.to(o_ptr.dtype.element_ty), mask=m)
 
@@ -41,13 +48,13 @@ def _qx_dq_kernel(c_ptr, s_ptr, o_ptr, n, BLOCK: tl.constexpr):
     tl.store(o_ptr + offs, (c * s).to(o_ptr.dtype.element_ty), mask=m)
 
 
-def _q_map(xf, inv, lo, hi, do_round, out_dtype):
-    xf, inv = xf.contiguous(), inv.contiguous()
+def _q_map(xf, scale, lo, hi, do_round, out_dtype):
+    xf, scale = xf.contiguous(), scale.contiguous()
     o = torch.empty(xf.shape, device=xf.device, dtype=out_dtype)
     n = xf.numel()
     BLOCK = 1024
     grid = (triton.cdiv(n, BLOCK),)
-    _qx_q_kernel[grid](xf, inv, o, n, lo, hi, ROUND=(1 if do_round else 0), BLOCK=BLOCK)
+    _qx_q_kernel[grid](xf, scale, o, n, lo, hi, ROUND=(1 if do_round else 0), BLOCK=BLOCK)
     return o
 
 
@@ -82,10 +89,10 @@ def qx_double_quant_int8(x):
     xf = x.float(); M, K = xf.shape
     xb = xf.reshape(M, K // BLK, BLK)
     sb = xb.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / INT8_MAX
-    inv = (1.0 / sb).expand(M, K // BLK, BLK).reshape(M, K)
-    codes = _q_map(xf, inv, (-INT8_MAX), INT8_MAX, True, torch.int8)
+    sc = sb.expand(M, K // BLK, BLK).reshape(M, K)
+    codes = _q_map(xf, sc, (-INT8_MAX), INT8_MAX, True, torch.int8)
     bscale = sb.squeeze(-1).to(torch.float32)
     meta = (bscale.abs().amax().clamp(min=1e-12) / FP8_MAX).reshape(())
-    sc_inv = (1.0 / meta).expand_as(bscale)
-    sc_codes = _q_map(bscale, sc_inv, -FP8_MAX, FP8_MAX, False, torch.float8_e4m3fn)
+    mc = meta.expand_as(bscale)
+    sc_codes = _q_map(bscale, mc, -FP8_MAX, FP8_MAX, False, torch.float8_e4m3fn)
     return codes, sc_codes, meta.to(torch.float32)

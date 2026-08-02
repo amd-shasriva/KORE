@@ -216,49 +216,99 @@ Current sweep (MI350X / gfx950, 1,052 tasks):
 
 | Verdict | Tasks | Share |
 | --- | ---: | ---: |
-| `PASS` — seed correct at its declared SNR gate | 948 | 90.1% |
-| `FAIL_CORRECTNESS` | 100 | 9.5% |
-| `INFRA` — resource fault, **not** a task defect | 4 | 0.4% |
+| `PASS` — seed correct at its declared SNR gate | 1,052 | 100% |
+| `FAIL_CORRECTNESS` | 0 | — |
+| `INFRA` — resource fault, **not** a task defect | 0 | — |
 
-The 100 correctness failures are not uniform, and the split is what matters:
+### How the corpus got clean
 
-- **73 have SNR at or ABOVE their declared gate** (30.2–92.0 dB) and fail only
-  `torch.allclose`'s elementwise tolerance. The drivers hard-code `atol=rtol=1e-2`,
-  which is fp32-calibrated; applied to bf16/fp16/fp8 outputs it rejects kernels the
-  SNR gate accepts (e.g. a bf16 attention-backward at 57.9 dB failing on
-  `max_diff 0.03125`). This is a tolerance-calibration defect, not wrong math.
-- **15 report −999 dB** (zero signal: structurally broken), concentrated in
-  sliding-window attention (`genb_attn2_window*`). All 15 are `max_diff: inf`.
-- **11 fall short of their gate** by more than 5 dB (4.7–24.6 dB against 30/40 dB
-  gates) and are genuinely incorrect.
-- **1 sits within 5 dB of its gate** (`genb_red_topk256_fp16`, 29.67 dB vs 30.0).
+An earlier sweep read 948 `PASS` / 100 `FAIL_CORRECTNESS` / 4 `INFRA`. Those 104 were
+three unrelated problems, and only one of them was about tolerance.
 
-A previous sweep recorded 937 pass / 111 fail. Twelve of those failures were an
-`AttributeError` on `tl.math.tanh`, which Triton 3.6 removed — a toolchain break,
-not a task defect. Replacing it with the repo's libdevice-free `2·sigmoid(2x) − 1`
-form (max abs error 1.79e-07 vs `torch.tanh`) recovered **11 tasks with zero
-regressions**.
+**73 correct kernels rejected by a mis-calibrated tolerance.** The driver hard-coded
+`atol = rtol = 1e-2` — an fp32 number applied to every output format. It demands 1%
+relative agreement from `fp8_e4m3`, whose own relative resolution is 12.5%, so *no*
+fp8 kernel could ever satisfy it; and 0.01 absolute agreement from an int8 code, where
+the quantizer's own rounding boundary moves a code by a full LSB. The check is now
+derived from the arithmetic instead (`kore/tasks/_genops.py`,
+`correctness_tolerance`): two results may differ by `CORRECTNESS_ULP_STEPS` (2)
+representable steps of the *output format*, scaled by the oracle's peak magnitude.
+Peak rather than RMS because the error of a reduction is bounded by the magnitude of
+the **accumulation**, not of the result — an element that is small only because its
+terms cancelled still carries the full absolute error, so a relative `rtol·|r|`
+tolerance shrinks exactly where the error does not. Integer *codes* must match
+exactly unless the op declares that its quantizer consumes a computed value;
+integer *indices* must match exactly unless the op declares a monotone-CDF selection
+boundary. Measured across this corpus, correct seeds sit at 0.0–0.8 steps.
 
-The 4 `INFRA` cases are all 256-expert MoE at `D=4096, I=14336`. Their expert weights
-are ~60 GB per tensor in bf16, and `_randn` stages an fp32 buffer (plus a second for
-`* scale`) before downcasting — ~240 GB transient on a 252 GiB card. This is a
-shape-authoring defect, not a node fault; `_fused_moe_fp32` was fixed to cast one
-expert at a time (bit-identical, 168 GB → 84 GB) but the input-generation staging
-remains. Chunking `_randn` would change the seeded RNG stream for every task in the
-suite, so it needs deliberate treatment.
+**31 real defects, each fixed in the generator** (not in a threshold):
 
-**Treat a task's verdict as evidence, not as eligibility.** Nothing yet gates training
-on this artifact; the registry still admits all 1,289 train tasks. Wiring the verdict
-into eligibility is tracked work.
+| Root cause | Where | Tasks |
+| --- | --- | ---: |
+| `-inf - (-inf) = NaN` in the online-softmax rescale when a query row's first key block is entirely outside its window | `attn_ext.py`, `attn2_ext.py` | 12 |
+| Same NaN in the streaming softmax when the top-k mask leaves the first block empty | `sample_ext.py` | 6 |
+| Streaming top-k emitted DISTINCT values, not the top-k **with multiplicity** | `reduce_ext.py` | 8 |
+| MoE router renormalized through a global-memory round trip that raced its own scalar stores | `moe_ext.py` | 4 |
+| Gumbel-max rounded the perturbed logits to the task dtype before `argmax`, tying the top candidates | `sample_ext.py` | 2 |
+| LRU recurrence coefficient built in bf16, then amplified by `|λ|/(1−|λ|)` over 2,048 steps | `ssm_ext.py` | 2 |
+| Quantizer seeds rounded ties **away from zero** and scaled by a **reciprocal**; the oracle rounds to even and divides | `quant_ext.py`, `norm_ext.py`, `fused_ext.py` | 17 |
+| GroupNorm **oracle** inherited a wrong `dweight`/`dbias` from `torch.native_group_norm_backward` | `norm_ext.py` | 2 |
+
+The GroupNorm one is worth stating plainly: the seed was right and the *oracle* was
+wrong. On ROCm 7.0 / torch 2.10 / gfx950, `native_group_norm_backward` returns
+incorrect `dweight` and `dbias` whenever the batch dimension exceeds 128 — verified
+against the CPU kernel and against the closed form `dbias = dy.sum(0)`, with the error
+jumping from 1e-5 at M=128 to O(30) at M=129 and scaling with the tensor. `dx` is
+unaffected. The oracle now differentiates a composed fp32 forward, which keeps it
+autograd-derived while routing around the broken fused kernel.
+
+After these fixes, every quantizer task is **bit-exact** (SNR 999 dB), and the top-k,
+Gumbel-max and top-k-sampling tasks return **identical** values and indices.
+
+**4 `INFRA` from a harness sizing defect.** The 256-expert MoE shapes crossed
+`E=256` with `I=14336`, giving 90 GiB of expert weights — and the paired-timing
+protocol needs two disjoint copies while the fp32 oracle upcasts both tensors, so peak
+was ~360 GiB against a 252 GiB device. That pairing is not a configuration any model
+ships: a 256-expert MoE has *small* experts (DeepSeek-V3 runs 256 routed experts at
+`moe_intermediate_size = 2048`), while 14336 belongs to an 8-expert Mixtral. Expert
+width is now capped by a byte budget (`_expert_intermediate` in `moe_ext.py`) that
+binds only at `E ≥ 128`, so every shape that already ran is untouched, and `E=256`
+resolves to `I=3584`. Chunking the oracle was the alternative and was rejected: the
+weights themselves, not the upcast, are the floor, and two disjoint copies are a
+protocol requirement.
+
+### What the gate does and does not catch
+
+Correctness is the conjunction of two measurements, and neither is redundant. The
+**SNR gate** the task declares is a global L2 measure that a sparse defect barely
+moves; the **elementwise gate** is a max-norm measure that a small broad-spectrum bias
+barely moves. Against deliberately mutated kernels on real hardware: dropping the
+causal mask is rejected at 137 steps, dropping one block of a reduction at 27,101
+steps, skipping the router renormalization at 29,303, corrupting a *single element* of
+a 16.7M-element tensor at 128 — while the unmutated seed sits at 0.14. Re-introducing
+any of the eight defects above is rejected.
+
+The known limit: a kernel that uniformly *degrades precision* without changing the
+math — a bf16 softmax accumulator, say — lands at 49 dB SNR and 0.55 format steps, and
+the task's own declared 30 dB gate admits it. That is the SNR threshold's decision, not
+the tolerance's, and raising per-task gates is a separate change.
+
+**Treat a task's verdict as evidence, then opt in to eligibility.**
+`kore/tasks/verification.py` turns the artifact into a policy; the default excludes the
+`broken` and `shortfall` bands, both of which are empty today, so all 1,289 train tasks
+are currently eligible. 280 train tasks (`gen_*`, `genv_*`, hand-authored) carry no
+record at all and read `UNKNOWN` — admitted, but never counted as verified.
 
 Reproduce:
 
 ```bash
-python scripts/verify_tasks_gpu.py --out report.json --gpus 0,1,2,3,4,5 --prefix genb_
+python scripts/verify_tasks_gpu.py --out report.json --gpus 0,1,2,3 --prefix genb_
 ```
 
-It exits non-zero on task defects only — an infra fault cannot launder a broken corpus
-into a green verification.
+~13 minutes on four MI350X. It exits non-zero on task defects only — an infra fault
+cannot launder a broken corpus into a green verification. Note that the memory-heavy
+MoE shapes can still record `INFRA` if the node is shared; those verdicts are a
+statement about the node, not the task, and re-running them serially clears them.
 
 ---
 

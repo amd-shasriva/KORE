@@ -21,7 +21,7 @@ def _norm_add_rmsnorm_quant_int8_kernel(x_ptr, res_ptr, w_ptr, q_ptr, s_ptr, add
     amax = tl.max(tl.abs(normed), axis=0)
     scale = tl.where(amax > 0.0, amax / 127.0, 1.0)
     qv = normed / scale
-    tl.store(q_ptr + base + offs, (tl.minimum(tl.maximum(qv + tl.where(qv >= 0.0, 0.5, -0.5), -127.0), 127.0)).to(tl.int8), mask=mask)
+    tl.store(q_ptr + base + offs, (tl.minimum(tl.maximum(tl.where(tl.floor(qv + 0.5) - (qv) == 0.5, 2.0 * tl.floor(tl.floor(qv + 0.5) * 0.5), tl.floor(qv + 0.5)), -127.0), 127.0)).to(tl.int8), mask=mask)
     tl.store(s_ptr + row, scale)
 
 

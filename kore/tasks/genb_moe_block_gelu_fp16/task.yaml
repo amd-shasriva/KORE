@@ -36,13 +36,13 @@ shape_policy:
     - topk
     - E
   authored_hidden_shapes: []
-  max_elements: 3940649673949184
+  max_elements: 1970324836974592
 shapes:
   minimal: {M: 64, E: 8, topk: 2, D: 128, I: 256}
   primary: {M: 4096, E: 64, topk: 8, D: 4096, I: 14336}
   validation:
-    - {M: 16384, E: 128, topk: 8, D: 4096, I: 14336}
-    - {M: 4096, E: 256, topk: 8, D: 4096, I: 14336}
+    - {M: 16384, E: 128, topk: 8, D: 4096, I: 7168}
+    - {M: 4096, E: 256, topk: 8, D: 4096, I: 3584}
     - {M: 8193, E: 64, topk: 8, D: 4096, I: 14336}
 targets:
   snr_db: 30.0

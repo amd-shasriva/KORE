@@ -803,6 +803,311 @@ def test_contract_records_toolchain_core_and_validated_hardware_without_imports(
     assert all(name not in sys.modules for name in initially_unloaded)
 
 
+# --------------------------------------------------------------------------- #
+# Preflight runtime identity: the evidence that authorizes replaying at all.
+#
+# An identity declares, in ``bindings``, the live facts it was validated
+# against. The contract re-verifies every one of them on every evaluation, so
+# evidence cannot outlive what it attests to. Each test below proves a REFUSAL:
+# not merely that the replay key moved (which would still let a stale-evidence
+# run write new entries), but that nothing is authorized and nothing is cached.
+# --------------------------------------------------------------------------- #
+def _bound_identity(
+    config: SimpleNamespace,
+    *,
+    gpu: str = "0",
+    gpu_target: str = "gfx950",
+    hardware_id: str = "gpu-uuid-0",
+    boot_id: str | None = None,
+    toolchain_sha256: str | None = None,
+    core_code_sha256: str | None = None,
+    bindings: tuple[str, ...] = (
+        "boot_id", "core_code_sha256", "toolchain_sha256"),
+) -> dict:
+    """A producer-shaped identity bound to the live boot, toolchain, and code."""
+    return {
+        "identity_version": 1,
+        "validated": True,
+        "stable": True,
+        "hardware": {
+            "id": hardware_id,
+            "gpu_target": gpu_target,
+            "selected_gpu": str(gpu),
+        },
+        "runtime": {
+            "producer": "kore.env.preflight_identity",
+            "boot_id": (
+                boot_id if boot_id is not None else contract_module.boot_identity()
+            ),
+            "toolchain_sha256": (
+                toolchain_sha256
+                if toolchain_sha256 is not None
+                else contract_module.toolchain_digest(config)["sha256"]
+            ),
+            "core_code_sha256": (
+                core_code_sha256
+                if core_code_sha256 is not None
+                else contract_module.core_code_digest()["sha256"]
+            ),
+        },
+        "bindings": list(bindings),
+    }
+
+
+def _bundle(*identities: dict) -> dict:
+    return {
+        "identity_version": 1,
+        "kind": contract_module.PREFLIGHT_IDENTITY_BUNDLE_KIND,
+        "producer": "kore.env.preflight_identity",
+        "identities": list(identities),
+    }
+
+
+def _bound_env(tmp_path: Path, identity, *, gpu: str = "0"):
+    task = _task(tmp_path)
+    config = _config(tmp_path)
+    env = KoreEnv(
+        task, config=config, use_replay=True, gpu=gpu, runtime_identity=identity
+    )
+    runner = _Runner()
+    env._run = runner
+    return env, task, config, runner
+
+
+def test_a_fully_bound_identity_authorizes_replay_and_records_its_strength(tmp_path):
+    config = _config(tmp_path)
+    env, task, _config_obj, runner = _bound_env(tmp_path, _bound_identity(config))
+    shapes = [task.shapes[0]]
+
+    first = env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    second = env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    preflight = contract_module.build_evaluation_contract(
+        **_contract_kwargs(env, task, _config_obj))["runtime"]["preflight_identity"]
+
+    assert first.validation_passed and second.validation_passed
+    assert len(runner.calls) == 1, "the second evaluation must be a replay hit"
+    assert preflight["state"] == "validated"
+    assert preflight["bindings_verified"] == [
+        "boot_id", "core_code_sha256", "toolchain_sha256"]
+
+
+def test_a_stale_identity_from_a_previous_boot_is_refused(tmp_path):
+    """HIP ordinal->card enumeration may be renumbered across boots, so evidence
+    gathered under a different boot proves nothing about this one."""
+    config = _config(tmp_path)
+    env, task, _config_obj, runner = _bound_env(
+        tmp_path,
+        _bound_identity(config, boot_id="00000000-0000-4000-8000-000000000000"),
+    )
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 2
+    assert len(env._cache_obj) == 0, "stale evidence must not authorize a write"
+
+
+def test_a_changed_toolchain_refuses_to_authorize_replay(tmp_path, monkeypatch):
+    version = {"torch": "2.7.0"}
+
+    def packages():
+        return {
+            "torch": {"state": "present", "distribution": "torch",
+                      "version": version["torch"]},
+            "triton": {"state": "not-installed"},
+            "aiter": {"state": "not-installed"},
+        }, True
+
+    monkeypatch.setattr(contract_module, "_package_versions", packages)
+    config = _config(tmp_path)
+    env, task, _config_obj, runner = _bound_env(tmp_path, _bound_identity(config))
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    cached_before = len(env._cache_obj)
+    version["torch"] = "2.8.0"
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 3, "one hit before the bump, none after it"
+    assert cached_before == 1 and len(env._cache_obj) == 1, (
+        "a measurement taken under an unvalidated toolchain must not be stored")
+
+
+def test_a_changed_core_code_fingerprint_refuses_to_authorize_replay(
+    tmp_path, monkeypatch
+):
+    core = tmp_path / "core.py"
+    core.write_text("SEMANTICS = 1\n")
+    monkeypatch.setattr(contract_module, "_CORE_CODE_PATHS", (("test/core.py", core),))
+    contract_module._clear_fingerprint_caches()
+    config = _config(tmp_path / "env")
+    env, task, _config_obj, runner = _bound_env(
+        tmp_path / "env", _bound_identity(config))
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    core.write_text("SEMANTICS = 2\n")
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 3
+    assert len(env._cache_obj) == 1, (
+        "evidence about the old evaluator cannot authorize caching the new one")
+
+
+def test_an_identity_cannot_declare_a_binding_the_contract_cannot_verify(tmp_path):
+    """Otherwise an identity could look stronger by naming evidence nobody checks."""
+    config = _config(tmp_path)
+    env, task, _config_obj, runner = _bound_env(
+        tmp_path,
+        _bound_identity(config, bindings=("boot_id", "gpu_firmware_revision")),
+    )
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 2
+    assert len(env._cache_obj) == 0
+
+
+def test_a_binding_that_cannot_be_checked_in_this_process_is_refused(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(contract_module, "_BOOT_IDENTITY_CACHE", [])
+    monkeypatch.setattr(contract_module, "_BOOT_ID_PATH", tmp_path / "no-boot-id")
+    config = _config(tmp_path)
+    env, task, _config_obj, runner = _bound_env(
+        tmp_path, _bound_identity(config, boot_id="whatever"))
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 2
+    assert len(env._cache_obj) == 0
+
+
+def test_an_identity_for_another_gpu_is_refused(tmp_path):
+    config = _config(tmp_path)
+    env, task, _config_obj, runner = _bound_env(
+        tmp_path, _bound_identity(config, gpu="5"), gpu="6")
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert env._gpu_selection(task)["selected_gpu"] == "6"
+    assert len(runner.calls) == 2
+    assert len(env._cache_obj) == 0
+
+
+def test_an_identity_for_another_architecture_is_refused(tmp_path):
+    config = _config(tmp_path)
+    env, task, _config_obj, runner = _bound_env(
+        tmp_path, _bound_identity(config, gpu_target="gfx942"))
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert task.gpu_target == "gfx950"
+    assert len(runner.calls) == 2
+    assert len(env._cache_obj) == 0
+
+
+# --------------------------------------------------------------------------- #
+# One bundle, exported once, is correct for every rank.
+# --------------------------------------------------------------------------- #
+def test_each_rank_selects_its_own_identity_from_one_shared_bundle(tmp_path):
+    """The selected GPU is per-evaluation, so one flat identity could only ever
+    be right for one rank. Each rank picks its own entry out of the bundle."""
+    config = _config(tmp_path)
+    task = _task(tmp_path)
+    bundle = _bundle(
+        _bound_identity(config, gpu="5", hardware_id="gpu-uuid-5"),
+        _bound_identity(config, gpu="6", hardware_id="gpu-uuid-6"),
+    )
+    runner = _Runner()
+    env5 = KoreEnv(task, config=config, gpu="5", runtime_identity=bundle)
+    env6 = KoreEnv(task, config=config, gpu="6", runtime_identity=bundle)
+    env5._run = env6._run = runner
+    shapes = [task.shapes[0]]
+
+    env5.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env6.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env5.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env6.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    selected = contract_module.build_evaluation_contract(
+        **_contract_kwargs(env6, task, config)
+    )["runtime"]["preflight_identity"]
+
+    assert len(runner.calls) == 2, "each GPU pays once, then replays its own"
+    # Only the rank's OWN entry reaches the replay key, so one GPU's evidence
+    # never becomes part of another GPU's cache identity.
+    assert selected["identity"]["hardware"]["id"] == "gpu-uuid-6"
+    assert selected["source"] == "argument[bundle]"
+
+
+def test_a_bundle_that_never_validated_this_gpu_is_refused(tmp_path):
+    config = _config(tmp_path)
+    env, task, _config_obj, runner = _bound_env(
+        tmp_path, _bundle(_bound_identity(config, gpu="5")), gpu="7")
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 2
+    assert len(env._cache_obj) == 0
+
+
+def test_an_ambiguous_bundle_is_refused(tmp_path):
+    """Two entries claiming one GPU are not evidence about which describes it."""
+    config = _config(tmp_path)
+    env, task, _config_obj, runner = _bound_env(
+        tmp_path,
+        _bundle(
+            _bound_identity(config, gpu="0", hardware_id="gpu-uuid-a"),
+            _bound_identity(config, gpu="0", hardware_id="gpu-uuid-b"),
+        ),
+    )
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 2
+    assert len(env._cache_obj) == 0
+
+
+def test_a_bundle_exported_through_the_environment_authorizes_replay(
+    tmp_path, monkeypatch
+):
+    """The production delivery path: one exported value, inherited by every worker."""
+    config = _config(tmp_path)
+    monkeypatch.setenv(
+        contract_module.PREFLIGHT_IDENTITY_ENV,
+        json.dumps(_bundle(_bound_identity(config, gpu="3", hardware_id="uuid-3"))),
+    )
+    task = _task(tmp_path)
+    env = KoreEnv(task, config=config, use_replay=True, gpu="3",
+                  runtime_identity=None)
+    runner = _Runner()
+    env._run = runner
+    shapes = [task.shapes[0]]
+
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+    env.evaluate(task, _SOURCE, shapes=shapes, do_bench=False)
+
+    assert len(runner.calls) == 1
+    assert len(env._cache_obj) == 1
+
+
 def test_warm_contract_build_cpu_overhead_is_bounded(tmp_path):
     env, task, config, _runner = _env(tmp_path)
     kwargs = {

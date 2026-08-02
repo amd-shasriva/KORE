@@ -31,7 +31,7 @@ registry discovery never needs a GPU.
 
 from __future__ import annotations
 
-from kore.tasks._genops import DTYPES, _parse_shape
+from kore.tasks._genops import DTYPES, _parse_shape, tl_round_half_even
 
 # --------------------------------------------------------------------------- #
 # Task constants (MUST match the seed kernels)
@@ -660,6 +660,13 @@ def make_reference(op: str, dtype: str) -> dict:
           "baseline_fn": baseline_fn, "arity": arity, "entry_name": op,
           "dtype_name": dtype, "family": f"breadth_{op}",
           "mutates_input": op in FX_MUTATES_INPUT}
+    if KIND[op] in _QUANT_KINDS:
+        # The int8/fp8 codes here quantize a COMPUTED value (the normalized
+        # activation), so the two implementations reach the rounding boundary
+        # with slightly different fp32 inputs and one code step is unavoidable.
+        # A PURE quantizer (kore/tasks/breadth/quant_ext.py) declares nothing
+        # and is held to exact codes.
+        ns["code_tolerance_steps"] = 1.0
     ns[f"{op}_ref"] = ref_fn
     return ns
 
@@ -1221,7 +1228,8 @@ def _quant_bits(dtype: str):
     """(triton store expression on ``qv``, torch output dtype literal, qmax literal)."""
     if dtype == "fp8":
         return "qv.to(tl.float8e4nv)", "torch.float8_e4m3fn", "448.0"
-    expr = ("(tl.minimum(tl.maximum(qv + tl.where(qv >= 0.0, 0.5, -0.5), -127.0), "
+    # int8: round half to EVEN, which is what the torch.round oracle does.
+    expr = (f"(tl.minimum(tl.maximum({tl_round_half_even('qv')}, -127.0), "
             "127.0)).to(tl.int8)")
     return expr, "torch.int8", "127.0"
 

@@ -2,35 +2,57 @@
 
 ``data/gfx950_task_verification.json`` records what actually happened when every
 breadth task's declared seed kernel was executed against its own reference on
-real gfx950 silicon: 948 PASS, 100 FAIL_CORRECTNESS, 4 INFRA over 1,052 tasks.
-That evidence existed but nothing consumed it, so the registry admitted tasks
-whose own seed cannot clear the SNR gate the task itself declares.
+real gfx950 silicon.  The corpus is currently clean: **1,052 PASS, 0
+FAIL_CORRECTNESS, 0 INFRA over 1,052 tasks**, so the default policy excludes
+nothing.  The machinery below is kept, exercised and pinned regardless, because
+its job is to make a future regression impossible to admit silently -- a task
+with no record still reads ``UNKNOWN`` rather than ``PASS``, and a recorded
+failure still disqualifies a task from training selection.
+
+An earlier sweep of the same corpus read 948 PASS / 100 FAIL_CORRECTNESS / 4
+INFRA.  Those 104 were not one problem:
+
+* 73 correct kernels were rejected by an fp32-calibrated ``atol = rtol = 1e-2``
+  applied to bf16/fp16/fp8/int8 outputs -- a tolerance that fp8_e4m3, whose own
+  relative resolution is 12.5%, can never satisfy.  The driver now derives the
+  bound from the output format's own representable step (see
+  ``kore.tasks._genops.correctness_tolerance``).
+* 31 were real seed or oracle defects, each fixed in the GENERATOR: an
+  ``-inf - (-inf)`` NaN in the online-softmax rescale of windowed attention and
+  of top-k-masked sampling; a streaming top-k that emitted DISTINCT values
+  instead of values with multiplicity; a MoE router that renormalized through a
+  racing global-memory round trip; a recurrence coefficient rounded to bf16
+  before a 2,048-step scan; quantizers that rounded ties away from zero and
+  scaled by a reciprocal where their oracle rounded to even and divided; and a
+  GroupNorm oracle that inherited a wrong ``dweight``/``dbias`` from
+  ``torch.native_group_norm_backward`` on ROCm.
+* 4 ``INFRA`` were a harness sizing defect -- 256 experts crossed with a
+  14,336-wide intermediate, a configuration no model ships, needing ~360 GiB of
+  peak for a 252 GiB device.  Expert width is now budget-capped.
 
 Three deliberate properties:
 
 * **Three-valued verdicts.**  A task with no record gets ``UNKNOWN``, never
   ``PASS``.  ``is_pass`` is False for ``UNKNOWN`` and for ``INFRA``, so no report
   can launder an unmeasured task into "hardware verified".
-* **INFRA is not a task defect.**  The four ``INFRA`` records are harness OOMs on
-  a shared GPU (252 GiB exhausted).  They are reported separately and are never
-  counted as a correctness failure.
+* **INFRA is not a task defect.**  A harness or capacity fault is reported
+  separately and is never counted as a correctness failure.
 * **The policy is explicit.**  Nothing here changes the registry's train split.
   A caller opts in by asking for an eligibility decision, so the definition of
   "train task" and the definition of "eligible for selection under this policy"
   stay separate, inspectable states.
 
 ``FAIL_CORRECTNESS`` is not one failure mode, so it is banded by the seed's SNR
-against the gate the task declares (see :data:`NEAR_GATE_MARGIN_DB`):
+against the gate the task declares (see :data:`NEAR_GATE_MARGIN_DB`).  All three
+bands are empty today; the definitions are what a future sweep is banded by:
 
-* ``broken`` (27) - the seed does not compile on this Triton build or returns a
+* ``broken`` - the seed does not compile on this Triton build or returns a
   non-finite result; the sweep records -999 dB.  No rollout can ever earn reward.
-* ``near_gate`` (73) - the seed clears (72) or lands within 5 dB of (1) its
-  declared gate and fails only ``torch.allclose``'s elementwise tolerance.  The
-  evidence points at a tolerance calibrated for fp32 being applied to bf16/fp16/
-  fp8 outputs, not at broken math.
-* ``shortfall`` (11) - the seed returns finite values but misses its own gate by
-  more than 5 dB (4.7-24.6 dB against 30/40 dB gates).  Too large to be a
-  rounding artifact.
+* ``near_gate`` - the seed clears its declared gate, or lands within 5 dB of it,
+  and fails only the elementwise check.  That is evidence about the tolerance or
+  about a boundary-sensitive operator, not necessarily about broken math.
+* ``shortfall`` - the seed returns finite values but misses its own gate by more
+  than 5 dB.  Too large to be a rounding artifact.
 """
 
 from __future__ import annotations
@@ -138,8 +160,9 @@ class HardwareVerdict:
     def clears_declared_gate(self) -> bool:
         """True when the measured SNR met the task's own gate.
 
-        72 of the 111 correctness failures are in this state: the SNR gate passed
-        and only the elementwise ``allclose`` tolerance rejected the seed.
+        A ``FAIL_CORRECTNESS`` verdict in this state failed only the elementwise
+        check, which is a different claim from missing the SNR gate and calls for
+        different action -- that distinction is what the bands encode.
         """
         margin = self.margin_db
         return margin is not None and margin >= 0.0
@@ -456,19 +479,20 @@ class EligibilityPolicy:
 
 
 # Default: exclude only the two bands where the hardware evidence contradicts the
-# task's own declared contract, and treat everything else as admissible.
+# task's own declared contract, and treat everything else as admissible.  Both
+# excluded bands are empty on the current artifact, so this policy removes
+# nothing today; it is the standing rule a future regression would meet.
 #
-# * ``broken`` (27) is excluded: an uncompilable or inf-producing seed makes the
+# * ``broken`` is excluded: an uncompilable or inf-producing seed makes the
 #   task's correctness gate unreachable, so every rollout scores zero.
-# * ``shortfall`` (11) is excluded: missing your own gate by 5-25 dB is not a
-#   rounding artifact.  Several are topk/sampling ops where elementwise SNR is
-#   the wrong metric, but until that metric is recalibrated the recorded evidence
-#   says the reference and the seed disagree.
-# * ``near_gate`` (73) is admitted: 72 of them cleared the declared SNR gate and
-#   failed only ``allclose``'s elementwise tolerance (1 LSB of bf16 in
-#   attention-backward, one fp8 quantization step in fused norm+quant).  Dropping
-#   them would delete real coverage over a threshold artifact.
-# * ``INFRA`` (4) is admitted: those runs OOM'd the shared GPU at 252 GiB.
+# * ``shortfall`` is excluded: missing your own gate by more than 5 dB is not a
+#   rounding artifact.
+# * ``near_gate`` is admitted: clearing the declared SNR gate and failing only the
+#   elementwise check is evidence about the tolerance or about a
+#   boundary-sensitive operator.  Dropping such a task would delete real coverage
+#   over a threshold artifact -- which is exactly what happened to the 73 tasks
+#   the fp32-calibrated tolerance used to reject.
+# * ``INFRA`` is admitted: a harness or capacity fault says nothing about a task.
 # * ``UNKNOWN`` (280 train tasks) is admitted but never counted as verified: the
 #   sweep ran with prefix ``genb_``, so ``gen_``/``genv_``/hand-authored tasks
 #   were never executed.  Absence of a run is not evidence of a defect.

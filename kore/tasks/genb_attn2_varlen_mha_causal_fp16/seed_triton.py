@@ -60,8 +60,18 @@ def _attn2_fwd(Q, K, V, O, Bias, sm_scale, H, HKV, SQ, SK,
             keep = keep & (n[None, :] <= q_pos[:, None]) & (((q_pos[:, None] - n[None, :]) % DILATION) == 0)
         qk = tl.where(keep, qk, -float("inf"))
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
-        p = tl.exp(qk - m_ij[:, None])
-        alpha = tl.exp(m_i - m_ij)
+        # A (row, key-block) pair can be ENTIRELY masked: `lo` is aligned down
+        # from the FIRST query row of the block, so under a sliding window the
+        # later rows of the block have no key inside the first block visited
+        # (a dilated or custom mask can do the same).  Their running max stays
+        # -inf, and -inf - (-inf) is NaN, which poisons l_i and acc for the whole
+        # row.  Rescaling against 0.0 in that case is exact, not a patch: every
+        # term is then exp(-inf) = 0, so the accumulator correctly stays empty
+        # until a live key arrives.  Where m_ij is finite this is the identity,
+        # so no unwindowed kernel changes.
+        m_re = tl.where(m_ij == -float("inf"), 0.0, m_ij)
+        p = tl.exp(qk - m_re[:, None])
+        alpha = tl.exp(m_i - m_re)
         l_i = l_i * alpha + tl.sum(p, 1)
         v = tl.load(V + (kv_base + n)[:, None] * HEAD_DIM + offs_d[None, :],
                     mask=n_mask[:, None], other=0.0).to(tl.float32)

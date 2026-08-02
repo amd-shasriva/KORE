@@ -15,7 +15,8 @@ def _sm_kernel(x_ptr, o_ptr, sx, so, N, INV_T, BLOCK_N: tl.constexpr):
         x = tl.load(x_ptr + row * sx + offs, mask=mask, other=-float('inf')).to(tl.float32) * INV_T
         blk = tl.max(x, axis=0)
         new_m = tl.maximum(m, blk)
-        s = s * tl.exp(m - new_m) + tl.sum(tl.where(mask, tl.exp(x - new_m), 0.0), axis=0)
+        rs = tl.where(new_m == -float('inf'), 0.0, new_m)
+        s = s * tl.exp(m - rs) + tl.sum(tl.where(mask, tl.exp(x - rs), 0.0), axis=0)
         m = new_m
     for start in range(0, N, BLOCK_N):
         offs = start + tl.arange(0, BLOCK_N)

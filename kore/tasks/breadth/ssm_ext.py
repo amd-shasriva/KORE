@@ -1296,8 +1296,13 @@ def _ssm_lru_kernel(x_ptr, lr_ptr, li_ptr, y_ptr, D, L, srow, sl):
 
 def ssm_lru(x: torch.Tensor, nu: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
     B, D, L, _ = x.shape
-    lr = (nu * torch.cos(theta)).contiguous()
-    li = (nu * torch.sin(theta)).contiguous()
+    # lam = nu*exp(i*theta) is the recurrence COEFFICIENT, so it must be built in
+    # fp32 like the oracle does, not in the task dtype.  |lam| is biased close to
+    # 1, and a perturbation of lam is amplified by the effective memory
+    # |lam|/(1-|lam|) over L steps: one bf16 rounding of lam (2**-9) turns into
+    # percent-level error in y, which no amount of fp32 state can undo.
+    lr = (nu.float() * torch.cos(theta.float())).contiguous()
+    li = (nu.float() * torch.sin(theta.float())).contiguous()
     xf = x.contiguous().reshape(B * D, L, 2)
     y = torch.empty_like(xf)
     _ssm_lru_kernel[(B * D,)](xf, lr, li, y, D, L, xf.stride(0), xf.stride(1), num_warps=1)

@@ -732,6 +732,12 @@ def make_reference(op: str, dtype: str) -> dict:
           "baseline_fn": baseline_fn, "arity": arity_of(op), "entry_name": op,
           "dtype_name": dtype, "family": f"breadth_{op}", "mutates_input": False,
           "adversarial_inputs": adversarial_inputs}
+    if cfg["ep"] == "requant":
+        # The epilogue ends in an fp8 quantizer, so although the tensor is stored
+        # in bf16 every value it can hold is an fp8 code times ``osc``.  Its true
+        # granularity is therefore the fp8 step -- 16x the bf16 step -- and a
+        # one-code disagreement at the quantizer boundary is not a defect.
+        ns["output_value_grid"] = torch.float8_e4m3fn
     ns[f"{op}_ref"] = ref_fn
     return ns
 

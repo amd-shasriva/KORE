@@ -32,13 +32,13 @@ shape_policy:
     preserve_singleton: true
   constraints: []
   authored_hidden_shapes: []
-  max_elements: 492581209243648
+  max_elements: 246290604621824
 shapes:
   minimal: {M: 64, E: 8, D: 128, I: 256}
   primary: {M: 4096, E: 64, D: 4096, I: 14336}
   validation:
-    - {M: 16384, E: 128, D: 4096, I: 14336}
-    - {M: 4096, E: 256, D: 4096, I: 14336}
+    - {M: 16384, E: 128, D: 4096, I: 7168}
+    - {M: 4096, E: 256, D: 4096, I: 3584}
     - {M: 8192, E: 64, D: 4096, I: 14335}
 targets:
   snr_db: 25.0

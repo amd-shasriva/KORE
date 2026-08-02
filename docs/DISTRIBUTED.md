@@ -75,6 +75,22 @@ hood), run the sharded launcher directly with the shipped config:
 scripts/launch_distributed.sh midtrain configs/midtrain_14b_full.json
 ```
 
+**This only works if you are already on a GPU node.** On the SPUR cluster the
+login node has no GPUs, so the real path is `sbatch`, and the launchers there
+default to a second config tree under `data/b05factory/launch/` — that is what
+actually ran, not `configs/`:
+
+```bash
+sbatch scripts/spur_midtrain_1node.sbatch \
+       /home/shasriva/Kore-RL/KORE/data/b05factory/launch/midtrain_frontier.json
+```
+
+Both trees are kept in sync on `model_id`, `model_revision`, `corpus_path` and
+`save_total_limit` by `tests/test_dataloader_contract.py`. They diverged once:
+`configs/midtrain_14b_full.json` named an 11 MB, 1,360-row development stub
+while every launcher used the 683 MB frontier corpus, so following this document
+trained on 1.6% of the data. Prefer the launch tree for real runs.
+
 ## How a launcher-driven stage runs
 
 `scripts/launch_distributed.sh sft configs/sft_14b_full.json` expands to:

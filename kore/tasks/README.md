@@ -176,15 +176,25 @@ Generation is idempotent and its current outputs are checked in. Registry discov
 ## Baselines
 
 **There are two baseline lanes, and a speedup means different things in each.** Measured across all
-1,334 `task.yaml` files: **1,259 declare a `torch_*` baseline**, 64 declare AITER, 3 declare
+1,334 `task.yaml` files: **1,259 declare a `torch_*` baseline**, 63 declare AITER, 4 declare
 hipBLASLt, and 8 declare something else. At runtime `_genops._vendor_baseline` additionally upgrades
-33 `gemm_fusion` tasks to hipBLASLt (via `torch.matmul` / `torch._scaled_mm`) and 2 gated activations
-to AITER when `KORE_USE_VENDOR_BASELINE=1` (the default).
+55 more when `KORE_USE_VENDOR_BASELINE=1` (the default): 33 `gemm_fusion` tasks to hipBLASLt (via
+`torch.matmul` / `torch._scaled_mm`), 6 gated activations to AITER, and 16 breadth MoE and
+block-sparse-matmul tasks.
+
+Count the lane by what the resolver *returns*, not by what the YAML declares — 55 of the 122 are
+runtime upgrades and are invisible in `task.yaml`:
+
+```python
+from kore.tasks.registry import all_tasks
+from kore.data.schemas import resolve_baseline_identity
+sum(resolve_baseline_identity(t)["baseline_kind"] == "vendor" for t in all_tasks())  # 122
+```
 
 | Lane | Tasks | Baseline | What a >1× result means |
 | --- | ---: | --- | --- |
-| Vendor | ~100 | AITER / hipBLASLt CK kernels | beats the state of practice — citable |
-| Breadth | ~1,234 | torch (`torch.compile`-fused if `KORE_COMPILE_BASELINE=1`, else eager) | beats PyTorch — not a vendor claim |
+| Vendor | 122 | AITER / hipBLASLt CK kernels | beats the state of practice — citable |
+| Breadth | 1,164 | torch (eager), or 42 `torch_compile`-fused when `KORE_COMPILE_BASELINE=1` | beats PyTorch — not a vendor claim |
 
 `aiter_ref.py` / `aiter_ref_attn.py` wrap the AITER ops (`aiter_rms_norm`, `flash_attn_func`,
 `fused_moe`, `paged_attention_rocm`, …) and hipBLASLt for GEMM.
@@ -196,9 +206,14 @@ to AITER when `KORE_USE_VENDOR_BASELINE=1` (the default).
 > `WinRecord.baseline_type` is the field that records which baseline actually produced a stored win;
 > read it before pooling numbers across lanes.
 
-> **~94 sequence/SSM tasks declare a baseline that is an eager Python `for t in range(L)` recurrence**
-> over 2,048–8,192 timesteps. A correct fused Triton kernel beats that by orders of magnitude. Those
-> ratios are real as measured and meaningless as claims.
+> **The 80 `genb_ssm_*` tasks once declared a baseline that was an eager Python `for t in range(L)`
+> recurrence** over 2,048–8,192 timesteps. A correct fused Triton kernel beats that by orders of
+> magnitude, so those ratios were real as measured and meaningless as claims. They have since been
+> replaced with parallel and chunked scans: the seed's median measured speedup over the family fell
+> from 73.7x to 0.41x, and the count above 10x fell from 88 to 4. The residual is the Mamba-1
+> selective-scan family (3.5–10.9x), where a per-(channel, state) decay admits no efficient torch
+> formulation — which is precisely why `mamba_ssm` ships a CUDA kernel. Treat that family, and only
+> it, as a still-weak bar.
 
 > fp8 e4m3 is arch-selected by `aiter_ref.FP8_DTYPE`: OCP `e4m3fn` on gfx950/CDNA4 (MI350X/MI355X — the native format and this node's default), FNUZ `e4m3fnuz` on gfx942/CDNA3. Override with `KORE_FP8_ENCODING=ocp|fnuz`.
 

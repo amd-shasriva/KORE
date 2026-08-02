@@ -30,7 +30,7 @@ imported lazily inside make_reference so registry discovery never needs a GPU.
 
 from __future__ import annotations
 
-from kore.tasks._genops import DTYPES, _parse_shape
+from kore.tasks._genops import DTYPES, _parse_shape, tl_round_half_even
 
 # --------------------------------------------------------------------------- #
 # Task constants (MUST match the seed kernels)
@@ -42,6 +42,35 @@ INV_KEEP = 1.0 / (1.0 - DROP_P)   # 1/(1-p) inverted-dropout scale
 L2_EPS = 1e-12         # F.normalize denominator floor (||x|| clamp)
 FP8_MAX = 448.0        # OCP e4m3fn max finite (gfx950/CDNA4 native fp8) - quant clamp
 INT8_MAX = 127.0       # int8 symmetric quant clamp
+
+
+def _group_norm_fp32(xf, wf, bf, num_groups: int = NUM_GROUPS, eps: float = EPS):
+    """GroupNorm forward over ``x[M, C]``, written out so autograd differentiates it.
+
+    Deliberately NOT ``F.group_norm``.  On ROCm 7.0 / torch 2.10 / gfx950,
+    ``native_group_norm_backward`` returns WRONG ``dweight`` and ``dbias``
+    whenever the batch dimension exceeds 128 (verified against both the CPU
+    kernel and the closed form ``dbias = dy.sum(0)``: at M=129 the error jumps
+    from 1e-5 to O(30), and it scales with the tensor, so it is not a rounding
+    artifact).  ``dx`` is unaffected, which is why only the two reduced
+    gradients were ever wrong.
+
+    An oracle may not inherit a vendor kernel's bug: this task's seed computes
+    the textbook gradient and was being failed BY the oracle, not by its own
+    math.  Composing the forward from primitives keeps the oracle
+    autograd-derived (still ground truth, no hand-written backward to get wrong)
+    while routing around the broken fused kernel.  The forward itself is fine on
+    every size tested, so this changes nothing about what the task means.
+    """
+    import torch
+
+    M, C = xf.shape
+    xg = xf.reshape(M, num_groups, C // num_groups)
+    mean = xg.mean(-1, keepdim=True)
+    centered = xg - mean
+    var = centered.pow(2).mean(-1, keepdim=True)
+    xhat = (centered * torch.rsqrt(var + eps)).reshape(M, C)
+    return xhat * wf + bf
 
 
 # --------------------------------------------------------------------------- #
@@ -677,7 +706,7 @@ def make_reference(op: str, dtype: str) -> dict:
                 return xf.grad.detach(), wf.grad.detach()
             if kind == "groupnorm_bwd":
                 bf = torch.zeros_like(wf).requires_grad_(True)
-                y = F.group_norm(xf, NUM_GROUPS, wf, bf, EPS)
+                y = _group_norm_fp32(xf, wf, bf)
                 y.backward(dy.float())
                 return xf.grad.detach(), wf.grad.detach(), bf.grad.detach()
             # layernorm (with / without bias)
@@ -700,7 +729,7 @@ def make_reference(op: str, dtype: str) -> dict:
                 return xf.grad.detach(), wf.grad.detach()
             if kind == "groupnorm_bwd":
                 bf = torch.zeros_like(wf).requires_grad_(True)
-                F.group_norm(xf, NUM_GROUPS, wf, bf, EPS).backward(dy.float())
+                _group_norm_fp32(xf, wf, bf).backward(dy.float())
                 return xf.grad.detach(), wf.grad.detach(), bf.grad.detach()
             N = xf.shape[-1]
             if kind == "layernorm_bwd":
@@ -738,6 +767,13 @@ def make_reference(op: str, dtype: str) -> dict:
           "baseline_fn": baseline_fn, "arity": arity, "entry_name": op,
           "dtype_name": dtype, "family": f"breadth_{op}",
           "mutates_input": op in NORM_MUTATES_INPUT}
+    if KIND[op] in _QUANT_KINDS:
+        # The int8/fp8 codes here quantize a COMPUTED value (the normalized
+        # activation), so the two implementations reach the rounding boundary
+        # with slightly different fp32 inputs and one code step is unavoidable.
+        # A PURE quantizer (kore/tasks/breadth/quant_ext.py) declares nothing
+        # and is held to exact codes.
+        ns["code_tolerance_steps"] = 1.0
     ns[f"{op}_ref"] = ref_fn
     ns.update(ns_extra)
     return ns
@@ -1573,8 +1609,8 @@ def _quant_bits(dtype: str):
     """(triton store expression on ``qv``, torch output dtype literal, qmax literal)."""
     if dtype == "fp8":
         return "qv.to(tl.float8e4nv)", "torch.float8_e4m3fn", "448.0"
-    # int8: round half away from zero (add +/-0.5 then truncate-on-cast), clamp.
-    expr = ("(tl.minimum(tl.maximum(qv + tl.where(qv >= 0.0, 0.5, -0.5), -127.0), "
+    # int8: round half to EVEN, which is what the torch.round oracle does.
+    expr = (f"(tl.minimum(tl.maximum({tl_round_half_even('qv')}, -127.0), "
             "127.0)).to(tl.int8)")
     return expr, "torch.int8", "127.0"
 

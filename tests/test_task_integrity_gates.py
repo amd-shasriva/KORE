@@ -11,11 +11,18 @@ Two measured defects are pinned here.
 2. ``data/gfx950_task_verification.json`` recorded 100 breadth tasks whose own
    seed fails its declared SNR gate on real gfx950, and nothing consumed it.
 
+Defect 2 is now CLOSED: the artifact reads 1,052/1,052 ``PASS``.  73 of the 100
+were correct kernels rejected by an fp32-calibrated ``atol = rtol = 1e-2``
+applied to bf16/fp16/fp8/int8 outputs, 31 were real seed or oracle defects fixed
+in the generators, and the 4 ``INFRA`` were a MoE shape that needed ~360 GiB of
+peak on a 252 GiB device.  See ``kore/tasks/README.md`` for the breakdown.
+
 The counts below are pinned deliberately: they are measurements, so a change to
-the artifact must be an explicit edit here rather than a silent re-baseline.  An
-earlier sweep read 937/111/4 with 27 in the ``broken`` band; 12 of those were an
-``AttributeError`` on ``tl.math.tanh`` (removed in Triton 3.6) rather than a task
-defect, and replacing it recovered 11 tasks with no regressions.
+the artifact must be an explicit edit here rather than a silent re-baseline.
+Because the corpus is clean, the tests that need a FAILING verdict build a
+synthetic artifact rather than reaching for a real task -- the banding and
+eligibility machinery has to keep working for the sweep that finds the next
+regression, and it cannot be exercised by a corpus that has none.
 """
 
 from __future__ import annotations
@@ -50,14 +57,45 @@ CONTAMINATED = (
 
 # Recorded on real gfx950 over 1,052 breadth tasks, banded by SNR against each
 # task's own declared gate.
-EXPECTED_STATUS_COUNTS = {"PASS": 948, "FAIL_CORRECTNESS": 100, "INFRA": 4}
+EXPECTED_STATUS_COUNTS = {"PASS": 1_052, "FAIL_CORRECTNESS": 0, "INFRA": 0}
 EXPECTED_BAND_COUNTS = {
-    "pass": 948,
-    "near_gate": 74,
-    "shortfall": 11,
-    "broken": 15,
-    "infra": 4,
+    "pass": 1_052,
+    "near_gate": 0,
+    "shortfall": 0,
+    "broken": 0,
+    "infra": 0,
 }
+# Every train task the sweep measured now clears its own gate, so the default
+# eligibility policy removes nobody.  Pinned so a regression cannot arrive quietly.
+EXPECTED_TRAIN_TASKS = 1_289
+EXPECTED_ELIGIBLE_TRAIN_TASKS = 1_289
+EXPECTED_STRICT_ELIGIBLE_TRAIN_TASKS = 1_009
+EXPECTED_UNMEASURED_TRAIN_TASKS = 280
+
+
+def _synthetic_artifact(path):
+    """An artifact holding one verdict of every recorded kind.
+
+    The committed sweep is clean, so the banding and exclusion paths have no real
+    input to exercise.  They still have to work, so they are tested here against
+    verdicts built by hand.
+    """
+    payload = {
+        "summary": {"prefix": "synthetic", "total": 5},
+        "results": [
+            {"task": "syn_pass", "status": "PASS", "snr_db": 88.0, "threshold": 30.0},
+            {"task": "syn_near", "status": "FAIL_CORRECTNESS", "snr_db": 57.9,
+             "threshold": 30.0},
+            {"task": "syn_shortfall", "status": "FAIL_CORRECTNESS", "snr_db": 4.7,
+             "threshold": 30.0},
+            {"task": "syn_broken", "status": "FAIL_CORRECTNESS", "snr_db": -999.0,
+             "threshold": 30.0},
+            {"task": "syn_infra", "status": "INFRA", "snr_db": None,
+             "threshold": 30.0},
+        ],
+    }
+    path.write_text(json.dumps(payload))
+    return verification.load_verification(path)
 
 
 @pytest.fixture(scope="module")
@@ -325,7 +363,11 @@ def test_committed_artifact_matches_its_own_recorded_summary():
     report = verification.report()
 
     assert report.status_counts() == EXPECTED_STATUS_COUNTS
-    assert dict(report.summary["counts"]) == EXPECTED_STATUS_COUNTS
+    # The sweep writes only the statuses it actually observed; the loader fills the
+    # rest in as zero.  Both views have to agree on every status either mentions.
+    recorded = dict(report.summary["counts"])
+    assert recorded == {k: v for k, v in EXPECTED_STATUS_COUNTS.items() if v}
+    assert sum(recorded.values()) == len(report.verdicts)
     assert len(report.verdicts) == 1_052
     assert report.architecture == "gfx950"
     assert report.digest == verification.load_verification().digest
@@ -333,39 +375,47 @@ def test_committed_artifact_matches_its_own_recorded_summary():
     assert set(report.verdicts) <= set(registry.task_ids())
 
 
-def test_failures_split_into_broken_near_gate_and_shortfall():
+def test_the_committed_corpus_has_no_failing_or_infra_verdict():
     report = verification.report()
 
     assert report.band_counts() == EXPECTED_BAND_COUNTS
-
-    broken = report.task_ids_in_band(verification.BAND_BROKEN)
-    assert len(broken) == 15
-    assert sum(1 for task_id in broken if task_id.startswith("genb_attn2_window")) == 8
-    assert all(
-        verification.verdict_for(task_id).snr_db <= verification.BROKEN_SNR_DB
-        for task_id in broken
-    )
-
-    # 73 of the 74 near-gate failures actually CLEARED their declared SNR gate and
-    # were rejected only by the elementwise allclose tolerance; 1 sits 0.33 dB low.
-    near = report.task_ids_in_band(verification.BAND_NEAR_GATE)
-    verdicts = [verification.verdict_for(task_id) for task_id in near]
-    assert sum(1 for verdict in verdicts if verdict.clears_declared_gate) == 73
-    assert all(verdict.margin_db >= -verification.NEAR_GATE_MARGIN_DB for verdict in verdicts)
-
-    shortfall = report.task_ids_in_band(verification.BAND_SHORTFALL)
-    assert len(shortfall) == 11
-    margins = [verification.verdict_for(task_id).margin_db for task_id in shortfall]
-    assert max(margins) < -verification.NEAR_GATE_MARGIN_DB
-    assert all(
-        0.0 <= verification.verdict_for(task_id).snr_db < 25.0 for task_id in shortfall
-    )
+    for band in (verification.BAND_BROKEN, verification.BAND_NEAR_GATE,
+                 verification.BAND_SHORTFALL, verification.BAND_INFRA):
+        assert report.task_ids_in_band(band) == ()
+    # Every recorded seed clears the gate its own task.yaml declares.
+    assert all(verdict.is_pass for verdict in report.verdicts.values())
+    assert len(verification.hardware_pass_ids()) == EXPECTED_STATUS_COUNTS["PASS"]
+    assert verification.hardware_failure_ids() == frozenset()
 
 
-def test_pass_fail_infra_and_missing_are_four_distinct_states():
+def test_failures_split_into_broken_near_gate_and_shortfall(tmp_path):
+    """The banding still has to work for the sweep that finds the next regression."""
+    report = _synthetic_artifact(tmp_path / "synthetic.json")
+
+    assert report.band_counts() == {
+        "pass": 1, "near_gate": 1, "shortfall": 1, "broken": 1, "infra": 1
+    }
+    broken = report.verdicts["syn_broken"]
+    assert broken.band == verification.BAND_BROKEN
+    assert broken.snr_db <= verification.BROKEN_SNR_DB
+    assert broken.margin_db is None and not broken.clears_declared_gate
+
+    # A near-gate seed CLEARED its declared SNR gate and was rejected only by the
+    # elementwise check -- a different claim from missing the gate.
+    near = report.verdicts["syn_near"]
+    assert near.band == verification.BAND_NEAR_GATE
+    assert near.clears_declared_gate and near.margin_db > 0.0
+
+    shortfall = report.verdicts["syn_shortfall"]
+    assert shortfall.band == verification.BAND_SHORTFALL
+    assert shortfall.margin_db < -verification.NEAR_GATE_MARGIN_DB
+
+
+def test_pass_fail_infra_and_missing_are_four_distinct_states(tmp_path):
+    synthetic = _synthetic_artifact(tmp_path / "synthetic.json")
     passing = verification.verdict_for("genb_adaptive_avgpool2d_bf16")
-    failing = verification.verdict_for("genb_attn2_window256_mha_causal_bf16")
-    infra = verification.verdict_for("genb_moe_block_silu_k8_e256_bf16")
+    failing = synthetic.verdicts["syn_broken"]
+    infra = synthetic.verdicts["syn_infra"]
     missing = verification.verdict_for("genb_definitely_not_a_task_bf16")
 
     assert (passing.status, passing.band) == ("PASS", "pass")
@@ -387,8 +437,7 @@ def test_pass_fail_infra_and_missing_are_four_distinct_states():
     assert missing.margin_db is None and not missing.clears_declared_gate
 
     assert "genb_definitely_not_a_task_bf16" not in verification.hardware_pass_ids()
-    assert len(verification.hardware_pass_ids()) == 948
-    assert len(verification.hardware_failure_ids()) == 100
+    assert len(verification.hardware_pass_ids()) == EXPECTED_STATUS_COUNTS["PASS"]
     assert verification.hardware_pass_ids().isdisjoint(
         verification.hardware_failure_ids()
     )
@@ -444,53 +493,65 @@ def test_verdict_lookup_rejects_an_empty_identity():
 # --------------------------------------------------------------------------- #
 # Defect 2: the eligibility policy
 # --------------------------------------------------------------------------- #
-def test_default_policy_excludes_only_broken_and_shortfall_seeds():
+def test_default_policy_excludes_only_broken_and_shortfall_seeds(tmp_path):
     policy = verification.DEFAULT_ELIGIBILITY_POLICY
     assert policy.exclude_broken and policy.exclude_shortfall
     assert not policy.exclude_near_gate
     assert not policy.exclude_infra
     assert not policy.require_verdict
 
+    # Both excluded bands are empty on the committed sweep, so the policy removes
+    # nobody -- it is a standing rule, not a currently-active filter.
     excluded = registry.train_eligibility_exclusions()
-    assert len(excluded) == 24
-    reasons = sorted(set(excluded.values()))
-    assert reasons == [verification.EXCLUSION_BROKEN, verification.EXCLUSION_SHORTFALL]
-    assert sum(
-        1 for reason in excluded.values() if reason == verification.EXCLUSION_BROKEN
-    ) == 15
-    # 9, not 11: two shortfall tasks are held out, so they never reach the train split.
-    assert sum(
-        1 for reason in excluded.values() if reason == verification.EXCLUSION_SHORTFALL
-    ) == 9
-
+    assert excluded == {}
     eligible = registry.eligible_train_tasks()
-    assert len(eligible) == 1_265
-    assert {task.task_id for task in eligible}.isdisjoint(excluded)
+    assert len(eligible) == EXPECTED_ELIGIBLE_TRAIN_TASKS
+
+    # What the rule WOULD do, on verdicts that exercise every band.
+    synthetic = _synthetic_artifact(tmp_path / "synthetic.json")
+    decided = {
+        task_id: policy.exclusion_reason(verdict)
+        for task_id, verdict in synthetic.verdicts.items()
+    }
+    assert decided == {
+        "syn_pass": None,
+        "syn_near": None,          # cleared its gate; only the elementwise check failed
+        "syn_infra": None,         # a node fault is not a task defect
+        "syn_broken": verification.EXCLUSION_BROKEN,
+        "syn_shortfall": verification.EXCLUSION_SHORTFALL,
+    }
 
 
 def test_the_train_split_itself_is_untouched_by_the_policy():
     """Eligibility is an opt-in view, so "train task" keeps its registry meaning."""
     train_ids = {task.task_id for task in registry.train_tasks()}
 
-    assert len(train_ids) == 1_289
-    assert len(registry.build_split_manifest().train_ids) == 1_289
-    assert {task.task_id for task in registry.eligible_train_tasks()} < train_ids
+    assert len(train_ids) == EXPECTED_TRAIN_TASKS
+    assert len(registry.build_split_manifest().train_ids) == EXPECTED_TRAIN_TASKS
+    # A subset always, and equal only because nothing is currently excluded.
+    assert {task.task_id for task in registry.eligible_train_tasks()} <= train_ids
     assert {
         task.task_id
         for task in registry.eligible_train_tasks(verification.ADMIT_ALL_POLICY)
     } == train_ids
 
 
-def test_near_gate_and_infra_tasks_stay_eligible_by_default():
-    # SNR 57.93 dB against a 30 dB gate, rejected only by allclose.
-    near = registry.hardware_verdict("genb_attn_bwd_gqa_causal_bf16")
-    assert near.band == verification.BAND_NEAR_GATE and near.clears_declared_gate
-    decision = verification.eligibility(near.task_id)
-    assert decision.eligible and decision.reason == verification.ADMITTED_BAND
+def test_near_gate_and_infra_tasks_stay_eligible_by_default(tmp_path):
+    synthetic = _synthetic_artifact(tmp_path / "synthetic.json")
+    policy = verification.DEFAULT_ELIGIBILITY_POLICY
 
-    infra = verification.eligibility("genb_moe_fused_moe_silu_k8_e256_bf16")
-    assert infra.eligible
-    assert infra.reason == verification.ADMITTED_INFRA
+    # Cleared its declared SNR gate; only the elementwise check rejected it.
+    near = synthetic.verdicts["syn_near"]
+    assert near.band == verification.BAND_NEAR_GATE and near.clears_declared_gate
+    assert policy.admits(near)
+
+    infra = synthetic.verdicts["syn_infra"]
+    assert infra.band == verification.BAND_INFRA
+    assert policy.admits(infra)
+
+    # And a real PASS reports as verified rather than merely admitted.
+    decision = verification.eligibility("genb_attn_bwd_gqa_causal_bf16")
+    assert decision.eligible and decision.reason == verification.ADMITTED_VERIFIED
 
 
 def test_unknown_verdicts_are_admitted_but_never_reported_as_verified():
@@ -499,7 +560,7 @@ def test_unknown_verdicts_are_admitted_but_never_reported_as_verified():
         for task in registry.train_tasks()
         if not registry.hardware_verdict(task.task_id).is_known
     )
-    assert len(unmeasured) == 280
+    assert len(unmeasured) == EXPECTED_UNMEASURED_TRAIN_TASKS
     assert any(task_id.startswith("gen_") for task_id in unmeasured)
     assert any(task_id.startswith("genv_") for task_id in unmeasured)
 
@@ -523,15 +584,20 @@ def test_strict_policy_admits_only_recorded_passes():
     assert eligible == verification.hardware_pass_ids() & {
         task.task_id for task in registry.train_tasks()
     }
-    assert len(eligible) == 912
+    assert len(eligible) == EXPECTED_STRICT_ELIGIBLE_TRAIN_TASKS
 
     excluded = registry.train_eligibility_exclusions(strict)
-    assert (
-        excluded["genb_moe_fused_moe_silu_k8_e256_bf16"] == verification.EXCLUSION_INFRA
-    )
-    assert (
-        excluded["genb_attn_bwd_gqa_causal_bf16"] == verification.EXCLUSION_NEAR_GATE
-    )
+    # Strict admits only a recorded PASS, so it drops every unmeasured task -- and
+    # would drop a near-gate or infra verdict too, which the default admits.
+    for verdict, reason in (
+        (verification.HardwareVerdict("t", "INFRA", verification.BAND_INFRA),
+         verification.EXCLUSION_INFRA),
+        (verification.HardwareVerdict("t", "FAIL_CORRECTNESS",
+                                      verification.BAND_NEAR_GATE, 57.9, 30.0),
+         verification.EXCLUSION_NEAR_GATE),
+    ):
+        assert strict.exclusion_reason(verdict) == reason
+        assert verification.DEFAULT_ELIGIBILITY_POLICY.admits(verdict)
     unmeasured = next(
         task.task_id
         for task in registry.train_tasks()
@@ -559,12 +625,9 @@ def test_policies_are_named_resolvable_and_never_silently_default_to_admit_all()
     report = registry.hardware_eligibility_report()
     assert report["policy"]["name"] == "exclude_broken_and_shortfall"
     assert report["policy"]["near_gate_margin_db"] == verification.NEAR_GATE_MARGIN_DB
-    assert report["train_tasks"] == 1_289
-    assert report["eligible"] == 1_265
-    assert sorted(report["excluded_by_reason"]) == [
-        verification.EXCLUSION_BROKEN,
-        verification.EXCLUSION_SHORTFALL,
-    ]
+    assert report["train_tasks"] == EXPECTED_TRAIN_TASKS
+    assert report["eligible"] == EXPECTED_ELIGIBLE_TRAIN_TASKS
+    assert report["excluded_by_reason"] == {}
 
 
 def test_band_classification_refuses_to_invent_a_verdict():

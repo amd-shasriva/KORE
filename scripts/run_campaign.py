@@ -1731,37 +1731,49 @@ def _stage_datagen(ctx):
     from kore.data.gen_groups import generate_groups
     from kore.data.gen_repair import generate_repairs
     from kore.data.gen_wins import generate_wins
-    from kore.data.parallel_datagen import shard_done
-    from kore.data.schemas import write_jsonl
+    from kore.data.parallel_datagen import (build_generator_contract, claim_shard,
+                                            write_completed_shard)
     from kore.env.kore_env import KoreEnv
 
     t = _teacher(ctx["args"])
     train = _train_tasks(ctx)
     n_tasks = len(train)
+    counts = _datagen_counts(ctx)
+    seed = int(getattr(ctx["args"], "seed", 0) or 0)
     dg_t0 = time.time()
     for i, task in enumerate(train):
-        # RESUMABLE (matches the parallel path): skip any (task, kind) whose shard
-        # already exists non-empty, so a rerun only fills holes / new tasks and never
-        # redoes verified work. Delete a shard to force its regeneration.
+        # RESUMABLE (matches the parallel path EXACTLY): every shard is claimed and
+        # then published through write_completed_shard, so it carries the production
+        # record envelope AND the durable completion receipt the resume check reads
+        # back. Writing bare JSONL here meant shard_done() could never return True -
+        # each rerun regenerated every shard at full teacher+GPU cost - and the
+        # production build reader rejected the unstamped records outright. Delete a
+        # shard and its .complete.json receipt to force regeneration.
         env = None
         for kind in ("repair", "groups", "wins"):
-            if shard_done(
-                ctx["data_root"], task.task_id, kind, gate="quota_only"):
-                _log("datagen", f"{task.task_id}:{kind} skip (resume)")
-                continue
-            if env is None:
-                env = KoreEnv(task)
-            if kind == "repair":
-                recs = generate_repairs(task, t, env, n=ctx["args"].n_repair)
-            elif kind == "groups":
-                recs = generate_groups(task, t, env, n_parents=ctx["args"].n_parents, k=ctx["args"].k)
-            else:
-                recs = generate_wins(task, t, env, gens=ctx["args"].wins_gens)
-            out = ctx["data_root"] / kind / f"{task.task_id}.jsonl"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            write_jsonl(out, recs)
-            _log("datagen", f"{task.task_id}:{kind} -> {len(recs)} records")
-            LOG.event("datagen_records", task=task.task_id, kind=kind, n=len(recs))
+            contract = build_generator_contract(
+                kind, counts, teacher_kind=ctx["args"].teacher,
+                model_teacher=ctx["args"].model_teacher,
+                model_teacher_revision=ctx["args"].model_teacher_revision,
+                task=task, seed=seed)
+            with claim_shard(ctx["data_root"], task.task_id, kind,
+                             contract=contract, gate="quota_only") as claimed:
+                if not claimed:
+                    _log("datagen", f"{task.task_id}:{kind} skip (resume)")
+                    continue
+                if env is None:
+                    env = KoreEnv(task)
+                if kind == "repair":
+                    recs = generate_repairs(task, t, env, n=ctx["args"].n_repair)
+                elif kind == "groups":
+                    recs = generate_groups(task, t, env, n_parents=ctx["args"].n_parents,
+                                           k=ctx["args"].k)
+                else:
+                    recs = generate_wins(task, t, env, gens=ctx["args"].wins_gens)
+                n_written = write_completed_shard(
+                    ctx["data_root"], task.task_id, kind, recs, contract=contract)
+            _log("datagen", f"{task.task_id}:{kind} -> {n_written} records")
+            LOG.event("datagen_records", task=task.task_id, kind=kind, n=n_written)
         LOG.progress(i + 1, n_tasks, "datagen", t_start=dg_t0, task=task.task_id)
     _log_datagen_coverage(ctx)
 
@@ -2088,6 +2100,24 @@ def _stage_build(ctx):
     _write_rows(ctx["data_root"] / "dpo" / "pairs.jsonl", dpo["rows"])
     _log("build", f"DPO (train-only): {dpo['n_total']} pairs ({dpo['n_hard']} hard, "
                   f"frac={dpo['n_hard']/max(1,dpo['n_total']):.1%}, >=8% target met={dpo['meets_target']})")
+    # The >=8% reward-hack hard-negative floor (DATASET_SPEC 2.6) is the entire
+    # anti-reward-hacking contrast of the DPO product: below it Stage-2 learns
+    # "prefer the faster kernel" with no counterweight against copying the
+    # reference or calling the vendor lib. ``meets_target`` was computed and
+    # logged here but never acted on, so a diluted set trained anyway - a shipped
+    # 14B run emitted 1854/44709 = 4.1% and nothing stopped it. --dpo-hard-fraction
+    # tunes how hard the abundant ranked-group pairs are thinned toward a (higher)
+    # target; it is not a lever for opting out of the spec floor, so this fails
+    # closed exactly like the SFT general-retention floor above.
+    _hard_target = float(getattr(ctx["args"], "dpo_hard_fraction", 0.0) or 0.0)
+    if not dpo["meets_target"]:
+        raise SystemExit(
+            f"DPO hard-negative floor NOT met: {dpo['n_hard']}/{dpo['n_total']} pairs "
+            f"= {dpo['n_hard']/max(1,dpo['n_total']):.1%} < 8% (DATASET_SPEC 2.6). "
+            f"Refusing to emit a preference set whose anti-reward-hack contrast is "
+            f"diluted below the spec floor. Raise --dpo-hard-fraction (currently "
+            f"{_hard_target:g}) so the abundant ranked-group pairs are subsampled to "
+            f"it, or generate hard negatives for more TRAIN tasks.")
 
 
 def _stage_midtrain(ctx):

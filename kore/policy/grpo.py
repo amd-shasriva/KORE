@@ -487,11 +487,25 @@ def _make_rollout_env(task, config=None, gpu=None, serial=True):
     evaluation physically did - in particular whether it was served from the replay
     cache. An UNBUDGETED rollout passes no ledger argument at all rather than an
     explicit ``None``, so the env is constructed exactly as before and lightweight
-    test doubles that accept only ``task`` keep working.
+    test doubles that accept only ``task`` keep working. The preflight runtime
+    identity is threaded in the same way, and for the same reason.
     """
     from kore.env.kore_env import KoreEnv
+    from kore.env.preflight_identity import (
+        preflight_identity_for, resolve_selected_gpu,
+    )
     ledger = _budget_ledger(config)
-    budget = {"budget_ledger": ledger} if ledger is not None else {}
+    kwargs = {"budget_ledger": ledger} if ledger is not None else {}
+    # Hand this rollout the preflight identity for the exact physical GPU it will
+    # bench on. Without it every duplicate candidate in a GRPO group re-pays a
+    # full GPU evaluation, because the replay cache fails closed with no proof
+    # the hardware/runtime were validated. A pure lookup: it never probes, and
+    # returns None when no preflight was established (or when THIS GPU did not
+    # pass one), which reproduces the previous uncached behavior exactly.
+    identity = preflight_identity_for(
+        resolve_selected_gpu(gpu), getattr(task, "gpu_target", None))
+    if identity is not None:
+        kwargs["runtime_identity"] = identity
     if serial and _dense_profile_weight(config) > 0.0:
         cfg0 = None
         try:
@@ -501,10 +515,10 @@ def _make_rollout_env(task, config=None, gpu=None, serial=True):
         except Exception:  # noqa: BLE001 - fall back to default env construction
             cfg0 = None
         if cfg0 is not None:
-            return (KoreEnv(task, config=cfg0, gpu=gpu, **budget) if gpu is not None
-                    else KoreEnv(task, config=cfg0, **budget))
-    return (KoreEnv(task, gpu=gpu, **budget) if gpu is not None
-            else KoreEnv(task, **budget))
+            return (KoreEnv(task, config=cfg0, gpu=gpu, **kwargs) if gpu is not None
+                    else KoreEnv(task, config=cfg0, **kwargs))
+    return (KoreEnv(task, gpu=gpu, **kwargs) if gpu is not None
+            else KoreEnv(task, **kwargs))
 
 
 def _dense_profile_bonus(env, task, code, obs, config):
@@ -882,6 +896,27 @@ def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inproc
     # Only a valid config may mutate process feature bridges.  Rebuild them on
     # every invocation so false clears stale KORE_* values from an earlier run.
     apply_runtime_env(config)
+
+    # Establish the preflight runtime identity HERE, before any rollout
+    # environment exists. KoreEnv only ever consumes this evidence: were it to
+    # mint its own at evaluation time, the proof authorizing a replay would be
+    # manufactured by the very run it authorizes and would guarantee nothing.
+    # No config argument - the identity must be bound to the same kore.config
+    # CONFIG the rollout envs are built from, not to the GRPO training config.
+    # Returns None on a host that cannot be validated, which just means no
+    # caching; it never blocks training.
+    from kore.env.preflight_identity import establish_preflight_identity
+
+    identity_bundle = establish_preflight_identity()
+    log.info(
+        "preflight runtime identity",
+        validated_gpus=(
+            [i["hardware"]["selected_gpu"] for i in identity_bundle["identities"]]
+            if identity_bundle else []),
+        rejected=(identity_bundle or {}).get("rejected", []),
+        replay_cache=("enabled" if identity_bundle
+                      and identity_bundle["identities"] else "disabled"),
+    )
     log.info("grpo backend: native in-process (transformers+PEFT on AMD)",
              backend=backend, model=getattr(config, "model_id", None))
     return _train_grpo_inprocess(config, tasks)

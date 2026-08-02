@@ -1384,10 +1384,13 @@ def test_an_unbudgeted_rollout_builds_the_environment_exactly_as_before(monkeypa
 # --------------------------------------------------------------------------- #
 # 11c. Hardware eligibility is an OPT-IN narrowing of datagen selection.
 #
-# The registry's train split is 1289 tasks; the default eligibility policy drops
-# the 27 structurally-broken + 11 SNR-shortfall seeds. Applying that implicitly
-# would be its own bug - an operator who did not ask for a smaller scope would
-# read the shrunken totals as progress - so the default must not move.
+# The registry's train split is 1289 tasks. The default eligibility policy drops
+# the structurally-broken and SNR-shortfall seeds; both bands are empty on the
+# current gfx950 sweep, so it drops nothing today, and the STRICT policy is what
+# still narrows (it admits only a recorded PASS, so every unmeasured task goes).
+# Applying either implicitly would be its own bug - an operator who did not ask
+# for a smaller scope would read the shrunken totals as progress - so the default
+# must not move.
 # --------------------------------------------------------------------------- #
 def _partition(tmp_path, name, *extra_argv):
     import scripts.spur_partition as sp
@@ -1420,19 +1423,31 @@ def test_partitioner_selection_is_unchanged_unless_a_policy_is_named(tmp_path):
 def test_naming_a_policy_narrows_selection_and_records_what_it_dropped(tmp_path):
     from kore.tasks.registry import eligible_train_tasks, train_tasks
 
-    narrowed = _partition(tmp_path, "narrowed",
-                          "--eligibility-policy", "exclude_broken_and_shortfall")
-
+    # The default policy is honoured, and on a clean sweep that means it removes
+    # nobody -- naming it must still be RECORDED, or a later run could not tell
+    # which scope a manifest was built under.
+    named = _partition(tmp_path, "named",
+                       "--eligibility-policy", "exclude_broken_and_shortfall")
     eligible = {task.task_id for task in eligible_train_tasks()}
-    assert narrowed["eligibility_policy"] == "exclude_broken_and_shortfall"
-    assert narrowed["n_train_tasks"] == len(eligible)
-    assert narrowed["n_train_tasks"] < len(train_tasks())
-    dropped = narrowed["ineligible_excluded"]
-    assert len(dropped) == narrowed["n_ineligible_excluded"] > 0
-    assert not set(dropped) & eligible
+    assert named["eligibility_policy"] == "exclude_broken_and_shortfall"
+    assert named["n_train_tasks"] == len(eligible)
+    assert {item["task_id"] for item in named["items"]} <= eligible
+
+    # The narrowing path itself is exercised by the strict policy, which admits
+    # only a recorded PASS and so drops every unmeasured task.
+    strict = _partition(tmp_path, "strict",
+                        "--eligibility-policy", "strict_hardware_verified")
+    strict_eligible = {task.task_id
+                       for task in eligible_train_tasks("strict_hardware_verified")}
+    assert strict["eligibility_policy"] == "strict_hardware_verified"
+    assert strict["n_train_tasks"] == len(strict_eligible)
+    assert strict["n_train_tasks"] < len(train_tasks())
+    dropped = strict["ineligible_excluded"]
+    assert len(dropped) == strict["n_ineligible_excluded"] > 0
+    assert not set(dropped) & strict_eligible
     # Every drop names the hardware evidence behind it, never a bare count.
     assert all(reason for reason in dropped.values())
-    assert {item["task_id"] for item in narrowed["items"]} <= eligible
+    assert {item["task_id"] for item in strict["items"]} <= strict_eligible
 
 
 def test_admit_all_is_a_nameable_no_op_policy(tmp_path):

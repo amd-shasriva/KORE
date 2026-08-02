@@ -31,27 +31,36 @@ def _route_topk_kernel(gate_ptr, dense_ptr, tw_ptr, ti_ptr, E, sgm, sge,
     else:
         scores = raw
     candidates = tl.where(mask, scores, -float("inf"))
-    tl.store(dense_ptr + row * E + e, 0.0, mask=mask)
+    # The renormalizer used to write the k winners to `dense`, read the row back,
+    # divide and write it again.  A load has no ordering against earlier stores
+    # to the same addresses from the same program, and the second vector store
+    # races the scalar ones, so some winners kept their UN-normalized value --
+    # every renormalizing router was wrong on ~87% of rows.  Selecting twice
+    # instead, with the row held in registers, removes the round trip entirely:
+    # pass one only accumulates `total`, pass two writes values already divided.
+    scan = candidates
     total = 0.0
+    for j in range(0, TOPK):
+        picked = tl.max(scan, axis=0)
+        if TOPK_SOFTMAX:
+            total += tl.exp(picked - row_max)
+        else:
+            total += picked
+        scan = tl.where(e == tl.argmax(scan, axis=0), -float("inf"), scan)
+    inv = 1.0 / total if (RENORM or TOPK_SOFTMAX) else 1.0
+    dense_row = tl.zeros([EB], dtype=tl.float32)
     for j in range(0, TOPK):
         pick = tl.argmax(candidates, axis=0)
         picked = tl.max(candidates, axis=0)
         if TOPK_SOFTMAX:
-            value = tl.exp(picked - row_max)
+            value = tl.exp(picked - row_max) * inv
         else:
-            value = picked
-        total += value
-        tl.store(dense_ptr + row * E + pick, value)
+            value = picked * inv
+        dense_row = tl.where(e == pick, value, dense_row)
         tl.store(tw_ptr + row * TOPK + j, value)
         tl.store(ti_ptr + row * TOPK + j, pick)
         candidates = tl.where(e == pick, -float("inf"), candidates)
-    if RENORM or TOPK_SOFTMAX:
-        vals = tl.load(dense_ptr + row * E + e, mask=mask, other=0.0)
-        vals = tl.where(vals != 0.0, vals / total, 0.0)
-        tl.store(dense_ptr + row * E + e, vals, mask=mask)
-        for j in range(0, TOPK):
-            value = tl.load(tw_ptr + row * TOPK + j)
-            tl.store(tw_ptr + row * TOPK + j, value / total)
+    tl.store(dense_ptr + row * E + e, dense_row, mask=mask)
 
 
 def _route_topk(gate, topk, mode, renorm):

@@ -81,6 +81,22 @@ flowchart TD
 
 ---
 
+## End-to-end serving gate
+
+`e2e_sglang_vllm.py` is the last gate a kernel passes: a win in the isolated verifier only counts if it survives inside a production inference server with no accuracy regression. `e2e_gate_endpoints` serves the stock kernel and the candidate kernel behind two OpenAI-compatible endpoints, replays an identical `Workload` against each, and accepts only if **tokens/s improved AND accuracy did not regress**.
+
+The module never imports vLLM or SGLang. It speaks HTTP to `/v1/chat/completions`, so the engine lives in its own container or venv and the training stack never inherits an engine's `torch` pin — `VLLM_AVAILABLE` / `SGLANG_AVAILABLE` are diagnostics that read `False` on the training box by design. That separation is **permanent on the current node**, and [`docs/E2E_SERVING_GATE.md`](../../docs/E2E_SERVING_GATE.md) has the verified install/serve procedure, the measured gfx950 numbers, and the exact reason the prebuilt vLLM-ROCm wheels cannot be installed here.
+
+```bash
+python -m kore.eval.e2e_sglang_vllm --engine sglang --model <NAME> \
+  --base-url http://127.0.0.1:30000 --candidate-url http://127.0.0.1:30001 \
+  --requests 32 --json runs/e2e_gate/<run>.json
+```
+
+`tests/test_e2e_serving_gate.py` drives the whole client path over real HTTP against a stdlib stub endpoint (no GPU, no engine, no outbound network); `tests/test_gpu_e2e_serving_gate.py` (`-m gpu`) repeats it against a live server and skips with a reason when `KORE_E2E_BASE_URL` is unset.
+
+---
+
 ## Publishable frontier suite
 
 Four capabilities make a KORE result comparable to the field, hardened against correctness hacks, and statistically defensible. All are import-safe (torch/numpy imported lazily) and unit-tested in `kore/eval/tests/test_eval_frontier.py`. The campaign eval stage (`scripts/run_campaign.py._stage_eval`) runs three fail-safe tracks — each wrapped so a failure logs and skips rather than breaking eval:

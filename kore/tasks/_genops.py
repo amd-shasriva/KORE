@@ -65,6 +65,28 @@ def _torch_dtype(name: str):
     return getattr(torch, DTYPES[name][0])
 
 
+def tl_round_half_even(v: str) -> str:
+    """Triton EXPRESSION rounding ``v`` half-to-EVEN -- exactly ``torch.round``.
+
+    Every integer quantizer in this corpus has a ``round(x / scale)`` oracle, and
+    ``torch.round`` breaks ties to even.  Rounding half AWAY FROM ZERO instead
+    (``floor(v + 0.5)`` for positive ``v``) is off by one code on every exact
+    tie, and ties are not a measure-zero set here: the operand is a bf16/fp16
+    value divided by a scale derived from that same tensor, so ~0.3% of a
+    quantized tensor lands exactly on ``.5`` and ~0.11% of codes come out
+    different.  That is a systematic, reproducible disagreement with the oracle,
+    not rounding noise, and no tolerance should absorb it.
+
+    Written with ``floor`` rather than ``libdevice.rint`` so a generated seed
+    needs no import beyond ``triton.language`` and does not depend on where a
+    given Triton release puts its device-function shims.  Sub-expressions repeat
+    but are common-subexpression-eliminated.
+    """
+    down = f"tl.floor({v} + 0.5)"
+    return (f"tl.where({down} - ({v}) == 0.5, "
+            f"2.0 * tl.floor({down} * 0.5), {down})")
+
+
 # torch.compile'd baseline cache (one per fusion/gemm_fusion op+dtype).
 _FUSED_BASELINE_CACHE: dict = {}
 
@@ -1264,6 +1286,160 @@ def _snr_db(out, ref_out) -> float:
     return 20.0 * math.log10(signal / noise) if signal > 0 else -999.0
 
 
+# --------------------------------------------------------------------------- #
+# Elementwise correctness tolerance
+# --------------------------------------------------------------------------- #
+# Two finite-precision evaluations of the same mathematical function do not
+# produce the same bits.  What a correctness gate has to decide is whether the
+# disagreement is attributable to the arithmetic of the DECLARED OUTPUT FORMAT --
+# which is a property of the dtype and of the tensor's scale, never a universal
+# constant.
+#
+# The tolerance is built from the two things that actually generate the
+# difference:
+#
+# 1. REPRESENTATION.  Both results are stored in the output format, so two exact
+#    values that straddle a representable boundary land on ADJACENT codes.
+#    Agreement can only ever be asserted to within a small number of code steps.
+#    ``torch.finfo(d).eps`` is that step, relative, for a float format; for an
+#    integer-coded (quantized) output it is exactly 1.
+#
+# 2. ACCUMULATION.  The rounding error of a reduction is bounded by the magnitude
+#    of the ACCUMULATION, not by the magnitude of the RESULT.  An output element
+#    that is small only because its terms cancelled still carries the absolute
+#    error the summation incurred, so a relative (``rtol * |r|``) tolerance is the
+#    wrong shape for any reduction: it shrinks exactly where the error does not.
+#    The scale must come from the tensor.  ``max|r|`` over the ORACLE's finite
+#    entries is the available bound on any single element's accumulation scale.
+#    (The RMS would be too tight for the heterogeneous tensors here -- an
+#    attention-backward dK has peak/RMS ~= 32 and each row's error tracks its own
+#    row's accumulation, so the max-norm bound has to be referenced to the peak,
+#    the same convention LAPACK's scaled-residual tests use.)
+#
+# giving
+#
+#     |o - r|  <=  ULP_STEPS * step(dtype) * peak(r)
+#
+# The peak is taken from the reference, never the candidate, so a kernel cannot
+# widen its own tolerance by emitting a large value.
+#
+# What the previous fixed ``atol = rtol = 1e-2`` did instead was apply an
+# fp32-calibrated number to every format: it demands 1% relative agreement from
+# fp8_e4m3, whose own relative resolution is 12.5%, so NO fp8 kernel could ever
+# satisfy it; and 0.01 absolute agreement from an int8 code, where the
+# quantizer's own rounding boundary moves a code by a full LSB.
+#
+# This gate is one of TWO that must both hold; the task's declared SNR gate is
+# the other.  They are complementary and neither is redundant: SNR is a global
+# (L2) measure that a sparse defect -- one masked tail, one boundary row -- barely
+# moves, and this elementwise bound is a max-norm measure that a small
+# broad-spectrum bias barely moves.
+
+# Representable steps of the output format that two correct implementations of
+# the same math may differ by.  Measured on gfx950 across this corpus, correct
+# seeds sit at 0.5-0.8 steps; 2 leaves ~3x headroom without admitting a
+# difference the format could not have produced.
+CORRECTNESS_ULP_STEPS = 2.0
+# Integer-CODED (quantizer) outputs are EXACT by default.  A pure quantizer --
+# input tensor in, codes out -- is a deterministic function of bits both
+# implementations already hold, so any disagreement is a real difference in the
+# rounding rule or the scale expression, not noise.  Allowing even one code here
+# hides exactly that: a seed that rounded ties away from zero while its oracle
+# used torch.round (ties to even) disagreed on 0.11% of codes and still passed.
+# Ops whose quantizer consumes a COMPUTED value (a normalized activation, an Adam
+# update) declare ``code_tolerance_steps = 1`` instead -- see
+# :func:`_tolerance_declarations`.
+CORRECTNESS_CODE_STEPS = 0.0
+# Relative slack for REASSOCIATING an fp32 reduction.  Recursive summation of K
+# terms drifts by ~sqrt(K) * 2**-24; the widest reductions in this corpus are
+# ~2**14 elements, i.e. 7.6e-6, and 2**-16 is the next binade up.  It sits below
+# every low-precision format's own resolution, so it only ever binds for an fp32
+# output -- where the storage step (2**-23) is far finer than the arithmetic.
+FP32_REASSOC_SLACK = 2.0 ** -16
+# Integer outputs that carry a QUANTIZER CODE, so "one step" means one LSB of the
+# code.  Every other integer output in this corpus is an index, count or offset,
+# where "off by one" is a different answer rather than a rounder one.
+_CODED_INT_DTYPES = frozenset({"int8", "uint8"})
+
+
+def _format_step(dtype, peak: float) -> tuple[float, str]:
+    """One representable step of ``dtype`` at magnitude ``peak``, and its kind.
+
+    ``kind`` is ``"code"`` for an integer-coded (quantized) output, ``"index"``
+    for an integer index/count/mask, and ``"float"`` otherwise.  For a float
+    format the step is absolute: the format's relative resolution scaled by
+    ``peak``, the oracle tensor's largest finite magnitude -- floored at the
+    SUBNORMAL spacing, because below the smallest normal a float's spacing stops
+    shrinking with the value and becomes constant.  Several backward passes in
+    this corpus land entirely in fp16's subnormal range (peak ~3e-07 against a
+    smallest normal of 6.1e-05), where ``eps * peak`` under-states the true step
+    by two orders of magnitude and would fail a kernel that is off by one code.
+    """
+    import torch
+
+    if dtype == torch.bool or not dtype.is_floating_point:
+        name = str(dtype).rsplit(".", 1)[-1]
+        return (1.0, "code") if name in _CODED_INT_DTYPES else (0.0, "index")
+    info = torch.finfo(dtype)
+    resolution = max(float(info.eps), FP32_REASSOC_SLACK)
+    subnormal = float(info.tiny) * float(info.eps)   # constant spacing below `tiny`
+    return max(resolution * abs(float(peak)), subnormal), "float"
+
+
+def correctness_tolerance(dtype, peak: float,
+                          code_steps: float = CORRECTNESS_CODE_STEPS
+                          ) -> tuple[float, float, str]:
+    """``(absolute tolerance, one format step, kind)`` for an output of ``dtype``.
+
+    ``peak`` must be the ORACLE's largest finite magnitude, never the
+    candidate's, so a kernel cannot widen its own tolerance.  An index/count
+    output gets a tolerance of exactly zero.
+    """
+    step, kind = _format_step(dtype, peak)
+    if kind == "index":
+        return 0.0, 0.0, kind
+    steps = code_steps if kind == "code" else CORRECTNESS_ULP_STEPS
+    return steps * step, step, kind
+
+
+# --------------------------------------------------------------------------- #
+# Per-op tolerance declarations
+# --------------------------------------------------------------------------- #
+# Some ops cannot be judged from the OUTPUT TENSOR'S DTYPE alone, so the
+# reference declares the missing fact.  Every declaration defaults to off, so an
+# op that says nothing is judged by the plain format-step gate above.
+#
+# * ``output_value_grid`` -- the output is stored in one format but its VALUES
+#   live on a coarser grid, because the op ends in a quantizer.  A requantizing
+#   GEMM writes bf16, but every value it can produce is an fp8 code times a
+#   scale, so its true granularity is the fp8 step (16x the bf16 step) and a
+#   one-code disagreement is not a defect.
+#
+# * ``selection_rel_tol`` / ``selection_index_tol`` -- the output is a
+#   DISCONTINUOUS function of a floating-point cumulative sum (top-p nucleus,
+#   typical-mass mask, inverse-CDF sampling).  The token sitting exactly at the
+#   mass threshold moves across it under any last-bit change in the
+#   probabilities, so two correct implementations differ by that token's own
+#   mass (float outputs) or by a few positions along the monotone CDF (index
+#   outputs).  Measured on gfx950, an equally-correct reassociation of the
+#   oracle's own softmax flips the boundary on ~1-2% of rows.  This is a
+#   property of the operator, not of the kernel, and no tolerance on the inputs
+#   removes it -- so it is declared per op and bounded, never applied globally.
+# * ``code_tolerance_steps`` -- the quantizer's INPUT is itself computed (a
+#   normalized activation, an Adam update), so the two implementations feed the
+#   rounding boundary slightly different fp32 values and one code step is
+#   unavoidable.  A PURE quantizer declares nothing and must match exactly.
+def _tolerance_declarations(ref) -> dict:
+    grid = getattr(ref, "output_value_grid", None)
+    return {
+        "grid": grid if isinstance(grid, (tuple, list)) else (grid,),
+        "selection_rel": float(getattr(ref, "selection_rel_tol", 0.0) or 0.0),
+        "selection_index": int(getattr(ref, "selection_index_tol", 0) or 0),
+        "code_steps": float(getattr(ref, "code_tolerance_steps",
+                                    CORRECTNESS_CODE_STEPS)),
+    }
+
+
 def _num_correct_trials() -> int:
     try:
         return max(5, int(os.environ.get("KORE_CORRECTNESS_TRIALS", "5")))
@@ -1447,11 +1623,19 @@ def _make_paired_invokers(inputs, candidate_call, baseline_call,
     )
 
 
-def _compare_outputs(out, ref_out, atol=1e-2, rtol=1e-2, expected_dtypes=None):
-    """SNR/max_diff/allclose over single-tensor OR multi-output (tuple) results.
+def _compare_outputs(out, ref_out, atol=None, rtol=None, expected_dtypes=None,
+                     stats=None, declared=None):
+    """SNR/max_diff/agreement over single-tensor OR multi-output (tuple) results.
 
-    Returns ``(worst_snr_db, max_abs_diff, allclose_all)`` - the worst SNR and the
-    logical-AND of allclose across every output tensor.
+    Returns ``(worst_snr_db, max_abs_diff, agree_all)`` - the worst SNR and the
+    logical-AND of the elementwise agreement test across every output tensor.
+
+    The elementwise test is :func:`correctness_tolerance`: a per-output-tensor
+    bound in representable steps of that tensor's own storage format, scaled by
+    the oracle's peak magnitude.  ``atol``/``rtol`` are honoured only when a
+    caller passes them explicitly (the hand-authored ``_attn_common`` /
+    ``_moe_common`` drivers do), in which case the legacy
+    ``|o - r| <= atol + rtol * |r|`` test is used unchanged.
 
     NON-FINITE-AWARE: a correct kernel must reproduce the reference's NaN/Inf
     STRUCTURE exactly (same non-finite positions, same inf sign), and match
@@ -1462,13 +1646,22 @@ def _compare_outputs(out, ref_out, atol=1e-2, rtol=1e-2, expected_dtypes=None):
     ``_snr_db`` (ref norm inf/nan -> -999), so it FALSE-REJECTED correct kernels on
     those regimes. Matching the non-finite structure is correctness, not a hack: a
     kernel that is wrong anywhere still fails on the finite elements or the
-    structure check, and on the many finite adversarial regimes."""
+    structure check, and on the many finite adversarial regimes.
+
+    ``stats``, when a dict is supplied, receives the worst elementwise error
+    expressed in representable steps of the output format -- the dtype-normalised
+    number that makes a verdict readable across bf16/fp8/int8 outputs."""
     import torch
+    legacy = atol is not None or rtol is not None
+    atol = 1e-2 if atol is None else atol
+    rtol = 1e-2 if rtol is None else rtol
+    decl = declared or {"grid": (None,), "selection_rel": 0.0,
+                        "selection_index": 0, "code_steps": CORRECTNESS_CODE_STEPS}
     pairs = _output_pairs(out, ref_out, expected_dtypes=expected_dtypes)
     if pairs is None:
         return -999.0, float("inf"), False
     worst, maxd, ok = 999.0, 0.0, True
-    for o, r in pairs:
+    for index, (o, r) in enumerate(pairs):
         of, rf = o.float(), r.float()
         rnan, onan = torch.isnan(rf), torch.isnan(of)
         rpos, opos = torch.isposinf(rf), torch.isposinf(of)
@@ -1489,8 +1682,26 @@ def _compare_outputs(out, ref_out, atol=1e-2, rtol=1e-2, expected_dtypes=None):
         if rf_c.numel() == 0:
             continue  # entirely non-finite and structurally matched -> agreement
         worst = min(worst, _snr_db(of_c, rf_c))
-        maxd = max(maxd, (of_c - rf_c).abs().max().item())
-        ok = ok and bool(torch.allclose(of_c, rf_c, atol=atol, rtol=rtol))
+        diff = (of_c - rf_c).abs().max().item()
+        maxd = max(maxd, diff)
+        if legacy:
+            ok = ok and bool(torch.allclose(of_c, rf_c, atol=atol, rtol=rtol))
+            continue
+        grids = decl["grid"]
+        grid = grids[index] if index < len(grids) else None
+        peak = rf_c.abs().max().item()
+        tol, step, kind = correctness_tolerance(grid or r.dtype, peak,
+                                                decl["code_steps"])
+        if kind == "index":
+            tol = float(decl["selection_index"])
+        else:
+            tol += decl["selection_rel"] * peak
+        ok = ok and (diff <= tol)
+        if stats is not None:
+            stats["steps"] = max(stats.get("steps", 0.0),
+                                 (diff / step) if step > 0 else
+                                 (0.0 if diff == 0 else float("inf")))
+            stats.setdefault("kinds", set()).add(kind)
     return worst, maxd, ok
 
 
@@ -1499,6 +1710,8 @@ def _run_correctness(ref, task_dir, shape) -> int:
     import torch
     fn = _load_candidate(task_dir, ref.entry_name)
     worst, maxd, ok = 999.0, 0.0, True
+    stats: dict = {}
+    declared = _tolerance_declarations(ref)
     for s in range(_num_correct_trials()):
         inputs = ref.get_inputs(shape, device="cuda", seed=s)
         r = ref.ref_fn(*_clone_inputs(inputs))
@@ -1509,7 +1722,7 @@ def _run_correctness(ref, task_dir, shape) -> int:
             print(f"CANDIDATE_ERROR: {type(e).__name__}: {e}")
             return 0
         torch.cuda.synchronize()
-        snr, md, cok = _compare_outputs(o, r)
+        snr, md, cok = _compare_outputs(o, r, stats=stats, declared=declared)
         worst = min(worst, snr); maxd = max(maxd, md); ok = ok and cok
 
     # Verification-in-the-loop: enumerated adversarial regimes. Opt-in via
@@ -1528,13 +1741,20 @@ def _run_correctness(ref, task_dir, shape) -> int:
                 print(f"ADVERSARIAL_ERROR[{name}]: {type(e).__name__}: {e}")
                 return 0
             torch.cuda.synchronize()
-            snr, md, cok = _compare_outputs(o, r)
+            snr, md, cok = _compare_outputs(o, r, stats=stats, declared=declared)
             worst = min(worst, snr); maxd = max(maxd, md)
             if not cok:
                 ok = False
                 print(f"ADVERSARIAL_FAIL[{name}]: SNR {snr:.2f} dB")
 
     print(f"SNR: {worst:.2f} dB"); print(f"allclose: {ok}"); print(f"max_diff: {maxd:.6f}")
+    # The dtype-normalised form of max_diff: how many representable steps of the
+    # output format the candidate and the oracle disagree by.  ``max_diff`` alone
+    # is unreadable across bf16/fp8/int8 outputs; this is the number the gate
+    # actually tests (see :func:`correctness_tolerance`).
+    print(f"format_steps: {stats.get('steps', 0.0):.4f} "
+          f"limit: {CORRECTNESS_ULP_STEPS:.4f} "
+          f"kinds: {','.join(sorted(stats.get('kinds', ()))) or 'none'}")
     return 0
 
 

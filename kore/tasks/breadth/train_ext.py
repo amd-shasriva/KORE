@@ -1022,6 +1022,12 @@ def make_reference(op: str, dtype: str) -> dict:
     ns = {"parse_shape": _parse_shape, "get_inputs": get_inputs, "ref_fn": ref_fn,
           "baseline_fn": baseline_fn, "arity": arity, "entry_name": op, "dtype_name": dtype,
           "family": family, "mutates_input": op in TRAIN_MUTATES_INPUT}
+    if op in _QUANT_OPS:
+        # The 8-bit optimizer states requantize a COMPUTED Adam update, so the
+        # two implementations reach the rounding boundary with slightly different
+        # fp32 values and one code step is unavoidable.  A PURE quantizer
+        # (kore/tasks/breadth/quant_ext.py) declares nothing and must be exact.
+        ns["code_tolerance_steps"] = 1.0
     ns[f"{op}_ref"] = ref_fn
     return ns
 

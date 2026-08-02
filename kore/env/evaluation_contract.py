@@ -29,6 +29,18 @@ EVALUATION_CONTRACT_VERSION = 3
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _PREFLIGHT_IDENTITY_ENV = "KORE_PREFLIGHT_RUNTIME_IDENTITY"
+PREFLIGHT_IDENTITY_ENV = _PREFLIGHT_IDENTITY_ENV
+PREFLIGHT_IDENTITY_BUNDLE_KIND = "kore-preflight-identity-bundle"
+"""One artifact holding one identity per validated GPU.
+
+``gpu_target`` and ``selected_gpu`` are per-evaluation values, and each rank of a
+distributed run benches on its own physical GPU, so a single flat identity
+exported for a whole multi-GPU run would be wrong for every rank but one. A
+bundle lets one exported value be correct everywhere: each consumer selects the
+entry matching the GPU and architecture only it knows, and a rank whose GPU was
+never validated selects nothing rather than somebody else's evidence.
+"""
+_BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _CORE_CODE_PATHS: tuple[tuple[str, Path], ...] = tuple(
     (
@@ -59,6 +71,7 @@ _CORE_CODE_PATHS: tuple[tuple[str, Path], ...] = tuple(
     )
 )
 _REPLAY_DISABLED_ANNOUNCED: set[str] = set()
+_BOOT_IDENTITY_CACHE: list[str] = []
 _FINGERPRINT_LOCK = threading.RLock()
 _FILE_FINGERPRINT_CACHE: dict[
     str, tuple[tuple[int, int, int, int, int], dict[str, Any]]
@@ -495,14 +508,117 @@ def _toolchain_fingerprint(config: Any) -> dict[str, Any]:
     }
 
 
+def boot_identity() -> str:
+    """This boot's kernel-generated id, or ``""`` when it cannot be read.
+
+    A preflight identity binds to it because HIP device enumeration is stable
+    for the life of a boot but may be renumbered across boots. The value cannot
+    change while this process lives, so it is read once.
+    """
+    with _FINGERPRINT_LOCK:
+        if _BOOT_IDENTITY_CACHE:
+            return _BOOT_IDENTITY_CACHE[0]
+    try:
+        value = _BOOT_ID_PATH.read_text(errors="replace").strip()
+    except OSError:
+        value = ""
+    with _FINGERPRINT_LOCK:
+        if not _BOOT_IDENTITY_CACHE and value:
+            _BOOT_IDENTITY_CACHE.append(value)
+    return value
+
+
+def core_code_digest() -> dict[str, Any]:
+    """PUBLIC: aggregate content identity of the verdict-bearing core modules."""
+    details = _fingerprint_code_paths()
+    return {"state": details.get("state"), "sha256": details.get("sha256")}
+
+
+def toolchain_digest(config: Any) -> dict[str, Any]:
+    """PUBLIC: aggregate identity of compilers, ROCm, and GPU packages."""
+    fingerprint = _toolchain_fingerprint(config)
+    return {"state": fingerprint.get("state"), "sha256": fingerprint.get("sha256")}
+
+
+def _select_bundled_identity(
+    value: Mapping[str, Any],
+    *,
+    effective_gpu_target: str,
+    expected_gpu: Any,
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """Pick this evaluation's identity out of a multi-GPU bundle.
+
+    Returns ``(identity, None)`` on an unambiguous match. Two entries claiming
+    the same GPU and architecture are not evidence about which one describes it,
+    so an ambiguous bundle is refused rather than resolved by position.
+    """
+    entries = value.get("identities")
+    if not isinstance(entries, list):
+        return None, "bundle has no identity list"
+    matches = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and isinstance(entry.get("hardware"), dict)
+        and str(entry["hardware"].get("selected_gpu")) == str(expected_gpu)
+        and entry["hardware"].get("gpu_target") == effective_gpu_target
+    ]
+    if not matches:
+        return None, "bundle validated no identity for this GPU and architecture"
+    if len(matches) > 1:
+        return None, "bundle is ambiguous for this GPU and architecture"
+    return matches[0], None
+
+
+def _binding_drift(
+    identity: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    *,
+    toolchain_sha256: Optional[str],
+    core_code_sha256: Optional[str],
+) -> Optional[str]:
+    """Re-verify, against live state, every fact the identity claims it was validated against.
+
+    This is what stops the evidence from outliving what it attests to: a
+    preflight that validated one toolchain, one evaluator revision, or one boot
+    must not authorize replaying measurements taken under another.
+
+    An identity that declares nothing makes the weaker, unbound claim it always
+    made. An identity that declares a binding this build cannot check is
+    *refused*, so no identity can look stronger by naming evidence nobody
+    verifies.
+    """
+    declared = identity.get("bindings")
+    if declared is None:
+        return None
+    if not isinstance(declared, list) or not all(
+        isinstance(name, str) for name in declared
+    ):
+        return "bindings must be a list of names"
+    live = {
+        "boot_id": boot_identity() or None,
+        "toolchain_sha256": toolchain_sha256,
+        "core_code_sha256": core_code_sha256,
+    }
+    for name in declared:
+        if name not in live:
+            return f"unverifiable binding {name!r}"
+        current = live[name]
+        if not current:
+            return f"binding {name!r} cannot be checked in this process"
+        if runtime.get(name) != current:
+            return f"{name} changed since the preflight"
+    return None
+
+
 def _announce_replay_disabled() -> None:
     """Say once, per process, that replay caching cannot engage.
 
     An evaluation is only replayable against an identity proving the hardware and
-    runtime were validated and found stable *before* the run. No producer of
-    ``KORE_PREFLIGHT_RUNTIME_IDENTITY`` exists yet, so the cache fails closed and
-    every candidate -- including one already measured -- costs a fresh GPU
-    evaluation. That is safe and slow, and the slowness should be attributable.
+    runtime were validated and found stable *before* the run. Without one the
+    cache fails closed and every candidate -- including one already measured --
+    costs a fresh GPU evaluation. That is safe and slow, and the slowness should
+    be attributable, so name the producer that would fix it.
     """
     with _FINGERPRINT_LOCK:
         if "no_identity" in _REPLAY_DISABLED_ANNOUNCED:
@@ -515,7 +631,9 @@ def _announce_replay_disabled() -> None:
         "(argument or %s), so no evaluation is cacheable and replay_hits will "
         "stay at 0. Every candidate costs a fresh GPU evaluation. This is "
         "fail-closed by design -- an observation may only be replayed against "
-        "proof that the hardware and runtime were validated as stable.",
+        "proof that the hardware and runtime were validated as stable. Run "
+        "'python -m kore.env.preflight_identity --export' and export the "
+        "result to establish that proof.",
         _PREFLIGHT_IDENTITY_ENV,
     )
 
@@ -525,6 +643,8 @@ def _validated_preflight_identity(
     *,
     effective_gpu_target: str,
     gpu_selection: Mapping[str, Any],
+    toolchain_sha256: Optional[str] = None,
+    core_code_sha256: Optional[str] = None,
 ) -> tuple[dict[str, Any], bool]:
     source = "argument"
     value: Any = identity
@@ -539,8 +659,7 @@ def _validated_preflight_identity(
     if value is None:
         # Fail-closed is correct, but silence here is not: the caller sees
         # replay_hits stay at 0 forever and cannot tell "no duplicates" apart
-        # from "caching never engaged". Nothing in this repo emits the env var
-        # yet, so this is the permanent state until a producer ships.
+        # from "caching never engaged".
         _announce_replay_disabled()
         return {"state": "unknown", "source": "none"}, False
     try:
@@ -549,6 +668,23 @@ def _validated_preflight_identity(
         return {"state": "invalid", "source": source, "reason": "non-finite/non-JSON"}, False
     if not isinstance(value, dict):
         return {"state": "invalid", "source": source, "reason": "not an object"}, False
+    expected_gpu = gpu_selection.get("selected_gpu")
+    if value.get("kind") == PREFLIGHT_IDENTITY_BUNDLE_KIND:
+        selected, bundle_reason = _select_bundled_identity(
+            value,
+            effective_gpu_target=effective_gpu_target,
+            expected_gpu=expected_gpu,
+        )
+        if selected is None:
+            return {
+                "state": "invalid",
+                "source": source,
+                "reason": bundle_reason,
+            }, False
+        # Only the selected entry continues, so one rank's evidence never
+        # becomes part of another rank's replay key.
+        source = f"{source}[bundle]"
+        value = selected
     if value.get("identity_version") != 1:
         return {"state": "invalid", "source": source, "reason": "identity_version"}, False
     if value.get("validated") is not True or value.get("stable") is not True:
@@ -562,13 +698,20 @@ def _validated_preflight_identity(
     hardware_id = hardware.get("id")
     target = hardware.get("gpu_target")
     selected_gpu = hardware.get("selected_gpu")
-    expected_gpu = gpu_selection.get("selected_gpu")
     if not isinstance(hardware_id, str) or not hardware_id.strip():
         return {"state": "invalid", "source": source, "reason": "hardware id"}, False
     if target != effective_gpu_target:
         return {"state": "invalid", "source": source, "reason": "gpu target mismatch"}, False
     if str(selected_gpu) != str(expected_gpu):
         return {"state": "invalid", "source": source, "reason": "selected GPU mismatch"}, False
+    drift = _binding_drift(
+        value,
+        runtime,
+        toolchain_sha256=toolchain_sha256,
+        core_code_sha256=core_code_sha256,
+    )
+    if drift is not None:
+        return {"state": "invalid", "source": source, "reason": drift}, False
     digest = hashlib.sha256(
         json.dumps(
             value,
@@ -581,6 +724,10 @@ def _validated_preflight_identity(
         "state": "validated",
         "source": source,
         "sha256": digest,
+        # Records how strong this authorization actually was, and keeps two
+        # otherwise-identical identities that verified different amounts of
+        # evidence from sharing one replay key.
+        "bindings_verified": sorted(value.get("bindings") or ()),
         "identity": value,
     }, True
 
@@ -666,6 +813,10 @@ def build_evaluation_contract(
         runtime_identity,
         effective_gpu_target=architecture,
         gpu_selection=selection if isinstance(selection, dict) else {},
+        # The live values the identity's declared bindings are re-checked
+        # against, taken from the same fingerprints this contract records.
+        toolchain_sha256=toolchain.get("sha256"),
+        core_code_sha256=core_code.get("sha256"),
     )
     runtime_stable = (
         core_code.get("state") == "stable"
@@ -831,7 +982,12 @@ def observation_satisfies_contract(obs: Any, contract: Mapping[str, Any]) -> boo
 
 __all__ = [
     "EVALUATION_CONTRACT_VERSION",
+    "PREFLIGHT_IDENTITY_BUNDLE_KIND",
+    "PREFLIGHT_IDENTITY_ENV",
+    "boot_identity",
     "build_evaluation_contract",
     "contract_is_cacheable",
+    "core_code_digest",
     "observation_satisfies_contract",
+    "toolchain_digest",
 ]

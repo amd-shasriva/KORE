@@ -27,6 +27,13 @@ owner must select and apply an outbound license and must resolve every item
 listed as unresolved in THIRD_PARTY.md. See that file for the specific
 outstanding items.
 
+The choice of outbound license is CONSTRAINED, not free. THIRD_PARTY.md
+Section 0 records inbound terms that bind any externally released artifact:
+in particular, 31.5% of the mid-train corpus comes from datasets whose license
+requires that a use-based restriction be carried, as an enforceable provision,
+in the terms governing any model trained on them. Read Section 0 before
+drafting outbound terms, not after.
+
 NO WARRANTY
 
 This software is provided "AS IS", without warranty of any kind, express or

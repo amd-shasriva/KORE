@@ -835,9 +835,18 @@ def make_reference(op: str, dtype: str) -> dict:
     else:
         raise ValueError(f"unknown breadth op {op!r}")
 
+    def _sample_ext_selection_rel_tol() -> float:
+        from kore.tasks.breadth.sample_ext import SELECTION_REL_TOL
+        return SELECTION_REL_TOL
+
     ns = {"parse_shape": _parse_shape, "get_inputs": get_inputs, "ref_fn": ref_fn,
           "baseline_fn": baseline_fn, "arity": arity, "entry_name": op,
           "dtype_name": dtype, "family": f"breadth_{op}", "mutates_input": False}
+    if op == "red_topp_renorm":
+        # Nucleus selection thresholds a CUMULATIVE probability, so the token at
+        # the mass boundary crosses it under any last-bit change in the softmax.
+        # See kore.tasks.breadth.sample_ext.SELECTION_REL_TOL for the measurement.
+        ns["selection_rel_tol"] = _sample_ext_selection_rel_tol()
     ns[f"{op}_ref"] = ref_fn
     return ns
 
@@ -1809,7 +1818,13 @@ def red_js_div(logits_p: torch.Tensor, logits_q: torch.Tensor) -> torch.Tensor:
 _TOPK_TMPL = '''"""GENERATED breadth {op} seed ({dtype}). x[M,N] -> the top-{k} values per row,
 descending. Naive but correct STREAMING threshold selection: {k} passes, each
 pulling the running max strictly below the previous winner (O(k*N), the policy
-replaces it with a real partial/bitonic top-k). {tldt} store."""
+replaces it with a real partial/bitonic top-k).
+
+Each pass ALSO counts how many times the previous winner occurs, because the
+answer is the top-{k} values WITH MULTIPLICITY (``torch.sort(...)[:{k}]``), not the
+{k} largest DISTINCT values. Repeats are not an edge case here: {dtype} has few
+codes per octave, so thousands of the N values in a row collide exactly, and
+skipping duplicates walks far down the distribution. {tldt} store."""
 from __future__ import annotations
 import torch, triton, triton.language as tl
 
@@ -1817,15 +1832,21 @@ import torch, triton, triton.language as tl
 @triton.jit
 def _{op}_kernel(x_ptr, o_ptr, sx, so, N, BLOCK_N: tl.constexpr):
     row = tl.program_id(0)
-    prev = float("inf")
+    prev = float("inf")      # last value emitted (+inf primes the first pass)
+    used = 0.0               # copies of `prev` already emitted
     for i in range(0, {k}):
-        cur = -float("inf")
+        nxt = -float("inf")  # largest value strictly below `prev`
+        mult = 0.0           # how many times `prev` occurs in this row
         for start in range(0, N, BLOCK_N):
             offs = start + tl.arange(0, BLOCK_N)
             mask = offs < N
             x = tl.load(x_ptr + row * sx + offs, mask=mask, other=-float("inf")).to(tl.float32)
             cand = tl.where(x < prev, x, -float("inf"))
-            cur = tl.maximum(cur, tl.max(cand, axis=0))
+            nxt = tl.maximum(nxt, tl.max(cand, axis=0))
+            mult += tl.sum(tl.where(mask & (x == prev), 1.0, 0.0), axis=0)
+        # Emit another copy of `prev` while any remain, else step down.
+        cur = tl.where(used < mult, prev, nxt)
+        used = tl.where(cur == prev, used + 1.0, 1.0)
         tl.store(o_ptr + row * so + i, cur.to({tldt}))
         prev = cur
 

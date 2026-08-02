@@ -16,6 +16,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
@@ -1911,6 +1912,222 @@ def _hip_inventory_from_env(
     return tuple(dict(item) for item in payload)
 
 
+# --------------------------------------------------------------------------- #
+# HIP-side inventory probe
+#
+# ``collect_amd_gpu_devices`` deliberately refuses to infer a HIP ordinal from
+# DRM discovery order and instead joins the two by PCI BDF -- but until now the
+# only source of the HIP half was the ``KORE_HIP_INVENTORY_JSON`` environment
+# variable, which nothing in the tree produced. So on an ordinary host every
+# ``hip_ordinal`` stayed ``MEASURE``, every GPU stayed ``visible=MEASURE``, and
+# the snapshot could never resolve. This is that missing half.
+#
+# The refusal to trust discovery order is not paranoia. On this box HIP ordinal
+# 0 is PCI bus 0x78 and ordinal 1 is bus 0x08, so ordinal order and BDF order
+# genuinely disagree; pairing an ordinal with the n-th sorted DRM card would
+# mislabel six of eight GPUs.
+#
+# The probe runs in a SUBPROCESS. The parent (a trainer, or a KoreEnv host) must
+# never initialize HIP: doing so would create a context, pin memory on a GPU it
+# may not own, and permanently fix that process's device visibility.
+# --------------------------------------------------------------------------- #
+_HIP_PROBE_TIMEOUT_S = 300
+# Sum of squares 1..4096 and a 32x32 integer matmul, both chosen to be exactly
+# representable (int64, and fp32 products/sums below 2**24) so a correct GPU
+# returns the exact expected integer. An approximate "looks finite" check would
+# pass on a card that is silently returning garbage.
+_HIP_PROBE_SUM_OF_SQUARES = 4096 * 4097 * 8193 // 6
+# Every row of the operand is ``arange(32)``, so every element of the product is
+# ``sum(k**2 for k in range(32))`` and the total is that times the 32x32 shape.
+_HIP_PROBE_MATMUL_TRACE = 32 * 32 * (31 * 32 * 63 // 6)
+_HIP_PROBE_SOURCE = r'''
+import binascii, json, sys
+
+import torch
+
+SUM_OF_SQUARES = %(sum_of_squares)d
+MATMUL_TRACE = %(matmul_trace)d
+VERIFY_COMPUTE = %(verify_compute)s
+
+
+def _uuid(properties):
+    """Decode the ROCm UUID, which is the DRM ``unique_id`` in ASCII hex."""
+    raw = str(getattr(properties, "uuid", "") or "").strip()
+    if not raw:
+        return ""
+    compact = raw.replace("-", "").replace("0x", "")
+    try:
+        decoded = binascii.unhexlify(compact).decode("ascii")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return raw.lower()
+    return decoded.strip().lower() if decoded.strip().isalnum() else raw.lower()
+
+
+def _compute_check(ordinal):
+    device = "cuda:%%d" %% ordinal
+    squares = torch.arange(1, 4097, device=device, dtype=torch.int64)
+    if int((squares * squares).sum().item()) != SUM_OF_SQUARES:
+        return "mismatch"
+    operand = torch.arange(32, device=device, dtype=torch.float32).repeat(32, 1)
+    product = operand @ operand.t()
+    if int(product.sum().item()) != MATMUL_TRACE:
+        return "mismatch"
+    return "pass"
+
+
+devices = []
+for ordinal in range(torch.cuda.device_count()):
+    properties = torch.cuda.get_device_properties(ordinal)
+    entry = {
+        "hip_ordinal": ordinal,
+        "pci_bdf": "%%04x:%%02x:%%02x.0" %% (
+            int(properties.pci_domain_id),
+            int(properties.pci_bus_id),
+            int(properties.pci_device_id),
+        ),
+        "uuid": _uuid(properties),
+        "name": str(properties.name),
+        "gcn_arch_name": str(getattr(properties, "gcnArchName", "") or ""),
+        "total_hbm_bytes": int(properties.total_memory),
+        "multi_processor_count": int(properties.multi_processor_count),
+    }
+    if VERIFY_COMPUTE:
+        try:
+            entry["compute_check"] = _compute_check(ordinal)
+        except Exception as exc:  # noqa: BLE001 - any failure is a failed check
+            entry["compute_check"] = "error: %%s" %% type(exc).__name__
+    devices.append(entry)
+
+json.dump(
+    {
+        "torch_version": str(torch.__version__),
+        "hip_version": str(getattr(torch.version, "hip", "") or ""),
+        "devices": devices,
+    },
+    sys.stdout,
+)
+'''
+
+
+class HIPProbeError(ResourcePreflightError):
+    """Raised when the out-of-process HIP inventory probe cannot be trusted."""
+
+
+def _visible_mask(environ: Mapping[str, str]) -> Optional[tuple[int, ...]]:
+    """Absolute HIP ordinals a child inherits, or ``None`` when unmasked."""
+    raw = environ.get("HIP_VISIBLE_DEVICES")
+    if raw is None:
+        raw = environ.get("CUDA_VISIBLE_DEVICES")
+    if raw is None:
+        return None
+    try:
+        return _parse_ordinal_list(raw)
+    except ValueError as exc:
+        raise HIPProbeError(
+            f"visible-device mask {raw!r} is not a list of HIP ordinals"
+        ) from exc
+
+
+def probe_hip_inventory(
+    *,
+    ordinals: Optional[tuple[int, ...] | list[int]] = None,
+    verify_compute: bool = False,
+    environ: Optional[Mapping[str, str]] = None,
+    timeout: int = _HIP_PROBE_TIMEOUT_S,
+    python_executable: Optional[str] = None,
+) -> tuple[dict[str, Any], ...]:
+    """Enumerate HIP devices out of process, keyed by ABSOLUTE HIP ordinal.
+
+    Each entry carries the PCI BDF and UUID that HIP itself reports, which is
+    what lets :func:`collect_amd_gpu_devices` join DRM/sysfs cards to HIP
+    ordinals by BDF instead of by discovery order, and cross-check the UUID.
+
+    ``ordinals`` names absolute HIP ordinals to probe; the child is masked to
+    exactly those, in that order, and each reported ordinal is translated back
+    to its absolute value. ``None`` inherits the caller's own mask, so this can
+    never look at a GPU the caller was not already allowed to use.
+
+    ``verify_compute`` additionally runs an exactly-checkable computation on
+    every probed device, so "the driver enumerated it" and "it computes
+    correctly" stay separate facts.
+    """
+
+    env = dict(os.environ if environ is None else environ)
+    if ordinals is None:
+        absolute = _visible_mask(env)
+    else:
+        absolute = tuple(
+            _non_negative_int(int(value), "ordinals") for value in ordinals
+        )
+        if not absolute:
+            raise HIPProbeError("no HIP ordinals were requested")
+        if len(set(absolute)) != len(absolute):
+            raise HIPProbeError("requested HIP ordinals contain duplicates")
+    if absolute is not None:
+        # An explicit child mask REPLACES any inherited one, so its entries are
+        # absolute ordinals and the child's ordinal i is absolute[i].
+        env["HIP_VISIBLE_DEVICES"] = ",".join(str(value) for value in absolute)
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+        env.pop("ROCR_VISIBLE_DEVICES", None)
+
+    source = _HIP_PROBE_SOURCE % {
+        "sum_of_squares": _HIP_PROBE_SUM_OF_SQUARES,
+        "matmul_trace": _HIP_PROBE_MATMUL_TRACE,
+        "verify_compute": "True" if verify_compute else "False",
+    }
+    try:
+        completed = subprocess.run(
+            [python_executable or sys.executable, "-c", source],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HIPProbeError(f"HIP inventory probe timed out after {timeout}s") from exc
+    except OSError as exc:
+        raise HIPProbeError(f"HIP inventory probe could not start: {exc}") from exc
+    if completed.returncode != 0:
+        detail = " ".join((completed.stderr or "").split())[-400:]
+        raise HIPProbeError(
+            f"HIP inventory probe exited {completed.returncode}: {detail}"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+        devices = payload["devices"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise HIPProbeError("HIP inventory probe produced unreadable output") from exc
+
+    inventory: list[dict[str, Any]] = []
+    for entry in devices:
+        child_ordinal = int(entry["hip_ordinal"])
+        if absolute is None:
+            resolved = child_ordinal
+        elif child_ordinal < len(absolute):
+            resolved = absolute[child_ordinal]
+        else:
+            raise HIPProbeError(
+                "HIP reported more devices than the mask made visible"
+            )
+        record = dict(entry)
+        record["hip_ordinal"] = resolved
+        # No Slurm renumbering is applied here: the physical card is whatever the
+        # absolute HIP ordinal denotes, which is exactly the id KoreEnv writes
+        # into the evaluator subprocess's HIP_VISIBLE_DEVICES.
+        record["physical_card"] = resolved
+        record["pci_bdf"] = _normalize_bdf(str(entry["pci_bdf"]))
+        record["uuid"] = _normalize_uuid(str(entry.get("uuid", "")))
+        record["torch_version"] = str(payload.get("torch_version", ""))
+        record["hip_version"] = str(payload.get("hip_version", ""))
+        inventory.append(record)
+    if absolute is not None and len(inventory) != len(absolute):
+        raise HIPProbeError(
+            f"probe requested {len(absolute)} HIP devices but saw {len(inventory)}"
+        )
+    return tuple(inventory)
+
+
 def collect_code_fingerprint(code_root: Optional[str | Path] = None) -> str:
     """Return a clean git commit fingerprint; dirty/unknown trees are unresolved."""
 
@@ -2617,6 +2834,7 @@ __all__ = [
     "AnalyticalLowerBounds",
     "FilesystemCapacity",
     "GPUDevice",
+    "HIPProbeError",
     "InsufficientResourcesError",
     "MeasurementProvenance",
     "MeasuredPeakProfile",
@@ -2643,6 +2861,7 @@ __all__ = [
     "load_resource_snapshot",
     "log_stage_preflight",
     "preflight_resources",
+    "probe_hip_inventory",
     "reject_unresolved_production_fields",
     "required_measurement_phases",
     "resolve_preflight_mode",

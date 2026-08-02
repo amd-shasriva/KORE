@@ -245,10 +245,24 @@
       "production": true
     },
     {
+      "path": "scripts/spur_dpo_1node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "single-node 8-rank stage-2 DPO launcher (trains the SFT output; requeue-safe)"
+    },
+    {
       "path": "scripts/spur_gpu_smoke.sbatch",
       "classification": "diagnostic",
       "lifecycle": "active",
       "role": "one-node gfx950 GPU smoke validating the merged verifier/reward + genb seeds + accelerator-gated tests"
+    },
+    {
+      "path": "scripts/spur_grpo_1node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "single-node 8-rank stage-3 multi-turn GRPO launcher (ZeRO-2, in-process rollout replica; spans requeues)"
     },
     {
       "path": "scripts/spur_midtrain_1node.sbatch",
@@ -297,6 +311,20 @@
       "classification": "active",
       "lifecycle": "active",
       "production": true
+    },
+    {
+      "path": "scripts/spur_resolve_launch_config.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "resolve a shipped sft/dpo/grpo config into the launch config a SPUR job runs (model_id handoff, output_dir, grpo co-evolution data root)"
+    },
+    {
+      "path": "scripts/spur_sft_1node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "single-node 8-rank stage-1 SFT launcher (trains the midtrain output; requeue-safe)"
     },
     {
       "path": "scripts/spur_stage_array.sbatch",

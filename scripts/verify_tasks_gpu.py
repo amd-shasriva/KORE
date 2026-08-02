@@ -37,6 +37,11 @@ TASKS = REPO / "kore" / "tasks"
 
 _SNR = re.compile(r"^SNR:\s*(-?[\d.]+)", re.M)
 _ALLCLOSE = re.compile(r"^allclose:\s*(True|False)", re.M)
+# The elementwise disagreement in representable steps of the OUTPUT format --
+# the dtype-normalised form of max_diff, and the quantity the elementwise gate
+# actually tests.  Recorded per task so the tolerance's headroom is auditable
+# from the artifact instead of having to be re-derived from a rerun.
+_STEPS = re.compile(r"^format_steps:\s*([\d.eE+-]+)\s+limit:\s*([\d.eE+-]+)", re.M)
 _INFRA = re.compile(
     r"OutOfMemoryError|HSA_STATUS|hipError|CUDA error|No such device|"
     r"MemoryError|Cannot allocate|Bus error|device-side assert",
@@ -110,11 +115,14 @@ def run_task(task_dir: Path, gpu: str, timeout: int, python: str) -> dict:
 
     snr_matches = _SNR.findall(output)
     allclose = _ALLCLOSE.findall(output)
+    steps = _STEPS.findall(output)
     snr = float(snr_matches[-1]) if snr_matches else None
     record = {
         "task": task_dir.name, "rc": rc, "snr_db": snr, "threshold": threshold,
         "seconds": round(time.time() - started, 1), "shape": shape, "gpu": gpu,
         "dtype": meta.get("dtype"), "operation": meta.get("operation"),
+        "format_steps": round(float(steps[-1][0]), 4) if steps else None,
+        "format_steps_limit": float(steps[-1][1]) if steps else None,
     }
 
     if rc == -9:

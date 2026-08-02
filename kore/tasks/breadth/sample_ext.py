@@ -97,6 +97,47 @@ NGRAM_N = 3                # no-repeat n-gram size (block repeats of the (n-1)-g
 
 ROPE_THETA = 10000.0       # RoPE base frequency
 ROPE_SCALE = 4.0           # long-context scale factor (PI / NTK / YaRN)
+
+# --------------------------------------------------------------------------- #
+# Ops whose output is a DISCONTINUOUS function of a cumulative sum
+# --------------------------------------------------------------------------- #
+# Nucleus (top-p), typical-mass and inverse-CDF sampling all threshold a running
+# cumulative probability.  The token sitting exactly at that threshold crosses it
+# under ANY last-bit change in the probabilities, so two equally-correct
+# implementations disagree on ~1-2% of rows -- measured by reassociating the
+# ORACLE'S OWN fp32 softmax, with no kernel involved.  What the disagreement
+# costs is bounded and different per output kind:
+#
+#   float mask/renormalized distribution -> the boundary token's own mass, which
+#     is at most a small fraction of the peak (worst measured here: 1.3e-4 of
+#     peak, i.e. 2**-12.9).  SELECTION_REL_TOL bounds it at 2**-9.
+#   int64 sampled index -> the crossing point of a MONOTONE CDF, so it moves to a
+#     NEARBY token: index distance, not an arbitrary token (worst measured: 5).
+#     SELECTION_INDEX_TOL bounds it at 64 of a 32,000-token vocabulary, so a
+#     kernel sampling from the wrong distribution is still rejected by ~3 orders
+#     of magnitude.
+#
+# Ops that threshold a SINGLE VALUE rather than a running sum (top-k, min-p,
+# arg-reduce) are deliberately NOT listed: there the perturbation is one ULP, not
+# an accumulated one, and they match the oracle exactly on this hardware.
+SELECTION_REL_TOL = 2.0 ** -9
+SELECTION_INDEX_TOL = 64
+_CUMULATIVE_SELECTION_FLOAT = frozenset({
+    "smp_topp_renorm", "smp_topk_topp", "smp_typical_mask",
+})
+_CUMULATIVE_SELECTION_INDEX = frozenset({
+    "smp_categorical_sample", "smp_topp_sample", "smp_topk_sample",
+    "smp_spec_bonus_token",
+})
+
+
+def selection_tolerance(op: str) -> dict:
+    """Reference-namespace entries declaring an op's selection-boundary allowance."""
+    if op in _CUMULATIVE_SELECTION_FLOAT:
+        return {"selection_rel_tol": SELECTION_REL_TOL}
+    if op in _CUMULATIVE_SELECTION_INDEX:
+        return {"selection_index_tol": SELECTION_INDEX_TOL}
+    return {}
 ROPE_ORIG_MAX = 4096       # original (pre-scaling) max position
 ROPE_DYN_SEQ_LEN = 16384   # current sequence length for dynamic-NTK
 YARN_BETA_FAST = 32.0      # YaRN correction range (fast/high-frequency rotations)
@@ -707,6 +748,7 @@ def make_reference(op: str, dtype: str) -> dict:
     ns = {"parse_shape": _parse_shape, "get_inputs": get_inputs, "ref_fn": ref_fn,
           "baseline_fn": baseline_fn, "arity": arity, "entry_name": op,
           "dtype_name": dtype, "family": f"breadth_{op}", "mutates_input": False}
+    ns.update(selection_tolerance(op))
     ns[f"{op}_ref"] = ref_fn
     return ns
 
@@ -760,7 +802,14 @@ def seed_source(op: str, dtype: str) -> str:
         "        x = tl.load(x_ptr + row * sx + offs, mask=mask, other=-float('inf')).to(tl.float32) * INV_T\n"
         "        blk = tl.max(x, axis=0)\n"
         "        new_m = tl.maximum(m, blk)\n"
-        "        s = s * tl.exp(m - new_m) + tl.sum(tl.where(mask, tl.exp(x - new_m), 0.0), axis=0)\n"
+        # A whole block can be -inf: the top-k processors mask all but K of V
+        # logits, so with V=32000 and K=50 the first 1024-wide block usually
+        # holds no surviving token.  new_m then stays -inf and -inf - (-inf) is
+        # NaN, which poisons s and every probability in the row.  Rescaling
+        # against 0.0 there is exact -- s is still 0 and every exp(-inf) is 0 --
+        # and it is the identity whenever new_m is finite.
+        "        rs = tl.where(new_m == -float('inf'), 0.0, new_m)\n"
+        "        s = s * tl.exp(m - rs) + tl.sum(tl.where(mask, tl.exp(x - rs), 0.0), axis=0)\n"
         "        m = new_m\n"
         "    for start in range(0, N, BLOCK_N):\n"
         "        offs = start + tl.arange(0, BLOCK_N)\n"
@@ -806,14 +855,28 @@ def seed_source(op: str, dtype: str) -> str:
         return hdr(desc) + elem_kernel(expr) + elem_entry(arg)
 
     if op == "smp_gumbel_max":
+        # The perturbed logits are an INTERMEDIATE here, not the result -- the
+        # result is the argmax INDEX.  Rounding them to the task dtype before the
+        # argmax collapses the leading candidates onto the same bf16/fp16 code
+        # and then picks whichever tied index comes first, which is a different
+        # token from the one the fp32 oracle selects.  So this op keeps its own
+        # fp32-storing kernel instead of the shared elementwise one.
         return (hdr("argmax(logits + supplied gumbel noise) - the Gumbel-max sampler.")
-                + elem_kernel("x + a")
+                + "@triton.jit\n"
+                "def _gumbel_kernel(x_ptr, g_ptr, o_ptr, sx, sg, so, N, BLOCK_N: tl.constexpr):\n"
+                "    row = tl.program_id(0)\n"
+                "    col = tl.program_id(1)\n"
+                "    offs = col * BLOCK_N + tl.arange(0, BLOCK_N)\n"
+                "    mask = offs < N\n"
+                "    x = tl.load(x_ptr + row * sx + offs, mask=mask, other=0.0).to(tl.float32)\n"
+                "    g = tl.load(g_ptr + row * sg + offs, mask=mask, other=0.0).to(tl.float32)\n"
+                "    tl.store(o_ptr + row * so + offs, x + g, mask=mask)\n\n\n"
                 + f"def {op}(x: torch.Tensor, gumbel: torch.Tensor) -> torch.Tensor:\n"
                 "    M, N = x.shape\n"
-                "    y = torch.empty_like(x)\n"
+                "    y = torch.empty((M, N), device=x.device, dtype=torch.float32)\n"
                 "    BLOCK_N = 1024\n"
                 "    grid = (M, triton.cdiv(N, BLOCK_N))\n"
-                "    _elem_kernel[grid](x, gumbel, y, x.stride(0), gumbel.stride(0), y.stride(0), N, BLOCK_N=BLOCK_N, num_warps=4)\n"
+                "    _gumbel_kernel[grid](x, gumbel, y, x.stride(0), gumbel.stride(0), y.stride(0), N, BLOCK_N=BLOCK_N, num_warps=4)\n"
                 "    return y.argmax(-1).to(torch.int64)\n")
 
     if op == "smp_no_repeat_ngram":

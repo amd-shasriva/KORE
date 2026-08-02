@@ -28,6 +28,38 @@ How to actually run the gate (operator checklist):
   4. Measure accuracy on a held-out eval set; require no regression beyond a
      tolerance (default: within 0.1% absolute of baseline).
   5. Gate: accept only if tokens/s improved AND accuracy did not regress.
+
+Provisioning a backend (the part that is NOT in this process)
+-------------------------------------------------------------
+``VLLM_AVAILABLE`` / ``SGLANG_AVAILABLE`` report whether the engine is importable
+*here*, and both are expected to be ``False`` on the training box. They are
+diagnostics, not preconditions: nothing in this module imports an engine. The
+gate speaks HTTP to an OpenAI-compatible ``/v1/chat/completions`` endpoint, so
+the server runs in its own environment - a container or a separate venv - and
+the training stack never takes an engine's torch pin.
+
+``docs/E2E_SERVING_GATE.md`` carries the verified, copy-pasteable procedure for
+this node (ROCm 7.2.3, gfx950/MI350X, glibc 2.34), including why the prebuilt
+vLLM-ROCm wheels cannot be installed here and which container serves instead.
+The short version::
+
+    # one GPU, its own userspace, nothing installed into the training venv
+    docker run -d --name kore-e2e-sglang \\
+      --device=/dev/kfd --device=/dev/dri/renderD168 \\
+      --group-add video --group-add render \\
+      --security-opt seccomp=unconfined --shm-size 32g \\
+      -v <HF_MODEL_DIR>:/models/m:ro -p 127.0.0.1:30000:30000 \\
+      <sglang-rocm-image> \\
+      python -m sglang.launch_server --model-path /models/m \\
+        --served-model-name <NAME> --host 0.0.0.0 --port 30000
+
+Then point the gate at it - from ANY python that can reach the port::
+
+    python -m kore.eval.e2e_sglang_vllm --engine sglang \\
+      --base-url http://127.0.0.1:30000 --model <NAME> --requests 32
+
+which measures throughput + accuracy and, when given a candidate endpoint or an
+explicit baseline, prints the accept/reject and can write a JSON artifact.
 """
 
 from __future__ import annotations
@@ -166,7 +198,15 @@ def _openai_compatible_generate(
             req = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 body = json.loads(r.read().decode("utf-8"))
-        return body["choices"][0]["message"]["content"]
+        message = body["choices"][0]["message"]
+        # A reasoning model served with a reasoning parser (Qwen3 + SGLang's
+        # ``--reasoning-parser qwen3``, DeepSeek-R1, ...) splits its output:
+        # the chain of thought goes to ``reasoning_content`` and ``content`` is
+        # left empty whenever the answer never arrived - e.g. the response hit
+        # ``max_tokens`` mid-thought. Falling back keeps the tokens the server
+        # really generated in the throughput count instead of silently scoring
+        # that request as 0 tokens.
+        return message.get("content") or message.get("reasoning_content") or ""
 
     return generate
 
@@ -321,11 +361,244 @@ def e2e_gate(
     }
 
 
-def _cli() -> int:
+def e2e_measure(
+    *,
+    base_url: Optional[str] = None,
+    model_generate: Optional[ModelGenerate] = None,
+    model: str = "",
+    api_key: Optional[str] = None,
+    engine: str = "vllm",
+    served_kernel: str = "",
+    workload: Optional[Workload] = None,
+    accuracy_workload: Optional[Workload] = None,
+    tasks: Optional[list] = None,
+    count_tokens: Optional[Callable[[str], int]] = None,
+    baseline_tokens_per_s: Optional[float] = None,
+    baseline_accuracy: Optional[float] = None,
+    tol_abs: float = 1e-3,
+    role: str = "candidate",
+) -> tuple[E2EResult, E2EResult]:
+    """Measure ``(throughput, accuracy)`` for ONE served endpoint.
+
+    A convenience over calling :func:`e2e_throughput` and :func:`e2e_accuracy`
+    with the same backend twice; it exists so the two halves of the gate cannot
+    drift apart (same engine, same model, same client).
+
+    ``accuracy_workload`` is separate from ``workload`` on purpose. Throughput
+    wants a short, fixed generation length; accuracy wants enough room for the
+    model to actually finish an answer, which on a reasoning model means far
+    more tokens than a throughput sweep would use.
+    """
+    tput = e2e_throughput(
+        model=model,
+        served_kernel=served_kernel,
+        workload=workload,
+        engine=engine,
+        base_url=base_url,
+        api_key=api_key,
+        model_generate=model_generate,
+        baseline_tokens_per_s=baseline_tokens_per_s,
+        count_tokens=count_tokens,
+        role=role,
+    )
+    acc = e2e_accuracy(
+        model=model,
+        served_kernel=served_kernel,
+        workload=accuracy_workload if accuracy_workload is not None else workload,
+        engine=engine,
+        base_url=base_url,
+        api_key=api_key,
+        model_generate=model_generate,
+        baseline_accuracy=baseline_accuracy,
+        tol_abs=tol_abs,
+        tasks=tasks,
+        role=role,
+    )
+    return tput, acc
+
+
+def e2e_gate_endpoints(
+    *,
+    baseline_base_url: Optional[str] = None,
+    candidate_base_url: Optional[str] = None,
+    baseline_generate: Optional[ModelGenerate] = None,
+    candidate_generate: Optional[ModelGenerate] = None,
+    model: str = "",
+    api_key: Optional[str] = None,
+    engine: str = "vllm",
+    served_kernel: str = "",
+    workload: Optional[Workload] = None,
+    accuracy_workload: Optional[Workload] = None,
+    tasks: Optional[list] = None,
+    count_tokens: Optional[Callable[[str], int]] = None,
+    tol_abs: float = 1e-3,
+) -> dict:
+    """Run the whole gate: measure baseline, measure candidate, decide.
+
+    This is the documented protocol in one call - two servers that differ ONLY
+    in which kernel is registered, measured with an identical workload, then
+    combined by :func:`e2e_gate`. The candidate's measurement carries the
+    baseline's numbers as its thresholds, which is what makes
+    ``throughput_improved`` / ``accuracy_held`` meaningful.
+
+    Both endpoints are required: :func:`e2e_gate` cannot accept anything
+    without a baseline to beat, so a one-sided run is a measurement, not a gate.
+    """
+    if not (baseline_base_url or baseline_generate):
+        raise E2ENotProvisioned("no BASELINE backend configured.\n" + _PROVISION_HELP)
+    if not (candidate_base_url or candidate_generate):
+        raise E2ENotProvisioned("no CANDIDATE backend configured.\n" + _PROVISION_HELP)
+
+    common = dict(
+        model=model,
+        api_key=api_key,
+        engine=engine,
+        served_kernel=served_kernel,
+        workload=workload,
+        accuracy_workload=accuracy_workload,
+        tasks=tasks,
+        count_tokens=count_tokens,
+        tol_abs=tol_abs,
+    )
+    base_tput, base_acc = e2e_measure(
+        base_url=baseline_base_url, model_generate=baseline_generate,
+        role="baseline", **common,
+    )
+    cand_tput, cand_acc = e2e_measure(
+        base_url=candidate_base_url, model_generate=candidate_generate,
+        role="candidate",
+        baseline_tokens_per_s=base_tput.candidate_value,
+        baseline_accuracy=base_acc.candidate_value,
+        **common,
+    )
+    return e2e_gate(cand_tput, cand_acc)
+
+
+def gate_artifact(gate: dict, **extra) -> dict:
+    """A JSON-serializable record of a gate decision, for archiving a run."""
+    from dataclasses import asdict
+
+    def _result(res: E2EResult) -> dict:
+        out = asdict(res)
+        out["rel_change"] = res.rel_change
+        return out
+
+    return {
+        "schema": "kore.e2e-serving-gate.v1",
+        "accept": gate["accept"],
+        "throughput_improved": gate["throughput_improved"],
+        "accuracy_held": gate["accuracy_held"],
+        "throughput": _result(gate["throughput"]),
+        "accuracy": _result(gate["accuracy"]),
+        **extra,
+    }
+
+
+def _format(gate: dict) -> str:
+    tput, acc = gate["throughput"], gate["accuracy"]
+    rel = tput.rel_change
+    rel_s = "n/a" if rel is None else f"{rel * 100:+.2f}%"
+    return "\n".join([
+        f"  throughput : baseline {tput.baseline_value} -> candidate "
+        f"{tput.candidate_value:.2f} {tput.unit}  ({rel_s})",
+        f"               {tput.detail}",
+        f"  accuracy   : baseline {acc.baseline_value} -> candidate "
+        f"{acc.candidate_value:.4f}  [{acc.detail}]",
+        f"  throughput_improved={gate['throughput_improved']}  "
+        f"accuracy_held={gate['accuracy_held']}",
+        f"  DECISION   : {'ACCEPT' if gate['accept'] else 'REJECT'}",
+    ])
+
+
+def _build_parser():
+    import argparse
+
+    p = argparse.ArgumentParser(
+        prog="python -m kore.eval.e2e_sglang_vllm",
+        description="Run KORE's end-to-end serving gate against a live "
+                    "OpenAI-compatible endpoint (served vLLM/SGLang on ROCm). "
+                    "With no arguments, prints backend availability and how to "
+                    "provision one. See docs/E2E_SERVING_GATE.md.",
+    )
+    p.add_argument("--base-url", help="endpoint to measure (baseline role when "
+                                      "--candidate-url is also given)")
+    p.add_argument("--candidate-url", help="second endpoint, serving the winning "
+                                           "kernel; enables the accept/reject")
+    p.add_argument("--model", default="", help="served model name (OpenAI 'model' field)")
+    p.add_argument("--api-key", default=None)
+    p.add_argument("--engine", default="vllm", choices=("vllm", "sglang"))
+    p.add_argument("--served-kernel", default="", help="label for the kernel under test")
+    p.add_argument("--requests", type=int, default=32, help="throughput requests")
+    p.add_argument("--max-new-tokens", type=int, default=128,
+                   help="generation length for the throughput sweep")
+    p.add_argument("--accuracy-max-new-tokens", type=int, default=512,
+                   help="generation length for the accuracy tasks; a reasoning "
+                        "model needs room to finish thinking AND answer")
+    p.add_argument("--baseline-tokens-per-s", type=float, default=None,
+                   help="a previously measured stock number, instead of "
+                        "--candidate-url")
+    p.add_argument("--baseline-accuracy", type=float, default=None)
+    p.add_argument("--tol-abs", type=float, default=1e-3,
+                   help="allowed absolute accuracy regression")
+    p.add_argument("--json", dest="json_out", default=None,
+                   help="write the decision to this path as a JSON artifact")
+    return p
+
+
+def _cli(argv: Optional[list] = None) -> int:
+    args = _build_parser().parse_args(argv)
+
     print("KORE E2E gate (vLLM / SGLang on ROCm)")
-    print(f"  vllm available:   {VLLM_AVAILABLE}")
-    print(f"  sglang available: {SGLANG_AVAILABLE}")
-    print("\n" + _PROVISION_HELP)
+    print(f"  vllm importable here:   {VLLM_AVAILABLE}")
+    print(f"  sglang importable here: {SGLANG_AVAILABLE}")
+    print("  (both False is normal - the gate talks HTTP to a server that "
+          "lives in its own environment)")
+
+    if not args.base_url:
+        print("\n" + _PROVISION_HELP)
+        return 0
+
+    workload = Workload(num_requests=args.requests,
+                        max_new_tokens=args.max_new_tokens)
+    accuracy_workload = Workload(max_new_tokens=args.accuracy_max_new_tokens)
+    common = dict(
+        model=args.model, api_key=args.api_key, engine=args.engine,
+        served_kernel=args.served_kernel, workload=workload,
+        accuracy_workload=accuracy_workload, tol_abs=args.tol_abs,
+    )
+
+    if args.candidate_url:
+        print(f"\nbaseline : {args.base_url}\ncandidate: {args.candidate_url}")
+        gate = e2e_gate_endpoints(baseline_base_url=args.base_url,
+                                  candidate_base_url=args.candidate_url, **common)
+    else:
+        print(f"\nendpoint : {args.base_url}")
+        tput, acc = e2e_measure(
+            base_url=args.base_url, role="candidate",
+            baseline_tokens_per_s=args.baseline_tokens_per_s,
+            baseline_accuracy=args.baseline_accuracy, **common,
+        )
+        gate = e2e_gate(tput, acc)
+        if args.baseline_tokens_per_s is None:
+            print("  NOTE: no baseline given, so this is a MEASUREMENT, not a "
+                  "decision - e2e_gate cannot accept without something to beat.")
+
+    print(_format(gate))
+
+    if args.json_out:
+        artifact = gate_artifact(
+            gate,
+            engine=args.engine, model=args.model,
+            served_kernel=args.served_kernel, base_url=args.base_url,
+            candidate_url=args.candidate_url,
+            workload={"num_requests": workload.num_requests,
+                      "max_new_tokens": workload.max_new_tokens,
+                      "accuracy_max_new_tokens": accuracy_workload.max_new_tokens},
+        )
+        with open(args.json_out, "w", encoding="utf-8") as fh:
+            json.dump(artifact, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        print(f"\nwrote artifact: {args.json_out}")
     return 0
 
 

@@ -49,8 +49,8 @@ skips it with that reason rather than failing on tests it never looked at.
 
 ## The GPU suite
 
-`test_gpu_verifier.py` and `test_gpu_timing_protocol.py` are the only tests that
-touch hardware, and they use no stubs: the driver really runs in a subprocess
+`test_gpu_verifier.py` and `test_gpu_timing_protocol.py` are the tests that touch
+hardware directly, and they use no stubs: the driver really runs in a subprocess
 through `KoreEnv._env` / `KoreEnv._exec`, the candidate really compiles through
 Triton, and every verdict comes from measured output. This is the half of
 `kore/env/kore_env.py` the CPU suite cannot reach — `tests/test_phase0_verifier_fixes.py`
@@ -131,6 +131,18 @@ framework path instead of the production kernel.
   the roofline speed-of-light floor are unfounded. Assertions are on
   relationships (best-of-N ratios), never on absolute latencies.
 
+`test_gpu_e2e_serving_gate.py` is the third `gpu` module and the one exception to
+"the marker means this process touches a card": it measures the end-to-end
+serving gate against a **served model** over HTTP, so the GPU is occupied by an
+inference server in its own container rather than by pytest. It carries `gpu`
+because the resource is still an accelerator and because the marker contract
+requires `gpu` tests to live in a `test_gpu*.py` module. Configure it with
+`KORE_E2E_BASE_URL` (plus `KORE_E2E_CANDIDATE_URL`, `KORE_E2E_MODEL`,
+`KORE_E2E_ENGINE`); unset or unreachable, every test skips with that reason.
+[`docs/E2E_SERVING_GATE.md`](../docs/E2E_SERVING_GATE.md) has the serve command.
+The engine-free half of the same path is `test_e2e_serving_gate.py`, which runs
+the real HTTP client against a stdlib stub endpoint in the default CPU suite.
+
 ### CI
 
 `.github/workflows/gpu.yml` runs this suite, but on `workflow_dispatch` only: no
@@ -157,7 +169,7 @@ the suite itself would skip every test anyway. On a Slurm cluster,
 | Policy / RL | `test_rl_core.py`, `test_policy.py`, `test_grpo_fsdp.py`, `test_grpo_distill_hook.py`, `test_dynamic_steps.py`, `test_midtrain.py`, `test_distributed.py`, `test_frontier_ops_wiring.py`, `test_deep_cot_contract.py` |
 | Value model | `test_value.py`, `test_value_replay_train.py` |
 | Agent / transforms | `test_agent.py`, `test_agent_transform_discover.py` |
-| Eval / gates | `test_eval.py`, `test_generalization.py`, `test_retention.py`, `test_champion.py`, `test_korebench.py`, `test_vs_opus.py` |
+| Eval / gates | `test_eval.py`, `test_generalization.py`, `test_retention.py`, `test_champion.py`, `test_korebench.py`, `test_vs_opus.py`, `test_e2e_serving_gate.py`, `test_gpu_e2e_serving_gate.py` (`-m gpu`) |
 | Infra | `test_campaign_wiring.py`, `test_obs.py`, `test_contract.py`, `test_marker_contract.py`, `test_env_gpu_visibility.py`, `test_phase0_verifier_fixes.py` |
 
 `test_campaign_wiring.py` and `test_distributed.py` are the fastest confidence

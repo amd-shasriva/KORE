@@ -439,6 +439,61 @@ def _production(ctx) -> bool:
     return _campaign_mode(ctx) == "production"
 
 
+# Which checkpoint each stage consumes, in preference order. A stage may run
+# from an earlier stage's output when the immediate predecessor was skipped, but
+# it must never do so silently.
+_STAGE_INPUT_CHAIN: dict[str, tuple[str, ...]] = {
+    "sft": ("midtrain_ckpt",),
+    "dpo": ("sft_ckpt",),
+    "grpo": ("dpo_ckpt", "sft_ckpt"),
+    "soup": ("grpo_ckpt", "dpo_ckpt", "sft_ckpt"),
+    "eval": ("final", "grpo_ckpt", "dpo_ckpt", "sft_ckpt"),
+}
+
+
+def _resolve_stage_input(ctx, stage: str) -> str:
+    """Resolve a stage's input checkpoint, refusing to silently use the raw base.
+
+    Every stage used to read ``ctx.get(<predecessor>) or ctx["base"]``. When the
+    predecessor had not run -- which is the normal case for ``--stages sft`` or
+    for any campaign resumed against a manifest that was rejected -- the stage
+    silently trained from the untrained Qwen3-14B and reported the result under
+    the stage's name. For ``eval`` that meant scoring the RAW BASE and
+    publishing it as the trained model.
+
+    Falling back is still allowed, because running a later stage alone is a
+    legitimate thing to do. It is simply no longer silent, and in production it
+    requires ``--allow-base-fallback``.
+    """
+    for key in _STAGE_INPUT_CHAIN.get(stage, ()):
+        value = ctx.get(key)
+        if value:
+            _log(stage, f"input checkpoint: {value} (from {key})")
+            return str(value)
+
+    wanted = " -> ".join(_STAGE_INPUT_CHAIN.get(stage, ()) or ("<none>",))
+    flags = " / ".join(
+        "--" + key.replace("_ckpt", "").replace("_", "-") + "-ckpt"
+        for key in _STAGE_INPUT_CHAIN.get(stage, ())
+        if key != "final"
+    )
+    base = str(ctx["base"])
+    if _production(ctx) and not bool(
+        getattr(ctx["args"], "allow_base_fallback", False)
+    ):
+        raise SystemExit(
+            f"campaign stage {stage!r} has no input checkpoint (looked for "
+            f"{wanted}) and would fall back to the untrained base {base!r}. In "
+            f"production that silently discards every earlier stage, so it is "
+            f"refused. Supply the real checkpoint with {flags}, or pass "
+            f"--allow-base-fallback if training from the raw base is genuinely "
+            f"what you want."
+        )
+    _log(stage, f"WARNING: no {wanted}; falling back to the UNTRAINED base "
+                f"{base}. Every earlier stage is discarded.")
+    return base
+
+
 def _atomic_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -1255,11 +1310,28 @@ def run(args) -> int:
 
     ctx = {
         "data_root": data_root, "tasks": tasks, "dry": dry, "args": args,
-        "base": args.model, "midtrain_ckpt": None, "sft_ckpt": None,
-        "dpo_ckpt": None, "grpo_ckpt": None, "final": None, "metrics": {},
+        "base": args.model,
+        # Seeded from --*-ckpt so a stage completed outside this invocation
+        # (e.g. a mid-train submitted directly with sbatch) is visible to the
+        # stages that consume it. A manifest resume overwrites these later.
+        "midtrain_ckpt": getattr(args, "midtrain_ckpt", None),
+        "sft_ckpt": getattr(args, "sft_ckpt_in", None),
+        "dpo_ckpt": getattr(args, "dpo_ckpt_in", None),
+        "grpo_ckpt": getattr(args, "grpo_ckpt_in", None),
+        "final": None, "metrics": {},
         "done_stages": set(), "eval_task_ids": None, "train_task_ids": None,
         "current_stage": "-", "artifacts": {}, "lineage": None,
     }
+    for _key, _flag in (("midtrain_ckpt", "--midtrain-ckpt"),
+                        ("sft_ckpt", "--sft-ckpt"),
+                        ("dpo_ckpt", "--dpo-ckpt"),
+                        ("grpo_ckpt", "--grpo-ckpt")):
+        _given = ctx.get(_key)
+        if _given and not dry and not Path(_given).exists():
+            raise SystemExit(
+                f"{_flag} points at {_given!r}, which does not exist. Refusing "
+                f"to start a campaign against a checkpoint that is not there."
+            )
 
     # Authoritative train / held-out generalization split (item 1). Training
     # stages run on ctx["train_tasks"]; eval runs on ctx["eval_tasks"]. This
@@ -2124,9 +2196,7 @@ def _stage_sft(ctx):
 
     # Start Stage-1 SFT from the Stage-0 mid-train checkpoint when present (the
     # continued-pretrained base); fall back to the raw base otherwise.
-    sft_base = ctx.get("midtrain_ckpt") or ctx["base"]
-    if ctx.get("midtrain_ckpt"):
-        _log("sft", f"starting from mid-train checkpoint {sft_base}")
+    sft_base = _resolve_stage_input(ctx, "sft")
     dataset = ctx["data_root"] / "sft" / "multicap.jsonl"
     # Fix 1: --lora keeps the 14B validation run single-GPU-feasible (single
     # process). --full-ft engages REAL FSDP full fine-tuning via the launcher
@@ -2210,7 +2280,7 @@ def _stage_dpo(ctx):
             _log("dpo", "would DPO on ranked-groups + hard-negative pairs")
         return
 
-    sft = ctx.get("sft_ckpt") or ctx["base"]
+    sft = _resolve_stage_input(ctx, "dpo")
     if rounds > 1:
         ctx["dpo_ckpt"] = _stage_dpo_iterative(ctx, sft, rounds)
     else:
@@ -2352,8 +2422,8 @@ def _stage_grpo(ctx):
     from kore.policy.configs import GRPOConfig
     from kore.policy.grpo import train_grpo
 
-    sft = ctx.get("sft_ckpt") or ctx["base"]
-    init = ctx.get("dpo_ckpt") or sft
+    sft = _resolve_stage_input(ctx, "dpo")
+    init = _resolve_stage_input(ctx, "grpo")
 
     # item 1: GRPO must train ONLY on the TRAIN-split tasks. The held-out eval ids
     # (reserved operator family + arch-specific tasks) are the generalization set;
@@ -3152,6 +3222,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repair-dpo", dest="repair_dpo", action=argparse.BooleanOptionalAction,
                    default=True, help="mint fixed>broken DPO pairs from verified repair records")
     p.add_argument("--repair-dpo-cap", type=int, default=8000, dest="repair_dpo_cap")
+    # Hand an ALREADY-COMPLETED stage to the campaign. Without these, a stage's
+    # checkpoint can only enter ctx by that stage running in this invocation or
+    # by resuming a schema-current manifest -- so a finished 16-hour midtrain
+    # that was launched directly via sbatch is invisible to the campaign, and
+    # `--stages sft` would train from the untrained base instead.
+    p.add_argument("--midtrain-ckpt", default=None, dest="midtrain_ckpt",
+                   help="path to an existing mid-train checkpoint to use as the SFT base")
+    p.add_argument("--sft-ckpt", default=None, dest="sft_ckpt_in",
+                   help="path to an existing SFT checkpoint to use as the DPO base")
+    p.add_argument("--dpo-ckpt", default=None, dest="dpo_ckpt_in",
+                   help="path to an existing DPO checkpoint to use as the GRPO init")
+    p.add_argument("--grpo-ckpt", default=None, dest="grpo_ckpt_in",
+                   help="path to an existing GRPO checkpoint to use for soup/eval")
+    p.add_argument("--allow-base-fallback", action="store_true",
+                   dest="allow_base_fallback",
+                   help="permit a stage with no input checkpoint to train from the "
+                        "untrained base (refused in production mode otherwise)")
     p.add_argument("--midtrain-out", default="runs/midtrain", dest="midtrain_out")
     p.add_argument("--sft-out", default="runs/sft", dest="sft_out")
     p.add_argument("--dpo-out", default="runs/dpo", dest="dpo_out")

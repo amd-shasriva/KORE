@@ -34,15 +34,23 @@ source /home/shasriva/kore-venv/bin/activate
 # Positional args take precedence over the env vars, because SPUR does not
 # reliably propagate `--export KEY=VALUE` into a requeued child -- the same
 # reason the training launchers are positional. Pass `-` to keep a default.
-#   sbatch spur_eval_ab_1node.sbatch [CAND_MODEL] [CAND_ARM] [OUT]
+#   sbatch spur_eval_ab_1node.sbatch [CAND_MODEL] [CAND_ARM] [OUT] [BASE_MODEL] [BASE_REV]
+#
+# BASE_MODEL is a real knob, not boilerplate. A continued-pretrained BASE model
+# must be compared against Qwen3-14B-Base -- the weights it actually started
+# from -- and its kernel-generation numbers are meaningless either way, because
+# neither arm follows instructions. Only after SFT restores the instruction
+# surface is a comparison against the INSTRUCT model (Qwen3-14B) the right
+# question, and that one is the headline: our tuned model vs the vendor's.
 ARG_CAND="${1:--}"; ARG_ARM="${2:--}"; ARG_OUT="${3:--}"
+ARG_BASE="${4:--}"; ARG_BASEREV="${5:--}"
 _or() { [ "$1" = "-" ] || [ -z "$1" ] && printf '%s' "$2" || printf '%s' "$1"; }
 
 OUT="$(_or "$ARG_OUT" "${KORE_EVAL_AB_OUT:-$REPO/runs/eval_ab_${SLURM_JOB_ID:-manual}}")"
 mkdir -p "$OUT"
 
-BASE_MODEL="${KORE_AB_BASE_MODEL:-Qwen/Qwen3-14B}"
-BASE_REV="${KORE_AB_BASE_REVISION:-40c069824f4251a91eefaf281ebe4c544efd3e18}"
+BASE_MODEL="$(_or "$ARG_BASE" "${KORE_AB_BASE_MODEL:-Qwen/Qwen3-14B}")"
+BASE_REV="$(_or "$ARG_BASEREV" "${KORE_AB_BASE_REVISION:-40c069824f4251a91eefaf281ebe4c544efd3e18}")"
 CAND_MODEL="$(_or "$ARG_CAND" "${KORE_AB_CAND_MODEL:-$REPO/runs/midtrain_14b_1ep}")"
 # The candidate arm is named so an SFT comparison does not file itself under
 # "midtrain"; every downstream artifact and report keys off this string.

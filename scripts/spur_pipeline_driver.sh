@@ -26,9 +26,9 @@ cd "$REPO" || exit 1
 
 STATE="$REPO/runs/pipeline_state.json"
 LOG="$REPO/runs/pipeline_driver.log"
-MIDTRAIN_OUT="$REPO/runs/midtrain_14b_1ep"
+MIDTRAIN_OUT="$REPO/runs/midtrain_14b_base"
 SFT_OUT="$REPO/runs/sft_14b_frontier"
-MIDTRAIN_CFG="$REPO/data/b05factory/launch/midtrain_1ep.json"
+MIDTRAIN_CFG="$REPO/data/b05factory/launch/midtrain_base_64gpu.json"
 
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
@@ -103,7 +103,7 @@ step_midtrain() {
   if [ -n "$job" ]; then log "midtrain: adopting running job $job"
   else
     log "midtrain: submitting"
-    job="$(submit_until_accepted midtrain "$REPO/scripts/spur_midtrain_1node.sbatch" "$MIDTRAIN_CFG")" || return 1
+    job="$(submit_until_accepted midtrain --qos=amd-burst-qos "$REPO/scripts/spur_midtrain_8node_dedicated.sbatch" "$MIDTRAIN_CFG")" || return 1
   fi
   note midtrain_job "$job"
   wait_for_job "$job" midtrain
@@ -111,7 +111,7 @@ step_midtrain() {
     log "midtrain: COMPLETE and verified"; note midtrain "complete"; return 0
   fi
   log "midtrain: job ended but checkpoint is INCOMPLETE -- retrying once (resume is supported)"
-  job="$(submit_until_accepted midtrain "$REPO/scripts/spur_midtrain_1node.sbatch" "$MIDTRAIN_CFG")" || return 1
+  job="$(submit_until_accepted midtrain --qos=amd-burst-qos "$REPO/scripts/spur_midtrain_8node_dedicated.sbatch" "$MIDTRAIN_CFG")" || return 1
   wait_for_job "$job" midtrain-resume
   checkpoint_complete "$MIDTRAIN_OUT" || { log "midtrain: STILL incomplete, stopping"; note midtrain "failed"; return 1; }
   log "midtrain: COMPLETE after resume"; note midtrain "complete"; return 0
@@ -119,13 +119,13 @@ step_midtrain() {
 
 # ---------------------------------------------------------------- eval A/B ---
 step_eval() {
-  local cand="$1" arm="$2" tag="$3" out job
+  local cand="$1" arm="$2" tag="$3" base="${4:--}" baserev="${5:--}" out job
   out="$REPO/runs/eval_ab_${tag}"
   if [ -f "$out/report_kernel_ab.md" ] && [ -f "$out/report_heldout_lm.md" ]; then
     log "eval[$tag]: already complete"; return 0
   fi
-  log "eval[$tag]: submitting (candidate=$cand arm=$arm)"
-  job="$(submit_until_accepted "eval-$tag" "$REPO/scripts/spur_eval_ab_1node.sbatch" "$cand" "$arm" "$out")" || return 1
+  log "eval[$tag]: submitting (candidate=$cand arm=$arm reference=$base)"
+  job="$(submit_until_accepted "eval-$tag" "$REPO/scripts/spur_eval_ab_1node.sbatch" "$cand" "$arm" "$out" "$base" "$baserev")" || return 1
   note "eval_${tag}_job" "$job"
   wait_for_job "$job" "eval-$tag"
   if [ -f "$out/report_kernel_ab.md" ]; then
@@ -161,9 +161,17 @@ log "================ pipeline driver start (HEAD $(git rev-parse --short HEAD))
 note pipeline "running"
 
 step_midtrain    || { log "STOP: midtrain failed"; note pipeline "failed_midtrain"; exit 1; }
-step_eval "$MIDTRAIN_OUT" midtrain "midtrain1ep"
+# Reference is the BASE weights midtrain actually started from. Held-out LM
+# loss is the meaningful signal here; kernel generation is not, because
+# neither arm follows instructions yet.
+step_eval "$MIDTRAIN_OUT" midtrain "midtrain_base" \
+          "Qwen/Qwen3-14B-Base" "0b0bd3732e2c374d483664439ea334928b65f304"
 step_sft         || { log "STOP: sft failed"; note pipeline "failed_sft"; exit 1; }
-step_eval "$SFT_OUT" sft "sft"
+# The headline comparison: our instruction-tuned model against the vendor's
+# instruction-tuned model, both of which follow instructions, so the kernel
+# funnel is finally a fair question.
+step_eval "$SFT_OUT" sft "sft" \
+          "Qwen/Qwen3-14B" "40c069824f4251a91eefaf281ebe4c544efd3e18"
 
 log "================ pipeline COMPLETE through SFT; stopping before DPO ================"
 note pipeline "complete_through_sft"

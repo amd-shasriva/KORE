@@ -403,26 +403,38 @@ trainer construction → real optimizer step → checkpoint write → resume.
 **Step count.** After the repair up-sampling and the over-length filter the
 trainer sees 68,277 rows per epoch:
 
-```
-56,493 rows + 15,083 repair duplicates          =  71,576
-       − 3,299 rows over max_seq_length 16384   =  68,277 rows/epoch (184.3M tokens)
+Measured by tokenizing the full corpus at both cuts (see F2 — the shipped value
+is now 17,408):
 
-effective batch = 2 x 8 x 8 ranks               =  128 sequences/step
-optimizer steps per epoch                       =  533
-TOTAL (3 epochs)                                =  1,599 steps
 ```
+                                    max_seq_length 16384      17408
+rows surviving the filter                    53,194         56,427
+  + repair duplicates (x2.0)                 15,083         15,083
+  = rows/epoch                               68,277         71,510
+  tokens/epoch                                184.3M         238.7M
+dropped: math_reasoning                        3,214              0
+         kernel_repair_opt                        85             66
+
+effective batch = 2 x 8 x 8 ranks = 128 sequences/step
+optimizer steps per epoch                        534            559
+TOTAL (3 epochs)                               1,602          1,677
+```
+
+At 17,408 the math slice is recovered whole and 19 additional kernel rows
+survive. Steps rise only 4.7% because a step is 128 *rows*, but wall time tracks
+tokens, so budget for the +29.5%.
 
 **Wall time.** Midtrain's measured 33.5 s/step at `4 x 4 x 8` micro-batches of
-8192 tokens is 1,048,576 tokens/step, i.e. **31,301 tok/s across 8 GPUs**. SFT
-trains 553.0M tokens over 3 epochs:
+8192 tokens is 1,048,576 tokens/step, i.e. **31,301 tok/s across 8 GPUs**. At
+`max_seq_length: 17408` SFT trains 716.0M tokens over 3 epochs (238.7M/epoch):
 
 | assumption | wall time | implied s/step |
 |---|---|---|
-| token parity, no padding waste | 4.9 h | 11.0 |
-| +15% padding (`group_by_length` is on) | **5.6 h** | 12.7 |
-| +30% padding | 6.4 h | 14.4 |
+| token parity, no padding waste | 6.4 h | 13.7 |
+| +15% padding (`group_by_length` is on) | **7.3 h** | 15.7 |
+| +30% padding | 8.3 h | 17.8 |
 
-Call it **5–7 hours**, plus ~15 min of checkpoint I/O (8 × ~110 s) and ~4 min of
+Call it **6.5–8.5 hours**, plus ~15 min of checkpoint I/O (8 × ~110 s) and ~4 min of
 single-threaded startup tokenization. Treat this as a token-throughput
 extrapolation, not a measurement: midtrain packs uniform 8192-token chunks
 whereas SFT pads to the longest row in each length-grouped batch, and its
@@ -445,7 +457,7 @@ host; worth knowing given that a previous 14B midtrain died of host-memory
 exhaustion at step 492.
 
 **`save_total_limit` — see Blocker 2.** With `save_steps` at its default 200 and
-1,599 total steps, the run writes 7 periodic checkpoints plus one
+1,677 total steps, the run writes 8 periodic checkpoints plus one
 end-of-training checkpoint, each 221 GB, each rotating the previous one out.
 
 ---
@@ -466,8 +478,11 @@ the same reason.** If that matters, cast to bf16 before `save_pretrained` in eac
 stage; if not, it should at least be written down, because "the 14B checkpoint is
 28 GB" is wrong by 2×.
 
-**F2 — the 16,384 limit deletes 53.6% of the math capability slice, by ~420
-tokens.** `_filter_overlong` drops 3,299 of 71,576 rows (4.6%), and 3,214 of them
+**F2 — RESOLVED: the 16,384 limit deleted 53.6% of the math capability slice, by
+~420 tokens.** `configs/sft_14b_full.json` now ships `max_seq_length: 17408`,
+which recovers all 3,214 rows (independently re-measured: the math slice's
+maximum is 16,808 tokens, so nothing is left above the new cut). The original
+finding follows. `_filter_overlong` drops 3,299 of 71,576 rows (4.6%), and 3,214 of them
 are `math_reasoning`. That is **53.58% of the entire math slice**, versus 0.43%
 of `kernel_repair_opt` and 0% of every other source. The mixture is designed for
 `frac_math_reasoning = 0.10`; after filtering, math contributes about half what
@@ -594,7 +609,7 @@ GPU_IDS=0,1,2,3,4,5,6,7 bash scripts/launch_distributed.sh sft \
 
 Expect: `model identity resolved ... revision_pinned_at_load=False` (correct —
 the base is now a directory), `sft: completion-only loss enabled`,
-`dropped_overlong=3299`, then 1,599 steps over 5–7 hours.
+`dropped_overlong=66`, then 1,677 steps over 6.5-8.5 hours.
 
 Do **not** set `KORE_RESOURCE_PREFLIGHT=strict` (F9). Ensure the output
 filesystem has **≥ 800 GB** free: `save_total_limit: 2` means a transient peak of

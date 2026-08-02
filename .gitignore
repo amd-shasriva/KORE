@@ -29,3 +29,7 @@ runs_smoke/
 # breadth datagen output (large, regenerable; preserved on disk + /shareddata)
 data/b05factory/
 data/b05factory_synced/
+
+# Replay-cache lock files are transient per-process artifacts, never content.
+runs/*.lock
+runs/**/*.lock

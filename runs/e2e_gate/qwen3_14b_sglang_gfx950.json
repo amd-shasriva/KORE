@@ -1,0 +1,36 @@
+{
+  "accept": false,
+  "accuracy": {
+    "baseline_value": 1.0,
+    "candidate_value": 1.0,
+    "detail": "candidate: 4/4 correct",
+    "engine": "sglang",
+    "kind": "accuracy",
+    "passed": true,
+    "rel_change": 0.0,
+    "unit": "accuracy"
+  },
+  "accuracy_held": true,
+  "base_url": "http://127.0.0.1:30000",
+  "candidate_url": "http://127.0.0.1:30000",
+  "engine": "sglang",
+  "model": "Qwen3-14B",
+  "schema": "kore.e2e-serving-gate.v1",
+  "served_kernel": "stock-aiter-attention",
+  "throughput": {
+    "baseline_value": 95.70325334004526,
+    "candidate_value": 95.46256603028685,
+    "detail": "candidate: 3107 tok / 32.5468s over 32 reqs",
+    "engine": "sglang",
+    "kind": "throughput",
+    "passed": false,
+    "rel_change": -0.002514933415097423,
+    "unit": "tokens/s"
+  },
+  "throughput_improved": false,
+  "workload": {
+    "accuracy_max_new_tokens": 512,
+    "max_new_tokens": 128,
+    "num_requests": 32
+  }
+}

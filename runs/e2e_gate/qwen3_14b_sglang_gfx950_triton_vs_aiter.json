@@ -1,0 +1,36 @@
+{
+  "accept": true,
+  "accuracy": {
+    "baseline_value": 1.0,
+    "candidate_value": 1.0,
+    "detail": "candidate: 4/4 correct",
+    "engine": "sglang",
+    "kind": "accuracy",
+    "passed": true,
+    "rel_change": 0.0,
+    "unit": "accuracy"
+  },
+  "accuracy_held": true,
+  "base_url": "http://127.0.0.1:30001",
+  "candidate_url": null,
+  "engine": "sglang",
+  "model": "Qwen3-14B",
+  "schema": "kore.e2e-serving-gate.v1",
+  "served_kernel": "sglang attention-backend=triton (vs aiter baseline)",
+  "throughput": {
+    "baseline_value": 95.44,
+    "candidate_value": 96.62430502193665,
+    "detail": "candidate: 3060 tok / 31.6691s over 32 reqs",
+    "engine": "sglang",
+    "kind": "throughput",
+    "passed": true,
+    "rel_change": 0.012408895871088137,
+    "unit": "tokens/s"
+  },
+  "throughput_improved": true,
+  "workload": {
+    "accuracy_max_new_tokens": 512,
+    "max_new_tokens": 128,
+    "num_requests": 32
+  }
+}

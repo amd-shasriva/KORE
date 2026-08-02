@@ -29,9 +29,17 @@ LOG="$REPO/runs/pipeline_driver.log"
 MIDTRAIN_OUT="$REPO/runs/midtrain_14b_base"
 SFT_OUT="$REPO/runs/sft_14b_frontier"
 MIDTRAIN_CFG="$REPO/data/b05factory/launch/midtrain_base_8gpu.json"
-# Short enough to schedule against a busy cluster, long enough that the
-# per-segment startup (model load + tokenize, a few minutes) stays amortized.
-SEGMENT_WALLTIME="${KORE_SEGMENT_WALLTIME:-03:00:00}"
+# One reservation, not many. The 3h default here was a workaround for a
+# misdiagnosis: I believed long reservations would not schedule, when the real
+# blocker was --requeue. Measured after removing it -- a 23h probe scheduled and
+# ran immediately, and the partition reports MaxTime=UNLIMITED.
+#
+# Segmenting is actively expensive: at 34.3 s/it a 3h window covers ~315 steps
+# while save_steps=200 discards everything since the last checkpoint, averaging
+# ~100 steps (~57 min) per boundary over ~6 boundaries. The segment loop is kept
+# because it is still what recovers from a genuine failure, but the common case
+# should be a single segment that runs to completion.
+SEGMENT_WALLTIME="${KORE_SEGMENT_WALLTIME:-23:00:00}"
 
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 

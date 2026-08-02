@@ -171,6 +171,37 @@ def test_shipped_config_dataset_path_is_what_reassemble_produces():
     )
 
 
+def test_no_stage_config_names_a_corpus_nothing_produces():
+    """Every stage that reads a corpus must name the path reassemble.sh writes.
+
+    SFT shipped ``data/sft/multicap.jsonl`` and DPO shipped
+    ``data/dpo/pairs.jsonl``; neither is produced by anything in this repo, so
+    both stages died at launch. SFT's failed *expensively*, after a 14B load on
+    every rank. This generalizes the check so the next stage cannot repeat it.
+    """
+    reassemble = (REPO / "data" / "release" / "reassemble.sh").read_text()
+
+    # (stage config, corpus key, the destination reassemble.sh writes)
+    expected = {
+        "configs/sft_14b_full.json": ("dataset_path", "b05factory/sft/multicap.jsonl"),
+        "configs/dpo_14b_full.json": ("dataset_path", "b05factory/dpo/pairs.jsonl"),
+        # midtrain names its corpus differently, and shipped a path to a
+        # 1,360-row development stub while calling itself "14b_full".
+        "configs/midtrain_14b_full.json": ("corpus_path", "b05factory/midtrain/corpus.jsonl"),
+    }
+    for rel_config, (key, produced) in expected.items():
+        raw = json.loads((REPO / rel_config).read_text())
+        configured = raw.get(key)
+        assert configured, f"{rel_config} has no {key}"
+        assert f"../{produced}" in reassemble, (
+            f"reassemble.sh does not write {produced}"
+        )
+        assert Path(configured) == Path("data") / produced, (
+            f"{rel_config} reads {configured!r}, but reassemble.sh writes "
+            f"data/{produced}. Nothing produces {configured!r}."
+        )
+
+
 # --------------------------------------------------------------------------- #
 # 2. Loss-masking template surgery
 # --------------------------------------------------------------------------- #

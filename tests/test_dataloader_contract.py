@@ -274,3 +274,43 @@ def test_midtrain_entry_preflight_runs_before_any_torch_import(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "ok" in result.stdout
+
+
+def test_every_midtrain_config_names_the_real_frontier_corpus():
+    """No midtrain config may point at the 1,360-row development stub.
+
+    ``configs/midtrain_14b_full.json`` shipped ``data/midtrain/corpus.jsonl``,
+    which is 11 MB against the frontier corpus's 683 MB -- 1.6% of the data --
+    while every launcher under ``data/b05factory/launch/`` correctly used the
+    frontier path. ``docs/DISTRIBUTED.md`` documents launching from the former,
+    so the divergence was reachable by following the documentation.
+    """
+    real = "data/b05factory/midtrain/corpus.jsonl"
+    for rel_path in MIDTRAIN_CONFIGS:
+        raw = _load(rel_path)
+        corpus = raw.get("corpus_path")
+        assert corpus, f"{rel_path} has no corpus_path"
+        assert corpus == real, (
+            f"{rel_path} trains on {corpus!r}, not the frontier corpus {real!r}"
+        )
+
+
+def test_the_two_config_trees_agree_on_what_is_safety_critical():
+    """``configs/`` and ``data/b05factory/launch/`` must not silently diverge.
+
+    They are separate trees -- the first is the documented template set, the
+    second is what the sbatch launchers actually run -- so a fix applied to one
+    can miss the other. These fields are the ones where a mismatch costs either
+    a wrong result or a lost run.
+    """
+    template = _load("configs/midtrain_14b_full.json")
+    for rel_path in MIDTRAIN_CONFIGS:
+        if rel_path.startswith("configs/"):
+            continue
+        launch = _load(rel_path)
+        for field in ("model_id", "model_revision", "corpus_path"):
+            assert launch.get(field) == template.get(field), (
+                f"{rel_path} and configs/midtrain_14b_full.json disagree on "
+                f"{field}: {launch.get(field)!r} vs {template.get(field)!r}"
+            )
+        assert launch.get("save_total_limit", 1) >= MIN_SAVE_TOTAL_LIMIT, rel_path

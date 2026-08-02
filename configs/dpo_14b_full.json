@@ -1,7 +1,8 @@
 {
   "model_id": "Qwen/Qwen3-14B",
   "model_revision": "40c069824f4251a91eefaf281ebe4c544efd3e18",
-  "dataset_path": "data/dpo/pairs.jsonl",
+  "_comment_dataset_path": "data/b05factory/dpo/pairs.jsonl is what data/release/reassemble.sh actually writes; the earlier data/dpo/pairs.jsonl was produced by nothing in this repo and made a direct launcher call fail at startup.",
+  "dataset_path": "data/b05factory/dpo/pairs.jsonl",
   "output_dir": "runs/dpo_14b_full",
   "use_lora": false,
   "distributed": true,

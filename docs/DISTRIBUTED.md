@@ -46,8 +46,13 @@ the shipped `accelerate_fsdp.yaml` offload knobs) changes.
 
 ### <a name="full-ft-per-stage-status"></a>Full-FT per-stage status
 
-The launcher accepts all four stages (`midtrain|sft|dpo|grpo`), and the campaign
-routes each to the launcher **only if** that stage exposes a JSON `-m` entry
+The launcher accepts the four *trainable* stages (`midtrain|sft|dpo|grpo`). The
+campaign itself runs nine: `midtrain, datagen, agentic, build, sft, dpo, grpo,
+soup, eval` (plus optional `evolve` after `datagen`). The five non-trainable
+ones build corpora, average checkpoints, or score, and never touch the launcher.
+
+The campaign routes a trainable stage to the launcher **only if** that stage
+exposes a JSON `-m` entry
 (detected via a `<stage>_config_from_dict` builder, so it flips on automatically
 the moment the entry ships - no campaign change needed):
 
@@ -331,8 +336,20 @@ next stage's load) still fit. To reload into a single-file model for downstream 
 # import-level + wiring unit tests (CPU only)
 PYTHONPATH=. python -m pytest tests/test_distributed.py tests/test_campaign_wiring.py -q
 
-# whole-campaign wiring preflight (no GPU/teacher; import-checks every symbol)
-PYTHONPATH=. python scripts/run_campaign.py --dry-run --tasks rmsnorm_aiter,gemm_bf16
+# whole-campaign wiring preflight (no GPU/teacher; import-checks every symbol).
+# --use-hf is required: the production contract refuses weakened retention
+# sources. Without it the command exits with "missing --use-hf" and does nothing.
+PYTHONPATH=. python scripts/run_campaign.py --dry-run --use-hf \
+    --tasks rmsnorm_aiter,gemm_bf16
+
+# To drive a campaign from a stage that already finished outside it -- e.g. a
+# mid-train submitted directly with sbatch -- hand the checkpoint in. Without
+# this the campaign cannot see it, and production refuses to start SFT from the
+# untrained base:
+PYTHONPATH=. python scripts/run_campaign.py --use-hf \
+    --data-root data/b05factory \
+    --stages sft,dpo,grpo,soup,eval \
+    --midtrain-ckpt runs/midtrain_14b_frontier
 
 # launcher dry-run for any stage (prints the accelerate command, does not train)
 bash scripts/launch_distributed.sh midtrain configs/midtrain_14b_full.json --dry-run

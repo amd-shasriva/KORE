@@ -28,7 +28,7 @@ STATE="$REPO/runs/pipeline_state.json"
 LOG="$REPO/runs/pipeline_driver.log"
 MIDTRAIN_OUT="$REPO/runs/midtrain_14b_base"
 SFT_OUT="$REPO/runs/sft_14b_frontier"
-MIDTRAIN_CFG="$REPO/data/b05factory/launch/midtrain_base_32gpu.json"
+MIDTRAIN_CFG="$REPO/data/b05factory/launch/midtrain_base_8gpu.json"
 # Short enough to schedule against a busy cluster, long enough that the
 # per-segment startup (model load + tokenize, a few minutes) stays amortized.
 SEGMENT_WALLTIME="${KORE_SEGMENT_WALLTIME:-03:00:00}"
@@ -151,7 +151,7 @@ run_training_stage() {
 # ---------------------------------------------------------------- stage 0 ----
 step_midtrain() {
   run_training_stage midtrain kore-mid "$MIDTRAIN_OUT" "$SEGMENT_WALLTIME" \
-    "$REPO/scripts/spur_midtrain_4node.sbatch" "$MIDTRAIN_CFG"
+    "$REPO/scripts/spur_midtrain_1node.sbatch" "$MIDTRAIN_CFG"
 }
 
 # ---------------------------------------------------------------- eval A/B ---

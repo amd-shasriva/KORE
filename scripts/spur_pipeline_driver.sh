@@ -1,0 +1,169 @@
+#!/bin/bash
+# Drive Stage-0 -> evaluate -> Stage-1 -> evaluate, unattended, and stop before DPO.
+#
+# Why this exists: every stage here is hours long, and the SPUR controller
+# intermittently refuses a submission with JobHoldMaxRequeue even when the QoS
+# has free nodes -- a job can be held within 15s having never executed a line,
+# and the only remedy is to resubmit. Chaining these by hand means babysitting
+# ~12 hours of wall clock for a fault whose fix is "try again".
+#
+# Each step is gated on EVIDENCE, not on the scheduler's opinion:
+#   - a training stage is complete only when its consolidated safetensors index
+#     resolves with every shard present, because a job can exit 0 having written
+#     a partial directory;
+#   - an eval stage is complete only when both reports exist.
+# A step that cannot be proven complete stops the pipeline rather than feeding a
+# half-written checkpoint into the next stage.
+#
+# Deliberately stops before DPO: Stage-2 has never been validated on real
+# weights, so it is not something to start unattended.
+set -uo pipefail
+
+REPO="/home/shasriva/Kore-RL/KORE"
+export SPUR_CONTROLLER_ADDR="${SPUR_CONTROLLER_ADDR:-http://crs-m2m-cpu-spur-005:6817}"
+export KORE_SPUR_CONTROLLER_ADDR="$SPUR_CONTROLLER_ADDR"
+cd "$REPO" || exit 1
+
+STATE="$REPO/runs/pipeline_state.json"
+LOG="$REPO/runs/pipeline_driver.log"
+MIDTRAIN_OUT="$REPO/runs/midtrain_14b_1ep"
+SFT_OUT="$REPO/runs/sft_14b_frontier"
+MIDTRAIN_CFG="$REPO/data/b05factory/launch/midtrain_1ep.json"
+
+log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
+
+note() {  # note <key> <value> -- append a fact to the state file
+  /home/shasriva/kore-venv/bin/python - "$STATE" "$1" "$2" <<'PY'
+import json, sys, pathlib, time
+p, k, v = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+d = json.loads(p.read_text()) if p.exists() else {}
+d[k] = v; d.setdefault("_history", []).append(
+    {"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), k: v})
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(d, indent=2) + "\n")
+PY
+}
+
+# A consolidated HF checkpoint, verified against its own index rather than by
+# directory existence -- a crashed save leaves a directory that looks fine.
+checkpoint_complete() {
+  /home/shasriva/kore-venv/bin/python - "$1" <<'PY'
+import json, sys, pathlib
+d = pathlib.Path(sys.argv[1])
+idx = d / "model.safetensors.index.json"
+if not (d / "config.json").exists() or not idx.exists():
+    sys.exit(1)
+try:
+    shards = set(json.loads(idx.read_text())["weight_map"].values())
+except Exception:
+    sys.exit(1)
+sys.exit(0 if shards and all((d / s).exists() for s in shards) else 1)
+PY
+}
+
+running_job() { squeue -u "$USER" -h -o "%i %j %T" 2>/dev/null | awk -v n="$1" '$2 ~ n && $3=="RUNNING" {print $1; exit}'; }
+
+# Submit, and treat a JobHoldMaxRequeue as "the controller said no, ask again".
+# Returns the job id of a job that is RUNNING or legitimately PENDING.
+submit_until_accepted() {
+  local name="$1"; shift
+  local attempt job state
+  for attempt in $(seq 1 200); do
+    job="$(sbatch "$@" 2>&1 | grep -oE '[0-9]+$')"
+    if [ -z "$job" ]; then log "  $name: submit produced no job id (attempt $attempt)"; sleep 300; continue; fi
+    sleep 40
+    state="$(squeue -u "$USER" -h -j "$job" -o '%T %R' 2>/dev/null)"
+    case "$state" in
+      RUNNING*)            log "  $name: job $job RUNNING"; echo "$job"; return 0 ;;
+      *JobHoldMaxRequeue*) scancel "$job" 2>/dev/null; log "  $name: attempt $attempt held, retrying"; sleep 240 ;;
+      PENDING*)            log "  $name: job $job queued normally ($state)"; echo "$job"; return 0 ;;
+      "")                  log "  $name: job $job left the queue immediately -- check its log"; echo "$job"; return 0 ;;
+      *)                   log "  $name: job $job state=$state"; echo "$job"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+wait_for_job() {
+  local job="$1" name="$2" i
+  for i in $(seq 1 20000); do
+    squeue -u "$USER" -h -j "$job" >/dev/null 2>&1 || true
+    if ! squeue -u "$USER" -h -o "%i" 2>/dev/null | grep -qx "$job"; then
+      log "  $name: job $job left the queue"; return 0
+    fi
+    sleep 120
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------- stage 0 ----
+step_midtrain() {
+  if checkpoint_complete "$MIDTRAIN_OUT"; then log "midtrain: already complete"; return 0; fi
+  local job; job="$(running_job kore-mid)"
+  if [ -n "$job" ]; then log "midtrain: adopting running job $job"
+  else
+    log "midtrain: submitting"
+    job="$(submit_until_accepted midtrain "$REPO/scripts/spur_midtrain_1node.sbatch" "$MIDTRAIN_CFG")" || return 1
+  fi
+  note midtrain_job "$job"
+  wait_for_job "$job" midtrain
+  if checkpoint_complete "$MIDTRAIN_OUT"; then
+    log "midtrain: COMPLETE and verified"; note midtrain "complete"; return 0
+  fi
+  log "midtrain: job ended but checkpoint is INCOMPLETE -- retrying once (resume is supported)"
+  job="$(submit_until_accepted midtrain "$REPO/scripts/spur_midtrain_1node.sbatch" "$MIDTRAIN_CFG")" || return 1
+  wait_for_job "$job" midtrain-resume
+  checkpoint_complete "$MIDTRAIN_OUT" || { log "midtrain: STILL incomplete, stopping"; note midtrain "failed"; return 1; }
+  log "midtrain: COMPLETE after resume"; note midtrain "complete"; return 0
+}
+
+# ---------------------------------------------------------------- eval A/B ---
+step_eval() {
+  local cand="$1" arm="$2" tag="$3" out job
+  out="$REPO/runs/eval_ab_${tag}"
+  if [ -f "$out/report_kernel_ab.md" ] && [ -f "$out/report_heldout_lm.md" ]; then
+    log "eval[$tag]: already complete"; return 0
+  fi
+  log "eval[$tag]: submitting (candidate=$cand arm=$arm)"
+  job="$(submit_until_accepted "eval-$tag" "$REPO/scripts/spur_eval_ab_1node.sbatch" "$cand" "$arm" "$out")" || return 1
+  note "eval_${tag}_job" "$job"
+  wait_for_job "$job" "eval-$tag"
+  if [ -f "$out/report_kernel_ab.md" ]; then
+    log "eval[$tag]: COMPLETE -> $out"; note "eval_$tag" "complete"; return 0
+  fi
+  log "eval[$tag]: reports missing -- continuing anyway, evaluation is not a gate on training"
+  note "eval_$tag" "incomplete"; return 0
+}
+
+# ---------------------------------------------------------------- stage 1 ----
+step_sft() {
+  if checkpoint_complete "$SFT_OUT"; then log "sft: already complete"; return 0; fi
+  checkpoint_complete "$MIDTRAIN_OUT" || { log "sft: refusing to start, midtrain is not complete"; return 1; }
+  local job; job="$(running_job kore-sft)"
+  if [ -n "$job" ]; then log "sft: adopting running job $job"
+  else
+    log "sft: submitting from $MIDTRAIN_OUT"
+    job="$(submit_until_accepted sft "$REPO/scripts/spur_sft_1node.sbatch" \
+             "$REPO/configs/sft_14b_full.json" "$MIDTRAIN_OUT" "$SFT_OUT")" || return 1
+  fi
+  note sft_job "$job"
+  wait_for_job "$job" sft
+  if checkpoint_complete "$SFT_OUT"; then log "sft: COMPLETE and verified"; note sft "complete"; return 0; fi
+  log "sft: job ended but checkpoint is INCOMPLETE -- retrying once (resume is supported)"
+  job="$(submit_until_accepted sft "$REPO/scripts/spur_sft_1node.sbatch" \
+           "$REPO/configs/sft_14b_full.json" "$MIDTRAIN_OUT" "$SFT_OUT")" || return 1
+  wait_for_job "$job" sft-resume
+  checkpoint_complete "$SFT_OUT" || { log "sft: STILL incomplete, stopping"; note sft "failed"; return 1; }
+  log "sft: COMPLETE after resume"; note sft "complete"; return 0
+}
+
+log "================ pipeline driver start (HEAD $(git rev-parse --short HEAD)) ================"
+note pipeline "running"
+
+step_midtrain    || { log "STOP: midtrain failed"; note pipeline "failed_midtrain"; exit 1; }
+step_eval "$MIDTRAIN_OUT" midtrain "midtrain1ep"
+step_sft         || { log "STOP: sft failed"; note pipeline "failed_sft"; exit 1; }
+step_eval "$SFT_OUT" sft "sft"
+
+log "================ pipeline COMPLETE through SFT; stopping before DPO ================"
+note pipeline "complete_through_sft"

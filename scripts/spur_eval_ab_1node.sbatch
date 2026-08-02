@@ -31,12 +31,22 @@ PY="/home/shasriva/kore-venv/bin/python"
 cd "$REPO"
 source /home/shasriva/kore-venv/bin/activate
 
-OUT="${KORE_EVAL_AB_OUT:-$REPO/runs/eval_ab_${SLURM_JOB_ID:-manual}}"
+# Positional args take precedence over the env vars, because SPUR does not
+# reliably propagate `--export KEY=VALUE` into a requeued child -- the same
+# reason the training launchers are positional. Pass `-` to keep a default.
+#   sbatch spur_eval_ab_1node.sbatch [CAND_MODEL] [CAND_ARM] [OUT]
+ARG_CAND="${1:--}"; ARG_ARM="${2:--}"; ARG_OUT="${3:--}"
+_or() { [ "$1" = "-" ] || [ -z "$1" ] && printf '%s' "$2" || printf '%s' "$1"; }
+
+OUT="$(_or "$ARG_OUT" "${KORE_EVAL_AB_OUT:-$REPO/runs/eval_ab_${SLURM_JOB_ID:-manual}}")"
 mkdir -p "$OUT"
 
 BASE_MODEL="${KORE_AB_BASE_MODEL:-Qwen/Qwen3-14B}"
 BASE_REV="${KORE_AB_BASE_REVISION:-40c069824f4251a91eefaf281ebe4c544efd3e18}"
-CAND_MODEL="${KORE_AB_CAND_MODEL:-$REPO/runs/midtrain_14b_frontier}"
+CAND_MODEL="$(_or "$ARG_CAND" "${KORE_AB_CAND_MODEL:-$REPO/runs/midtrain_14b_1ep}")"
+# The candidate arm is named so an SFT comparison does not file itself under
+# "midtrain"; every downstream artifact and report keys off this string.
+CAND_ARM="$(_or "$ARG_ARM" "${KORE_AB_CAND_ARM:-midtrain}")"
 MAX_TOKENS="${KORE_AB_MAX_TOKENS:-4096}"
 BATCH="${KORE_AB_BATCH:-12}"
 BUDGET="${KORE_AB_BUDGET:-1}"
@@ -64,7 +74,7 @@ run() { echo; echo "=== $* ==="; "$@" || { echo "[eval-ab] FAILED: $*"; rc=1; };
 # ---------------------------------------------------------------- phase A ----
 # One GPU per arm; the model is 14B so a single MI355X holds it with room for a
 # batched KV cache. device_map="auto" over 8 cards would only add pipeline hops.
-for spec in "base:$BASE_MODEL:$BASE_REV" "midtrain:$CAND_MODEL:"; do
+for spec in "base:$BASE_MODEL:$BASE_REV" "$CAND_ARM:$CAND_MODEL:"; do
   ARM="${spec%%:*}"; rest="${spec#*:}"; MODEL="${rest%:*}"; REV="${rest##*:}"
   REVARG=(); [[ -n "$REV" ]] && REVARG=(--revision "$REV")
   run env HIP_VISIBLE_DEVICES=0 $PY -m kore.eval.checkpoint_ab run-arm \
@@ -75,7 +85,7 @@ done
 
 # ---------------------------------------------------------------- phase B ----
 # Both arms on the SAME device, back to back, nothing else resident.
-for ARM in base midtrain; do
+for ARM in base "$CAND_ARM"; do
   [[ -f "$OUT/generations_$ARM.jsonl" ]] || { echo "[eval-ab] no generations for $ARM"; rc=1; continue; }
   run env HIP_VISIBLE_DEVICES=0 $PY -m kore.eval.checkpoint_ab measure \
       "$OUT/generations_$ARM.jsonl" --out "$OUT/measures_$ARM.json" \
@@ -83,14 +93,14 @@ for ARM in base midtrain; do
 done
 
 # ---------------------------------------------------------------- phase C ----
-if [[ -f "$OUT/measures_midtrain.json" && -f "$OUT/measures_base.json" ]]; then
+if [[ -f "$OUT/measures_$CAND_ARM.json" && -f "$OUT/measures_base.json" ]]; then
   run $PY -m kore.eval.checkpoint_ab compare \
-      --candidate "$OUT/measures_midtrain.json" \
+      --candidate "$OUT/measures_$CAND_ARM.json" \
       --reference "$OUT/measures_base.json" --out "$OUT/report_kernel_ab"
 fi
-if [[ -f "$OUT/lm_scores_midtrain.json" && -f "$OUT/lm_scores_base.json" ]]; then
+if [[ -f "$OUT/lm_scores_$CAND_ARM.json" && -f "$OUT/lm_scores_base.json" ]]; then
   run $PY -m kore.eval.heldout_lm \
-      --candidate "$OUT/lm_scores_midtrain.json" \
+      --candidate "$OUT/lm_scores_$CAND_ARM.json" \
       --reference "$OUT/lm_scores_base.json" --out "$OUT/report_heldout_lm"
 fi
 

@@ -252,6 +252,13 @@
       "role": "single-node 8-rank stage-2 DPO launcher (trains the SFT output; requeue-safe)"
     },
     {
+      "path": "scripts/spur_pipeline_driver.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "unattended stage driver: midtrain -> A/B eval -> SFT -> A/B eval, gated on verified consolidated checkpoints rather than scheduler state, resubmitting through JobHoldMaxRequeue; stops before DPO"
+    },
+    {
       "path": "scripts/spur_eval_ab_1node.sbatch",
       "classification": "diagnostic",
       "lifecycle": "active",

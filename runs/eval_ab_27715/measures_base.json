@@ -1,0 +1,864 @@
+{
+  "schema": "kore.checkpoint-ab-measures.v1",
+  "arm": "base",
+  "generations_meta": {
+    "schema": "kore.checkpoint-ab-generations.v1",
+    "n_records": 34,
+    "arm": "base",
+    "backend": {
+      "model_id": "Qwen/Qwen3-14B",
+      "dtype": "bfloat16",
+      "revision": "40c069824f4251a91eefaf281ebe4c544efd3e18",
+      "enable_thinking": false,
+      "padding_side": "left",
+      "config_dtype": "torch.bfloat16",
+      "n_parameters": 14768307200,
+      "vocab_size": 151936,
+      "device": "cuda:0",
+      "backend": "hf-batch"
+    },
+    "samples": 1,
+    "max_tokens": 4096,
+    "temperature": 0.0,
+    "scope": {
+      "taxonomy_version": "1.0.0",
+      "taxonomy_digest": "cd5c7769cd7597fe59232a6ee89778ff65d6ca38184a2eb953f104fc7127ac5c",
+      "n_heldout_reservation": 45,
+      "n_generalization_scope": 34,
+      "n_scored": 34,
+      "scored_task_ids": [
+        "genb_attn2_cross_gqa_step_fp16",
+        "genb_attn2_decode_mqa_hd256_bf16",
+        "genb_attn2_varlen_gqa_causal_bf16",
+        "genb_attn_fp8_mha_hd128_causal_fp8",
+        "genb_attn_mha_hd128_noncausal_fp16",
+        "genb_attn_mqa_hd64_causal_bf16",
+        "genb_cv_conv2d_7x7_s1_d1_fp16",
+        "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+        "genb_fx_embed_scale_bf16",
+        "genb_fx_reglu_act_fp16",
+        "genb_fx_rope_qk_half_qknorm_bf16",
+        "genb_gemm_bf16_residual_bf16",
+        "genb_gemm_fp8_channelwise_fp8",
+        "genb_gemm_int4_asym_group_fp16",
+        "genb_gemm_int8_pertensor_int8",
+        "genb_moe_block_silu_k8_e256_bf16",
+        "genb_moe_fused_moe_silu_fp16",
+        "genb_moe_grouped_mlp_gelu_bf16",
+        "genb_moe_sigmoid_topk_norenorm_fp16",
+        "genb_norm_groupnorm_bf16",
+        "genb_norm_layernorm_bwd_fp32",
+        "genb_norm_layernorm_quant_fp8_fp8",
+        "genb_qx_quant_int8_pertoken_int8",
+        "genb_red_entropy_bf16",
+        "genb_red_topk256_bf16",
+        "genb_smp_rope_yarn_bf16",
+        "genb_smp_topk_sample_bf16",
+        "genb_ssm_mamba2_ssd_c128_n128_bf16",
+        "genb_ssm_retnet_c64_bf16",
+        "genb_tr_adamw_8bit_bf16",
+        "genb_tr_foreach_sgd_bf16",
+        "genb_tr_ls_ce_bwd_bf16",
+        "mla_decode_bf16",
+        "paged_attn_decode_bf16"
+      ],
+      "excluded_contaminated": {
+        "genb_cv_conv2d_1x1_s2_fp16": "midtrain_curriculum_tier4_win_source",
+        "genb_cv_depthwise_conv2d_5x5_s1_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_norm_rmsnorm_h16384_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_qx_int4_unpack_group_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_qx_quant_fp8_block2d_fp8": "midtrain_curriculum_tier4_win_source",
+        "genb_red_log_softmax_bwd_fp32": "midtrain_curriculum_tier4_win_source",
+        "genb_red_rms_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_smp_repetition_penalty_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_ssm_gated_retention_c128_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_ssm_lightning_attn_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_tr_rmsprop_centered_momentum_fp32": "midtrain_curriculum_tier4_win_source"
+      },
+      "contamination_evidence": {
+        "reason": "midtrain_curriculum_tier4_win_source",
+        "detector": "kore.data.decontam.analyze_text_contamination",
+        "match_kind": "directional_containment",
+        "generator": "data/release/generators/gen_curriculum.py::tier4",
+        "corpus": "data/b05factory/midtrain/corpus.jsonl (source=kernel_curriculum)",
+        "chunks_analyzed": 9956,
+        "hits": 17,
+        "tasks": 11,
+        "containment_min": 0.795,
+        "containment_max": 0.943,
+        "public_benchmark_hits": 0,
+        "reference_pattern": "kore-task:<task_id>:seed_triton.py"
+      },
+      "families": {
+        "activation": [
+          "genb_fx_embed_scale_bf16",
+          "genb_fx_reglu_act_fp16",
+          "genb_fx_rope_qk_half_qknorm_bf16"
+        ],
+        "attention": [
+          "genb_attn2_cross_gqa_step_fp16",
+          "genb_attn2_decode_mqa_hd256_bf16",
+          "genb_attn2_varlen_gqa_causal_bf16",
+          "genb_attn_fp8_mha_hd128_causal_fp8",
+          "genb_attn_mha_hd128_noncausal_fp16",
+          "genb_attn_mqa_hd64_causal_bf16",
+          "mla_decode_bf16",
+          "paged_attn_decode_bf16"
+        ],
+        "convolution": [
+          "genb_cv_conv2d_7x7_s1_d1_fp16",
+          "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16"
+        ],
+        "gemm": [
+          "genb_gemm_bf16_residual_bf16",
+          "genb_gemm_fp8_channelwise_fp8",
+          "genb_gemm_int4_asym_group_fp16",
+          "genb_gemm_int8_pertensor_int8"
+        ],
+        "moe": [
+          "genb_moe_block_silu_k8_e256_bf16",
+          "genb_moe_fused_moe_silu_fp16",
+          "genb_moe_grouped_mlp_gelu_bf16",
+          "genb_moe_sigmoid_topk_norenorm_fp16"
+        ],
+        "norm": [
+          "genb_norm_groupnorm_bf16",
+          "genb_norm_layernorm_bwd_fp32",
+          "genb_norm_layernorm_quant_fp8_fp8"
+        ],
+        "quant": [
+          "genb_qx_quant_int8_pertoken_int8"
+        ],
+        "reduction": [
+          "genb_red_entropy_bf16",
+          "genb_red_topk256_bf16"
+        ],
+        "sampling": [
+          "genb_smp_rope_yarn_bf16",
+          "genb_smp_topk_sample_bf16"
+        ],
+        "sequence": [
+          "genb_ssm_mamba2_ssd_c128_n128_bf16",
+          "genb_ssm_retnet_c64_bf16"
+        ],
+        "training": [
+          "genb_tr_adamw_8bit_bf16",
+          "genb_tr_foreach_sgd_bf16",
+          "genb_tr_ls_ce_bwd_bf16"
+        ]
+      }
+    },
+    "wall_seconds": 839.3
+  },
+  "summary": {
+    "arm": "base",
+    "n": 34,
+    "budget": 1,
+    "mode": "parallel",
+    "counts": {
+      "contract_ok": 32,
+      "compiled": 32,
+      "correct": 23,
+      "timed": 12,
+      "faster": 4,
+      "infra_error": 1
+    },
+    "rates": {
+      "contract_ok": {
+        "k": 32,
+        "n": 34,
+        "rate": 0.9411764705882353,
+        "lo": 0.8090606311053629,
+        "hi": 0.9837176869361576,
+        "z": 1.96
+      },
+      "compiled": {
+        "k": 32,
+        "n": 34,
+        "rate": 0.9411764705882353,
+        "lo": 0.8090606311053629,
+        "hi": 0.9837176869361576,
+        "z": 1.96
+      },
+      "correct": {
+        "k": 23,
+        "n": 34,
+        "rate": 0.6764705882352942,
+        "lo": 0.5084258404811939,
+        "hi": 0.8086854867354143,
+        "z": 1.96
+      },
+      "timed": {
+        "k": 12,
+        "n": 34,
+        "rate": 0.35294117647058826,
+        "lo": 0.21487714895296073,
+        "hi": 0.5208634116998658,
+        "z": 1.96
+      },
+      "faster": {
+        "k": 4,
+        "n": 34,
+        "rate": 0.11764705882352941,
+        "lo": 0.04671370973436122,
+        "hi": 0.26621174796298774,
+        "z": 1.96
+      },
+      "infra_error": {
+        "k": 1,
+        "n": 34,
+        "rate": 0.029411764705882353,
+        "lo": 0.005210771925596644,
+        "hi": 0.14915902216344817,
+        "z": 1.96
+      }
+    },
+    "fast_p": {
+      "0.0": 0.35294117647058826,
+      "0.5": 0.17647058823529413,
+      "1.0": 0.11764705882352941,
+      "1.5": 0.058823529411764705,
+      "2.0": 0.029411764705882353
+    },
+    "geometric_mean_speedup": 0.46738566219638883,
+    "median_response_chars": 5060.5,
+    "per_task": [
+      {
+        "task_id": "genb_attn2_cross_gqa_step_fp16",
+        "contract_ok": true,
+        "response_chars": 6137,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 0.15200607433108,
+        "speedup_raw": 0.15200607433108,
+        "snr_db": 88.29,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn2_decode_mqa_hd256_bf16",
+        "contract_ok": true,
+        "response_chars": 6417,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 76.57,
+        "baseline_impl": null,
+        "timing_grade": "screening",
+        "flags": [
+          "timing:screening"
+        ],
+        "error_head": "timing not admitted (measurement noise): minimal: baseline CV 3.023% exceeds 3.000%",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn2_varlen_gqa_causal_bf16",
+        "contract_ok": true,
+        "response_chars": 6384,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 0.7781541521028409,
+        "speedup_raw": 0.7781541521028409,
+        "snr_db": 86.46,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn_fp8_mha_hd128_causal_fp8",
+        "contract_ok": true,
+        "response_chars": 5455,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 86.97,
+        "baseline_impl": null,
+        "timing_grade": "screening",
+        "flags": [
+          "timing:screening"
+        ],
+        "error_head": "timing not admitted (measurement noise): minimal: baseline CV 4.511% exceeds 3.000%",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn_mha_hd128_noncausal_fp16",
+        "contract_ok": true,
+        "response_chars": 5380,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 90.54,
+        "baseline_impl": null,
+        "timing_grade": "screening",
+        "flags": [
+          "timing:screening"
+        ],
+        "error_head": "timing not admitted (measurement noise): minimal: paired ratio CV 5.047% exceeds 3.000%",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn_mqa_hd64_causal_bf16",
+        "contract_ok": false,
+        "response_chars": 20415,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "File \"<frozen importlib._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed",
+        "faster": false
+      },
+      {
+        "task_id": "genb_cv_conv2d_7x7_s1_d1_fp16",
+        "contract_ok": true,
+        "response_chars": 5083,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": -999.0,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+        "contract_ok": true,
+        "response_chars": 4188,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": -999.0,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_fx_embed_scale_bf16",
+        "contract_ok": true,
+        "response_chars": 2490,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 999.0,
+        "baseline_impl": null,
+        "timing_grade": "screening",
+        "flags": [
+          "timing:screening"
+        ],
+        "error_head": "timing not admitted (measurement noise): primary: candidate CV 5.940% exceeds 3.000%; validation_0: paired ratio CV 3.087% exceeds 3.000%",
+        "faster": false
+      },
+      {
+        "task_id": "genb_fx_reglu_act_fp16",
+        "contract_ok": true,
+        "response_chars": 2958,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 2.3625863429860705,
+        "speedup_raw": 2.3625863429860705,
+        "snr_db": 999.0,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [
+          "fast_p>=1.0",
+          "fast_p>=1.2",
+          "fast_p>=1.5"
+        ],
+        "error_head": null,
+        "faster": true
+      },
+      {
+        "task_id": "genb_fx_rope_qk_half_qknorm_bf16",
+        "contract_ok": true,
+        "response_chars": 3741,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 1.470723049476964,
+        "speedup_raw": 1.470723049476964,
+        "snr_db": 95.19,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [
+          "fast_p>=1.0",
+          "fast_p>=1.2"
+        ],
+        "error_head": null,
+        "faster": true
+      },
+      {
+        "task_id": "genb_gemm_bf16_residual_bf16",
+        "contract_ok": true,
+        "response_chars": 6290,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 51.5,
+        "baseline_impl": null,
+        "timing_grade": "screening",
+        "flags": [
+          "timing:screening"
+        ],
+        "error_head": "timing not admitted (measurement noise): minimal: baseline CV 4.432% exceeds 3.000%",
+        "faster": false
+      },
+      {
+        "task_id": "genb_gemm_fp8_channelwise_fp8",
+        "contract_ok": true,
+        "response_chars": 6026,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 0.18011115787986315,
+        "speedup_raw": 0.18011115787986315,
+        "snr_db": 48.54,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_gemm_int4_asym_group_fp16",
+        "contract_ok": true,
+        "response_chars": 6121,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 0.0,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_gemm_int8_pertensor_int8",
+        "contract_ok": true,
+        "response_chars": 6410,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 0.17774017453714142,
+        "speedup_raw": 0.17774017453714142,
+        "snr_db": 48.93,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_block_silu_k8_e256_bf16",
+        "contract_ok": true,
+        "response_chars": 10172,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": -999.0,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_fused_moe_silu_fp16",
+        "contract_ok": true,
+        "response_chars": 6545,
+        "compiled": true,
+        "infra_error": true,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 65.58,
+        "baseline_impl": null,
+        "timing_grade": "rejected",
+        "flags": [
+          "infra"
+        ],
+        "error_head": "infra: timing admission failed: candidate timing keys mismatch (missing=['minimal', 'primary', 'validation_0', 'validation_1', 'validation_2'], extra=[])",
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_grouped_mlp_gelu_bf16",
+        "contract_ok": true,
+        "response_chars": 6055,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 0.4071611518053732,
+        "speedup_raw": 0.4071611518053732,
+        "snr_db": 48.69,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_sigmoid_topk_norenorm_fp16",
+        "contract_ok": true,
+        "response_chars": 5038,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 1.6513492605526514,
+        "speedup_raw": 1.6513492605526514,
+        "snr_db": 150.85,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [
+          "fast_p>=1.0",
+          "fast_p>=1.2",
+          "fast_p>=1.5"
+        ],
+        "error_head": null,
+        "faster": true
+      },
+      {
+        "task_id": "genb_norm_groupnorm_bf16",
+        "contract_ok": true,
+        "response_chars": 3302,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 1.0,
+        "speedup_raw": 1.0,
+        "snr_db": 95.76,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_norm_layernorm_bwd_fp32",
+        "contract_ok": true,
+        "response_chars": 3237,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 0.08315850000110483,
+        "speedup_raw": 0.08315850000110483,
+        "snr_db": 112.67,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_norm_layernorm_quant_fp8_fp8",
+        "contract_ok": true,
+        "response_chars": 3502,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": -999.0,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_qx_quant_int8_pertoken_int8",
+        "contract_ok": true,
+        "response_chars": 4771,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 999.0,
+        "baseline_impl": null,
+        "timing_grade": "screening",
+        "flags": [
+          "timing:screening"
+        ],
+        "error_head": "timing not admitted (measurement noise): minimal: candidate CV 5.833% exceeds 3.000%; validation_0: candidate CV 3.211% exceeds 3.000%",
+        "faster": false
+      },
+      {
+        "task_id": "genb_red_entropy_bf16",
+        "contract_ok": true,
+        "response_chars": 3274,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 80.02,
+        "baseline_impl": null,
+        "timing_grade": "screening",
+        "flags": [
+          "timing:screening"
+        ],
+        "error_head": "timing not admitted (measurement noise): primary: candidate CV 3.725% exceeds 3.000%",
+        "faster": false
+      },
+      {
+        "task_id": "genb_red_topk256_bf16",
+        "contract_ok": true,
+        "response_chars": 2173,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": -999.0,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_smp_rope_yarn_bf16",
+        "contract_ok": true,
+        "response_chars": 3680,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 1.2155115923771287,
+        "speedup_raw": 1.2155115923771287,
+        "snr_db": 999.0,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [
+          "fast_p>=1.0"
+        ],
+        "error_head": null,
+        "faster": true
+      },
+      {
+        "task_id": "genb_smp_topk_sample_bf16",
+        "contract_ok": true,
+        "response_chars": 3485,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 999.0,
+        "baseline_impl": null,
+        "timing_grade": "screening",
+        "flags": [
+          "timing:screening"
+        ],
+        "error_head": "timing not admitted (measurement noise): minimal: candidate CV 3.349% exceeds 3.000%",
+        "faster": false
+      },
+      {
+        "task_id": "genb_ssm_mamba2_ssd_c128_n128_bf16",
+        "contract_ok": true,
+        "response_chars": 3405,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": -999.0,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_ssm_retnet_c64_bf16",
+        "contract_ok": true,
+        "response_chars": 2900,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": true,
+        "speedup_gated": 0.12152404407786954,
+        "speedup_raw": 0.12152404407786954,
+        "snr_db": 89.12,
+        "baseline_impl": null,
+        "timing_grade": "publication",
+        "flags": [],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_tr_adamw_8bit_bf16",
+        "contract_ok": true,
+        "response_chars": 3382,
+        "compiled": true,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 44.77,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "incorrect",
+          "shaped"
+        ],
+        "error_head": null,
+        "faster": false
+      },
+      {
+        "task_id": "genb_tr_foreach_sgd_bf16",
+        "contract_ok": true,
+        "response_chars": 2979,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 76.04,
+        "baseline_impl": null,
+        "timing_grade": "screening",
+        "flags": [
+          "timing:screening"
+        ],
+        "error_head": "timing not admitted (measurement noise): primary: candidate CV 9.641% exceeds 3.000%",
+        "faster": false
+      },
+      {
+        "task_id": "genb_tr_ls_ce_bwd_bf16",
+        "contract_ok": false,
+        "response_chars": 21465,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_head": "a large number of memory loads and stores which may be inefficient for the given workload. The kernel is also using a large number of memory loads and stores which may be inefficient for the given workload. The kernel is also using a large number of memory loads and stores which may be inefficient f",
+        "faster": false
+      },
+      {
+        "task_id": "mla_decode_bf16",
+        "contract_ok": true,
+        "response_chars": 6419,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 49.1,
+        "baseline_impl": null,
+        "timing_grade": "ineligible",
+        "flags": [
+          "performance_ineligible"
+        ],
+        "error_head": "performance-ineligible: driver did not advertise a recognized timing protocol",
+        "faster": false
+      },
+      {
+        "task_id": "paged_attn_decode_bf16",
+        "contract_ok": true,
+        "response_chars": 5371,
+        "compiled": true,
+        "infra_error": false,
+        "correct": true,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": 83.95,
+        "baseline_impl": null,
+        "timing_grade": "ineligible",
+        "flags": [
+          "performance_ineligible"
+        ],
+        "error_head": "performance-ineligible: driver did not advertise a recognized timing protocol",
+        "faster": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,125 @@
+{
+  "benches": [
+    "mmlu",
+    "humaneval"
+  ],
+  "scores": {
+    "mmlu": 0.9166666666666666,
+    "humaneval": 1.0
+  },
+  "aggregate": 0.9583333333333333,
+  "per_bench": {
+    "mmlu": {
+      "score": 0.9166666666666666,
+      "accuracy": 0.9166666666666666,
+      "n": 12,
+      "correct": 11,
+      "source": "smoke",
+      "per_item": [
+        {
+          "id": "mmlu-0",
+          "pred": "B",
+          "gold": "B",
+          "correct": true
+        },
+        {
+          "id": "mmlu-1",
+          "pred": "C",
+          "gold": "C",
+          "correct": true
+        },
+        {
+          "id": "mmlu-2",
+          "pred": "C",
+          "gold": "D",
+          "correct": false
+        },
+        {
+          "id": "mmlu-3",
+          "pred": "A",
+          "gold": "A",
+          "correct": true
+        },
+        {
+          "id": "mmlu-4",
+          "pred": "B",
+          "gold": "B",
+          "correct": true
+        },
+        {
+          "id": "mmlu-5",
+          "pred": "C",
+          "gold": "C",
+          "correct": true
+        },
+        {
+          "id": "mmlu-6",
+          "pred": "B",
+          "gold": "B",
+          "correct": true
+        },
+        {
+          "id": "mmlu-7",
+          "pred": "C",
+          "gold": "C",
+          "correct": true
+        },
+        {
+          "id": "mmlu-8",
+          "pred": "A",
+          "gold": "A",
+          "correct": true
+        },
+        {
+          "id": "mmlu-9",
+          "pred": "C",
+          "gold": "C",
+          "correct": true
+        },
+        {
+          "id": "mmlu-10",
+          "pred": "B",
+          "gold": "B",
+          "correct": true
+        },
+        {
+          "id": "mmlu-11",
+          "pred": "D",
+          "gold": "D",
+          "correct": true
+        }
+      ]
+    },
+    "humaneval": {
+      "score": 1.0,
+      "pass@1": 1.0,
+      "n": 3,
+      "passed": 3,
+      "source": "smoke",
+      "per_item": [
+        {
+          "task_id": "HE/2",
+          "passed": true,
+          "detail": "ok"
+        },
+        {
+          "task_id": "HE/53",
+          "passed": true,
+          "detail": "ok"
+        },
+        {
+          "task_id": "HE/27",
+          "passed": true,
+          "detail": "ok"
+        }
+      ]
+    }
+  },
+  "sources": {
+    "mmlu": "smoke",
+    "humaneval": "smoke"
+  },
+  "full": false,
+  "arm": "base",
+  "wall_seconds": 1.4
+}

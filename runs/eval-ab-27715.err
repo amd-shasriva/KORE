@@ -1,0 +1,250 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/8 [00:00<?, ?it/s]Loading checkpoint shards:  12%|█▎        | 1/8 [00:10<01:10, 10.03s/it]Loading checkpoint shards:  25%|██▌       | 2/8 [00:16<00:47,  7.84s/it]Loading checkpoint shards:  38%|███▊      | 3/8 [00:22<00:34,  6.92s/it]Loading checkpoint shards:  50%|█████     | 4/8 [00:27<00:25,  6.43s/it]Loading checkpoint shards:  62%|██████▎   | 5/8 [00:33<00:18,  6.20s/it]Loading checkpoint shards:  75%|███████▌  | 6/8 [00:39<00:12,  6.15s/it]Loading checkpoint shards:  88%|████████▊ | 7/8 [00:45<00:06,  6.04s/it]Loading checkpoint shards: 100%|██████████| 8/8 [00:48<00:00,  5.06s/it]Loading checkpoint shards: 100%|██████████| 8/8 [00:48<00:00,  6.06s/it]
+[checkpoint_ab] arm=base backend={'model_id': 'Qwen/Qwen3-14B', 'dtype': 'bfloat16', 'revision': '40c069824f4251a91eefaf281ebe4c544efd3e18', 'enable_thinking': False, 'padding_side': 'left', 'config_dtype': 'torch.bfloat16', 'n_parameters': 14768307200, 'vocab_size': 151936, 'device': 'cuda:0', 'backend': 'hf-batch'}
+[base] scored 5/86 documents
+[base] scored 10/86 documents
+[base] scored 15/86 documents
+[base] scored 20/86 documents
+[base] scored 25/86 documents
+[base] scored 30/86 documents
+[base] scored 35/86 documents
+[base] scored 40/86 documents
+[base] scored 45/86 documents
+[base] scored 50/86 documents
+[base] scored 55/86 documents
+[base] scored 60/86 documents
+[base] scored 65/86 documents
+[base] scored 70/86 documents
+[base] scored 75/86 documents
+[base] scored 80/86 documents
+[base] scored 85/86 documents
+[checkpoint_ab] base: seed bits/token = 1.5787 over 34 docs / 38088 tokens
+[checkpoint_ab] base: reference bits/token = 3.1206 over 34 docs / 5292 tokens
+[checkpoint_ab] base: general bits/token = 2.8152 over 18 docs / 578 tokens
+[checkpoint_ab] base: LM scores -> /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/lm_scores_base.json
+The following generation flags are not valid and may be ignored: ['top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+[base] generated 12/34 (24.9s/completion in this chunk)
+[base] generated 24/34 (20.6s/completion in this chunk)
+[base] generated 34/34 (29.2s/completion in this chunk)
+[checkpoint_ab] base: 32/34 honored the FULL_KERNEL contract (14.0 min) -> /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/generations_base.jsonl
+[checkpoint_ab] base: retention {'mmlu': 0.9166666666666666, 'humaneval': 1.0}
+The tokenizer you are loading from '/home/shasriva/Kore-RL/KORE/runs/midtrain_14b_frontier' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/13 [00:00<?, ?it/s]Loading checkpoint shards:   8%|▊         | 1/13 [00:06<01:16,  6.38s/it]Loading checkpoint shards:  15%|█▌        | 2/13 [00:12<01:11,  6.48s/it]Loading checkpoint shards:  23%|██▎       | 3/13 [00:20<01:07,  6.76s/it]Loading checkpoint shards:  31%|███       | 4/13 [00:26<00:59,  6.65s/it]Loading checkpoint shards:  38%|███▊      | 5/13 [00:33<00:53,  6.63s/it]Loading checkpoint shards:  46%|████▌     | 6/13 [00:40<00:47,  6.79s/it]Loading checkpoint shards:  54%|█████▍    | 7/13 [00:47<00:41,  6.97s/it]Loading checkpoint shards:  62%|██████▏   | 8/13 [00:54<00:34,  6.88s/it]Loading checkpoint shards:  69%|██████▉   | 9/13 [01:00<00:27,  6.81s/it]Loading checkpoint shards:  77%|███████▋  | 10/13 [01:07<00:20,  6.85s/it]Loading checkpoint shards:  85%|████████▍ | 11/13 [01:14<00:13,  6.80s/it]Loading checkpoint shards:  92%|█████████▏| 12/13 [01:18<00:05,  5.85s/it]Loading checkpoint shards: 100%|██████████| 13/13 [01:22<00:00,  5.30s/it]Loading checkpoint shards: 100%|██████████| 13/13 [01:22<00:00,  6.32s/it]
+[checkpoint_ab] arm=midtrain backend={'model_id': '/home/shasriva/Kore-RL/KORE/runs/midtrain_14b_frontier', 'dtype': 'bfloat16', 'revision': None, 'enable_thinking': False, 'padding_side': 'left', 'config_dtype': 'torch.bfloat16', 'n_parameters': 14768307200, 'vocab_size': 151936, 'device': 'cuda:0', 'backend': 'hf-batch'}
+[midtrain] scored 5/86 documents
+[midtrain] scored 10/86 documents
+[midtrain] scored 15/86 documents
+[midtrain] scored 20/86 documents
+[midtrain] scored 25/86 documents
+[midtrain] scored 30/86 documents
+[midtrain] scored 35/86 documents
+[midtrain] scored 40/86 documents
+[midtrain] scored 45/86 documents
+[midtrain] scored 50/86 documents
+[midtrain] scored 55/86 documents
+[midtrain] scored 60/86 documents
+[midtrain] scored 65/86 documents
+[midtrain] scored 70/86 documents
+[midtrain] scored 75/86 documents
+[midtrain] scored 80/86 documents
+[midtrain] scored 85/86 documents
+[checkpoint_ab] midtrain: seed bits/token = 0.8181 over 34 docs / 38088 tokens
+[checkpoint_ab] midtrain: reference bits/token = 1.3405 over 34 docs / 5292 tokens
+[checkpoint_ab] midtrain: general bits/token = 3.0175 over 18 docs / 578 tokens
+[checkpoint_ab] midtrain: LM scores -> /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/lm_scores_midtrain.json
+The following generation flags are not valid and may be ignored: ['top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+[midtrain] generated 12/34 (24.9s/completion in this chunk)
+[midtrain] generated 24/34 (27.5s/completion in this chunk)
+[midtrain] generated 34/34 (29.3s/completion in this chunk)
+[checkpoint_ab] midtrain: 33/34 honored the FULL_KERNEL contract (15.4 min) -> /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/generations_midtrain.jsonl
+[checkpoint_ab] midtrain: retention {'mmlu': 0.6666666666666666, 'humaneval': 1.0}
+[00:04] EVENT  env: eval_start  task=genb_attn2_cross_gqa_step_fp16 n_shapes=5 source_sha=5f83817920d1 do_bench=True
+[00:23] EVENT  env: oracle_report  task=genb_attn2_cross_gqa_step_fp16 task_id=genb_attn2_cross_gqa_step_fp16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[00:27] EVENT  env: eval_done  task=genb_attn2_cross_gqa_step_fp16 compiled=True correct=True snr_min=88.29 worst_speedup=0.152 cv_pct=0.9293 infra_error=False cached=False
+[00:27] EVENT  env: eval_start  task=genb_attn2_decode_mqa_hd256_bf16 n_shapes=5 source_sha=f8e3a79f086f do_bench=True
+[00:44] EVENT  env: oracle_report  task=genb_attn2_decode_mqa_hd256_bf16 task_id=genb_attn2_decode_mqa_hd256_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[00:49] EVENT  env: eval_timing_unadmitted  task=genb_attn2_decode_mqa_hd256_bf16 source_sha=f8e3a79f086f reason=minimal: baseline CV 3.023% exceeds 3.000% cv_pct=0.7513 paired_ratio_cv_pct=3.347 paired_ci_half_width_pct=3.016
+[00:49] EVENT  env: eval_done  task=genb_attn2_decode_mqa_hd256_bf16 compiled=True correct=True snr_min=76.57 worst_speedup=0.05656 cv_pct=0.7513 infra_error=False cached=False
+[00:49] EVENT  env: eval_start  task=genb_attn2_varlen_gqa_causal_bf16 n_shapes=5 source_sha=444e81ba845f do_bench=True
+[01:10] EVENT  env: oracle_report  task=genb_attn2_varlen_gqa_causal_bf16 task_id=genb_attn2_varlen_gqa_causal_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[01:18] EVENT  env: eval_done  task=genb_attn2_varlen_gqa_causal_bf16 compiled=True correct=True snr_min=86.46 worst_speedup=0.7782 cv_pct=0.5534 infra_error=False cached=False
+[01:18] EVENT  env: eval_start  task=genb_attn_fp8_mha_hd128_causal_fp8 n_shapes=5 source_sha=7c95a45bfd5b do_bench=True
+[01:36] EVENT  env: oracle_report  task=genb_attn_fp8_mha_hd128_causal_fp8 task_id=genb_attn_fp8_mha_hd128_causal_fp8 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[01:42] EVENT  env: eval_timing_unadmitted  task=genb_attn_fp8_mha_hd128_causal_fp8 source_sha=7c95a45bfd5b reason=minimal: baseline CV 4.511% exceeds 3.000% cv_pct=1.72 paired_ratio_cv_pct=2.983 paired_ci_half_width_pct=2.616
+[01:42] EVENT  env: eval_done  task=genb_attn_fp8_mha_hd128_causal_fp8 compiled=True correct=True snr_min=86.97 worst_speedup=0.7202 cv_pct=1.72 infra_error=False cached=False
+[01:42] EVENT  env: eval_start  task=genb_attn_mha_hd128_noncausal_fp16 n_shapes=5 source_sha=9b8480ea9403 do_bench=True
+[01:58] EVENT  env: oracle_report  task=genb_attn_mha_hd128_noncausal_fp16 task_id=genb_attn_mha_hd128_noncausal_fp16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[02:03] EVENT  env: eval_timing_unadmitted  task=genb_attn_mha_hd128_noncausal_fp16 source_sha=9b8480ea9403 reason=minimal: paired ratio CV 5.047% exceeds 3.000% cv_pct=2.985 paired_ratio_cv_pct=5.047 paired_ci_half_width_pct=4.581
+[02:03] EVENT  env: eval_done  task=genb_attn_mha_hd128_noncausal_fp16 compiled=True correct=True snr_min=90.54 worst_speedup=0.4679 cv_pct=2.985 infra_error=False cached=False
+[02:03] EVENT  env: eval_start  task=genb_attn_mqa_hd64_causal_bf16 n_shapes=5 source_sha=0ade209c65e0 do_bench=True
+[02:05] EVENT  env: eval_done  task=genb_attn_mqa_hd64_causal_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[02:05] EVENT  env: eval_start  task=genb_cv_conv2d_7x7_s1_d1_fp16 n_shapes=5 source_sha=4beab8c9e3c2 do_bench=True
+[02:21] EVENT  env: oracle_report  task=genb_cv_conv2d_7x7_s1_d1_fp16 task_id=genb_cv_conv2d_7x7_s1_d1_fp16 verified=False live_prongs=['random'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'fail', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[02:21] EVENT  env: eval_done  task=genb_cv_conv2d_7x7_s1_d1_fp16 compiled=True correct=False snr_min=-999 worst_speedup=None cv_pct=None infra_error=False cached=False
+[02:21] EVENT  env: eval_start  task=genb_cv_conv2d_nhwc_5x5_s1_d1_bf16 n_shapes=5 source_sha=f6540e3b3e0f do_bench=True
+[02:31] EVENT  env: oracle_report  task=genb_cv_conv2d_nhwc_5x5_s1_d1_bf16 task_id=genb_cv_conv2d_nhwc_5x5_s1_d1_bf16 verified=False live_prongs=['random'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'fail', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[02:31] EVENT  env: eval_done  task=genb_cv_conv2d_nhwc_5x5_s1_d1_bf16 compiled=True correct=False snr_min=-999 worst_speedup=None cv_pct=None infra_error=False cached=False
+[02:31] EVENT  env: eval_start  task=genb_fx_embed_scale_bf16 n_shapes=5 source_sha=3a8d06e5511a do_bench=True
+[02:43] EVENT  env: oracle_report  task=genb_fx_embed_scale_bf16 task_id=genb_fx_embed_scale_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[02:46] EVENT  env: eval_timing_unadmitted  task=genb_fx_embed_scale_bf16 source_sha=3a8d06e5511a reason=primary: candidate CV 5.940% exceeds 3.000%; validation_0: paired ratio CV 3.087% exceeds 3.000% cv_pct=5.94 paired_ratio_cv_pct=4.829 paired_ci_half_width_pct=4.348
+[02:46] EVENT  env: eval_done  task=genb_fx_embed_scale_bf16 compiled=True correct=True snr_min=999 worst_speedup=1.975 cv_pct=5.94 infra_error=False cached=False
+[02:46] EVENT  env: eval_start  task=genb_fx_reglu_act_fp16 n_shapes=5 source_sha=e6650817f52b do_bench=True
+[02:58] EVENT  env: oracle_report  task=genb_fx_reglu_act_fp16 task_id=genb_fx_reglu_act_fp16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[03:02] EVENT  env: eval_done  task=genb_fx_reglu_act_fp16 compiled=True correct=True snr_min=999 worst_speedup=2.363 cv_pct=1.447 infra_error=False cached=False
+[03:02] EVENT  env: eval_start  task=genb_fx_rope_qk_half_qknorm_bf16 n_shapes=5 source_sha=e9c59b6bacd7 do_bench=True
+[03:15] EVENT  env: oracle_report  task=genb_fx_rope_qk_half_qknorm_bf16 task_id=genb_fx_rope_qk_half_qknorm_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[03:19] EVENT  env: eval_done  task=genb_fx_rope_qk_half_qknorm_bf16 compiled=True correct=True snr_min=95.19 worst_speedup=1.471 cv_pct=1.771 infra_error=False cached=False
+[03:19] EVENT  env: eval_start  task=genb_gemm_bf16_residual_bf16 n_shapes=5 source_sha=aea75162d950 do_bench=True
+[03:33] EVENT  env: oracle_report  task=genb_gemm_bf16_residual_bf16 task_id=genb_gemm_bf16_residual_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[03:39] EVENT  env: eval_timing_unadmitted  task=genb_gemm_bf16_residual_bf16 source_sha=aea75162d950 reason=minimal: baseline CV 4.432% exceeds 3.000% cv_pct=1.931 paired_ratio_cv_pct=5.902 paired_ci_half_width_pct=5.33
+[03:39] EVENT  env: eval_done  task=genb_gemm_bf16_residual_bf16 compiled=True correct=True snr_min=51.5 worst_speedup=0.1303 cv_pct=1.931 infra_error=False cached=False
+[03:39] EVENT  env: eval_start  task=genb_gemm_fp8_channelwise_fp8 n_shapes=5 source_sha=2b8270d29405 do_bench=True
+[03:53] EVENT  env: oracle_report  task=genb_gemm_fp8_channelwise_fp8 task_id=genb_gemm_fp8_channelwise_fp8 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[03:59] EVENT  env: eval_done  task=genb_gemm_fp8_channelwise_fp8 compiled=True correct=True snr_min=48.54 worst_speedup=0.1801 cv_pct=1.447 infra_error=False cached=False
+[03:59] EVENT  env: eval_start  task=genb_gemm_int4_asym_group_fp16 n_shapes=5 source_sha=633d592ae71d do_bench=True
+[04:12] EVENT  env: oracle_report  task=genb_gemm_int4_asym_group_fp16 task_id=genb_gemm_int4_asym_group_fp16 verified=False live_prongs=['adversarial'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'inconclusive', 'adversarial': 'fail', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[04:12] EVENT  env: eval_done  task=genb_gemm_int4_asym_group_fp16 compiled=True correct=False snr_min=0 worst_speedup=None cv_pct=None infra_error=False cached=False
+[04:12] EVENT  env: eval_start  task=genb_gemm_int8_pertensor_int8 n_shapes=5 source_sha=21bfcd5f5b51 do_bench=True
+[04:25] EVENT  env: oracle_report  task=genb_gemm_int8_pertensor_int8 task_id=genb_gemm_int8_pertensor_int8 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[04:31] EVENT  env: eval_done  task=genb_gemm_int8_pertensor_int8 compiled=True correct=True snr_min=48.93 worst_speedup=0.1777 cv_pct=0.9126 infra_error=False cached=False
+[04:31] EVENT  env: eval_start  task=genb_moe_block_silu_k8_e256_bf16 n_shapes=4 source_sha=971679d24e5a do_bench=True
+[04:40] EVENT  env: oracle_report  task=genb_moe_block_silu_k8_e256_bf16 task_id=genb_moe_block_silu_k8_e256_bf16 verified=False live_prongs=['random'] random_trials_per_shape=5 random_shapes=4 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'fail', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[04:41] EVENT  env: eval_done  task=genb_moe_block_silu_k8_e256_bf16 compiled=True correct=False snr_min=-999 worst_speedup=None cv_pct=None infra_error=False cached=False
+[04:41] EVENT  env: eval_start  task=genb_moe_fused_moe_silu_fp16 n_shapes=5 source_sha=2c927df8283b do_bench=True
+[05:06] EVENT  env: oracle_report  task=genb_moe_fused_moe_silu_fp16 task_id=genb_moe_fused_moe_silu_fp16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[10:07] EVENT  env: eval_bench_incomplete  task=genb_moe_fused_moe_silu_fp16 source_sha=2c927df8283b reason=candidate timing keys mismatch (missing=['minimal', 'primary', 'validation_0', 'validation_1', 'validation_2'], extra=[])
+[10:07] EVENT  env: eval_done  task=genb_moe_fused_moe_silu_fp16 compiled=True correct=True snr_min=65.58 worst_speedup=None cv_pct=None infra_error=True cached=False
+[10:07] EVENT  env: eval_start  task=genb_moe_grouped_mlp_gelu_bf16 n_shapes=5 source_sha=925602d77c95 do_bench=True
+[10:31] EVENT  env: oracle_report  task=genb_moe_grouped_mlp_gelu_bf16 task_id=genb_moe_grouped_mlp_gelu_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[12:35] EVENT  env: eval_done  task=genb_moe_grouped_mlp_gelu_bf16 compiled=True correct=True snr_min=48.69 worst_speedup=0.4072 cv_pct=0.4852 infra_error=False cached=False
+[12:35] EVENT  env: eval_start  task=genb_moe_sigmoid_topk_norenorm_fp16 n_shapes=5 source_sha=547b0616937d do_bench=True
+[12:48] EVENT  env: oracle_report  task=genb_moe_sigmoid_topk_norenorm_fp16 task_id=genb_moe_sigmoid_topk_norenorm_fp16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[12:51] EVENT  env: eval_done  task=genb_moe_sigmoid_topk_norenorm_fp16 compiled=True correct=True snr_min=150.8 worst_speedup=1.651 cv_pct=1.752 infra_error=False cached=False
+[12:51] EVENT  env: eval_start  task=genb_norm_groupnorm_bf16 n_shapes=5 source_sha=76d061726ee8 do_bench=True
+[13:04] EVENT  env: oracle_report  task=genb_norm_groupnorm_bf16 task_id=genb_norm_groupnorm_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[13:08] EVENT  env: eval_done  task=genb_norm_groupnorm_bf16 compiled=True correct=True snr_min=95.76 worst_speedup=1 cv_pct=1.98 infra_error=False cached=False
+[13:08] EVENT  env: eval_start  task=genb_norm_layernorm_bwd_fp32 n_shapes=5 source_sha=e4a75c8ed8e8 do_bench=True
+[13:23] EVENT  env: oracle_report  task=genb_norm_layernorm_bwd_fp32 task_id=genb_norm_layernorm_bwd_fp32 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[13:31] EVENT  env: eval_done  task=genb_norm_layernorm_bwd_fp32 compiled=True correct=True snr_min=112.7 worst_speedup=0.08316 cv_pct=1.486 infra_error=False cached=False
+[13:31] EVENT  env: eval_start  task=genb_norm_layernorm_quant_fp8_fp8 n_shapes=5 source_sha=d0572e440838 do_bench=True
+[13:41] EVENT  env: oracle_report  task=genb_norm_layernorm_quant_fp8_fp8 task_id=genb_norm_layernorm_quant_fp8_fp8 verified=False live_prongs=['random'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'fail', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[13:41] EVENT  env: eval_done  task=genb_norm_layernorm_quant_fp8_fp8 compiled=True correct=False snr_min=-999 worst_speedup=None cv_pct=None infra_error=False cached=False
+[13:41] EVENT  env: eval_start  task=genb_qx_quant_int8_pertoken_int8 n_shapes=5 source_sha=d5f7dfd637c6 do_bench=True
+[13:53] EVENT  env: oracle_report  task=genb_qx_quant_int8_pertoken_int8 task_id=genb_qx_quant_int8_pertoken_int8 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[13:57] EVENT  env: eval_timing_unadmitted  task=genb_qx_quant_int8_pertoken_int8 source_sha=d5f7dfd637c6 reason=minimal: candidate CV 5.833% exceeds 3.000%; validation_0: candidate CV 3.211% exceeds 3.000% cv_pct=5.833 paired_ratio_cv_pct=5.238 paired_ci_half_width_pct=4.86
+[13:57] EVENT  env: eval_done  task=genb_qx_quant_int8_pertoken_int8 compiled=True correct=True snr_min=999 worst_speedup=1.128 cv_pct=5.833 infra_error=False cached=False
+[13:57] EVENT  env: eval_start  task=genb_red_entropy_bf16 n_shapes=6 source_sha=391509b0fb44 do_bench=True
+[14:11] EVENT  env: oracle_report  task=genb_red_entropy_bf16 task_id=genb_red_entropy_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=6 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[14:15] EVENT  env: eval_timing_unadmitted  task=genb_red_entropy_bf16 source_sha=391509b0fb44 reason=primary: candidate CV 3.725% exceeds 3.000% cv_pct=3.725 paired_ratio_cv_pct=2.791 paired_ci_half_width_pct=2.469
+[14:15] EVENT  env: eval_done  task=genb_red_entropy_bf16 compiled=True correct=True snr_min=80.02 worst_speedup=1.51 cv_pct=3.725 infra_error=False cached=False
+[14:15] EVENT  env: eval_start  task=genb_red_topk256_bf16 n_shapes=5 source_sha=15d391da2688 do_bench=True
+[14:25] EVENT  env: oracle_report  task=genb_red_topk256_bf16 task_id=genb_red_topk256_bf16 verified=False live_prongs=['random'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'fail', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[14:25] EVENT  env: eval_done  task=genb_red_topk256_bf16 compiled=True correct=False snr_min=-999 worst_speedup=None cv_pct=None infra_error=False cached=False
+[14:25] EVENT  env: eval_start  task=genb_smp_rope_yarn_bf16 n_shapes=5 source_sha=de218c5001d7 do_bench=True
+[14:37] EVENT  env: oracle_report  task=genb_smp_rope_yarn_bf16 task_id=genb_smp_rope_yarn_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[14:41] EVENT  env: eval_done  task=genb_smp_rope_yarn_bf16 compiled=True correct=True snr_min=999 worst_speedup=1.216 cv_pct=2.608 infra_error=False cached=False
+[14:41] EVENT  env: eval_start  task=genb_smp_topk_sample_bf16 n_shapes=6 source_sha=d2dcb43a4559 do_bench=True
+[14:56] EVENT  env: oracle_report  task=genb_smp_topk_sample_bf16 task_id=genb_smp_topk_sample_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=6 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[15:00] EVENT  env: eval_timing_unadmitted  task=genb_smp_topk_sample_bf16 source_sha=d2dcb43a4559 reason=minimal: candidate CV 3.349% exceeds 3.000% cv_pct=3.349 paired_ratio_cv_pct=2.984 paired_ci_half_width_pct=2.666
+[15:00] EVENT  env: eval_done  task=genb_smp_topk_sample_bf16 compiled=True correct=True snr_min=999 worst_speedup=1.058 cv_pct=3.349 infra_error=False cached=False
+[15:00] EVENT  env: eval_start  task=genb_ssm_mamba2_ssd_c128_n128_bf16 n_shapes=5 source_sha=d2823e60fa87 do_bench=True
+[15:14] EVENT  env: oracle_report  task=genb_ssm_mamba2_ssd_c128_n128_bf16 task_id=genb_ssm_mamba2_ssd_c128_n128_bf16 verified=False live_prongs=['random'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'fail', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[15:14] EVENT  env: eval_done  task=genb_ssm_mamba2_ssd_c128_n128_bf16 compiled=True correct=False snr_min=-999 worst_speedup=None cv_pct=None infra_error=False cached=False
+[15:14] EVENT  env: eval_start  task=genb_ssm_retnet_c64_bf16 n_shapes=5 source_sha=ed486df2c079 do_bench=True
+[15:29] EVENT  env: oracle_report  task=genb_ssm_retnet_c64_bf16 task_id=genb_ssm_retnet_c64_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[15:37] EVENT  env: eval_done  task=genb_ssm_retnet_c64_bf16 compiled=True correct=True snr_min=89.12 worst_speedup=0.1215 cv_pct=1.362 infra_error=False cached=False
+[15:37] EVENT  env: eval_start  task=genb_tr_adamw_8bit_bf16 n_shapes=5 source_sha=baca873b9356 do_bench=True
+[15:48] EVENT  env: oracle_report  task=genb_tr_adamw_8bit_bf16 task_id=genb_tr_adamw_8bit_bf16 verified=False live_prongs=['random'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'fail', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[15:48] EVENT  env: eval_done  task=genb_tr_adamw_8bit_bf16 compiled=True correct=False snr_min=44.77 worst_speedup=None cv_pct=None infra_error=False cached=False
+[15:48] EVENT  env: eval_start  task=genb_tr_foreach_sgd_bf16 n_shapes=5 source_sha=e9e8d865b23b do_bench=True
+[16:00] EVENT  env: oracle_report  task=genb_tr_foreach_sgd_bf16 task_id=genb_tr_foreach_sgd_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[16:04] EVENT  env: eval_timing_unadmitted  task=genb_tr_foreach_sgd_bf16 source_sha=e9e8d865b23b reason=primary: candidate CV 9.641% exceeds 3.000% cv_pct=9.641 paired_ratio_cv_pct=43.24 paired_ci_half_width_pct=36.21
+[16:04] EVENT  env: eval_done  task=genb_tr_foreach_sgd_bf16 compiled=True correct=True snr_min=76.04 worst_speedup=1.747 cv_pct=9.641 infra_error=False cached=False
+[16:04] EVENT  env: eval_start  task=genb_tr_ls_ce_bwd_bf16 n_shapes=5 source_sha=b33dbf1be7b1 do_bench=True
+[16:05] EVENT  env: eval_done  task=genb_tr_ls_ce_bwd_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[16:05] EVENT  env: eval_start  task=mla_decode_bf16 n_shapes=5 source_sha=e563fe2579d0 do_bench=True
+[16:55] EVENT  env: oracle_report  task=mla_decode_bf16 task_id=mla_decode_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[16:56] EVENT  env: eval_performance_ineligible  task=mla_decode_bf16 source_sha=e563fe2579d0 reason=driver did not advertise a recognized timing protocol protocol=0
+[16:56] EVENT  env: eval_done  task=mla_decode_bf16 compiled=True correct=True snr_min=49.1 worst_speedup=None cv_pct=None infra_error=False cached=False
+[16:56] EVENT  env: eval_start  task=paged_attn_decode_bf16 n_shapes=5 source_sha=a2b1ead6f29d do_bench=True
+[17:33] EVENT  env: oracle_report  task=paged_attn_decode_bf16 task_id=paged_attn_decode_bf16 verified=True live_prongs=['random', 'determinism'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'pass', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'pass'}
+[17:34] EVENT  env: eval_performance_ineligible  task=paged_attn_decode_bf16 source_sha=a2b1ead6f29d reason=driver did not advertise a recognized timing protocol protocol=0
+[17:34] EVENT  env: eval_done  task=paged_attn_decode_bf16 compiled=True correct=True snr_min=83.95 worst_speedup=None cv_pct=None infra_error=False cached=False
+[checkpoint_ab] base: contract 32/34, compiled 32, correct 23, timed 12, faster 4 -> /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/measures_base.json
+[00:04] EVENT  env: eval_start  task=genb_attn2_cross_gqa_step_fp16 n_shapes=5 source_sha=01d32ab522b4 do_bench=True
+[00:05] EVENT  env: eval_done  task=genb_attn2_cross_gqa_step_fp16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:05] EVENT  env: eval_start  task=genb_attn2_decode_mqa_hd256_bf16 n_shapes=5 source_sha=36fd0635510c do_bench=True
+[00:06] EVENT  env: eval_done  task=genb_attn2_decode_mqa_hd256_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:06] EVENT  env: eval_start  task=genb_attn2_varlen_gqa_causal_bf16 n_shapes=5 source_sha=da47672cdce7 do_bench=True
+[00:07] EVENT  env: eval_done  task=genb_attn2_varlen_gqa_causal_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:07] EVENT  env: eval_start  task=genb_attn_fp8_mha_hd128_causal_fp8 n_shapes=5 source_sha=89bb0527a6d3 do_bench=True
+[00:08] EVENT  env: eval_done  task=genb_attn_fp8_mha_hd128_causal_fp8 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:08] EVENT  env: eval_start  task=genb_attn_mha_hd128_noncausal_fp16 n_shapes=5 source_sha=39a54927d978 do_bench=True
+[00:10] EVENT  env: eval_done  task=genb_attn_mha_hd128_noncausal_fp16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:10] EVENT  env: eval_start  task=genb_attn_mqa_hd64_causal_bf16 n_shapes=5 source_sha=c2d884748b1f do_bench=True
+[00:11] EVENT  env: eval_done  task=genb_attn_mqa_hd64_causal_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:11] EVENT  env: eval_start  task=genb_cv_conv2d_7x7_s1_d1_fp16 n_shapes=5 source_sha=d45481a2a138 do_bench=True
+[00:12] EVENT  env: eval_done  task=genb_cv_conv2d_7x7_s1_d1_fp16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:12] EVENT  env: eval_start  task=genb_cv_conv2d_nhwc_5x5_s1_d1_bf16 n_shapes=5 source_sha=0dda6c9f58bf do_bench=True
+[00:13] EVENT  env: eval_done  task=genb_cv_conv2d_nhwc_5x5_s1_d1_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:13] EVENT  env: eval_start  task=genb_fx_embed_scale_bf16 n_shapes=5 source_sha=c8fd0f3eee63 do_bench=True
+[00:23] EVENT  env: oracle_report  task=genb_fx_embed_scale_bf16 task_id=genb_fx_embed_scale_bf16 verified=False live_prongs=['random'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'fail', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[00:23] EVENT  env: eval_done  task=genb_fx_embed_scale_bf16 compiled=True correct=False snr_min=-2.43 worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:23] EVENT  env: eval_start  task=genb_fx_reglu_act_fp16 n_shapes=5 source_sha=8de4c8cce407 do_bench=True
+[00:24] EVENT  env: eval_done  task=genb_fx_reglu_act_fp16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:24] EVENT  env: eval_start  task=genb_fx_rope_qk_half_qknorm_bf16 n_shapes=5 source_sha=88c33c0a56f6 do_bench=True
+[00:25] EVENT  env: eval_done  task=genb_fx_rope_qk_half_qknorm_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:25] EVENT  env: eval_start  task=genb_gemm_bf16_residual_bf16 n_shapes=5 source_sha=1f0f85c8f165 do_bench=True
+[00:27] EVENT  env: eval_done  task=genb_gemm_bf16_residual_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:27] EVENT  env: eval_start  task=genb_gemm_fp8_channelwise_fp8 n_shapes=5 source_sha=a9be16482719 do_bench=True
+[00:28] EVENT  env: eval_done  task=genb_gemm_fp8_channelwise_fp8 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:28] EVENT  env: eval_start  task=genb_gemm_int4_asym_group_fp16 n_shapes=5 source_sha=da1ee38eb4bc do_bench=True
+[00:29] EVENT  env: eval_done  task=genb_gemm_int4_asym_group_fp16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:29] EVENT  env: eval_start  task=genb_gemm_int8_pertensor_int8 n_shapes=5 source_sha=07f116cc51dd do_bench=True
+[00:30] EVENT  env: eval_done  task=genb_gemm_int8_pertensor_int8 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:30] EVENT  env: eval_start  task=genb_moe_block_silu_k8_e256_bf16 n_shapes=4 source_sha=5eb0da432e4a do_bench=True
+[00:31] EVENT  env: eval_done  task=genb_moe_block_silu_k8_e256_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:31] EVENT  env: eval_start  task=genb_moe_fused_moe_silu_fp16 n_shapes=5 source_sha=6ccace8f8a9f do_bench=True
+[00:33] EVENT  env: eval_done  task=genb_moe_fused_moe_silu_fp16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:33] EVENT  env: eval_start  task=genb_moe_grouped_mlp_gelu_bf16 n_shapes=5 source_sha=9f6e9553f51d do_bench=True
+[00:33] EVENT  env: eval_hack  task=genb_moe_grouped_mlp_gelu_bf16 reason=uses the @ matmul operator (delegates to the vendor GEMM) source_sha=9f6e9553f51d
+[00:33] EVENT  reward: reward  tier=hack reward=-1.5 correct=False speedup=None flags=['hack'] detail=uses the @ matmul operator (delegates to the vendor GEMM)
+[00:33] WARN   reward: reward-hack flagged  reason=uses the @ matmul operator (delegates to the vendor GEMM) flags=['hack']
+[00:33] EVENT  env: eval_start  task=genb_moe_sigmoid_topk_norenorm_fp16 n_shapes=5 source_sha=7424d2b310b7 do_bench=True
+[00:34] EVENT  env: eval_done  task=genb_moe_sigmoid_topk_norenorm_fp16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:34] EVENT  env: eval_start  task=genb_norm_groupnorm_bf16 n_shapes=5 source_sha=55d7b0f7ac0e do_bench=True
+[00:43] EVENT  env: oracle_report  task=genb_norm_groupnorm_bf16 task_id=genb_norm_groupnorm_bf16 verified=False live_prongs=['random'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'fail', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[00:43] EVENT  env: eval_done  task=genb_norm_groupnorm_bf16 compiled=True correct=False snr_min=-999 worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:43] EVENT  env: eval_start  task=genb_norm_layernorm_bwd_fp32 n_shapes=5 source_sha=28114e6db82a do_bench=True
+[00:44] EVENT  env: eval_done  task=genb_norm_layernorm_bwd_fp32 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:44] EVENT  env: eval_start  task=genb_norm_layernorm_quant_fp8_fp8 n_shapes=5 source_sha=0c4b5a475a67 do_bench=True
+[00:45] EVENT  env: eval_done  task=genb_norm_layernorm_quant_fp8_fp8 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:45] EVENT  env: eval_start  task=genb_qx_quant_int8_pertoken_int8 n_shapes=5 source_sha=bdcfe8b6d0db do_bench=True
+[00:47] EVENT  env: eval_done  task=genb_qx_quant_int8_pertoken_int8 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:47] EVENT  env: eval_start  task=genb_red_entropy_bf16 n_shapes=6 source_sha=bc58b868439c do_bench=True
+[00:48] EVENT  env: eval_done  task=genb_red_entropy_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:48] EVENT  env: eval_start  task=genb_red_topk256_bf16 n_shapes=5 source_sha=4f989cc0ecb7 do_bench=True
+[00:49] EVENT  env: eval_done  task=genb_red_topk256_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:49] EVENT  env: eval_start  task=genb_smp_rope_yarn_bf16 n_shapes=5 source_sha=599aae6bb976 do_bench=True
+[00:57] EVENT  env: oracle_report  task=genb_smp_rope_yarn_bf16 task_id=genb_smp_rope_yarn_bf16 verified=False live_prongs=['random'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'fail', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[00:57] EVENT  env: eval_done  task=genb_smp_rope_yarn_bf16 compiled=True correct=False snr_min=-999 worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:57] EVENT  env: eval_start  task=genb_smp_topk_sample_bf16 n_shapes=6 source_sha=ebc5bfdb1945 do_bench=True
+[00:58] EVENT  env: eval_done  task=genb_smp_topk_sample_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[00:58] EVENT  env: eval_start  task=genb_ssm_mamba2_ssd_c128_n128_bf16 n_shapes=5 source_sha=bd0623d64ec0 do_bench=True
+[01:00] EVENT  env: eval_done  task=genb_ssm_mamba2_ssd_c128_n128_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[01:00] EVENT  env: eval_start  task=genb_ssm_retnet_c64_bf16 n_shapes=5 source_sha=56087c8d04e9 do_bench=True
+[01:01] EVENT  env: eval_done  task=genb_ssm_retnet_c64_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[01:01] EVENT  env: eval_start  task=genb_tr_adamw_8bit_bf16 n_shapes=5 source_sha=e1fc10c207de do_bench=True
+[01:02] EVENT  env: eval_done  task=genb_tr_adamw_8bit_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[01:02] EVENT  env: eval_start  task=genb_tr_foreach_sgd_bf16 n_shapes=5 source_sha=2cb123c8fc9e do_bench=True
+[01:03] EVENT  env: eval_done  task=genb_tr_foreach_sgd_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[01:03] EVENT  env: eval_start  task=genb_tr_ls_ce_bwd_bf16 n_shapes=5 source_sha=696dedf81ee0 do_bench=True
+[01:13] EVENT  env: oracle_report  task=genb_tr_ls_ce_bwd_bf16 task_id=genb_tr_ls_ce_bwd_bf16 verified=False live_prongs=['random'] random_trials_per_shape=5 random_shapes=5 random_elements=None reference_defect_fraction=0.0001 false_accept_bound=None false_accept_bound_log10=None detail= bound_basis=not computed: the per-shape comparison count is unknown for op_class='generic' (the driver does not report it), so no number is invented prong_states={'random': 'fail', 'adversarial': 'unknown', 'metamorphic': 'not-applicable', 'determinism': 'off'}
+[01:13] EVENT  env: eval_done  task=genb_tr_ls_ce_bwd_bf16 compiled=True correct=False snr_min=-999 worst_speedup=None cv_pct=None infra_error=False cached=False
+[01:13] EVENT  env: eval_start  task=mla_decode_bf16 n_shapes=5 source_sha=a55d5d9be4d3 do_bench=True
+[01:14] EVENT  env: eval_done  task=mla_decode_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[01:14] EVENT  env: eval_start  task=paged_attn_decode_bf16 n_shapes=5 source_sha=00795d89ae52 do_bench=True
+[01:16] EVENT  env: eval_done  task=paged_attn_decode_bf16 compiled=False correct=False snr_min=None worst_speedup=None cv_pct=None infra_error=False cached=False
+[checkpoint_ab] midtrain: contract 33/34, compiled 4, correct 0, timed 0, faster 0 -> /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/measures_midtrain.json
+[checkpoint_ab] report -> /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/report_kernel_ab.json

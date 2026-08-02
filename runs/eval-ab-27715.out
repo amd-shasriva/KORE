@@ -1,0 +1,123 @@
+[eval-ab] HEAD=aeada9b3 host=crsuse2-m2m-079 out=/home/shasriva/Kore-RL/KORE/runs/eval_ab_27715
+[eval-ab] base=Qwen/Qwen3-14B@40c069824f4251a91eefaf281ebe4c544efd3e18 candidate=/home/shasriva/Kore-RL/KORE/runs/midtrain_14b_frontier
+[eval-ab] torch 2.10.0+rocm7.0 devices=8
+[eval-ab] device0 AMD Instinct MI355X arch=gfx950:sramecc+:xnack- mem=288GiB
+
+=== env HIP_VISIBLE_DEVICES=0 /home/shasriva/kore-venv/bin/python -m kore.eval.checkpoint_ab run-arm --arm base --outdir /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715 --backend hf-batch --model Qwen/Qwen3-14B --revision 40c069824f4251a91eefaf281ebe4c544efd3e18 --dtype bfloat16 --max-tokens 4096 --temperature 0.0 --batch-size 12 --retention mmlu,humaneval ===
+
+=== env HIP_VISIBLE_DEVICES=0 /home/shasriva/kore-venv/bin/python -m kore.eval.checkpoint_ab run-arm --arm midtrain --outdir /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715 --backend hf-batch --model /home/shasriva/Kore-RL/KORE/runs/midtrain_14b_frontier --dtype bfloat16 --max-tokens 4096 --temperature 0.0 --batch-size 12 --retention mmlu,humaneval ===
+
+=== env HIP_VISIBLE_DEVICES=0 /home/shasriva/kore-venv/bin/python -m kore.eval.checkpoint_ab measure /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/generations_base.jsonl --out /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/measures_base.json --arm base --budget 1 --mode parallel ===
+
+=== env HIP_VISIBLE_DEVICES=0 /home/shasriva/kore-venv/bin/python -m kore.eval.checkpoint_ab measure /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/generations_midtrain.jsonl --out /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/measures_midtrain.json --arm midtrain --budget 1 --mode parallel ===
+
+=== /home/shasriva/kore-venv/bin/python -m kore.eval.checkpoint_ab compare --candidate /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/measures_midtrain.json --reference /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/measures_base.json --out /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/report_kernel_ab ===
+# Checkpoint A/B on the held-out generalization scope
+
+- **candidate**: `midtrain`
+- **reference**: `base`
+- **tasks scored (n)**: 34 of 34 in scope (45 held out, 11 excluded as contaminated)
+- **budget**: 1 bench(es)/task, mode=parallel (matched)
+
+## Funnel (per-task rate, Wilson 95% CI)
+
+| stage | midtrain | base | delta | discordant | exact McNemar p |
+| --- | --- | --- | --- | --- | --- |
+| emitted FULL_KERNEL | 33/34 = 97.1% [85.1%, 99.5%] | 32/34 = 94.1% [80.9%, 98.4%] | 2.9% | 3 (2/1) | 1 |
+| compiled | 4/34 = 11.8% [4.7%, 26.6%] | 32/34 = 94.1% [80.9%, 98.4%] | -82.4% | 30 (1/29) | 5.77e-08 |
+| correct (SNR gate) | 0/34 = 0.0% [0.0%, 10.2%] | 23/34 = 67.6% [50.8%, 80.9%] | -67.6% | 23 (0/23) | 2.38e-07 |
+| correct AND publication-timed | 0/34 = 0.0% [0.0%, 10.2%] | 12/34 = 35.3% [21.5%, 52.1%] | -35.3% | 12 (0/12) | 0.000488 |
+| faster than its baseline | 0/34 = 0.0% [0.0%, 10.2%] | 4/34 = 11.8% [4.7%, 26.6%] | -11.8% | 4 (0/4) | 0.125 |
+
+> **Infrastructure faults** (counted as failures above, but a statement about the node rather than the kernel): midtrain 0, base 1.
+
+## fast_p (fraction of the whole scope, uncorrected denominator)
+
+| p | midtrain | base | delta |
+| --- | --- | --- | --- |
+| 0 | 0.0% | 35.3% | -35.3% |
+| 0.5 | 0.0% | 17.6% | -17.6% |
+| 1 | 0.0% | 11.8% | -11.8% |
+| 1.5 | 0.0% | 5.9% | -5.9% |
+| 2 | 0.0% | 2.9% | -2.9% |
+
+**Verdict: reference_better** - correctness 0 vs 23 of 34; 23 discordant pair(s); exact McNemar p=2.38e-07 (significant at alpha=0.05)
+
+
+=== /home/shasriva/kore-venv/bin/python -m kore.eval.heldout_lm --candidate /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/lm_scores_midtrain.json --reference /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/lm_scores_base.json --out /home/shasriva/Kore-RL/KORE/runs/eval_ab_27715/report_heldout_lm ===
+# Held-out LM loss: `midtrain` vs `base`
+
+## Held-out Triton kernel source (the target domain)
+
+- **candidate**: `midtrain`
+- **reference**: `base`
+- **documents**: 34 (38,088 tokens, identical tokenization: True)
+
+| arm | bits/token | perplexity |
+| --- | --- | --- |
+| midtrain | 0.8181 | 1.763 |
+| base | 1.5787 | 2.987 |
+
+- **paired per-document effect**: -0.8368 bits/token, 95% CI [-0.9233, -0.7486]
+- **p-values**: wilcoxon 3.82e-07, sign 1.16e-10, bootstrap 0.0001
+- **documents improved**: 34/34
+- **corpus-level delta**: -0.7606 bits/token (perplexity ratio 0.5902x)
+
+**Verdict: candidate_better** - midtrain minus base: -0.8368 bits/token (95% CI [-0.9233, -0.7486], wilcoxon p=3.82e-07); 34/34 documents improved. Negative is better for midtrain.
+
+## Held-out torch reference/oracle source (adjacent domain)
+
+- **candidate**: `midtrain`
+- **reference**: `base`
+- **documents**: 34 (5,292 tokens, identical tokenization: True)
+
+| arm | bits/token | perplexity |
+| --- | --- | --- |
+| midtrain | 1.3405 | 2.532 |
+| base | 3.1206 | 8.697 |
+
+- **paired per-document effect**: -3.2882 bits/token, 95% CI [-3.5350, -2.9796]
+- **p-values**: wilcoxon 3.82e-07, sign 1.16e-10, bootstrap 0.0001
+- **documents improved**: 34/34
+- **corpus-level delta**: -1.7800 bits/token (perplexity ratio 0.2912x)
+
+**Verdict: candidate_better** - midtrain minus base: -3.2882 bits/token (95% CI [-3.5350, -2.9796], wilcoxon p=3.82e-07); 34/34 documents improved. Negative is better for midtrain.
+
+## General-domain text (forgetting probe, NOT decontaminated)
+
+- **candidate**: `midtrain`
+- **reference**: `base`
+- **documents**: 18 (578 tokens, identical tokenization: True)
+
+| arm | bits/token | perplexity |
+| --- | --- | --- |
+| midtrain | 3.0175 | 8.097 |
+| base | 2.8152 | 7.038 |
+
+- **paired per-document effect**: +0.3754 bits/token, 95% CI [+0.0589, +0.6743]
+- **p-values**: wilcoxon 0.0366, sign 0.0309, bootstrap 0.0154
+- **documents improved**: 4/18
+- **corpus-level delta**: +0.2023 bits/token (perplexity ratio 1.1505x)
+
+**Verdict: reference_better** - midtrain minus base: +0.3754 bits/token (95% CI [+0.0589, +0.6743], wilcoxon p=0.0366); 4/18 documents improved. Negative is better for midtrain.
+
+
+[eval-ab] artifacts:
+total 828
+drwxr-xr-x 2 shasriva ubuntu   4096 Aug  2 05:09 .
+drwxr-xr-x 2 shasriva ubuntu   4096 Aug  2 04:17 ..
+-rw-r--r-- 1 shasriva ubuntu    307 Aug  2 04:19 backend_base.json
+-rw-r--r-- 1 shasriva ubuntu    309 Aug  2 04:34 backend_midtrain.json
+-rw-r--r-- 1 shasriva ubuntu 313843 Aug  2 04:33 generations_base.jsonl
+-rw-r--r-- 1 shasriva ubuntu 288722 Aug  2 04:50 generations_midtrain.jsonl
+-rw-r--r-- 1 shasriva ubuntu  34478 Aug  2 04:19 lm_scores_base.json
+-rw-r--r-- 1 shasriva ubuntu  34868 Aug  2 04:34 lm_scores_midtrain.json
+-rw-r--r-- 1 shasriva ubuntu  26060 Aug  2 05:07 measures_base.json
+-rw-r--r-- 1 shasriva ubuntu  32759 Aug  2 05:09 measures_midtrain.json
+-rw-r--r-- 1 shasriva ubuntu  38450 Aug  2 05:09 report_heldout_lm.json
+-rw-r--r-- 1 shasriva ubuntu   2199 Aug  2 05:09 report_heldout_lm.md
+-rw-r--r-- 1 shasriva ubuntu  66171 Aug  2 05:09 report_kernel_ab.json
+-rw-r--r-- 1 shasriva ubuntu   1504 Aug  2 05:09 report_kernel_ab.md
+-rw-r--r-- 1 shasriva ubuntu   2371 Aug  2 04:33 retention_base.json
+-rw-r--r-- 1 shasriva ubuntu   2377 Aug  2 04:50 retention_midtrain.json
+[eval-ab] DONE (all phases succeeded)

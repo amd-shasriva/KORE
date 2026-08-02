@@ -1,0 +1,874 @@
+{
+  "schema": "kore.checkpoint-ab-measures.v1",
+  "arm": "midtrain",
+  "generations_meta": {
+    "schema": "kore.checkpoint-ab-generations.v1",
+    "n_records": 34,
+    "arm": "midtrain",
+    "backend": {
+      "model_id": "/home/shasriva/Kore-RL/KORE/runs/midtrain_14b_1ep",
+      "dtype": "bfloat16",
+      "revision": null,
+      "enable_thinking": false,
+      "padding_side": "left",
+      "config_dtype": "torch.bfloat16",
+      "n_parameters": 14768307200,
+      "vocab_size": 151936,
+      "device": "cuda:0",
+      "backend": "hf-batch"
+    },
+    "samples": 1,
+    "max_tokens": 4096,
+    "temperature": 0.0,
+    "scope": {
+      "taxonomy_version": "1.0.0",
+      "taxonomy_digest": "cd5c7769cd7597fe59232a6ee89778ff65d6ca38184a2eb953f104fc7127ac5c",
+      "n_heldout_reservation": 45,
+      "n_generalization_scope": 34,
+      "n_scored": 34,
+      "scored_task_ids": [
+        "genb_attn2_cross_gqa_step_fp16",
+        "genb_attn2_decode_mqa_hd256_bf16",
+        "genb_attn2_varlen_gqa_causal_bf16",
+        "genb_attn_fp8_mha_hd128_causal_fp8",
+        "genb_attn_mha_hd128_noncausal_fp16",
+        "genb_attn_mqa_hd64_causal_bf16",
+        "genb_cv_conv2d_7x7_s1_d1_fp16",
+        "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+        "genb_fx_embed_scale_bf16",
+        "genb_fx_reglu_act_fp16",
+        "genb_fx_rope_qk_half_qknorm_bf16",
+        "genb_gemm_bf16_residual_bf16",
+        "genb_gemm_fp8_channelwise_fp8",
+        "genb_gemm_int4_asym_group_fp16",
+        "genb_gemm_int8_pertensor_int8",
+        "genb_moe_block_silu_k8_e256_bf16",
+        "genb_moe_fused_moe_silu_fp16",
+        "genb_moe_grouped_mlp_gelu_bf16",
+        "genb_moe_sigmoid_topk_norenorm_fp16",
+        "genb_norm_groupnorm_bf16",
+        "genb_norm_layernorm_bwd_fp32",
+        "genb_norm_layernorm_quant_fp8_fp8",
+        "genb_qx_quant_int8_pertoken_int8",
+        "genb_red_entropy_bf16",
+        "genb_red_topk256_bf16",
+        "genb_smp_rope_yarn_bf16",
+        "genb_smp_topk_sample_bf16",
+        "genb_ssm_mamba2_ssd_c128_n128_bf16",
+        "genb_ssm_retnet_c64_bf16",
+        "genb_tr_adamw_8bit_bf16",
+        "genb_tr_foreach_sgd_bf16",
+        "genb_tr_ls_ce_bwd_bf16",
+        "mla_decode_bf16",
+        "paged_attn_decode_bf16"
+      ],
+      "excluded_contaminated": {
+        "genb_cv_conv2d_1x1_s2_fp16": "midtrain_curriculum_tier4_win_source",
+        "genb_cv_depthwise_conv2d_5x5_s1_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_norm_rmsnorm_h16384_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_qx_int4_unpack_group_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_qx_quant_fp8_block2d_fp8": "midtrain_curriculum_tier4_win_source",
+        "genb_red_log_softmax_bwd_fp32": "midtrain_curriculum_tier4_win_source",
+        "genb_red_rms_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_smp_repetition_penalty_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_ssm_gated_retention_c128_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_ssm_lightning_attn_bf16": "midtrain_curriculum_tier4_win_source",
+        "genb_tr_rmsprop_centered_momentum_fp32": "midtrain_curriculum_tier4_win_source"
+      },
+      "contamination_evidence": {
+        "reason": "midtrain_curriculum_tier4_win_source",
+        "detector": "kore.data.decontam.analyze_text_contamination",
+        "match_kind": "directional_containment",
+        "generator": "data/release/generators/gen_curriculum.py::tier4",
+        "corpus": "data/b05factory/midtrain/corpus.jsonl (source=kernel_curriculum)",
+        "chunks_analyzed": 9956,
+        "hits": 17,
+        "tasks": 11,
+        "containment_min": 0.795,
+        "containment_max": 0.943,
+        "public_benchmark_hits": 0,
+        "reference_pattern": "kore-task:<task_id>:seed_triton.py"
+      },
+      "families": {
+        "activation": [
+          "genb_fx_embed_scale_bf16",
+          "genb_fx_reglu_act_fp16",
+          "genb_fx_rope_qk_half_qknorm_bf16"
+        ],
+        "attention": [
+          "genb_attn2_cross_gqa_step_fp16",
+          "genb_attn2_decode_mqa_hd256_bf16",
+          "genb_attn2_varlen_gqa_causal_bf16",
+          "genb_attn_fp8_mha_hd128_causal_fp8",
+          "genb_attn_mha_hd128_noncausal_fp16",
+          "genb_attn_mqa_hd64_causal_bf16",
+          "mla_decode_bf16",
+          "paged_attn_decode_bf16"
+        ],
+        "convolution": [
+          "genb_cv_conv2d_7x7_s1_d1_fp16",
+          "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16"
+        ],
+        "gemm": [
+          "genb_gemm_bf16_residual_bf16",
+          "genb_gemm_fp8_channelwise_fp8",
+          "genb_gemm_int4_asym_group_fp16",
+          "genb_gemm_int8_pertensor_int8"
+        ],
+        "moe": [
+          "genb_moe_block_silu_k8_e256_bf16",
+          "genb_moe_fused_moe_silu_fp16",
+          "genb_moe_grouped_mlp_gelu_bf16",
+          "genb_moe_sigmoid_topk_norenorm_fp16"
+        ],
+        "norm": [
+          "genb_norm_groupnorm_bf16",
+          "genb_norm_layernorm_bwd_fp32",
+          "genb_norm_layernorm_quant_fp8_fp8"
+        ],
+        "quant": [
+          "genb_qx_quant_int8_pertoken_int8"
+        ],
+        "reduction": [
+          "genb_red_entropy_bf16",
+          "genb_red_topk256_bf16"
+        ],
+        "sampling": [
+          "genb_smp_rope_yarn_bf16",
+          "genb_smp_topk_sample_bf16"
+        ],
+        "sequence": [
+          "genb_ssm_mamba2_ssd_c128_n128_bf16",
+          "genb_ssm_retnet_c64_bf16"
+        ],
+        "training": [
+          "genb_tr_adamw_8bit_bf16",
+          "genb_tr_foreach_sgd_bf16",
+          "genb_tr_ls_ce_bwd_bf16"
+        ]
+      }
+    },
+    "wall_seconds": 918.3
+  },
+  "summary": {
+    "arm": "midtrain",
+    "n": 34,
+    "budget": 1,
+    "mode": "parallel",
+    "counts": {
+      "contract_ok": 12,
+      "compiled": 0,
+      "correct": 0,
+      "timed": 0,
+      "faster": 0,
+      "infra_error": 0
+    },
+    "rates": {
+      "contract_ok": {
+        "k": 12,
+        "n": 34,
+        "rate": 0.35294117647058826,
+        "lo": 0.21487714895296073,
+        "hi": 0.5208634116998658,
+        "z": 1.96
+      },
+      "compiled": {
+        "k": 0,
+        "n": 34,
+        "rate": 0.0,
+        "lo": 0.0,
+        "hi": 0.10151790621961015,
+        "z": 1.96
+      },
+      "correct": {
+        "k": 0,
+        "n": 34,
+        "rate": 0.0,
+        "lo": 0.0,
+        "hi": 0.10151790621961015,
+        "z": 1.96
+      },
+      "timed": {
+        "k": 0,
+        "n": 34,
+        "rate": 0.0,
+        "lo": 0.0,
+        "hi": 0.10151790621961015,
+        "z": 1.96
+      },
+      "faster": {
+        "k": 0,
+        "n": 34,
+        "rate": 0.0,
+        "lo": 0.0,
+        "hi": 0.10151790621961015,
+        "z": 1.96
+      },
+      "infra_error": {
+        "k": 0,
+        "n": 34,
+        "rate": 0.0,
+        "lo": 0.0,
+        "hi": 0.10151790621961015,
+        "z": 1.96
+      }
+    },
+    "fast_p": {
+      "0.0": 0.0,
+      "0.5": 0.0,
+      "1.0": 0.0,
+      "1.5": 0.0,
+      "2.0": 0.0
+    },
+    "geometric_mean_speedup": 0.0,
+    "median_response_chars": 12528.5,
+    "per_task": [
+      {
+        "task_id": "genb_attn2_cross_gqa_step_fp16",
+        "contract_ok": false,
+        "response_chars": 20269,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...lash-attention forward pass is a fine starting point but leaves room for tuning on the MI3\u8c41 chip arch (CDNA4, arch gfx950). Let's break down the bottlenecks:\n                                                                                                                                                                                   ^\nSyntaxError: unterminated string literal (detected at line 2)",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn2_decode_mqa_hd256_bf16",
+        "contract_ok": false,
+        "response_chars": 12358,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...ne-softmax flash-attention already, but it leaves room for tuning on the MI350X (gfx9ornership arch). Let's break down the bottlenechs:\n                                                                                                                                                                                                         ^\nSyntaxError: unterminated string literal (detected at line 2)",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn2_varlen_gqa_causal_bf16",
+        "contract_ok": false,
+        "response_chars": 12356,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...ternal>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_attn2_varlen_gqa_causal_bf16_cebdjl4e/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn_fp8_mha_hd128_causal_fp8",
+        "contract_ok": false,
+        "response_chars": 12264,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "....fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp\n                                                                                                                                                    ^\nSyntaxError: invalid decimal literal",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn_mha_hd128_noncausal_fp16",
+        "contract_ok": false,
+        "response_chars": 24545,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...ernal>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_attn_mha_hd128_noncausal_fp16_gpdqtj4e/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_attn_mqa_hd64_causal_bf16",
+        "contract_ok": false,
+        "response_chars": 10254,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "..._external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_attn_mqa_hd64_causal_bf16_a1etn1he/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_cv_conv2d_7x7_s1_d1_fp16",
+        "contract_ok": false,
+        "response_chars": 12136,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...p ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep ep\n              ^\nSyntaxError: unterminated string literal (detected at line 4)",
+        "faster": false
+      },
+      {
+        "task_id": "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+        "contract_ok": true,
+        "response_chars": 5917,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\u6a2a\u7eb5\n    ^\nSyntaxError: unterminated triple-quoted string literal (detected at line 2)",
+        "faster": false
+      },
+      {
+        "task_id": "genb_fx_embed_scale_bf16",
+        "contract_ok": true,
+        "response_chars": 12591,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...tlib._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_fx_embed_scale_bf16_k5g1w8d4/kernel.py\", line 1\n    ```python\n    ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_fx_reglu_act_fp16",
+        "contract_ok": true,
+        "response_chars": 12539,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...ortlib._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_fx_reglu_act_fp16_2iusz_l3/kernel.py\", line 1\n    ```python\n    ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_fx_rope_qk_half_qknorm_bf16",
+        "contract_ok": true,
+        "response_chars": 12653,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...ELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTELTEL\n                           ^\nSyntaxError: unmatched ')'",
+        "faster": false
+      },
+      {
+        "task_id": "genb_gemm_bf16_residual_bf16",
+        "contract_ok": false,
+        "response_chars": 12397,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...                                                                                                                                                                                                                                                                                                                                                                          ^\nSyntaxError: invalid decimal literal",
+        "faster": false
+      },
+      {
+        "task_id": "genb_gemm_fp8_channelwise_fp8",
+        "contract_ok": false,
+        "response_chars": 20211,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...p_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_gemm_fp8_channelwise_fp8__vpv9p5w/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_gemm_int4_asym_group_fp16",
+        "contract_ok": false,
+        "response_chars": 12300,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "..._external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_gemm_int4_asym_group_fp16_wwi86xnc/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_gemm_int8_pertensor_int8",
+        "contract_ok": false,
+        "response_chars": 9755,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...p_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_gemm_int8_pertensor_int8_ua27cx3v/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_block_silu_k8_e256_bf16",
+        "contract_ok": true,
+        "response_chars": 5187,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...otstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_moe_block_silu_k8_e256_bf16_w7a3ymdk/kernel.py\", line 1\n    ```python\n    ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_fused_moe_silu_fp16",
+        "contract_ok": false,
+        "response_chars": 12339,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...ap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_moe_fused_moe_silu_fp16_s9kv6d63/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_grouped_mlp_gelu_bf16",
+        "contract_ok": false,
+        "response_chars": 18123,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "..._external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_moe_grouped_mlp_gelu_bf16_n9a5d_1n/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_moe_sigmoid_topk_norenorm_fp16",
+        "contract_ok": true,
+        "response_chars": 5608,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...n get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_moe_sigmoid_topk_norenorm_fp16_5ocnepas/kernel.py\", line 2\n    \"\"\"GENERATED breadth MoE seed: moe_sigmoid_topk_norenorm (fp16).\n    ^\nSyntaxError: unterminated triple-quoted string literal (detected at line 4)",
+        "faster": false
+      },
+      {
+        "task_id": "genb_norm_groupnorm_bf16",
+        "contract_ok": false,
+        "response_chars": 12528,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...scale, and a fp32 bias on only 32 elements. This launch pattern is memory-bound on the per-group launch count, not on the per-group work, and it under-tilizes the MFMA matrix cores because the reduction is a scalar fp32 reduction, not a matrix reduction.\n                                                                                  ^\nSyntaxError: unterminated string literal (detected at line 2)",
+        "faster": false
+      },
+      {
+        "task_id": "genb_norm_layernorm_bwd_fp32",
+        "contract_ok": true,
+        "response_chars": 12694,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_norm_layernorm_bwd_fp32_nt6j6dex/kernel.py\", line 1\n    ```python\n    ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_norm_layernorm_quant_fp8_fp8",
+        "contract_ok": false,
+        "response_chars": 18304,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...global memory passes per row, which is suboptimal on MI350X's high-bandwidth HBM3 chip.\n                                                                                                                                                                                                                                                         ^\nSyntaxError: unterminated string literal (detected at line 5)",
+        "faster": false
+      },
+      {
+        "task_id": "genb_qx_quant_int8_pertoken_int8",
+        "contract_ok": true,
+        "response_chars": 12747,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...otstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_qx_quant_int8_pertoken_int8_ohd8_vly/kernel.py\", line 1\n    ```python\n    ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_red_entropy_bf16",
+        "contract_ok": true,
+        "response_chars": 23173,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "... line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_red_entropy_bf16_e878a4qc/kernel.py\", line 10\n    def _red_entropy_kerne\ufffd_pairs(x_ptr, o_ptr, sx, N, BLOCK_N: tl.constexpr):\n                          ^\nSyntaxError: invalid character '\ufffd' (U+FFFD)",
+        "faster": false
+      },
+      {
+        "task_id": "genb_red_topk256_bf16",
+        "contract_ok": false,
+        "response_chars": 14325,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_red_topk256_bf16_waznhtt8/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_smp_rope_yarn_bf16",
+        "contract_ok": false,
+        "response_chars": 19659,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "... singularity singularity singularity singularity singularity singularity singularity singularity singularity singularity singularity singularity singularity singularity singularity sing\n                                                                                                                                                                                ^\nSyntaxError: invalid decimal literal",
+        "faster": false
+      },
+      {
+        "task_id": "genb_smp_topk_sample_bf16",
+        "contract_ok": false,
+        "response_chars": 18467,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...trip with no useful work in between.\n                                                                                                                                                                                                                                                            ^\nSyntaxError: leading zeros in decimal integer literals are not permitted; use an 0o prefix for octal integers",
+        "faster": false
+      },
+      {
+        "task_id": "genb_ssm_mamba2_ssd_c128_n128_bf16",
+        "contract_ok": false,
+        "response_chars": 11751,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...ernal>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_ssm_mamba2_ssd_c128_n128_bf16_y8t954mc/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_ssm_retnet_c64_bf16",
+        "contract_ok": true,
+        "response_chars": 7631,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...tlib._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_ssm_retnet_c64_bf16_p8b4vv8z/kernel.py\", line 1\n    ```python\n    ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_tr_adamw_8bit_bf16",
+        "contract_ok": true,
+        "response_chars": 12529,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "....fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp.fp\n    ^\nSyntaxError: unterminated triple-quoted string literal (detected at line 2)",
+        "faster": false
+      },
+      {
+        "task_id": "genb_tr_foreach_sgd_bf16",
+        "contract_ok": true,
+        "response_chars": 12649,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...tlib._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_genb_tr_foreach_sgd_bf16_56di5lsw/kernel.py\", line 1\n    ```python\n    ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "genb_tr_ls_ce_bwd_bf16",
+        "contract_ok": false,
+        "response_chars": 8475,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "... Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes Nes\n                                                                                                                                            ^\nSyntaxError: unterminated string literal (detected at line 2)",
+        "faster": false
+      },
+      {
+        "task_id": "mla_decode_bf16",
+        "contract_ok": false,
+        "response_chars": 12319,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...tlib._bootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_mla_decode_bf16_j2xs37rl/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      },
+      {
+        "task_id": "paged_attn_decode_bf16",
+        "contract_ok": false,
+        "response_chars": 17714,
+        "compiled": false,
+        "infra_error": false,
+        "correct": false,
+        "timed": false,
+        "speedup_gated": null,
+        "speedup_raw": null,
+        "snr_db": null,
+        "baseline_impl": null,
+        "timing_grade": "compat",
+        "flags": [
+          "compile_fail"
+        ],
+        "error_tail": "...ootstrap_external>\", line 991, in exec_module\n  File \"<frozen importlib._bootstrap_external>\", line 1129, in get_code\n  File \"<frozen importlib._bootstrap_external>\", line 1059, in source_to_code\n  File \"<frozen importlib._bootstrap>\", line 488, in _call_with_frames_removed\n  File \"/tmp/kore_paged_attn_decode_bf16_xgqxl0hu/kernel.py\", line 1\n    ANALYSIS:\n             ^\nSyntaxError: invalid syntax",
+        "faster": false
+      }
+    ]
+  }
+}

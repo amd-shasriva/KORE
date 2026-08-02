@@ -1,0 +1,1047 @@
+{
+  "schema": "kore.heldout-lm-report.v1",
+  "candidate": "midtrain",
+  "reference": "base",
+  "by_kind": {
+    "seed": {
+      "schema": "kore.heldout-lm-report.v1",
+      "candidate": "midtrain",
+      "reference": "base",
+      "n_documents": 34,
+      "matched_tokenization": true,
+      "n_mismatched_documents": 0,
+      "per_document": [
+        {
+          "doc_id": "genb_attn2_cross_gqa_step_fp16:seed",
+          "task_id": "genb_attn2_cross_gqa_step_fp16",
+          "kind": "seed",
+          "n_tokens": 1407,
+          "candidate_bits_per_token": 3.167197999083102,
+          "reference_bits_per_token": 1.7885712857301734,
+          "delta_bits_per_token": 1.3786267133529284
+        },
+        {
+          "doc_id": "genb_attn2_decode_mqa_hd256_bf16:seed",
+          "task_id": "genb_attn2_decode_mqa_hd256_bf16",
+          "kind": "seed",
+          "n_tokens": 1414,
+          "candidate_bits_per_token": 3.261880633455613,
+          "reference_bits_per_token": 1.7865414308420398,
+          "delta_bits_per_token": 1.4753392026135732
+        },
+        {
+          "doc_id": "genb_attn2_varlen_gqa_causal_bf16:seed",
+          "task_id": "genb_attn2_varlen_gqa_causal_bf16",
+          "kind": "seed",
+          "n_tokens": 1557,
+          "candidate_bits_per_token": 3.007478247339066,
+          "reference_bits_per_token": 1.7112501409766687,
+          "delta_bits_per_token": 1.2962281063623973
+        },
+        {
+          "doc_id": "genb_attn_fp8_mha_hd128_causal_fp8:seed",
+          "task_id": "genb_attn_fp8_mha_hd128_causal_fp8",
+          "kind": "seed",
+          "n_tokens": 1467,
+          "candidate_bits_per_token": 3.1439232673402637,
+          "reference_bits_per_token": 1.775662111412437,
+          "delta_bits_per_token": 1.3682611559278268
+        },
+        {
+          "doc_id": "genb_attn_mha_hd128_noncausal_fp16:seed",
+          "task_id": "genb_attn_mha_hd128_noncausal_fp16",
+          "kind": "seed",
+          "n_tokens": 1461,
+          "candidate_bits_per_token": 3.3758810724508383,
+          "reference_bits_per_token": 1.7784344366732485,
+          "delta_bits_per_token": 1.5974466357775898
+        },
+        {
+          "doc_id": "genb_attn_mqa_hd64_causal_bf16:seed",
+          "task_id": "genb_attn_mqa_hd64_causal_bf16",
+          "kind": "seed",
+          "n_tokens": 1458,
+          "candidate_bits_per_token": 3.2943023436900205,
+          "reference_bits_per_token": 1.7757888271330902,
+          "delta_bits_per_token": 1.5185135165569303
+        },
+        {
+          "doc_id": "genb_cv_conv2d_7x7_s1_d1_fp16:seed",
+          "task_id": "genb_cv_conv2d_7x7_s1_d1_fp16",
+          "kind": "seed",
+          "n_tokens": 944,
+          "candidate_bits_per_token": 3.62783725001911,
+          "reference_bits_per_token": 1.4418219520146172,
+          "delta_bits_per_token": 2.1860152980044925
+        },
+        {
+          "doc_id": "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16:seed",
+          "task_id": "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+          "kind": "seed",
+          "n_tokens": 954,
+          "candidate_bits_per_token": 3.653601015583472,
+          "reference_bits_per_token": 1.417331013580071,
+          "delta_bits_per_token": 2.236270002003401
+        },
+        {
+          "doc_id": "genb_fx_embed_scale_bf16:seed",
+          "task_id": "genb_fx_embed_scale_bf16",
+          "kind": "seed",
+          "n_tokens": 246,
+          "candidate_bits_per_token": 2.295785186946571,
+          "reference_bits_per_token": 1.4578932288432198,
+          "delta_bits_per_token": 0.8378919581033513
+        },
+        {
+          "doc_id": "genb_fx_reglu_act_fp16:seed",
+          "task_id": "genb_fx_reglu_act_fp16",
+          "kind": "seed",
+          "n_tokens": 265,
+          "candidate_bits_per_token": 2.4764342054964543,
+          "reference_bits_per_token": 1.4761013248114494,
+          "delta_bits_per_token": 1.000332880685005
+        },
+        {
+          "doc_id": "genb_fx_rope_qk_half_qknorm_bf16:seed",
+          "task_id": "genb_fx_rope_qk_half_qknorm_bf16",
+          "kind": "seed",
+          "n_tokens": 646,
+          "candidate_bits_per_token": 2.5818545510694153,
+          "reference_bits_per_token": 1.0294262044930365,
+          "delta_bits_per_token": 1.5524283465763788
+        },
+        {
+          "doc_id": "genb_gemm_bf16_residual_bf16:seed",
+          "task_id": "genb_gemm_bf16_residual_bf16",
+          "kind": "seed",
+          "n_tokens": 1704,
+          "candidate_bits_per_token": 3.4124001651720017,
+          "reference_bits_per_token": 1.3460970270086063,
+          "delta_bits_per_token": 2.0663031381633954
+        },
+        {
+          "doc_id": "genb_gemm_fp8_channelwise_fp8:seed",
+          "task_id": "genb_gemm_fp8_channelwise_fp8",
+          "kind": "seed",
+          "n_tokens": 1736,
+          "candidate_bits_per_token": 3.4645793108707723,
+          "reference_bits_per_token": 1.3493919198163866,
+          "delta_bits_per_token": 2.115187391054386
+        },
+        {
+          "doc_id": "genb_gemm_int4_asym_group_fp16:seed",
+          "task_id": "genb_gemm_int4_asym_group_fp16",
+          "kind": "seed",
+          "n_tokens": 1726,
+          "candidate_bits_per_token": 3.369740162127795,
+          "reference_bits_per_token": 1.3612540567468143,
+          "delta_bits_per_token": 2.008486105380981
+        },
+        {
+          "doc_id": "genb_gemm_int8_pertensor_int8:seed",
+          "task_id": "genb_gemm_int8_pertensor_int8",
+          "kind": "seed",
+          "n_tokens": 1738,
+          "candidate_bits_per_token": 3.424304017294296,
+          "reference_bits_per_token": 1.3438713603852568,
+          "delta_bits_per_token": 2.0804326569090392
+        },
+        {
+          "doc_id": "genb_moe_block_silu_k8_e256_bf16:seed",
+          "task_id": "genb_moe_block_silu_k8_e256_bf16",
+          "kind": "seed",
+          "n_tokens": 2434,
+          "candidate_bits_per_token": 2.5471684228876956,
+          "reference_bits_per_token": 1.6550113400132154,
+          "delta_bits_per_token": 0.8921570828744803
+        },
+        {
+          "doc_id": "genb_moe_fused_moe_silu_fp16:seed",
+          "task_id": "genb_moe_fused_moe_silu_fp16",
+          "kind": "seed",
+          "n_tokens": 1578,
+          "candidate_bits_per_token": 3.12268534193464,
+          "reference_bits_per_token": 1.6389072876888109,
+          "delta_bits_per_token": 1.483778054245829
+        },
+        {
+          "doc_id": "genb_moe_grouped_mlp_gelu_bf16:seed",
+          "task_id": "genb_moe_grouped_mlp_gelu_bf16",
+          "kind": "seed",
+          "n_tokens": 1345,
+          "candidate_bits_per_token": 3.3010662761853142,
+          "reference_bits_per_token": 1.5995549209681923,
+          "delta_bits_per_token": 1.701511355217122
+        },
+        {
+          "doc_id": "genb_moe_sigmoid_topk_norenorm_fp16:seed",
+          "task_id": "genb_moe_sigmoid_topk_norenorm_fp16",
+          "kind": "seed",
+          "n_tokens": 981,
+          "candidate_bits_per_token": 3.2743879687645623,
+          "reference_bits_per_token": 2.3288199855392087,
+          "delta_bits_per_token": 0.9455679832253536
+        },
+        {
+          "doc_id": "genb_norm_groupnorm_bf16:seed",
+          "task_id": "genb_norm_groupnorm_bf16",
+          "kind": "seed",
+          "n_tokens": 463,
+          "candidate_bits_per_token": 3.588271512236003,
+          "reference_bits_per_token": 1.7466253608620292,
+          "delta_bits_per_token": 1.841646151373974
+        },
+        {
+          "doc_id": "genb_norm_layernorm_bwd_fp32:seed",
+          "task_id": "genb_norm_layernorm_bwd_fp32",
+          "kind": "seed",
+          "n_tokens": 604,
+          "candidate_bits_per_token": 2.7902981360609616,
+          "reference_bits_per_token": 1.3852591954419935,
+          "delta_bits_per_token": 1.405038940618968
+        },
+        {
+          "doc_id": "genb_norm_layernorm_quant_fp8_fp8:seed",
+          "task_id": "genb_norm_layernorm_quant_fp8_fp8",
+          "kind": "seed",
+          "n_tokens": 520,
+          "candidate_bits_per_token": 3.315902726199301,
+          "reference_bits_per_token": 1.2834528648020718,
+          "delta_bits_per_token": 2.0324498613972293
+        },
+        {
+          "doc_id": "genb_qx_quant_int8_pertoken_int8:seed",
+          "task_id": "genb_qx_quant_int8_pertoken_int8",
+          "kind": "seed",
+          "n_tokens": 1171,
+          "candidate_bits_per_token": 3.3788241888419535,
+          "reference_bits_per_token": 1.9246064854120646,
+          "delta_bits_per_token": 1.4542177034298889
+        },
+        {
+          "doc_id": "genb_red_entropy_bf16:seed",
+          "task_id": "genb_red_entropy_bf16",
+          "kind": "seed",
+          "n_tokens": 494,
+          "candidate_bits_per_token": 3.0573353448657525,
+          "reference_bits_per_token": 1.7533206966604518,
+          "delta_bits_per_token": 1.3040146482053008
+        },
+        {
+          "doc_id": "genb_red_topk256_bf16:seed",
+          "task_id": "genb_red_topk256_bf16",
+          "kind": "seed",
+          "n_tokens": 631,
+          "candidate_bits_per_token": 3.421663328893977,
+          "reference_bits_per_token": 2.6147962878484394,
+          "delta_bits_per_token": 0.8068670410455376
+        },
+        {
+          "doc_id": "genb_smp_rope_yarn_bf16:seed",
+          "task_id": "genb_smp_rope_yarn_bf16",
+          "kind": "seed",
+          "n_tokens": 778,
+          "candidate_bits_per_token": 3.318280356276872,
+          "reference_bits_per_token": 1.725074220117126,
+          "delta_bits_per_token": 1.593206136159746
+        },
+        {
+          "doc_id": "genb_smp_topk_sample_bf16:seed",
+          "task_id": "genb_smp_topk_sample_bf16",
+          "kind": "seed",
+          "n_tokens": 598,
+          "candidate_bits_per_token": 3.632603719287495,
+          "reference_bits_per_token": 1.9123088840701323,
+          "delta_bits_per_token": 1.7202948352173626
+        },
+        {
+          "doc_id": "genb_ssm_mamba2_ssd_c128_n128_bf16:seed",
+          "task_id": "genb_ssm_mamba2_ssd_c128_n128_bf16",
+          "kind": "seed",
+          "n_tokens": 852,
+          "candidate_bits_per_token": 2.922090875878263,
+          "reference_bits_per_token": 1.7584437417413494,
+          "delta_bits_per_token": 1.1636471341369137
+        },
+        {
+          "doc_id": "genb_ssm_retnet_c64_bf16:seed",
+          "task_id": "genb_ssm_retnet_c64_bf16",
+          "kind": "seed",
+          "n_tokens": 646,
+          "candidate_bits_per_token": 3.530818279405214,
+          "reference_bits_per_token": 1.933409852289558,
+          "delta_bits_per_token": 1.5974084271156561
+        },
+        {
+          "doc_id": "genb_tr_adamw_8bit_bf16:seed",
+          "task_id": "genb_tr_adamw_8bit_bf16",
+          "kind": "seed",
+          "n_tokens": 865,
+          "candidate_bits_per_token": 2.3222066539339736,
+          "reference_bits_per_token": 1.4843122306473566,
+          "delta_bits_per_token": 0.837894423286617
+        },
+        {
+          "doc_id": "genb_tr_foreach_sgd_bf16:seed",
+          "task_id": "genb_tr_foreach_sgd_bf16",
+          "kind": "seed",
+          "n_tokens": 334,
+          "candidate_bits_per_token": 3.3071366567592166,
+          "reference_bits_per_token": 1.3394021701551722,
+          "delta_bits_per_token": 1.9677344866040445
+        },
+        {
+          "doc_id": "genb_tr_ls_ce_bwd_bf16:seed",
+          "task_id": "genb_tr_ls_ce_bwd_bf16",
+          "kind": "seed",
+          "n_tokens": 2222,
+          "candidate_bits_per_token": 1.6298084399237294,
+          "reference_bits_per_token": 0.9577939772433881,
+          "delta_bits_per_token": 0.6720144626803413
+        },
+        {
+          "doc_id": "mla_decode_bf16:seed",
+          "task_id": "mla_decode_bf16",
+          "kind": "seed",
+          "n_tokens": 1684,
+          "candidate_bits_per_token": 1.7779386505774233,
+          "reference_bits_per_token": 1.2465033244836967,
+          "delta_bits_per_token": 0.5314353260937266
+        },
+        {
+          "doc_id": "paged_attn_decode_bf16:seed",
+          "task_id": "paged_attn_decode_bf16",
+          "kind": "seed",
+          "n_tokens": 1165,
+          "candidate_bits_per_token": 2.0055639090896022,
+          "reference_bits_per_token": 1.5931949169214117,
+          "delta_bits_per_token": 0.41236899216819056
+        }
+      ],
+      "corpus": {
+        "candidate": {
+          "n_documents": 34,
+          "n_tokens": 38088,
+          "sum_nll_nats": 79407.45300292969,
+          "bits_per_token": 3.0077908700102416,
+          "perplexity": 8.043318616401187
+        },
+        "reference": {
+          "n_documents": 34,
+          "n_tokens": 38088,
+          "sum_nll_nats": 41678.57160949707,
+          "bits_per_token": 1.578698502739891,
+          "perplexity": 2.9870026192846906
+        },
+        "delta_bits_per_token": 1.4290923672703506,
+        "perplexity_ratio": 2.6927725354078706
+      },
+      "paired": {
+        "n": 34,
+        "effect_size": 1.4435592986049401,
+        "effect_kind": "mean_delta",
+        "ci": [
+          1.2735105072559716,
+          1.6055365593628108
+        ],
+        "ci_level": 0.95,
+        "se": 0.08461135896107054,
+        "p_bootstrap": 9.999000099990002e-05,
+        "p_sign": 1.1641532182693481e-10,
+        "p_wilcoxon": 3.8210165387297934e-07,
+        "p_value": 3.8210165387297934e-07,
+        "significant": true,
+        "direction": "kore_better",
+        "bootstrap": {
+          "effect_size": 1.4435592986049401,
+          "ci_lo": 1.2735105072559716,
+          "ci_hi": 1.6055365593628108,
+          "ci_level": 0.95,
+          "se": 0.08461135896107054,
+          "p_value": 9.999000099990002e-05,
+          "n": 34,
+          "n_boot": 10000,
+          "statistic": "mean"
+        },
+        "sign": {
+          "n_pos": 34,
+          "n_neg": 0,
+          "n_effective": 34,
+          "p_value": 1.1641532182693481e-10,
+          "prop_positive": 1.0
+        },
+        "wilcoxon": {
+          "statistic": 595.0,
+          "z": 5.077664991741727,
+          "p_value": 3.8210165387297934e-07,
+          "n_effective": 34
+        }
+      },
+      "n_documents_improved": 0,
+      "verdict": {
+        "direction": "reference_better",
+        "significant": true,
+        "p_value": 3.8210165387297934e-07,
+        "statement": "midtrain minus base: +1.4436 bits/token (95% CI [+1.2735, +1.6055], wilcoxon p=3.82e-07); 0/34 documents improved. Negative is better for midtrain."
+      }
+    },
+    "reference": {
+      "schema": "kore.heldout-lm-report.v1",
+      "candidate": "midtrain",
+      "reference": "base",
+      "n_documents": 34,
+      "matched_tokenization": true,
+      "n_mismatched_documents": 0,
+      "per_document": [
+        {
+          "doc_id": "genb_attn2_cross_gqa_step_fp16:reference",
+          "task_id": "genb_attn2_cross_gqa_step_fp16",
+          "kind": "reference",
+          "n_tokens": 81,
+          "candidate_bits_per_token": 7.290370150901341,
+          "reference_bits_per_token": 4.649161801185769,
+          "delta_bits_per_token": 2.6412083497155727
+        },
+        {
+          "doc_id": "genb_attn2_decode_mqa_hd256_bf16:reference",
+          "task_id": "genb_attn2_decode_mqa_hd256_bf16",
+          "kind": "reference",
+          "n_tokens": 87,
+          "candidate_bits_per_token": 6.790523703457505,
+          "reference_bits_per_token": 4.492055896504457,
+          "delta_bits_per_token": 2.298467806953048
+        },
+        {
+          "doc_id": "genb_attn2_varlen_gqa_causal_bf16:reference",
+          "task_id": "genb_attn2_varlen_gqa_causal_bf16",
+          "kind": "reference",
+          "n_tokens": 85,
+          "candidate_bits_per_token": 6.844198459268057,
+          "reference_bits_per_token": 4.3825606799341426,
+          "delta_bits_per_token": 2.4616377793339144
+        },
+        {
+          "doc_id": "genb_attn_fp8_mha_hd128_causal_fp8:reference",
+          "task_id": "genb_attn_fp8_mha_hd128_causal_fp8",
+          "kind": "reference",
+          "n_tokens": 87,
+          "candidate_bits_per_token": 6.6915684760417795,
+          "reference_bits_per_token": 4.494200089215682,
+          "delta_bits_per_token": 2.1973683868260974
+        },
+        {
+          "doc_id": "genb_attn_mha_hd128_noncausal_fp16:reference",
+          "task_id": "genb_attn_mha_hd128_noncausal_fp16",
+          "kind": "reference",
+          "n_tokens": 87,
+          "candidate_bits_per_token": 7.255871213077263,
+          "reference_bits_per_token": 4.2872412119918035,
+          "delta_bits_per_token": 2.96863000108546
+        },
+        {
+          "doc_id": "genb_attn_mqa_hd64_causal_bf16:reference",
+          "task_id": "genb_attn_mqa_hd64_causal_bf16",
+          "kind": "reference",
+          "n_tokens": 83,
+          "candidate_bits_per_token": 6.591051242791289,
+          "reference_bits_per_token": 4.653631786992345,
+          "delta_bits_per_token": 1.9374194557989437
+        },
+        {
+          "doc_id": "genb_cv_conv2d_7x7_s1_d1_fp16:reference",
+          "task_id": "genb_cv_conv2d_7x7_s1_d1_fp16",
+          "kind": "reference",
+          "n_tokens": 89,
+          "candidate_bits_per_token": 6.133109656797241,
+          "reference_bits_per_token": 4.088925940163266,
+          "delta_bits_per_token": 2.0441837166339747
+        },
+        {
+          "doc_id": "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16:reference",
+          "task_id": "genb_cv_conv2d_nhwc_5x5_s1_d1_bf16",
+          "kind": "reference",
+          "n_tokens": 93,
+          "candidate_bits_per_token": 5.555608963112659,
+          "reference_bits_per_token": 4.034990824440046,
+          "delta_bits_per_token": 1.5206181386726136
+        },
+        {
+          "doc_id": "genb_fx_embed_scale_bf16:reference",
+          "task_id": "genb_fx_embed_scale_bf16",
+          "kind": "reference",
+          "n_tokens": 72,
+          "candidate_bits_per_token": 7.59544240419895,
+          "reference_bits_per_token": 4.959151382436846,
+          "delta_bits_per_token": 2.636291021762104
+        },
+        {
+          "doc_id": "genb_fx_reglu_act_fp16:reference",
+          "task_id": "genb_fx_reglu_act_fp16",
+          "kind": "reference",
+          "n_tokens": 74,
+          "candidate_bits_per_token": 6.862851626928305,
+          "reference_bits_per_token": 4.998333901595775,
+          "delta_bits_per_token": 1.8645177253325302
+        },
+        {
+          "doc_id": "genb_fx_rope_qk_half_qknorm_bf16:reference",
+          "task_id": "genb_fx_rope_qk_half_qknorm_bf16",
+          "kind": "reference",
+          "n_tokens": 84,
+          "candidate_bits_per_token": 6.547310463217979,
+          "reference_bits_per_token": 4.82954276709302,
+          "delta_bits_per_token": 1.7177676961249588
+        },
+        {
+          "doc_id": "genb_gemm_bf16_residual_bf16:reference",
+          "task_id": "genb_gemm_bf16_residual_bf16",
+          "kind": "reference",
+          "n_tokens": 80,
+          "candidate_bits_per_token": 7.117143456526818,
+          "reference_bits_per_token": 4.24356761976032,
+          "delta_bits_per_token": 2.8735758367664976
+        },
+        {
+          "doc_id": "genb_gemm_fp8_channelwise_fp8:reference",
+          "task_id": "genb_gemm_fp8_channelwise_fp8",
+          "kind": "reference",
+          "n_tokens": 76,
+          "candidate_bits_per_token": 6.81318127594364,
+          "reference_bits_per_token": 4.550590845322112,
+          "delta_bits_per_token": 2.262590430621527
+        },
+        {
+          "doc_id": "genb_gemm_int4_asym_group_fp16:reference",
+          "task_id": "genb_gemm_int4_asym_group_fp16",
+          "kind": "reference",
+          "n_tokens": 80,
+          "candidate_bits_per_token": 7.465857680794179,
+          "reference_bits_per_token": 4.547044077889212,
+          "delta_bits_per_token": 2.918813602904967
+        },
+        {
+          "doc_id": "genb_gemm_int8_pertensor_int8:reference",
+          "task_id": "genb_gemm_int8_pertensor_int8",
+          "kind": "reference",
+          "n_tokens": 78,
+          "candidate_bits_per_token": 7.4189997992782395,
+          "reference_bits_per_token": 4.544541534523524,
+          "delta_bits_per_token": 2.8744582647547157
+        },
+        {
+          "doc_id": "genb_moe_block_silu_k8_e256_bf16:reference",
+          "task_id": "genb_moe_block_silu_k8_e256_bf16",
+          "kind": "reference",
+          "n_tokens": 90,
+          "candidate_bits_per_token": 6.065659629370149,
+          "reference_bits_per_token": 4.181167605524497,
+          "delta_bits_per_token": 1.8844920238456524
+        },
+        {
+          "doc_id": "genb_moe_fused_moe_silu_fp16:reference",
+          "task_id": "genb_moe_fused_moe_silu_fp16",
+          "kind": "reference",
+          "n_tokens": 84,
+          "candidate_bits_per_token": 6.834864407185389,
+          "reference_bits_per_token": 4.073513847688948,
+          "delta_bits_per_token": 2.7613505594964414
+        },
+        {
+          "doc_id": "genb_moe_grouped_mlp_gelu_bf16:reference",
+          "task_id": "genb_moe_grouped_mlp_gelu_bf16",
+          "kind": "reference",
+          "n_tokens": 82,
+          "candidate_bits_per_token": 7.101927626228695,
+          "reference_bits_per_token": 4.351650604957992,
+          "delta_bits_per_token": 2.750277021270702
+        },
+        {
+          "doc_id": "genb_moe_sigmoid_topk_norenorm_fp16:reference",
+          "task_id": "genb_moe_sigmoid_topk_norenorm_fp16",
+          "kind": "reference",
+          "n_tokens": 84,
+          "candidate_bits_per_token": 6.843488567299055,
+          "reference_bits_per_token": 4.412236987181866,
+          "delta_bits_per_token": 2.4312515801171886
+        },
+        {
+          "doc_id": "genb_norm_groupnorm_bf16:reference",
+          "task_id": "genb_norm_groupnorm_bf16",
+          "kind": "reference",
+          "n_tokens": 71,
+          "candidate_bits_per_token": 8.172348303116644,
+          "reference_bits_per_token": 5.035319640200773,
+          "delta_bits_per_token": 3.1370286629158715
+        },
+        {
+          "doc_id": "genb_norm_layernorm_bwd_fp32:reference",
+          "task_id": "genb_norm_layernorm_bwd_fp32",
+          "kind": "reference",
+          "n_tokens": 79,
+          "candidate_bits_per_token": 7.806123483310046,
+          "reference_bits_per_token": 4.545272233377384,
+          "delta_bits_per_token": 3.260851249932662
+        },
+        {
+          "doc_id": "genb_norm_layernorm_quant_fp8_fp8:reference",
+          "task_id": "genb_norm_layernorm_quant_fp8_fp8",
+          "kind": "reference",
+          "n_tokens": 79,
+          "candidate_bits_per_token": 7.264313659191085,
+          "reference_bits_per_token": 4.69797457541261,
+          "delta_bits_per_token": 2.566339083778475
+        },
+        {
+          "doc_id": "genb_qx_quant_int8_pertoken_int8:reference",
+          "task_id": "genb_qx_quant_int8_pertoken_int8",
+          "kind": "reference",
+          "n_tokens": 77,
+          "candidate_bits_per_token": 8.07905815050425,
+          "reference_bits_per_token": 5.021742167671217,
+          "delta_bits_per_token": 3.0573159828330336
+        },
+        {
+          "doc_id": "genb_red_entropy_bf16:reference",
+          "task_id": "genb_red_entropy_bf16",
+          "kind": "reference",
+          "n_tokens": 69,
+          "candidate_bits_per_token": 7.335522149264133,
+          "reference_bits_per_token": 5.02180566911705,
+          "delta_bits_per_token": 2.3137164801470824
+        },
+        {
+          "doc_id": "genb_red_topk256_bf16:reference",
+          "task_id": "genb_red_topk256_bf16",
+          "kind": "reference",
+          "n_tokens": 77,
+          "candidate_bits_per_token": 7.251297164446055,
+          "reference_bits_per_token": 4.7226572440948305,
+          "delta_bits_per_token": 2.5286399203512246
+        },
+        {
+          "doc_id": "genb_smp_rope_yarn_bf16:reference",
+          "task_id": "genb_smp_rope_yarn_bf16",
+          "kind": "reference",
+          "n_tokens": 76,
+          "candidate_bits_per_token": 7.256396281000356,
+          "reference_bits_per_token": 4.777893544282073,
+          "delta_bits_per_token": 2.4785027367182826
+        },
+        {
+          "doc_id": "genb_smp_topk_sample_bf16:reference",
+          "task_id": "genb_smp_topk_sample_bf16",
+          "kind": "reference",
+          "n_tokens": 74,
+          "candidate_bits_per_token": 7.493199538406505,
+          "reference_bits_per_token": 4.84874967621433,
+          "delta_bits_per_token": 2.6444498621921753
+        },
+        {
+          "doc_id": "genb_ssm_mamba2_ssd_c128_n128_bf16:reference",
+          "task_id": "genb_ssm_mamba2_ssd_c128_n128_bf16",
+          "kind": "reference",
+          "n_tokens": 96,
+          "candidate_bits_per_token": 5.745255186445399,
+          "reference_bits_per_token": 3.965830039297516,
+          "delta_bits_per_token": 1.779425147147883
+        },
+        {
+          "doc_id": "genb_ssm_retnet_c64_bf16:reference",
+          "task_id": "genb_ssm_retnet_c64_bf16",
+          "kind": "reference",
+          "n_tokens": 82,
+          "candidate_bits_per_token": 6.806233710237851,
+          "reference_bits_per_token": 4.3902971368410855,
+          "delta_bits_per_token": 2.415936573396766
+        },
+        {
+          "doc_id": "genb_tr_adamw_8bit_bf16:reference",
+          "task_id": "genb_tr_adamw_8bit_bf16",
+          "kind": "reference",
+          "n_tokens": 78,
+          "candidate_bits_per_token": 7.852477078871262,
+          "reference_bits_per_token": 4.602628560197338,
+          "delta_bits_per_token": 3.2498485186739243
+        },
+        {
+          "doc_id": "genb_tr_foreach_sgd_bf16:reference",
+          "task_id": "genb_tr_foreach_sgd_bf16",
+          "kind": "reference",
+          "n_tokens": 74,
+          "candidate_bits_per_token": 8.259162444876155,
+          "reference_bits_per_token": 5.019145252582257,
+          "delta_bits_per_token": 3.240017192293898
+        },
+        {
+          "doc_id": "genb_tr_ls_ce_bwd_bf16:reference",
+          "task_id": "genb_tr_ls_ce_bwd_bf16",
+          "kind": "reference",
+          "n_tokens": 74,
+          "candidate_bits_per_token": 7.2389314628658035,
+          "reference_bits_per_token": 5.136116956365799,
+          "delta_bits_per_token": 2.102814506500004
+        },
+        {
+          "doc_id": "mla_decode_bf16:reference",
+          "task_id": "mla_decode_bf16",
+          "kind": "reference",
+          "n_tokens": 1518,
+          "candidate_bits_per_token": 2.2418677390124313,
+          "reference_bits_per_token": 1.6390672335098617,
+          "delta_bits_per_token": 0.6028005055025696
+        },
+        {
+          "doc_id": "paged_attn_decode_bf16:reference",
+          "task_id": "paged_attn_decode_bf16",
+          "kind": "reference",
+          "n_tokens": 1192,
+          "candidate_bits_per_token": 2.600889316735278,
+          "reference_bits_per_token": 1.8932450045528313,
+          "delta_bits_per_token": 0.7076443121824467
+        }
+      ],
+      "corpus": {
+        "candidate": {
+          "n_documents": 34,
+          "n_tokens": 5292,
+          "sum_nll_nats": 17097.806640625,
+          "bits_per_token": 4.66117174045882,
+          "perplexity": 25.301863521689935
+        },
+        "reference": {
+          "n_documents": 34,
+          "n_tokens": 5292,
+          "sum_nll_nats": 11446.624435424805,
+          "bits_per_token": 3.12055712545461,
+          "perplexity": 8.697236863215496
+        },
+        "delta_bits_per_token": 1.54061461500421,
+        "perplexity_ratio": 2.909184137401481
+      },
+      "paired": {
+        "n": 34,
+        "effect_size": 2.386183827428918,
+        "effect_kind": "mean_delta",
+        "ci": [
+          2.1678232173488685,
+          2.588096743493484
+        ],
+        "ci_level": 0.95,
+        "se": 0.10772698040729659,
+        "p_bootstrap": 9.999000099990002e-05,
+        "p_sign": 1.1641532182693481e-10,
+        "p_wilcoxon": 3.8210165387297934e-07,
+        "p_value": 3.8210165387297934e-07,
+        "significant": true,
+        "direction": "kore_better",
+        "bootstrap": {
+          "effect_size": 2.386183827428918,
+          "ci_lo": 2.1678232173488685,
+          "ci_hi": 2.588096743493484,
+          "ci_level": 0.95,
+          "se": 0.10772698040729659,
+          "p_value": 9.999000099990002e-05,
+          "n": 34,
+          "n_boot": 10000,
+          "statistic": "mean"
+        },
+        "sign": {
+          "n_pos": 34,
+          "n_neg": 0,
+          "n_effective": 34,
+          "p_value": 1.1641532182693481e-10,
+          "prop_positive": 1.0
+        },
+        "wilcoxon": {
+          "statistic": 595.0,
+          "z": 5.077664991741727,
+          "p_value": 3.8210165387297934e-07,
+          "n_effective": 34
+        }
+      },
+      "n_documents_improved": 0,
+      "verdict": {
+        "direction": "reference_better",
+        "significant": true,
+        "p_value": 3.8210165387297934e-07,
+        "statement": "midtrain minus base: +2.3862 bits/token (95% CI [+2.1678, +2.5881], wilcoxon p=3.82e-07); 0/34 documents improved. Negative is better for midtrain."
+      }
+    },
+    "general": {
+      "schema": "kore.heldout-lm-report.v1",
+      "candidate": "midtrain",
+      "reference": "base",
+      "n_documents": 18,
+      "matched_tokenization": true,
+      "n_mismatched_documents": 0,
+      "per_document": [
+        {
+          "doc_id": "general:mmlu:1",
+          "task_id": "general:mmlu",
+          "kind": "general",
+          "n_tokens": 18,
+          "candidate_bits_per_token": 6.659930774263509,
+          "reference_bits_per_token": 3.2162746123891197,
+          "delta_bits_per_token": 3.4436561618743897
+        },
+        {
+          "doc_id": "general:mmlu:2",
+          "task_id": "general:mmlu",
+          "kind": "general",
+          "n_tokens": 21,
+          "candidate_bits_per_token": 6.896515568557083,
+          "reference_bits_per_token": 2.4900792122235176,
+          "delta_bits_per_token": 4.406436356333566
+        },
+        {
+          "doc_id": "general:mmlu:3",
+          "task_id": "general:mmlu",
+          "kind": "general",
+          "n_tokens": 17,
+          "candidate_bits_per_token": 10.305296264385904,
+          "reference_bits_per_token": 3.76345563952572,
+          "delta_bits_per_token": 6.541840624860184
+        },
+        {
+          "doc_id": "general:mmlu:4",
+          "task_id": "general:mmlu",
+          "kind": "general",
+          "n_tokens": 23,
+          "candidate_bits_per_token": 7.522702762418561,
+          "reference_bits_per_token": 3.571079586783275,
+          "delta_bits_per_token": 3.951623175635286
+        },
+        {
+          "doc_id": "general:mmlu:5",
+          "task_id": "general:mmlu",
+          "kind": "general",
+          "n_tokens": 31,
+          "candidate_bits_per_token": 3.895576139823206,
+          "reference_bits_per_token": 2.009444049967708,
+          "delta_bits_per_token": 1.886132089855498
+        },
+        {
+          "doc_id": "general:mmlu:6",
+          "task_id": "general:mmlu",
+          "kind": "general",
+          "n_tokens": 22,
+          "candidate_bits_per_token": 6.470170940390836,
+          "reference_bits_per_token": 2.289179639667055,
+          "delta_bits_per_token": 4.180991300723781
+        },
+        {
+          "doc_id": "general:mmlu:7",
+          "task_id": "general:mmlu",
+          "kind": "general",
+          "n_tokens": 28,
+          "candidate_bits_per_token": 5.49270367571919,
+          "reference_bits_per_token": 2.27367039609303,
+          "delta_bits_per_token": 3.2190332796261596
+        },
+        {
+          "doc_id": "general:mmlu:8",
+          "task_id": "general:mmlu",
+          "kind": "general",
+          "n_tokens": 33,
+          "candidate_bits_per_token": 4.2019581747340595,
+          "reference_bits_per_token": 2.8107186752726947,
+          "delta_bits_per_token": 1.3912394994613648
+        },
+        {
+          "doc_id": "general:mmlu:9",
+          "task_id": "general:mmlu",
+          "kind": "general",
+          "n_tokens": 20,
+          "candidate_bits_per_token": 6.343641990829007,
+          "reference_bits_per_token": 3.9987931055406465,
+          "delta_bits_per_token": 2.3448488852883607
+        },
+        {
+          "doc_id": "general:mmlu:10",
+          "task_id": "general:mmlu",
+          "kind": "general",
+          "n_tokens": 22,
+          "candidate_bits_per_token": 5.8835527524579065,
+          "reference_bits_per_token": 2.7555933367714127,
+          "delta_bits_per_token": 3.127959415686494
+        },
+        {
+          "doc_id": "general:mmlu:11",
+          "task_id": "general:mmlu",
+          "kind": "general",
+          "n_tokens": 22,
+          "candidate_bits_per_token": 9.407270389142655,
+          "reference_bits_per_token": 3.570423871997174,
+          "delta_bits_per_token": 5.836846517145481
+        },
+        {
+          "doc_id": "general:humaneval:0",
+          "task_id": "general:humaneval",
+          "kind": "general",
+          "n_tokens": 85,
+          "candidate_bits_per_token": 3.98080713563351,
+          "reference_bits_per_token": 2.1231707427231274,
+          "delta_bits_per_token": 1.8576363929103827
+        },
+        {
+          "doc_id": "general:humaneval:1",
+          "task_id": "general:humaneval",
+          "kind": "general",
+          "n_tokens": 56,
+          "candidate_bits_per_token": 1.8531217113172065,
+          "reference_bits_per_token": 0.9397958542626011,
+          "delta_bits_per_token": 0.9133258570546053
+        },
+        {
+          "doc_id": "general:humaneval:2",
+          "task_id": "general:humaneval",
+          "kind": "general",
+          "n_tokens": 47,
+          "candidate_bits_per_token": 4.003376257298509,
+          "reference_bits_per_token": 1.3704954652901202,
+          "delta_bits_per_token": 2.6328807920083888
+        },
+        {
+          "doc_id": "general:mtbench:0",
+          "task_id": "general:mtbench",
+          "kind": "general",
+          "n_tokens": 40,
+          "candidate_bits_per_token": 4.9966155327563175,
+          "reference_bits_per_token": 3.3630552466287744,
+          "delta_bits_per_token": 1.6335602861275431
+        },
+        {
+          "doc_id": "general:mtbench:1",
+          "task_id": "general:mtbench",
+          "kind": "general",
+          "n_tokens": 40,
+          "candidate_bits_per_token": 4.472821318877168,
+          "reference_bits_per_token": 2.731203094937436,
+          "delta_bits_per_token": 1.741618223939732
+        },
+        {
+          "doc_id": "general:mtbench:2",
+          "task_id": "general:mtbench",
+          "kind": "general",
+          "n_tokens": 10,
+          "candidate_bits_per_token": 9.782221285999313,
+          "reference_bits_per_token": 4.816689759973819,
+          "delta_bits_per_token": 4.965531526025494
+        },
+        {
+          "doc_id": "general:mtbench:3",
+          "task_id": "general:mtbench",
+          "kind": "general",
+          "n_tokens": 43,
+          "candidate_bits_per_token": 8.974929769748945,
+          "reference_bits_per_token": 6.818654488873593,
+          "delta_bits_per_token": 2.1562752808753523
+        }
+      ],
+      "corpus": {
+        "candidate": {
+          "n_documents": 18,
+          "n_tokens": 578,
+          "sum_nll_nats": 2165.7934341430664,
+          "bits_per_token": 5.405846794166228,
+          "perplexity": 42.39572212694167
+        },
+        "reference": {
+          "n_documents": 18,
+          "n_tokens": 578,
+          "sum_nll_nats": 1127.8671684265137,
+          "bits_per_token": 2.815170191471295,
+          "perplexity": 7.038022818044725
+        },
+        "delta_bits_per_token": 2.5906766026949333,
+        "perplexity_ratio": 6.023811405988007
+      },
+      "paired": {
+        "n": 18,
+        "effect_size": 3.123968648079559,
+        "effect_kind": "mean_delta",
+        "ci": [
+          2.4402699681534514,
+          3.8541994503494266
+        ],
+        "ci_level": 0.95,
+        "se": 0.36384323076814706,
+        "p_bootstrap": 9.999000099990002e-05,
+        "p_sign": 7.62939453125e-06,
+        "p_wilcoxon": 0.00021409202584599107,
+        "p_value": 0.00021409202584599107,
+        "significant": true,
+        "direction": "kore_better",
+        "bootstrap": {
+          "effect_size": 3.123968648079559,
+          "ci_lo": 2.4402699681534514,
+          "ci_hi": 3.8541994503494266,
+          "ci_level": 0.95,
+          "se": 0.36384323076814706,
+          "p_value": 9.999000099990002e-05,
+          "n": 18,
+          "n_boot": 10000,
+          "statistic": "mean"
+        },
+        "sign": {
+          "n_pos": 18,
+          "n_neg": 0,
+          "n_effective": 18,
+          "p_value": 7.62939453125e-06,
+          "prop_positive": 1.0
+        },
+        "wilcoxon": {
+          "statistic": 171.0,
+          "z": 3.7017802286294086,
+          "p_value": 0.00021409202584599107,
+          "n_effective": 18
+        }
+      },
+      "n_documents_improved": 0,
+      "verdict": {
+        "direction": "reference_better",
+        "significant": true,
+        "p_value": 0.00021409202584599107,
+        "statement": "midtrain minus base: +3.1240 bits/token (95% CI [+2.4403, +3.8542], wilcoxon p=0.000214); 0/18 documents improved. Negative is better for midtrain."
+      }
+    }
+  },
+  "meta": {
+    "candidate": {
+      "schema": "kore.heldout-lm-scores.v1",
+      "n_rows": 86,
+      "arm": "midtrain",
+      "model": {
+        "model_id": "/home/shasriva/Kore-RL/KORE/runs/midtrain_14b_1ep",
+        "dtype": "bfloat16",
+        "revision": null,
+        "enable_thinking": false,
+        "padding_side": "left",
+        "config_dtype": "torch.bfloat16",
+        "n_parameters": 14768307200,
+        "vocab_size": 151936,
+        "device": "cuda:0",
+        "backend": "hf-batch"
+      },
+      "wall_seconds": 4.4
+    },
+    "reference": {
+      "schema": "kore.heldout-lm-scores.v1",
+      "n_rows": 86,
+      "arm": "base",
+      "model": {
+        "model_id": "Qwen/Qwen3-14B",
+        "dtype": "bfloat16",
+        "revision": "40c069824f4251a91eefaf281ebe4c544efd3e18",
+        "enable_thinking": false,
+        "padding_side": "left",
+        "config_dtype": "torch.bfloat16",
+        "n_parameters": 14768307200,
+        "vocab_size": 151936,
+        "device": "cuda:0",
+        "backend": "hf-batch"
+      },
+      "wall_seconds": 5.0
+    }
+  }
+}

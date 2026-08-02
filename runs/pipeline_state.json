@@ -1,0 +1,62 @@
+{
+  "pipeline": "running",
+  "_history": [
+    {
+      "t": "2026-08-02T06:27:49Z",
+      "pipeline": "running"
+    },
+    {
+      "t": "2026-08-02T06:27:49Z",
+      "midtrain_job": "28119"
+    },
+    {
+      "t": "2026-08-02T13:24:07Z",
+      "midtrain": "complete"
+    },
+    {
+      "t": "2026-08-02T13:24:48Z",
+      "eval_midtrain1ep_job": "[13:24:48]   eval-midtrain1ep: job 28669 RUNNING\n28669"
+    },
+    {
+      "t": "2026-08-02T14:17:08Z",
+      "eval_midtrain1ep": "complete"
+    },
+    {
+      "t": "2026-08-02T14:17:51Z",
+      "sft_job": "[14:17:51]   sft: job 28829 RUNNING\n28829"
+    },
+    {
+      "t": "2026-08-02T16:25:23Z",
+      "pipeline": "running"
+    },
+    {
+      "t": "2026-08-02T16:26:52Z",
+      "pipeline": "running"
+    },
+    {
+      "t": "2026-08-02T16:26:52Z",
+      "midtrain_job": "28980"
+    },
+    {
+      "t": "2026-08-02T16:32:31Z",
+      "pipeline": "running"
+    },
+    {
+      "t": "2026-08-02T16:38:06Z",
+      "pipeline": "running"
+    },
+    {
+      "t": "2026-08-02T16:58:06Z",
+      "pipeline": "running"
+    },
+    {
+      "t": "2026-08-02T16:58:32Z",
+      "midtrain_job": "[16:58:32]   midtrain: job 29086 RUNNING\n29086"
+    }
+  ],
+  "midtrain_job": "[16:58:32]   midtrain: job 29086 RUNNING\n29086",
+  "midtrain": "complete",
+  "eval_midtrain1ep_job": "[13:24:48]   eval-midtrain1ep: job 28669 RUNNING\n28669",
+  "eval_midtrain1ep": "complete",
+  "sft_job": "[14:17:51]   sft: job 28829 RUNNING\n28829"
+}

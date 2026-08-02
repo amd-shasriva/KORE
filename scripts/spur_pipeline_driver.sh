@@ -28,7 +28,7 @@ STATE="$REPO/runs/pipeline_state.json"
 LOG="$REPO/runs/pipeline_driver.log"
 MIDTRAIN_OUT="$REPO/runs/midtrain_14b_base"
 SFT_OUT="$REPO/runs/sft_14b_frontier"
-MIDTRAIN_CFG="$REPO/data/b05factory/launch/midtrain_base_64gpu.json"
+MIDTRAIN_CFG="$REPO/data/b05factory/launch/midtrain_base_32gpu.json"
 
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
@@ -111,7 +111,7 @@ step_midtrain() {
   if [ -n "$job" ]; then log "midtrain: adopting running job $job"
   else
     log "midtrain: submitting"
-    job="$(submit_until_accepted midtrain --qos=amd-burst-qos "$REPO/scripts/spur_midtrain_8node_dedicated.sbatch" "$MIDTRAIN_CFG")" || return 1
+    job="$(submit_until_accepted midtrain "$REPO/scripts/spur_midtrain_4node.sbatch" "$MIDTRAIN_CFG")" || return 1
   fi
   note midtrain_job "$job"
   wait_for_job "$job" midtrain
@@ -119,7 +119,7 @@ step_midtrain() {
     log "midtrain: COMPLETE and verified"; note midtrain "complete"; return 0
   fi
   log "midtrain: job ended but checkpoint is INCOMPLETE -- retrying once (resume is supported)"
-  job="$(submit_until_accepted midtrain --qos=amd-burst-qos "$REPO/scripts/spur_midtrain_8node_dedicated.sbatch" "$MIDTRAIN_CFG")" || return 1
+  job="$(submit_until_accepted midtrain "$REPO/scripts/spur_midtrain_4node.sbatch" "$MIDTRAIN_CFG")" || return 1
   wait_for_job "$job" midtrain-resume
   checkpoint_complete "$MIDTRAIN_OUT" || { log "midtrain: STILL incomplete, stopping"; note midtrain "failed"; return 1; }
   log "midtrain: COMPLETE after resume"; note midtrain "complete"; return 0

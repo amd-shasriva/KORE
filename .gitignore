@@ -33,3 +33,28 @@ data/b05factory_synced/
 # Replay-cache lock files are transient per-process artifacts, never content.
 runs/*.lock
 runs/**/*.lock
+
+# Evaluation artifacts are EVIDENCE, not output, and must survive the weights
+# they describe. `runs/*/` above exists to keep 221GB checkpoints out of git; it
+# was also swallowing ~2MB of JSON/JSONL/markdown that is the only surviving
+# record of two checkpoints now deleted -- every generation, per-task measure,
+# LM score and paired report behind docs/EVAL_RESULTS.md. Re-included
+# explicitly, with a belt-and-braces block on anything weight-shaped in case a
+# future harness writes a model into its own output directory.
+!runs/eval_ab_*/
+!runs/e2e_gate/
+runs/**/*.safetensors
+runs/**/*.bin
+runs/**/*.pt
+runs/**/*.pth
+runs/**/*.pkl
+
+# Pipeline provenance: which stage ran, as which job, and what it decided.
+!runs/pipeline_state.json
+!runs/pipeline_driver.log
+
+# Scheduler probes from diagnosing the JobHoldMaxRequeue behaviour. Throwaway.
+runs/bisect-*.out
+runs/kprobe*-*.out
+runs/min-*.out
+runs/gpu-smoke-*.out

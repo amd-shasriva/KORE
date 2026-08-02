@@ -158,10 +158,26 @@ def test_launcher_time_limit_is_positive_and_within_the_cluster_maximum(stage):
 
 @pytest.mark.parametrize("stage", sorted(STAGE_LAUNCHERS))
 def test_launcher_is_requeue_safe(stage):
+    """No launcher may set --requeue: on this controller it is a permanent hold.
+
+    This assertion was originally the opposite. Measured paired in one
+    scheduling window on identical scripts differing only in this directive:
+    WITH --requeue the job went straight to PENDING(JobHoldMaxRequeue); WITHOUT
+    it the job was scheduled and ran. The controller appears to trip MaxRequeue
+    on the FIRST requeue, so any transient NODE_FAIL -- and this cluster reports
+    them in the hundreds -- became an unrecoverable hold rather than a retry.
+
+    Recovery lives in scripts/spur_pipeline_driver.sh instead: it resubmits the
+    stage and the trainer resumes from its last complete checkpoint, which is
+    strictly more capable because it also survives the job id changing.
+    """
     directives = _directives(_text(STAGE_LAUNCHERS[stage]))
-    assert "--requeue" in directives
-    # A requeued job keeps its id, so the same %j file is reopened; truncate mode
-    # would erase the first attempt's log.
+    assert "--requeue" not in directives, (
+        f"{stage}: --requeue causes an immediate JobHoldMaxRequeue on this "
+        "controller; the pipeline driver handles resubmission instead"
+    )
+    # Harmless and still correct: a stage that is resubmitted under the same id
+    # would otherwise erase the first attempt's log.
     assert directives.get("--open-mode") == "append"
 
 

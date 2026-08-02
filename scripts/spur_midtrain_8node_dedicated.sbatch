@@ -14,7 +14,11 @@
 #SBATCH --gpus-per-node=mi355x:8
 #SBATCH --cpus-per-task=128
 #SBATCH --time=08:00:00
-#SBATCH --requeue
+# NOTE: --requeue is deliberately ABSENT. On this SPUR controller a requeued
+# job trips JobHoldMaxRequeue on its first requeue and is held permanently,
+# so any transient NODE_FAIL became an unrecoverable hold. Recovery now lives
+# in scripts/spur_pipeline_driver.sh, which resubmits and lets the trainer
+# resume from its last complete checkpoint.
 #SBATCH --exclusive
 #SBATCH --open-mode=append
 #SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/midtrain-%j.out

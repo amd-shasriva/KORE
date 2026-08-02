@@ -576,7 +576,12 @@ def test_lora_sft_stays_in_process_no_launcher(monkeypatch, tmp_path):
     monkeypatch.setattr(sft_mod, "train_sft",
                         lambda cfg, ds: seen.update(use_lora=cfg.use_lora) or "runs/sft")
 
-    args = _args(["--tasks", "rmsnorm_aiter", "--sft-out", "runs/sft"])  # LoRA default
+    # LoRA default, and deliberately no midtrain checkpoint: this is the
+    # documented single-process bring-up path, which starts from the raw base.
+    # It must therefore declare development mode -- production refuses to train
+    # a stage from the untrained base (see _resolve_stage_input).
+    args = _args(["--tasks", "rmsnorm_aiter", "--sft-out", "runs/sft",
+                  "--campaign-mode", "development"])
     ctx = {"data_root": tmp_path, "args": args, "dry": False, "base": "base_model",
            "tasks": [get_task("rmsnorm_aiter")], "train_tasks": [get_task("rmsnorm_aiter")],
            "midtrain_ckpt": None}
@@ -1517,3 +1522,83 @@ def test_kernelbench_bundled_smoke_specs_can_never_pass_the_track(
     assert result["source"] == "bundled-smoke"
     assert result["passed"] is False
     assert any("not claimable" in reason for reason in result["gate"]["reasons"])
+
+
+# --------------------------------------------------------------------------- #
+# 12. Stage chaining must never silently substitute the untrained base
+# --------------------------------------------------------------------------- #
+def _ctx(campaign_mode="production", allow_fallback=False, **ckpts):
+    args = SimpleNamespace(campaign_mode=campaign_mode,
+                           allow_base_fallback=allow_fallback)
+    ctx = {"base": "Qwen/Qwen3-14B", "args": args, "current_stage": "-",
+           "midtrain_ckpt": None, "sft_ckpt": None, "dpo_ckpt": None,
+           "grpo_ckpt": None, "final": None}
+    ctx.update(ckpts)
+    return ctx
+
+
+def test_production_refuses_to_train_a_stage_from_the_untrained_base():
+    """`--stages sft` used to silently train from raw Qwen3-14B.
+
+    ``ctx["midtrain_ckpt"]`` is only set by the midtrain stage running in the
+    same invocation or by resuming a schema-current manifest, so a mid-train
+    submitted directly with sbatch was invisible and every later stage fell
+    back to ``ctx["base"]`` with no log line at all.
+    """
+    campaign = rc
+    for stage in ("sft", "dpo", "grpo"):
+        with pytest.raises(SystemExit) as excinfo:
+            campaign._resolve_stage_input(_ctx(), stage)
+        message = str(excinfo.value)
+        assert "untrained base" in message
+        assert "--allow-base-fallback" in message
+        # It must name a flag that actually exists.
+        named = [tok for tok in message.split() if tok.startswith("--")]
+        assert named, message
+        for flag in named:
+            flag = flag.rstrip(",.")
+            if flag == "--allow-base-fallback":
+                continue
+            assert flag in {"--midtrain-ckpt", "--sft-ckpt", "--dpo-ckpt"}, flag
+
+
+def test_the_fallback_is_reachable_but_never_silent():
+    campaign = rc
+    logged: list[str] = []
+    original = campaign._log
+    campaign._log = lambda stage, msg, **kw: logged.append(str(msg))
+    try:
+        resolved = campaign._resolve_stage_input(
+            _ctx(campaign_mode="development"), "sft")
+    finally:
+        campaign._log = original
+    assert resolved == "Qwen/Qwen3-14B"
+    assert any("UNTRAINED base" in line for line in logged), logged
+
+
+def test_an_injected_checkpoint_is_used_and_reported():
+    campaign = rc
+    logged: list[str] = []
+    original = campaign._log
+    campaign._log = lambda stage, msg, **kw: logged.append(str(msg))
+    try:
+        resolved = campaign._resolve_stage_input(
+            _ctx(midtrain_ckpt="runs/midtrain_14b_frontier"), "sft")
+    finally:
+        campaign._log = original
+    assert resolved == "runs/midtrain_14b_frontier"
+    assert any("midtrain_ckpt" in line for line in logged), logged
+
+
+def test_grpo_falls_back_through_dpo_to_sft_before_the_base():
+    """Skipping DPO is legitimate; skipping straight to the base is not."""
+    campaign = rc
+    logged: list[str] = []
+    original = campaign._log
+    campaign._log = lambda stage, msg, **kw: logged.append(str(msg))
+    try:
+        resolved = campaign._resolve_stage_input(_ctx(sft_ckpt="runs/sft"), "grpo")
+    finally:
+        campaign._log = original
+    assert resolved == "runs/sft"
+    assert any("sft_ckpt" in line for line in logged), logged

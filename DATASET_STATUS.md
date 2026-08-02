@@ -14,7 +14,20 @@ Reproducible, decontaminated, and enriched with a novel kernel-curriculum layer.
 | Kernel-curriculum (folded into SFT + midtrain) | 9,965 | 13.3M | kore_offline/curriculum_all.jsonl | data/release/curriculum/ |
 | Provenance (wins/groups/repair/agentic) | — | — | data/b05factory/{wins,groups,repair,agentic}/ | data/release/provenance/ |
 
-**Total ~662M training tokens** (>1B effective at 3 CPT epochs). Reassemble: `cd data/release && ./reassemble.sh`
+**Total ~662M training tokens** (170.2 + 190.4 + 301.4M) (>1B effective at 3 CPT epochs). Reassemble: `cd data/release && ./reassemble.sh`
+
+> **The `data/b05factory/**` corpora are cluster-only.** They live on SPUR
+> (`amd-spur-tunnel:~/Kore-RL/KORE/`) and are not in a fresh checkout — only the
+> gzip+split parts under `data/release/` are, plus `data/b05factory/launch/` and
+> `data/b05factory/dpo/`. Run `reassemble.sh` to materialize them locally. Row and
+> byte counts re-verified on the cluster: `midtrain/corpus.jsonl` 683,463,071 B /
+> 86,010 rows, `sft/multicap.jsonl` 630,488,937 B / 56,493 rows,
+> `dpo/pairs.jsonl` 1,093,321,730 B / 96,675 rows. `tests/test_docs_contract.py`
+> pins these three counts so an artifact change forces a doc edit.
+>
+> The token columns are tokenizer-counted, not re-measured every audit. An
+> independent count of the SFT slice with the Qwen3-14B tokenizer gave
+> 191,477,221 tokens against the 190.4M below — 0.6% apart.
 
 ## Kernel-curriculum layer (novel, gfx950-only, teacher = claude-opus-5 via AMD gateway)
 Fills the GPU-code scarcity gap (CUDA/HIP <0.01% of pretraining data; Kevin-32B). Tiers:

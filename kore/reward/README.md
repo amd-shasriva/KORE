@@ -80,7 +80,9 @@ N (named residual) = (stall_frac + occupancy_deficit) · T_measured      # PMC a
 
 On the correct tier the reward becomes `correctness_weight + physics_weight · ρ_phys (+ format)` (default `physics_weight = 1.0`). `ρ_phys → 1` as the kernel drives the named residual `N → 0` (it approaches the roofline).
 
-`η = T_min / T_measured` is the PMC-free attainment used online; `ρ` is its counter-grounded named-residual refinement, which reconstructs the runtime residual with R² ≈ 0.98 on gfx950 (offline validation, [`docs/P0_RESULTS.md`](../../docs/P0_RESULTS.md)). Because `N` is clamped to `[0, R]`, crediting the named residual is never harsher than the timing-only fallback, giving the invariant `η ≤ ρ_phys ≤ 1`.
+`η = T_min / T_measured` is the PMC-free attainment used online; `ρ` is its counter-grounded named-residual refinement. Because `N` is clamped to `[0, R]`, crediting the named residual is never harsher than the timing-only fallback, giving the invariant `η ≤ ρ_phys ≤ 1`.
+
+> **`ρ` reconstructs the residual in-sample only, and that is not evidence.** An earlier revision of this page claimed "R² ≈ 0.98 on gfx950 (offline validation)". The 0.978 is reproducible but is a shared-denominator artifact — both sides scale with `T_candidate` — and a `T_candidate`-only predictor scores 0.997. On the preregistered normalized target over held-out task clusters the named model scores −0.458, and leave-one-family-out transfer is −384 on MoE. Three independent studies return `INTEGRITY_ONLY` with **no** authorized family. See [`docs/P0_RESULTS.md`](../../docs/P0_RESULTS.md). `residual` mode remains available and unit-tested, but must not be described as validated.
 
 ```mermaid
 flowchart LR

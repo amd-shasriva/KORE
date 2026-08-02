@@ -22,10 +22,16 @@ Full fine-tuning at 14B / 32B / 70B is a **documented one-command path** - you d
 ```bash
 # Full 14B run, single command. The campaign spawns the FSDP
 # processes under the hood (LoRA is the default; --full-ft opts into full-FT).
+# --use-hf is mandatory: the default `production` campaign mode is fail-closed on
+# weakened retention sources and exits 1 with "missing --use-hf" without it.
 PYTHONPATH=. python scripts/run_campaign.py --model Qwen/Qwen3-14B \
     --tasks rmsnorm_aiter,gemm_bf16,flash_attn_decode_bf16 \
-    --teacher claude --full-ft
+    --teacher claude --full-ft --use-hf
 ```
+
+On the SPUR cluster the login node has no GPUs, so this form only works inside an
+allocation; the real path is one `sbatch` per stage (see
+[`scripts/README.md`](../scripts/README.md)).
 
 When you pass `--full-ft`, the campaign:
 
@@ -47,9 +53,11 @@ the shipped `accelerate_fsdp.yaml` offload knobs) changes.
 ### <a name="full-ft-per-stage-status"></a>Full-FT per-stage status
 
 The launcher accepts the four *trainable* stages (`midtrain|sft|dpo|grpo`). The
-campaign itself runs nine: `midtrain, datagen, agentic, build, sft, dpo, grpo,
-soup, eval` (plus optional `evolve` after `datagen`). The five non-trainable
-ones build corpora, average checkpoints, or score, and never touch the launcher.
+campaign's `DEFAULT_STAGES` is nine, in this order: `midtrain, datagen, agentic,
+build, sft, dpo, grpo, soup, eval`. Two more are opt-in — `reverify` (re-grade
+existing data under the current oracle) and `evolve` (after `datagen`) — giving
+the eleven-entry `ALL_STAGES`. The five non-trainable default stages build
+corpora, average checkpoints, or score, and never touch the launcher.
 
 The campaign routes a trainable stage to the launcher **only if** that stage
 exposes a JSON `-m` entry
@@ -124,9 +132,21 @@ once per step, so no FSDP collective runs during generation at all.
 
 For GRPO the resolved JSON also carries the run's **train-split task ids** (so the
 sharded run trains only on the TRAIN split, never the held-out generalization
-family) and the **Kevin + anti-collapse levers** (`rc_grpo` / `variance_floor` /
-`sc_grpo` / `gtpo_codesim` / `value_prefilter`, all on by default -
-`configs/grpo_14b_full.json`).
+family) and the **Kevin + anti-collapse levers** (`variance_floor`,
+`gtpo_codesim`, `starpo_s`, `dynamic_sampling`, `rc_grpo`, `sc_grpo`,
+`value_prefilter`).
+
+**Do not read this document for which levers are on.**
+`configs/grpo_14b_full.json` is the authority, and several of these levers have
+no consumer under `distributed=true` + `agentic=true`: the SC-GRPO KL-weighting
+block exists only in the single-process loop, RC-GRPO reward tokens are prepended
+only in the serial `_rollout` (not `_rollout_agentic`), and `value_prefilter`'s
+generate-N-bench-top-k path is likewise serial-only.
+`kore.policy.capabilities.validate_grpo_config` encodes exactly these topologies
+as errors, and `audit_requested_capabilities` runs unconditionally at
+`train_grpo` startup and writes `capability_audit.json` naming every
+requested-but-inert capability. Check that file, or the config, rather than this
+sentence.
 
 ### Identical per-turn credit: single-process and distributed
 
@@ -145,19 +165,29 @@ per-trajectory `(rewards, correct, infra, phis)` traces through the same
   expected-gradient-neutral state-dependent baseline that densifies per-turn
   credit toward the roofline.
 
-Both travel in the resolved GRPO JSON (`credit_incorrect_turns=true`,
-`physics_shaping_weight=0.15` in `configs/grpo_14b_full.json`), so switching
-between the single-GPU LoRA bring-up and the sharded full-FT run does **not**
-change the credit assignment - only the sharding does. (The sharded path applies
-this credit per-rank on that rank's trajectory slice; the group-relative
-advantage baseline is then computed over the all-gathered full group.)
+Both travel in the resolved GRPO JSON, so switching between the single-GPU LoRA
+bring-up and the sharded full-FT run does **not** change the credit assignment -
+only the sharding does. (The sharded path applies this credit per-rank on that
+rank's trajectory slice; the group-relative advantage baseline is then computed
+over the all-gathered full group.)
 
-### Example training config (`configs/sft_14b_full.json`, as actually shipped)
+`physics_shaping_weight` is additionally gated at runtime:
+`_physics_shaping_weight()` returns 0.0 unless *both*
+`physics_shaping_evidence_path` and `physics_shaping_evidence_fingerprint` are
+set, and `reward.shaping.evidence_for_task` further requires that the task's
+operator family cleared `ShapingThresholds` under the same model fingerprint. No
+family has ever cleared them ([`P0_RESULTS.md`](P0_RESULTS.md) records three
+studies returning `INTEGRITY_ONLY` with "authorized families: none"), so read the
+config for the shipped value and do not assume a nonzero weight was a live
+training signal.
+
+### Example training config (`configs/sft_14b_full.json`, safety-critical fields)
 
 ```json
 {
   "model_id": "Qwen/Qwen3-14B",
-  "dataset_path": "data/sft/multicap.jsonl",
+  "model_revision": "40c069824f4251a91eefaf281ebe4c544efd3e18",
+  "dataset_path": "data/b05factory/sft/multicap.jsonl",
   "output_dir": "runs/sft_14b_full",
   "use_lora": false,
   "distributed": true,
@@ -165,17 +195,38 @@ advantage baseline is then computed over the all-gathered full group.)
   "gradient_checkpointing": true,
   "per_device_train_batch_size": 2,
   "gradient_accumulation_steps": 8,
-  "max_seq_length": 16384,
+  "max_seq_length": 17408,
   "num_train_epochs": 3.0,
   "learning_rate": 1e-05,
   "lr_scheduler_type": "cosine",
   "warmup_ratio": 0.03,
   "repair_loss_weight": 2.0,
+  "save_total_limit": 2,
   "fsdp": "full_shard auto_wrap",
   "fsdp_transformer_layer_cls": null,
   "fsdp_cpu_offload": false
 }
 ```
+
+This is an excerpt; read the file for the full set (it also carries the
+`dataloader_*` host-memory settings that `tests/test_dataloader_contract.py`
+pins). Three of these fields were wrong in an earlier revision of this document
+and each cost something real:
+
+- `dataset_path` said `data/sft/multicap.jsonl`, which nothing produces —
+  `data/release/reassemble.sh` writes `data/b05factory/sft/multicap.jsonl`. A
+  direct `launch_distributed.sh sft` on the documented path raised
+  `FileNotFoundError` *after* every rank had pulled 27.5 GiB of weights.
+- `max_seq_length` said `16384`, which silently dropped 3,214 rows — **53.6% of
+  the entire `math_reasoning` capability slice** — because the generator capped
+  its CoTs at ~16.8k tokens, just above that cut. The shipped value is now
+  `17408`.
+- `save_total_limit` was absent, so a reader inherited the non-crash-safe
+  default of 1; the Trainer rotates the previous checkpoint out around each save,
+  so a death inside that window left nothing resumable.
+
+`tests/test_dataloader_contract.py` and
+`tests/test_sft_launch_readiness.py` now pin all three.
 
 `fsdp_transformer_layer_cls: null` auto-detects the decoder block from
 `model_id` (Qwen3 → `Qwen3DecoderLayer`, DeepSeek-R1-Distill-Qwen → `Qwen2DecoderLayer`,

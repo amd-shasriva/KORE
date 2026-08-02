@@ -293,6 +293,15 @@ math — a bf16 softmax accumulator, say — lands at 49 dB SNR and 0.55 format 
 the task's own declared 30 dB gate admits it. That is the SNR threshold's decision, not
 the tolerance's, and raising per-task gates is a separate change.
 
+Every record now carries `format_steps` and `format_steps_limit`: the disagreement and
+the bound it was judged against, both in the same unit (one representable step of the
+output format, or one index position), taken from whichever output was most binding. So
+the headroom is readable straight off the artifact. Across the corpus, 245 tasks are
+bit-exact and 1,045 of 1,052 sit at or below 1.0 step against a limit of 2.0. The only
+records above 2.0 are the five top-p / typical-mass / inverse-CDF-sampling ops, and for
+those the recorded limit is the declared selection-boundary allowance, so no record
+exceeds the bound it was judged against.
+
 **Treat a task's verdict as evidence, then opt in to eligibility.**
 `kore/tasks/verification.py` turns the artifact into a policy; the default excludes the
 `broken` and `shortfall` bands, both of which are empty today, so all 1,289 train tasks

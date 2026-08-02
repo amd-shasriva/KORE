@@ -725,7 +725,10 @@ def test_grpo_config_is_pinned_and_parses_through_the_identity_split():
 
     runtime_keys = set(IDENTITY_CONFIG_KEYS) | set(PREFLIGHT_CONFIG_KEYS)
     fields = set(GRPOConfig.__dataclass_fields__)
-    leftover = set(payload) - runtime_keys - {"tasks", "lora"}
+    # ``_comment_<field>`` keys are this repo's in-config documentation and are
+    # dropped by every stage loader before the strict parse, exactly as here.
+    leftover = {key for key in payload if not key.startswith("_")}
+    leftover -= runtime_keys | {"tasks", "lora"}
     assert leftover <= fields, sorted(leftover - fields)
 
     config = grpo_config_from_dict(dict(payload))

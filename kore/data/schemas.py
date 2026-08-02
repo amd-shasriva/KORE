@@ -10,7 +10,14 @@ Four record types feed the capability curriculum:
     from :mod:`kore.agent.schema` to avoid an import cycle).
 
 Every record is a plain dataclass with symmetric ``to_dict``/``from_dict`` so it
-round-trips losslessly through JSONL. Production record admission is strict and
+round-trips losslessly through JSONL. That symmetry is load-bearing for the
+held-out split, not just tidiness: ``registry.record_split_decision`` reads a
+record's identity through ``__dict__`` for a dataclass, so every field its split
+decision consults has to be a real column or a typed read silently weakens the
+filter. All three types therefore carry the FULL leakage-provenance block -
+``operation``, ``arch``, ``shape``, ``dtype`` and ``provenance_root`` - covering
+the ``foreign_dtype`` and ``heldout_lineage`` branches that a key surviving only
+in the raw JSON would leave undefended. Production record admission is strict and
 versioned; the explicitly named ``read_jsonl_legacy`` path is the only tolerant
 reader and is intended for quarantine/migration tooling.
 
@@ -147,6 +154,52 @@ class JsonlReadMode(str, Enum):
     LEGACY_QUARANTINE = "legacy_quarantine"
 
 
+def _declared_dtype_of(d: dict) -> str | None:
+    """The dtype a record declares for itself, or ``None``.
+
+    Sibling of :func:`_provenance_root_of` and dropped by the typed read for the
+    same reason: ``split_decision_for_identity`` reserves any record outside
+    ``TRAIN_DTYPES`` as ``foreign_dtype``, and it resolves the dtype from
+    ``dtype`` -> ``_provenance["dtype"]`` -> the registry. ``arch`` was already a
+    column on all three record types so the ``foreign_arch`` guard survived typing;
+    ``dtype`` was not, so its guard did not.
+    """
+    dtype = d.get("dtype")
+    if isinstance(dtype, str) and dtype.strip():
+        return dtype
+    provenance = d.get("_provenance")
+    if isinstance(provenance, dict):
+        dtype = provenance.get("dtype")
+        if isinstance(dtype, str) and dtype.strip():
+            return dtype
+    return None
+
+
+def _provenance_root_of(d: dict) -> str | None:
+    """The lineage root a record declares for itself, or ``None``.
+
+    ``registry.record_split_decision`` resolves a record's provenance root from
+    ``provenance_root``, then ``_provenance["root"]``, then the REGISTRY entry for
+    its ``task_id`` - and a root that resolves to a held-out near-generalization
+    probe makes the record eval-only (``heldout_lineage``). Every typed record
+    therefore has to carry its own declared root across ``from_dict``: the registry
+    reads a dataclass through ``__dict__``, so a root that lives only in the raw
+    JSON is invisible to it, and a derived record under a fresh (unregistered)
+    ``task_id`` would fall back to ``task_id`` as its own root and classify as
+    TRAIN. This repo has a measured contamination history, so the lineage half of
+    the held-out defence must survive the typed read.
+    """
+    root = d.get("provenance_root")
+    if isinstance(root, str) and root.strip():
+        return root
+    provenance = d.get("_provenance")
+    if isinstance(provenance, dict):
+        root = provenance.get("root")
+        if isinstance(root, str) and root.strip():
+            return root
+    return None
+
+
 @dataclass
 class RepairRecord:
     """A single repair turn: parent kernel failed, teacher fixed it."""
@@ -165,6 +218,8 @@ class RepairRecord:
     operation: str | None = None
     arch: str | None = None
     shape: str | None = None
+    dtype: str | None = None
+    provenance_root: str | None = None
     schema_version: ClassVar[int] = RECORD_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
@@ -185,6 +240,8 @@ class RepairRecord:
             operation=d.get("operation"),
             arch=d.get("arch"),
             shape=d.get("shape"),
+            dtype=_declared_dtype_of(d),
+            provenance_root=_provenance_root_of(d),
         )
 
 
@@ -202,6 +259,8 @@ class RankedGroupRecord:
     operation: str | None = None
     arch: str | None = None
     shape: str | None = None
+    dtype: str | None = None
+    provenance_root: str | None = None
     # rocprofv3 counters for the rank-0 (best) candidate, when collected at datagen
     # (Pillar 4, KORE_GROUND_REASONING=1). Enables profiler-grounded gold-win reasoning.
     counters: dict | None = None
@@ -236,6 +295,8 @@ class RankedGroupRecord:
             operation=d.get("operation"),
             arch=d.get("arch"),
             shape=d.get("shape"),
+            dtype=_declared_dtype_of(d),
+            provenance_root=_provenance_root_of(d),
             counters=d.get("counters"),
             parent_counters=d.get("parent_counters"),
             parent_wall_us=d.get("parent_wall_us"),
@@ -271,6 +332,8 @@ class WinRecord:
     operation: str | None = None
     arch: str | None = None
     shape: str | None = None
+    dtype: str | None = None
+    provenance_root: str | None = None
     # Timing-rigor provenance (frontier-baselines upgrade). All optional so
     # existing v1 shards round-trip unchanged (defaults None on read).
     baseline_type: str | None = None      # DECLARED targets.comparison_baseline
@@ -313,6 +376,8 @@ class WinRecord:
             operation=d.get("operation"),
             arch=d.get("arch"),
             shape=d.get("shape"),
+            dtype=_declared_dtype_of(d),
+            provenance_root=_provenance_root_of(d),
             # v1->v2 timing-rigor fields; absent in v1 shards -> default None.
             baseline_type=d.get("baseline_type"),
             baseline_wall_us=d.get("baseline_wall_us"),
@@ -666,7 +731,19 @@ def _validate_meaningful_transcript(value: Any, path: str, *,
             path, f"trajectory is missing required roles {sorted(missing)}")
 
 
+def _validate_leakage_provenance(d: dict) -> None:
+    """The declared lineage root and dtype are optional, but never non-strings.
+
+    They feed ``registry.record_split_decision``'s ``heldout_lineage`` and
+    ``foreign_dtype`` branches, so a non-string here would silently degrade to
+    "not declared" and reclassify a reserved record as trainable.
+    """
+    _validate_optional_string(d, "provenance_root", "record")
+    _validate_optional_string(d, "dtype", "record")
+
+
 def _validate_repair(d: dict) -> None:
+    _validate_leakage_provenance(d)
     failure_class = _require_string(d, "failure_class", "record")
     if failure_class not in ("compile_fail", "snr_fail"):
         raise _validation_error(
@@ -680,6 +757,7 @@ def _validate_repair(d: dict) -> None:
 
 
 def _validate_ranked_group(d: dict) -> None:
+    _validate_leakage_provenance(d)
     _require_string(d, "parent_id", "record")
     if "candidates" not in d:
         raise _validation_error("record", "missing required field 'candidates'")
@@ -774,6 +852,7 @@ def _validate_ranked_group(d: dict) -> None:
 
 
 def _validate_win(d: dict) -> None:
+    _validate_leakage_provenance(d)
     if "trajectory" not in d:
         raise _validation_error("record", "missing required field 'trajectory'")
     _validate_messages(d["trajectory"], "record.trajectory")

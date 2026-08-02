@@ -1393,11 +1393,12 @@ def correctness_tolerance(dtype, peak: float,
 
     ``peak`` must be the ORACLE's largest finite magnitude, never the
     candidate's, so a kernel cannot widen its own tolerance.  An index/count
-    output gets a tolerance of exactly zero.
+    output gets a tolerance of exactly zero, and its step is one index position
+    so that a disagreement still reports in a meaningful unit.
     """
     step, kind = _format_step(dtype, peak)
     if kind == "index":
-        return 0.0, 0.0, kind
+        return 0.0, 1.0, kind
     steps = code_steps if kind == "code" else CORRECTNESS_ULP_STEPS
     return steps * step, step, kind
 
@@ -1698,9 +1699,14 @@ def _compare_outputs(out, ref_out, atol=None, rtol=None, expected_dtypes=None,
             tol += decl["selection_rel"] * peak
         ok = ok and (diff <= tol)
         if stats is not None:
-            stats["steps"] = max(stats.get("steps", 0.0),
-                                 (diff / step) if step > 0 else
-                                 (0.0 if diff == 0 else float("inf")))
+            # Report the MOST BINDING output: its disagreement and the bound it
+            # was judged against, in the same unit (one representable step, or
+            # one index position).  Taking the two maxima independently would
+            # pair a number from one output with a bound from another.
+            used, allowed = diff / step, tol / step
+            if used - allowed >= stats.get("margin", -float("inf")):
+                stats["margin"] = used - allowed
+                stats["steps"], stats["limit"] = used, allowed
             stats.setdefault("kinds", set()).add(kind)
     return worst, maxd, ok
 
@@ -1749,11 +1755,13 @@ def _run_correctness(ref, task_dir, shape) -> int:
 
     print(f"SNR: {worst:.2f} dB"); print(f"allclose: {ok}"); print(f"max_diff: {maxd:.6f}")
     # The dtype-normalised form of max_diff: how many representable steps of the
-    # output format the candidate and the oracle disagree by.  ``max_diff`` alone
-    # is unreadable across bf16/fp8/int8 outputs; this is the number the gate
-    # actually tests (see :func:`correctness_tolerance`).
+    # output format the candidate and the oracle disagree by, beside the bound it
+    # was judged against.  ``max_diff`` alone is unreadable across bf16/fp8/int8
+    # outputs; this pair is what the gate actually tested, in one unit, including
+    # any allowance the op declared (see :func:`correctness_tolerance` and
+    # :func:`_tolerance_declarations`).
     print(f"format_steps: {stats.get('steps', 0.0):.4f} "
-          f"limit: {CORRECTNESS_ULP_STEPS:.4f} "
+          f"limit: {stats.get('limit', CORRECTNESS_ULP_STEPS):.4f} "
           f"kinds: {','.join(sorted(stats.get('kinds', ()))) or 'none'}")
     return 0
 

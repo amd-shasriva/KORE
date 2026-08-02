@@ -141,10 +141,17 @@ HIP_VISIBLE_DEVICES=0 PYTHONPATH=. python -m kore.analysis.p0_sol \
 layernorm_bf16,quant_fp8_pertoken,rmsnorm_aiter,rope_bf16,silu_mul_bf16,softmax_bf16,\
 topk_softmax_bf16,flash_attn_decode_bf16,flash_attn_prefill_bf16,paged_attn_decode_bf16 \
   --calibration data/calibration_v1.json \
-  --expect-model-fingerprint sha256:a6e01795829dd9a1c11752e12ff84825241f1e7d1e752c47dd2d926f7b858c7a \
+  --expect-model-fingerprint sha256:74695c10e5ff5cf3d6799c38546258e1796be2e88840cd658abd99dd159c281f \
   --arch gfx950 --shapes-per-task 3 --reseeds 3 --bootstrap 1000 --permutations 1000 \
   --out data/p0_study_calibrated.json
 ```
+
+> The historic run passed the **v1** fingerprint
+> `sha256:a6e01795829dd9a1c11752e12ff84825241f1e7d1e752c47dd2d926f7b858c7a`. Since
+> `data/calibration_v1.json` was reissued under v2, that value no longer matches and the command
+> exits 1 with `physical-model fingerprint mismatch` — which is the guard working. The v2 digest
+> above is what the file carries today; it is verified to be accepted (checked with `--dry-run` on a
+> CPU box, which is the whole command minus the GPU measurement).
 
 ```
 (a) roofline beyond Tcand : rho = 0.6205   Tcand-only = 0.7291   delta = -0.1086   q = 0.277 -> FAIL
@@ -211,21 +218,35 @@ model can never authorize shaping. The shipped models are therefore not affected
 
 ## Peak calibration (measured achievable, not datasheet)
 
-On-device microbenchmarks (`kore.analysis.calibrate_peaks`, batched event timing):
+On-device microbenchmarks (`kore.analysis.calibrate_peaks`, batched event timing). These are the
+values in `data/calibration_v1.json` — the document both replications above were actually run with,
+so they are the numbers behind every calibrated figure in this report:
 
-| peak | datasheet | measured achievable | attained | method |
+| peak | datasheet (MI350X) | measured achievable | attained | method |
 | --- | --- | --- | --- | --- |
-| HBM bandwidth | 8.0 TB/s | **4.60 TB/s** | 57% | STREAM triad `a = b + q·c` (3·N·4 B traffic) |
-| bf16 matrix | 2.5 PF/s | **1.27 PF/s** | 51% | 8192³ square matmul (`2N³` FLOPs, sustained) |
-| fp8 matrix | 5.0 PF/s | *(datasheet)* | – | `torch._scaled_mm` unavailable on this stack |
+| HBM bandwidth | 8.0 TB/s | **4.763 TB/s** | 60% | STREAM triad `a = b + q·c` (3·N·4 B traffic), 512 MB |
+| bf16 matrix | 2.3 PF/s | **1.296 PF/s** | 56% | 8192³ square matmul (`2N³` FLOPs, sustained) |
+| fp8 matrix | 4.6 PF/s | *(datasheet)* | – | `torch._scaled_mm` unavailable on this stack |
+
+The datasheet column is MI350X, not MI355X: this node reports Marketing Name "AMD Instinct
+MI350X", a 1000 W cap and 2200 MHz max sclk, giving 256 CU × 2.2 GHz × 4096 bf16 FLOP/clk =
+2.31 PF/s. Dividing by an MI355X 2.5 PF/s ceiling would lower the speed-of-light integrity floor
+by 8% and admit physically impossible timings, so `rooflines.DEFAULT_SKU` pins `mi350x`. An earlier
+revision of this table quoted 2.5 / 5.0 PF/s datasheet and 4.60 TB/s / 1.27 PF/s measured — those
+came from the superseded `data/calibration.json` and disagreed with this document's own
+"HBM 4.763 TB/s, bf16 1.296 PF/s — 60% and 56%" above.
 
 > **Applying calibration.** Earlier revisions documented `KORE_PEAK_BF16` / `KORE_PEAK_HBM_BW` /
 > `KORE_PEAK_FP8` environment overrides. Those were deliberately removed as invisible,
-> unfingerprinted global calibration and are now a **silent no-op** — setting them changes nothing.
-> Calibrated peaks must be supplied as a fingerprinted `kore.runtime-calibration.v1` document; see
-> `kore/analysis/calibrate_peaks.py` and the `--calibration` path. Any figure produced without one
-> is computed against **datasheet** peaks, which inflates `T_min` by roughly 1.74× (memory-bound)
-> to 1.81× (compute-bound) and correspondingly roughly halves η.
+> unfingerprinted global calibration and now do nothing: `rooflines.resolve_peaks` ignores them and
+> raises a `RuntimeWarning` naming any that are exported. (Note that `scripts/run_conductor_14b.sh`
+> still exports two of them, to no effect, and `data/calibration.json` still carries an
+> `env_exports` block that no longer applies.) Calibrated peaks must be supplied as a fingerprinted
+> `kore.runtime-calibration.v1` document; see `kore/analysis/calibrate_peaks.py` and the
+> `--calibration` path. Any figure produced without one is computed against **datasheet** peaks,
+> which *understates* `T_min` — and therefore η — by 1.68× (memory-bound) to 1.77× (compute-bound),
+> i.e. roughly halves η. The direction matters: datasheet peaks are higher, so `T_min = max(W/P,
+> Q/B)` comes out smaller and a kernel looks *further* from the roofline than it is.
 
 Using an achievable rather than datasheet peak rescales η for every kernel of a dtype identically,
 so it does not change any of the relationships tested above.

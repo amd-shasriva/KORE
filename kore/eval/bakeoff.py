@@ -186,7 +186,15 @@ def _run_task(
         # serial mode conditions the next turn on this turn's outcome
         feedback = _feedback(obs, rr)
 
+    # ``correct`` here means SCORED: correct AND carrying an integrity-gated
+    # speedup, because that is what fast_p needs. It is deliberately NOT the same
+    # as the reward's correctness gate: a kernel that passes the SNR gate but
+    # whose timing was demoted to screening grade (``rr.speedup is None``, flag
+    # ``timing:screening``) is correct and unscoreable, and collapsing the two
+    # would report a *verifier* pass as a correctness failure. ``correct_gate``
+    # and ``timed`` keep the two separable for any caller that needs the funnel.
     correct = best_speedup is not None
+    correct_gate = any(t["correct"] for t in trajectory)
     # Normalized times so fast_p is measurement-unit independent: with
     # baseline=1.0, actual=1/speedup, the reconstructed speedup is exact.
     baseline_time = 1.0
@@ -200,6 +208,8 @@ def _run_task(
     return {
         "task_id": _task_id(task),
         "correct": correct,
+        "correct_gate": correct_gate,
+        "timed": correct,
         "best_speedup": best_speedup,
         "best_reward": best_reward,
         "baseline_time": baseline_time,

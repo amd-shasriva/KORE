@@ -170,7 +170,17 @@ the suite itself would skip every test anyway. On a Slurm cluster,
 | Value model | `test_value.py`, `test_value_replay_train.py` |
 | Agent / transforms | `test_agent.py`, `test_agent_transform_discover.py` |
 | Eval / gates | `test_eval.py`, `test_generalization.py`, `test_retention.py`, `test_champion.py`, `test_korebench.py`, `test_vs_opus.py`, `test_e2e_serving_gate.py`, `test_gpu_e2e_serving_gate.py` (`-m gpu`) |
-| Infra | `test_campaign_wiring.py`, `test_obs.py`, `test_contract.py`, `test_marker_contract.py`, `test_env_gpu_visibility.py`, `test_phase0_verifier_fixes.py` |
+| Infra | `test_campaign_wiring.py`, `test_campaign_stages.py`, `test_campaign_lineage.py`, `test_obs.py`, `test_contract.py`, `test_entrypoint_contract.py`, `test_marker_contract.py`, `test_dead_code_contract.py`, `test_env_gpu_visibility.py`, `test_env_plumbing.py`, `test_phase0_verifier_fixes.py`, `test_operations_registry.py`, `test_spur_partition.py`, `test_spur_stage_launchers.py`, `test_spur_supervisor.py`, `test_kf_verify.py`, `test_migrate_shards.py`, `test_merge_datagen_roots.py` |
+| Contracts and integrity gates | `test_docs_contract.py`, `test_dataloader_contract.py`, `test_packaging_contract.py`, `test_task_integrity_gates.py`, `test_generated_breadth_contract.py`, `test_breadth_seed_contract.py`, `test_replay_contract.py`, `test_shape_certification.py`, `test_baseline_honesty.py`, `test_grpo_recipe_honesty.py`, `test_eval_integrity.py`, `test_data_integrity.py`, `test_data_durability.py`, `test_decontam_provenance.py`, `test_frontier_protocol.py`, `test_training_budget_ledger.py` |
+| Model / resource identity | `test_model_identity_wiring.py`, `test_model_spec_resources.py`, `test_preflight_identity.py`, `test_gpu_preflight_identity.py`, `test_generation_client.py`, `test_sandbox_boundary.py`, `test_sandbox_launch_plan.py`, `test_hack_scanner_hardening.py`, `test_oracle_wiring.py` |
+| Stage readiness / resume | `test_sft_launch_readiness.py`, `test_dpo_launch_readiness.py`, `test_grpo_launch_readiness.py`, `test_grpo_capabilities.py`, `test_grpo_checkpoint_resume.py`, `test_minimum_grpo_profile.py`, `test_preemption_checkpoints.py` |
+| Tasks / ops (cont.) | `test_task_taxonomy.py`, `test_ops_runtime.py`, `test_ops_verify.py`, `test_registered_curriculum.py`, `test_deepen_ksaturate.py` |
+| Data factory (cont.) | `test_teacher.py`, `test_amd_knowledge.py`, `test_humaneval_extract.py` |
+
+**The map above must name every module.** `test_docs_contract.py` fails if a
+`tests/test_*.py` exists that this table does not list, because the useful half of
+this suite is the contract tests — and an unlisted contract test is one nobody
+knows to look at when the thing it pins changes.
 
 `test_campaign_wiring.py` and `test_distributed.py` are the fastest confidence
 check that the orchestration and FSDP configuration are coherent.

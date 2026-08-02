@@ -16,13 +16,27 @@
 # *.resolved.json. The resolved copy is kept at
 # runs/grpo-$SLURM_JOB_ID.resolved.json. Pass '-' to keep a config value verbatim.
 #
-# DATA_ROOT exists because kore.policy.grpo._build_opus_scores derives the
-# co-evolution archive root from dirname(coevolve_distill_path). The shipped
-# config says data/full14b/coevolve_wins.jsonl, so without this the
-# regret-vs-Opus curriculum would mine a DIFFERENT data root than the one this
-# lineage was built from, and (being fail-safe) would silently return no scores
-# rather than complain. The resolver rewrites both co-evolution paths and prints
-# what it changed.
+# DATA_ROOT matters because kore.policy.grpo._build_opus_scores derives the
+# co-evolution archive root from dirname(coevolve_distill_path), so that
+# directory decides which corpus the regret-vs-Opus curriculum mines.
+#
+# The shipped config used to say data/full14b/coevolve_wins.jsonl and this
+# rewrite was the only thing preventing a run from mining the wrong archive
+# (measured: data/full14b yields 51 Opus-scored tasks, data/b05factory yields
+# 1157). The config is now correct at rest, so on a default launch the resolver
+# reports "no overrides" for both co-evolution keys -- which is the point: the
+# recipe and the launcher agree, and you can see that they agree.
+#
+# The rewrite STAYS rather than being deleted as redundant, for two reasons.
+# It is a real capability, not a workaround: DATA_ROOT is a positional argument,
+# so an operator can point one job at data/b05factory_synced (557 scored tasks)
+# or any other archive without editing a tracked config. And it keeps the two
+# co-evolution paths re-rooted TOGETHER, which matters because build_opus_scores
+# treats a present, non-empty opus_scores.json cache as authoritative and skips
+# the archive scan entirely -- moving one path without the other would let a
+# cache from the old root silently win. tests/test_grpo_recipe_honesty.py pins
+# this default equal to the config's own root so the two cannot drift apart
+# again in silence.
 #
 # WHY ONE NODE (and no multi-node variant): GRPO does NOT need a separate
 # generation replica job. Its rollout replica is IN-PROCESS and PER-RANK -
@@ -125,6 +139,17 @@ export KORE_SHAPE_AUGMENT="${KORE_SHAPE_AUGMENT:-0}"
 # Per-GPU exclusive lock around TIMED regions only, so ranks that land on the
 # same physical device cannot inflate each other's CV (compiles still overlap).
 export KORE_TIMING_LOCK="${KORE_TIMING_LOCK:-1}"
+# Recipe integrity. kore.policy.capabilities.log_capability_audit runs at
+# train_grpo startup and reports every requested-but-inert capability; 'error'
+# promotes that report to a hard failure before the 8-rank weight load. This is
+# the fail-closed lane for a config that CANNOT set strict_feature_validation:
+# the strict profile bans use_search, value_prefilter, coevolve_mint,
+# search_bnb, coevolve_regret_vs_opus and distillation outright, so turning it
+# on here would delete the recipe rather than verify it. The audit checks
+# artifacts too, so this also refuses to burn an allocation training with a
+# silently-absent KL retention anchor because the SFT stage has not landed yet.
+# Overridable for a deliberate degraded run.
+export KORE_GRPO_INERT_FEATURES="${KORE_GRPO_INERT_FEATURES:-error}"
 # report, NEVER strict: no measured peak profile exists for this workload, so
 # strict mode would refuse to start. Exported AFTER .env.local deliberately.
 export KORE_RESOURCE_PREFLIGHT=report

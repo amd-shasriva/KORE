@@ -860,6 +860,7 @@ def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inproc
         apply_runtime_env,
         emit_feature_manifest,
         initialize_grpo_foundations,
+        log_capability_audit,
     )
 
     # Fail-closed task split: GRPO must train on an EXPLICIT train-only task list,
@@ -873,6 +874,19 @@ def train_grpo(config, tasks: Optional[list[str]] = None, backend: str = "inproc
         raise FeatureConfigurationError(
             "GRPO LoRA is unsupported; use_lora must be false"
         )
+
+    # Say out loud which requested capabilities this run cannot deliver, BEFORE
+    # anything else can fail on them. Every feature here degrades safely, so
+    # without this a stale recipe trains something other than what it says and
+    # nothing in the log disagrees. Runs on strict and non-strict alike; the
+    # strict resolver below then refuses what this only reports.
+    # ``output_dir`` is read defensively so a lightweight test double still
+    # gets audited; only rank 0 owns the file.
+    log_capability_audit(
+        config,
+        output_dir=(getattr(config, "output_dir", None)
+                    if int(os.environ.get("RANK", "0")) == 0 else None),
+    )
 
     strict = bool(getattr(config, "strict_feature_validation", False))
     if strict:
@@ -1492,6 +1506,8 @@ def _load_full_optim_state(model, optimizer, full_osd, accelerator=None) -> None
     state and ``optim_state_dict_to_load`` scatters it - so every rank calls it
     unconditionally, with followers passing ``None``.
     """
+    import torch
+
     inner = getattr(optimizer, "optimizer", optimizer)
     fsdp = _fsdp_module(model)
     if fsdp is not None:
@@ -1500,6 +1516,26 @@ def _load_full_optim_state(model, optimizer, full_osd, accelerator=None) -> None
         with _fsdp_full_state_ctx(fsdp):
             sharded = FSDP.optim_state_dict_to_load(fsdp, inner, full_osd)
         inner.load_state_dict(sharded)
+        # ``Optimizer.load_state_dict`` casts every floating-point state tensor to
+        # ``param.dtype``. Under FSDP mixed precision the params are in their
+        # BF16 low-precision form at this point, so the fp32 Adam moments are
+        # silently downcast to bf16 - which destroys exp_avg_sq's dynamic range
+        # (it holds squared gradients) AND leaves the state disagreeing with the
+        # fp32 params at the next step, where the foreach AdamW raises "Tensors
+        # of the same index must be on the same device and the same dtype".
+        # Every resumed run therefore died on its first optimizer step, which is
+        # every run after the first allocation. Restore the fp32 the save side
+        # wrote; ``step`` is left alone, as torch documents it as CPU-resident.
+        for group in inner.param_groups:
+            for param in group["params"]:
+                entry = inner.state.get(param)
+                if not entry:
+                    continue
+                for key, value in list(entry.items()):
+                    if key == "step" or not torch.is_tensor(value):
+                        continue
+                    if value.is_floating_point() and value.dtype != torch.float32:
+                        entry[key] = value.to(dtype=torch.float32)
         return
     if full_osd is None:
         raise RuntimeError("GRPO resume: no consolidated optimizer state to load")

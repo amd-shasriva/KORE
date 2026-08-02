@@ -24,6 +24,8 @@ KORE's target is conjunctive: **strong kernel numbers _while_ matching-or-beatin
 | `head_to_head.py` | KORE-vs-frontier head-to-head with paired significance on per-task speedup deltas |
 | `vs_opus.py` | KORE-vs-frontier head-to-head reporting multi-seed fast_p + win-rate with CIs |
 | `e2e_sglang_vllm.py` | End-to-end serving gate (throughput + accuracy on vLLM / SGLang) |
+| `checkpoint_ab.py` | Checkpoint-vs-base A/B on the held-out generalization scope at a matched budget (`docs/EVAL_RESULTS.md`) |
+| `heldout_lm.py` | Paired held-out LM loss (bits/token) on held-out kernel source — the high-power half of a continued-pretraining A/B |
 
 ---
 
@@ -72,6 +74,51 @@ flowchart TD
 `generalization.py` classifies tasks into 8 families (`attention, moe, gemm, norm, positional, quant, reduction, activation`, first-match-wins rules), builds a leakage-checked split by **entire families**, and evaluates the physics residual reward on held-out families from a P0 measures JSON — offline, no training. It gates aggregation on the reward's own correctness verdict (`rr.correct`), not just the raw measure flag.
 
 > **Two family taxonomies, by design.** The 8-family `classify` here is the richer analysis / leave-one-family-out grouping. The authoritative product split is `kore.tasks.registry` (`operator_family` + `HELDOUT_FAMILIES`): the model **trains** core attention (flash prefill/decode/varlen/fp8) and reserves the structurally distinct **MLA** (latent attention) and **paged-KV decode** families (plus any foreign-arch task) as the never-trained set. `korebench.py`'s per-family view uses the registry taxonomy; the two taxonomies are kept separate.
+
+---
+
+## Checkpoint A/B — "did the training buy anything?"
+
+`checkpoint_ab.py` answers the question a training stage is judged by: is the trained checkpoint better than the **exact weights it started from**, on tasks it never saw, at a **matched** measurement budget? It produced KORE's first evaluation of a trained checkpoint ([`docs/EVAL_RESULTS.md`](../../docs/EVAL_RESULTS.md)).
+
+Generation is decoupled from measurement in three resumable phases, which at `budget == 1` is exact (a single-shot policy cannot condition on a measurement it never sees) and means the expensive GPU bench can be re-run without re-generating, both arms can be benched back-to-back on one idle device, and the completions are archived as evidence:
+
+```bash
+# phase A, once per arm, ONE model load: generate + held-out LM loss + retention
+python -m kore.eval.checkpoint_ab run-arm --arm base --outdir runs/eval_ab \
+  --backend hf-batch --model Qwen/Qwen3-14B --revision <sha> --dtype bfloat16
+python -m kore.eval.checkpoint_ab run-arm --arm midtrain --outdir runs/eval_ab \
+  --backend hf-batch --model runs/midtrain_14b_frontier --dtype bfloat16
+
+# phase B, both arms on the SAME idle device, through the real KoreEnv
+python -m kore.eval.checkpoint_ab measure runs/eval_ab/generations_<arm>.jsonl \
+  --out runs/eval_ab/measures_<arm>.json --budget 1 --mode parallel
+
+# phase C, pure: paired comparison + markdown
+python -m kore.eval.checkpoint_ab compare --candidate runs/eval_ab/measures_midtrain.json \
+  --reference runs/eval_ab/measures_base.json --out runs/eval_ab/report_kernel_ab
+```
+
+`scripts/spur_eval_ab_1node.sbatch` runs all three on one node; `scripts/spur_eval_ab_cpu.sbatch` runs the model-side phases on a CPU allocation when GPU submissions are being held.
+
+Three properties do the work:
+
+- **one scope** — `generalization_tasks()`, the held-out reservation minus the tasks whose optimized source leaked into the midtrain corpus. Naming a contaminated or a training id raises, so a subset cannot quietly widen a zero-shot claim;
+- **one prompt** — `first_turn_messages` is what `model_policy` sends on its first turn, digested per record so an arm-to-arm prompt drift is *detected* (`assert_prompts_matched`) rather than assumed away;
+- **paired statistics** — both arms see the same tasks, so binary outcomes get an exact sign test on the per-task deltas (which on paired binary data *is* McNemar's exact test, with the discordant-pair count reported) and speedups get a geometric-mean ratio with a bootstrap CI.
+
+The funnel is reported as four separate stages — emitted `FULL_KERNEL` → compiled → correct → correct-**and**-publication-timed — because collapsing them hides why a small number is small. In particular a kernel the verifier ACCEPTS but whose timing was demoted to screening grade has `rr.speedup is None`, so `bakeoff.evaluate_policy`'s per-task `correct` (which means "correct AND scoreable", as `fast_p` requires) reads `False` for a verifier pass; `correct_gate` and `timed` keep the two separable.
+
+### `heldout_lm.py` — the high-power half
+
+A mid-train stage is continued **pretraining**, so the measurement that speaks to its objective is next-token loss on held-out in-domain text. Single-shot generation yields one bit per held-out task; teacher-forced loss over the same kernels yields tens of thousands of paired per-token measurements, which is the difference between "no effect" and "an effect too small to see in generation". Documents are scored per kind and never pooled — held-out Triton seed source (target domain), the torch reference/oracle (adjacent), and general-domain text (a forgetting probe, explicitly **not** decontaminated). Two arms whose tokenization of a document differs are refused as unpaired.
+
+```bash
+python -m kore.eval.heldout_lm --candidate runs/eval_ab/lm_scores_midtrain.json \
+  --reference runs/eval_ab/lm_scores_base.json --out runs/eval_ab/report_heldout_lm
+```
+
+`tests/test_checkpoint_ab.py` and `tests/test_heldout_lm.py` drive both modules on CPU against stub arms and a stub env; `tests/test_gpu_checkpoint_ab.py` (`-m gpu`) replays a task's own verified seed kernel through the real `KoreEnv` and skips with a reason when no accelerator, checkpoint or endpoint is configured.
 
 ---
 

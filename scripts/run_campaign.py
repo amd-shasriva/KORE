@@ -370,6 +370,29 @@ _IMPORT_CHECKS = [
     ("kore.data.gen_agentic", "generate_agentic_trajectories", True,
         ["task", "teacher", "env", "n", "max_turns", "keep_only_useful"]),
     ("kore.data.schemas", "write_jsonl", True, ["path", "records"]),
+    # The datagen/agentic shard contract: every sequential shard is claimed and then
+    # published through these three so it carries the production record envelope AND
+    # the durable completion receipt the resume check reads back.
+    ("kore.data.parallel_datagen", "build_generator_contract", True,
+        ["kind", "counts", "teacher_kind", "task", "seed"]),
+    ("kore.data.parallel_datagen", "claim_shard", True, ["contract", "gate"]),
+    ("kore.data.parallel_datagen", "write_completed_shard", True, ["records", "contract"]),
+    # The evolve stage publishes EXTRA `<task>.evolve.jsonl` shards, which the
+    # contract above cannot express (see _evolve_contract), so it composes the same
+    # identity + durable-write primitives directly.
+    ("kore.data.generation_identity", "task_identity", True, ["task"]),
+    ("kore.data.generation_identity", "resolved_config_identity", True, ["task"]),
+    ("kore.data.generation_identity", "resolve_teacher_identity", True,
+        ["teacher_kind", "model", "immutable_revision"]),
+    ("kore.data.generation_identity", "source_manifest", True, ["paths"]),
+    ("kore.data.generation_identity", "identity_digest", True, ["value"]),
+    ("kore.data.schemas", "stamp_production_record", True,
+        ["provenance_id", "evaluation_id"]),
+    ("kore.data.schemas", "validate_jsonl_shard", True,
+        ["expected_task_id", "expected_type"]),
+    ("kore.data.schemas", "validate_record_dict", True,
+        ["expected_task_id", "expected_type", "production"]),
+    ("kore.data.schemas", "atomic_write_json", True, ["path", "value"]),
     ("kore.data.teacher", "make_teacher", True, ["kind"]),
     ("kore.data.teacher", "load_env_local", True, []),
     ("kore.data.build_datasets", "build_sft", True, ["records"]),
@@ -1847,23 +1870,261 @@ def _stage_agentic(ctx):
         LOG.event("agentic_parallel", workers=workers, n_gpus=n_gpus, **summary)
         return
     from kore.data.gen_agentic import generate_agentic_trajectories
-    from kore.data.schemas import write_jsonl
+    from kore.data.parallel_datagen import (build_generator_contract, claim_shard,
+                                            write_completed_shard)
     from kore.env.kore_env import KoreEnv
 
     t = _teacher(ctx["args"])
     train = _train_tasks(ctx)
     n_tasks = len(train)
+    counts = _datagen_counts(ctx)
+    seed = int(getattr(ctx["args"], "seed", 0) or 0)
     ag_t0 = time.time()
     for i, task in enumerate(train):
-        env = KoreEnv(task)
-        recs = generate_agentic_trajectories(task, t, env, n=ctx["args"].n_agentic,
-                                             max_turns=ctx["args"].max_tool_turns, keep_only_useful=True)
-        out = ctx["data_root"] / "agentic" / f"{task.task_id}.jsonl"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        write_jsonl(out, [r.to_dict() for r in recs])
-        _log("agentic", f"{task.task_id} -> {len(recs)} trajectories")
-        LOG.event("agentic_records", task=task.task_id, n=len(recs))
+        # Published exactly like the datagen shards (claim -> generate ->
+        # write_completed_shard), because ``agentic`` is one of the SAME registered
+        # generator kinds and its shard stem IS the task id. Writing bare JSONL here
+        # left the shard with no completion receipt (so this path was not resumable
+        # despite the parallel path above being) AND outside the production record
+        # lane - and ``assemble._agentic_rows`` reads this directory with
+        # ``mode="production_strict"`` unconditionally, so the build stage raised on
+        # its own agentic slice in EVERY campaign mode, not just production.
+        contract = build_generator_contract(
+            "agentic", counts, teacher_kind=ctx["args"].teacher,
+            model_teacher=ctx["args"].model_teacher,
+            model_teacher_revision=ctx["args"].model_teacher_revision,
+            task=task, seed=seed)
+        with claim_shard(ctx["data_root"], task.task_id, "agentic",
+                         contract=contract, gate="quota_only") as claimed:
+            if not claimed:
+                _log("agentic", f"{task.task_id} skip (resume)")
+                LOG.progress(i + 1, n_tasks, "agentic", t_start=ag_t0, task=task.task_id)
+                continue
+            env = KoreEnv(task)
+            recs = generate_agentic_trajectories(task, t, env, n=ctx["args"].n_agentic,
+                                                 max_turns=ctx["args"].max_tool_turns,
+                                                 keep_only_useful=True)
+            n_written = write_completed_shard(
+                ctx["data_root"], task.task_id, "agentic",
+                [r.to_dict() for r in recs], contract=contract)
+        _log("agentic", f"{task.task_id} -> {n_written} trajectories")
+        LOG.event("agentic_records", task=task.task_id, n=n_written)
         LOG.progress(i + 1, n_tasks, "agentic", t_start=ag_t0, task=task.task_id)
+
+
+# --------------------------------------------------------------------------- #
+# Evolve shard publication: production lane + durable resume receipt
+# --------------------------------------------------------------------------- #
+# ``kore.data.parallel_datagen``'s claim/receipt machinery cannot express what the
+# evolve stage publishes, for three reasons that are all real and not incidental:
+#
+#   * it derives the shard PATH from the record ``task_id`` and binds every record
+#     to it, but an evolve shard is an EXTRA ``<task>.evolve.jsonl`` whose records
+#     carry the real (unsuffixed) task id -- suffixing the records instead would
+#     break the registry held-out lookup and the record->task mapping downstream;
+#   * its contract vocabulary is closed over the four registered generators
+#     (``_GENERATOR_BY_KIND`` / ``_COUNT_KEYS_BY_KIND``), and evolve is
+#     ``evolve_task`` at ``--evolve-generations``, not ``generate_wins`` at
+#     ``wins_gens``.  Claiming the latter would make the receipt's provenance a lie,
+#     and a receipt that misidentifies its generator cannot decide resumability;
+#   * ``COMPLETION_POLICIES`` treats a shard with zero accepted records as
+#     ``EMPTY_FAILURE``, but evolve is a SEARCH: finding nothing that beats the
+#     vendor baseline is a legitimate terminal outcome, not a failure to retry.
+#
+# So evolve gets its own receipt, built from the SAME identity and durability
+# primitives, deliberately kept in its own directory and version namespace so
+# neither validator can ever silently accept the other's format.
+_EVOLVE_GENERATOR = "kore.data.evolve.evolve_task"
+_EVOLVE_RECEIPT_VERSION = 1
+_EVOLVE_RECORD_TYPE = {"wins": "win", "groups": "ranked_group"}
+# The sources whose content can change what an evolve shard MEANS (the loop, the
+# mutation operators, the ranking/preference derivation, the reward + verification
+# it admits on, and the record schema it serializes to).
+_EVOLVE_SOURCES = (
+    "kore/config.py",
+    "kore/data/evolve.py",
+    "kore/data/gen_groups.py",
+    "kore/data/generation_identity.py",
+    "kore/data/mutate.py",
+    "kore/data/prompts.py",
+    "kore/data/schemas.py",
+    "kore/data/teacher.py",
+    "kore/data/verify_rigor.py",
+    "kore/env/kore_env.py",
+    "kore/env/replay.py",
+    "kore/reward/reward.py",
+    "kore/tasks/registry.py",
+    "kore/value/rerank.py",
+)
+
+
+def _evolve_shard_path(data_root, task_id: str, kind: str) -> Path:
+    return Path(data_root) / kind / f"{task_id}.evolve.jsonl"
+
+
+def _evolve_receipt_path(data_root, task_id: str) -> Path:
+    return Path(data_root) / "evolve" / f"{task_id}.complete.json"
+
+
+def _evolve_contract(ctx, task, *, generations: int, config_seed: int) -> dict:
+    """The generation inputs that make an evolve shard reusable.
+
+    Composed from the exported ``generation_identity`` primitives the datagen
+    contract uses, so an evolve shard is bound to the same task files, resolved
+    config + verification rigor, immutable teacher revision, hardware and software
+    - only the generator/source/parameter block differs.
+    """
+    from kore.data.generation_identity import (
+        DATA_LANE_VERSION,
+        GENERATION_IDENTITY_VERSION,
+        behavioral_environment,
+        hardware_identity,
+        identity_digest,
+        resolve_teacher_identity,
+        resolved_config_identity,
+        software_identity,
+        source_manifest,
+        task_identity,
+    )
+    from kore.data.schemas import RECORD_SCHEMA_VERSION
+
+    args = ctx["args"]
+    root = _repo_root()
+    identity = {
+        "identity_version": GENERATION_IDENTITY_VERSION,
+        "data_lane_version": DATA_LANE_VERSION,
+        "kind": "evolve",
+        "task": task_identity(task),
+        "code": source_manifest([root / name for name in _EVOLVE_SOURCES]),
+        "evaluation": resolved_config_identity(task),
+        "teacher": resolve_teacher_identity(
+            args.teacher, args.model_teacher, args.model_teacher_revision),
+        "hardware": hardware_identity(task),
+        "software": software_identity(),
+        "seeds": {"generator_seed": int(config_seed)},
+        "behavioral_environment": behavioral_environment(),
+    }
+    identity["digest"] = identity_digest(identity)
+    contract = {
+        "contract_version": _EVOLVE_RECEIPT_VERSION,
+        "record_schema_version": RECORD_SCHEMA_VERSION,
+        "data_lane_version": DATA_LANE_VERSION,
+        "task_id": task.task_id,
+        "generator": _EVOLVE_GENERATOR,
+        "parameters": {"generations": int(generations),
+                       "config_seed": int(config_seed)},
+        "generation_identity": identity,
+    }
+    contract["digest"] = identity_digest(contract)
+    return contract
+
+
+def _publish_evolve_shards(data_root, task_id: str, contract: dict, *,
+                           wins, groups) -> dict:
+    """Publish the evolve shards in the production record lane, receipt last.
+
+    Data first and receipt last on purpose: a crash between the two leaves shards
+    with no receipt, which the resume guard reads as NOT done, so the work is
+    redone rather than falsely claimed complete.
+
+    This publish is AUTHORITATIVE for both ``<task>.evolve.jsonl`` paths, as the
+    stage's bare ``write_jsonl`` always was. A kind the search produced nothing for
+    has any shard from a superseded generation REMOVED rather than left behind:
+    keeping it would both mix two contracts' output into the build stage's glob and
+    leave the receipt describing a corpus that is not on disk, which the resume
+    guard reads as not-done - re-running the whole search on every resume forever.
+    An empty file is not an option in its place; the evolve artifact contract
+    rejects a zero-byte shard.
+    """
+    from kore.data.generation_identity import DATA_LANE_VERSION
+    from kore.data.schemas import (RECORD_SCHEMA_VERSION, atomic_write_json,
+                                   stamp_production_record, validate_jsonl_shard,
+                                   validate_record_dict, write_jsonl)
+
+    provenance_id = contract["digest"]
+    evaluation_id = contract["generation_identity"]["evaluation"]["digest"]
+    shards: dict[str, dict] = {}
+    for kind, records in (("wins", wins), ("groups", groups)):
+        path = _evolve_shard_path(data_root, task_id, kind)
+        if not records:
+            path.unlink(missing_ok=True)
+            continue
+        record_type = _EVOLVE_RECORD_TYPE[kind]
+        rows = []
+        for record in records:
+            stamped = stamp_production_record(
+                record, provenance_id=provenance_id, evaluation_id=evaluation_id)
+            validate_record_dict(stamped, expected_task_id=task_id,
+                                 expected_type=record_type, production=True)
+            rows.append(stamped)
+        write_jsonl(path, rows, validate_records=True, expected_task_id=task_id,
+                    expected_type=record_type)
+        validation = validate_jsonl_shard(path, expected_task_id=task_id,
+                                          expected_type=record_type)
+        shards[kind] = {"data_file": path.name,
+                        "record_count": validation.record_count,
+                        "sha256": validation.sha256}
+    atomic_write_json(_evolve_receipt_path(data_root, task_id), {
+        "receipt_version": _EVOLVE_RECEIPT_VERSION,
+        "record_schema_version": RECORD_SCHEMA_VERSION,
+        "data_lane_version": DATA_LANE_VERSION,
+        "task_id": task_id,
+        "generator": _EVOLVE_GENERATOR,
+        "generator_contract": contract,
+        "generator_contract_sha256": contract["digest"],
+        "shards": shards,
+    })
+    return shards
+
+
+def _evolve_done(data_root, task_id: str, contract: dict) -> bool:
+    """True only when a durable receipt matches the exact bytes on disk.
+
+    An empty ``shards`` is a completed search that found nothing - the case the
+    datagen completion vocabulary would misread as an empty failure and retry
+    forever. A shard the receipt does not account for means another producer wrote
+    here (``scripts/evolve_wins.py`` merges into these same files additively), so
+    the receipt no longer describes the corpus and the task is not done.
+    """
+    from kore.data.generation_identity import DATA_LANE_VERSION
+    from kore.data.schemas import RECORD_SCHEMA_VERSION, validate_jsonl_shard
+
+    try:
+        receipt = json.loads(
+            _evolve_receipt_path(data_root, task_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(receipt, dict):
+        return False
+    for key, expected in (
+        ("receipt_version", _EVOLVE_RECEIPT_VERSION),
+        ("record_schema_version", RECORD_SCHEMA_VERSION),
+        ("data_lane_version", DATA_LANE_VERSION),
+        ("task_id", task_id),
+        ("generator", _EVOLVE_GENERATOR),
+        ("generator_contract_sha256", contract["digest"]),
+    ):
+        if receipt.get(key) != expected:
+            return False
+    shards = receipt.get("shards")
+    if not isinstance(shards, dict) or set(shards) - set(_EVOLVE_RECORD_TYPE):
+        return False
+    for kind, recorded in shards.items():
+        if not isinstance(recorded, dict):
+            return False
+        try:
+            validation = validate_jsonl_shard(
+                _evolve_shard_path(data_root, task_id, kind),
+                expected_task_id=task_id,
+                expected_type=_EVOLVE_RECORD_TYPE[kind])
+        except (OSError, ValueError):
+            return False
+        if (validation.record_count != recorded.get("record_count")
+                or validation.sha256 != recorded.get("sha256")):
+            return False
+    return not any(
+        kind not in shards and _evolve_shard_path(data_root, task_id, kind).exists()
+        for kind in _EVOLVE_RECORD_TYPE)
 
 
 def _stage_evolve(ctx):
@@ -1875,13 +2136,19 @@ def _stage_evolve(ctx):
     and ranked preference groups. They are written as EXTRA ``wins``/``groups``
     shards so the build stage folds them in via its existing glob (dedup handles
     any overlap with the teacher-generated datagen).
+
+    RESUMABLE and production-lane, for the same two reasons the sequential datagen
+    path is: the shards used to be written as bare JSONL, so the production build
+    reader rejected them outright (``data_lane_version``) and there was no durable
+    receipt at all - every rerun re-ran the whole teacher+GPU search and then
+    OVERWROTE the previous run's wins. Delete ``evolve/<task>.complete.json`` to
+    force a regeneration.
     """
     if ctx["dry"]:
         _log("evolve", "would run evolve_task per TRAIN task (D-MAB bandit + MAP-Elites "
                        "islands + value-prefilter) -> verified wins + ranked-group shards")
         return
     from kore.data.evolve import EvolveConfig, evolve_task
-    from kore.data.schemas import write_jsonl
     from kore.env.kore_env import KoreEnv
 
     t = _teacher(ctx["args"])
@@ -1890,17 +2157,20 @@ def _stage_evolve(ctx):
     gens = ctx["args"].evolve_generations
     ev_t0 = time.time()
     for i, task in enumerate(train):
+        contract = _evolve_contract(ctx, task, generations=gens, config_seed=i)
+        if _evolve_done(ctx["data_root"], task.task_id, contract):
+            _log("evolve", f"{task.task_id} skip (resume)")
+            LOG.progress(i + 1, n_tasks, "evolve", t_start=ev_t0, task=task.task_id)
+            continue
         env = KoreEnv(task)
         cfg = EvolveConfig(seed=i)
         result = evolve_task(task, t, env, generations=gens, cfg=cfg)
-        if result.wins:
-            write_jsonl(ctx["data_root"] / "wins" / f"{task.task_id}.evolve.jsonl", result.wins)
-        if result.groups:
-            write_jsonl(ctx["data_root"] / "groups" / f"{task.task_id}.evolve.jsonl", result.groups)
+        shards = _publish_evolve_shards(ctx["data_root"], task.task_id, contract,
+                                        wins=result.wins, groups=result.groups)
         _log("evolve", f"{task.task_id} -> {len(result.wins)} wins, {len(result.groups)} "
                        f"groups (best_speedup={result.stats.get('best_speedup')})")
         LOG.event("evolve_records", task=task.task_id, wins=len(result.wins),
-                  groups=len(result.groups))
+                  groups=len(result.groups), shards=sorted(shards))
         LOG.progress(i + 1, n_tasks, "evolve", t_start=ev_t0, task=task.task_id)
 
 
@@ -2505,12 +2775,39 @@ def _stage_grpo(ctx):
             from kore.value.replay_train import train_value_from_groups
             vpath = str(_repo_root() / "runs" / "value" / "value_model.pkl")
             m = train_value_from_groups(str(ctx["data_root"] / "groups"), vpath)
-            value_model_path = vpath
-            ctx["value_model_path"] = vpath
-            _log("grpo", f"trained value model from {m['n_groups']} groups "
-                         f"({m['n_candidates']} candidates); held-out group rank-corr="
-                         f"{m['heldout_group_rank_corr']} -> {vpath}")
             LOG.event("value_model_trained", **m)
+            # ``train_value_from_groups`` measures whether the fitted ranker
+            # actually recovers the within-group order on a HELD-OUT group split,
+            # and documents that a shortfall is for the caller to act on ("caller
+            # can then skip the prefilter"). Both signals were computed, one was
+            # interpolated into the log line below, and neither was ever read: the
+            # path adopted the model unconditionally. A ranker that did not fit, or
+            # whose held-out rank-corr is <= 0, carries no ordering information, and
+            # the prefilter BENCHES ONLY ITS TOP-K - so adopting it does not merely
+            # fail to help, it discards the genuinely-best candidates before they
+            # are ever measured. Fall back to the source heuristic instead, which is
+            # exactly what the ``except`` branch below already does for no data.
+            rank_corr = m.get("heldout_group_rank_corr")
+            usable = (m.get("ranker_fitted") is True
+                      and not isinstance(rank_corr, bool)
+                      and isinstance(rank_corr, (int, float))
+                      and math.isfinite(float(rank_corr))
+                      and float(rank_corr) > 0.0)
+            if not usable:
+                _log("grpo", f"value model REJECTED (fitted={m.get('ranker_fitted')}, "
+                             f"held-out group rank-corr={rank_corr}, top-k recall="
+                             f"{m.get('heldout_group_top_k_recall')} over "
+                             f"{m.get('n_test_groups')} held-out groups): it carries no "
+                             f"usable within-group ordering, and the bench prefilter "
+                             f"measures only its top-k, so it would discard the best "
+                             f"candidates unmeasured; prefilter -> heuristic fallback")
+            else:
+                value_model_path = vpath
+                ctx["value_model_path"] = vpath
+                _log("grpo", f"trained value model from {m['n_groups']} groups "
+                             f"({m['n_candidates']} candidates); held-out group rank-corr="
+                             f"{rank_corr} top-k recall="
+                             f"{m.get('heldout_group_top_k_recall')} -> {vpath}")
         except Exception as e:  # noqa: BLE001 - value model is a bonus, never a hard dep
             _log("grpo", f"value-model training skipped ({e}); prefilter -> heuristic fallback")
 

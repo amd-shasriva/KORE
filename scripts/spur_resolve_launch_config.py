@@ -25,9 +25,11 @@ What it does, in order:
    ``_discover_grpo_resume`` resume instead of restarting from step 0.
 4. ``--data-root DIR`` (grpo only) re-roots the co-evolution artifact paths.
    ``kore.policy.grpo._build_opus_scores`` derives the archive root from
-   ``dirname(coevolve_distill_path)``, so leaving the shipped
-   ``data/full14b/...`` in place silently points the regret curriculum at a
-   different (older) data root than the one the run trains against.
+   ``dirname(coevolve_distill_path)``, so that directory decides which corpus
+   the regret curriculum mines. The shipped config now names the right root, so
+   a default launch reports no change here; this exists to retarget one job at a
+   different archive, and it moves BOTH paths together because a stale
+   ``opus_scores.json`` cache would otherwise override a correct scan.
 5. For sft/dpo, checks ``dataset_path`` exists. Both stages read the dataset
    after (sft) or near (dpo) a 14B ``from_pretrained``, so a typo otherwise
    costs an 8-rank weight load per rank to report.

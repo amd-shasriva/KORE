@@ -38,8 +38,14 @@ def _task_id(task) -> str:
     return getattr(task, "task_id", None) or str(task)
 
 
-def _task_prompt(task) -> str:
-    """Render the first-turn user prompt for a task (op + hardware + seed)."""
+def task_prompt(task) -> str:
+    """Render the first-turn user prompt for a task (op + hardware + seed).
+
+    Public because an A/B of two checkpoints has to prompt both arms with the
+    byte-identical text this builds (see :mod:`kore.eval.checkpoint_ab`); a
+    second copy of the rendering would be a silent way for the two arms to drift
+    apart.
+    """
     tid = _task_id(task)
     op = getattr(task, "operation", tid)
     gpu = getattr(task, "gpu_target", "gfx942")
@@ -125,7 +131,7 @@ def model_policy(
         elif turns:
             turns[-1] = {**turns[-1], "feedback": _render_feedback(feedback)}
 
-        messages = build_transcript(_task_prompt(task), turns=turns, system_prompt=sys_prompt)
+        messages = build_transcript(task_prompt(task), turns=turns, system_prompt=sys_prompt)
         out = gen(messages, max_tokens=max_tokens, temperature=temperature)
         turns.append({"response": out})
         parsed = parse_response(out)
@@ -134,4 +140,7 @@ def model_policy(
     return policy
 
 
-__all__ = ["PolicyFn", "seed_policy", "model_policy"]
+#: Retained so existing callers of the private name keep working.
+_task_prompt = task_prompt
+
+__all__ = ["PolicyFn", "seed_policy", "task_prompt", "model_policy"]

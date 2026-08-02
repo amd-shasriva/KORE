@@ -12,10 +12,13 @@ pointed at a dataset path no tool produces, and two separate defects meant a
 mid-flight death restarted from step 0 rather than the last checkpoint. All
 three are now patched, along with two gaps the fixes exposed.
 
-- **Verified on:** `master` @ `3dfe1e8`; blockers fixed in the commit that adds this line
+- **Measured on:** `master` @ `3dfe1e8`. Every GPU number below is from that run and has **not** been
+  re-measured since; the code-level claims are re-verified at each audit.
 - **Hardware:** 2 × AMD Instinct MI350X (gfx950), HIP ordinals 6 and 7
 - **Stack:** Python 3.10.14, torch 2.10.0+rocm7.0, transformers 4.57.6, trl 0.29.1, accelerate 1.14.0, peft 0.19.1, datasets 3.6.0. `flash_attn` is **absent** → SDPA.
-- **Regression tests:** `tests/test_sft_launch_readiness.py` — 35 pass, no xfail. The four tests that encoded the blocker list are now ordinary regressions.
+- **Regression tests:** `tests/test_sft_launch_readiness.py` — **36 pass in the default suite plus 1
+  `release`-marked full-corpus check**, no xfail. The four tests that encoded the blocker list are now
+  ordinary regressions.
 
 | # | Item | Verdict |
 |---|---|---|
@@ -401,10 +404,12 @@ trainer construction → real optimizer step → checkpoint write → resume.
 ### 6. Memory and time — PASS with defects
 
 **Step count.** After the repair up-sampling and the over-length filter the
-trainer sees 68,277 rows per epoch:
+trainer sees **71,510 rows per epoch** at the shipped `max_seq_length: 17408`
+(68,277 at the old 16,384 cut).
 
-Measured by tokenizing the full corpus at both cuts (see F2 — the shipped value
-is now 17,408):
+Counted by tokenizing the full corpus at both cuts (see F2 — the shipped value
+is now 17,408). These are offline counts over the real corpus, not observations
+from a training run:
 
 ```
                                     max_seq_length 16384      17408
@@ -569,8 +574,24 @@ start.
 
 ## Launch command
 
-Once midtrain lands, from the repo root, with the venv active and
-`HF_HUB_OFFLINE=1`:
+**Use the cluster launcher.** Midtrain has landed on SPUR as
+`runs/midtrain_14b_frontier` (26 files), and `scripts/spur_sft_1node.sbatch`
+already defaults `FROM_STAGE` to exactly that and `OUT_DIR` to
+`runs/sft_14b_frontier`, rewriting the shipped config for you. There is no
+`runs/midtrain_14b_full` on the cluster — that is `configs/midtrain_14b_full.json`'s
+`output_dir`, which the sbatch path overrides, so an earlier revision of this
+section resolved a config against a directory nothing produces:
+
+```bash
+cd /home/shasriva/Kore-RL/KORE
+sbatch scripts/spur_sft_1node.sbatch          # = configs/sft_14b_full.json,
+                                              #   from runs/midtrain_14b_frontier,
+                                              #   into runs/sft_14b_frontier
+```
+
+The manual form below is for a GPU node you are already sitting on (the SPUR
+login node has no GPUs). It resolves the config by hand because
+`launch_distributed.sh` reads the JSON verbatim:
 
 ```bash
 cd /home/shasriva/Kore-RL/KORE
@@ -578,38 +599,49 @@ export PATH=/home/shasriva/kore-venv/bin:$PATH     # the launcher execs bare `ac
 export HF_HUB_OFFLINE=1
 
 # 1. Materialize the packaged corpus once (writes data/b05factory/sft/multicap.jsonl).
+#    Already present on the cluster: 630,488,937 B / 56,493 rows, verified.
 (cd data/release && ./reassemble.sh)
 wc -l data/b05factory/sft/multicap.jsonl          # must print 56493
 
 # 2. Resolve the launch config. dataset_path is now correct in the shipped file;
 #    model_id must still be overridden, because the shipped config names the raw
 #    base and this stage trains the midtrain output.
-python - <<'PY'
-import json, pathlib
+MIDTRAIN=runs/midtrain_14b_frontier               # what spur_midtrain_1node.sbatch wrote
+python - "$MIDTRAIN" <<'PY'
+import json, pathlib, sys
 cfg = json.loads(pathlib.Path("configs/sft_14b_full.json").read_text())
-cfg["model_id"]   = "runs/midtrain_14b_full"                 # Stage-0 output
-cfg["output_dir"] = "runs/sft_14b_full"
+cfg["model_id"]   = sys.argv[1]                              # Stage-0 output
+cfg["output_dir"] = "runs/sft_14b_frontier"
 pathlib.Path("configs/sft_14b_full.resolved.json").write_text(json.dumps(cfg, indent=2))
 print(json.dumps(cfg, indent=2))
 PY
 
 # 3. Sanity-check the handoff before spending an 8-rank load.
 python -c "
+import sys
 from kore.policy.configs import latest_checkpoint
-print('midtrain checkpoint:', latest_checkpoint('runs/midtrain_14b_full'))"
-ls runs/midtrain_14b_full/config.json runs/midtrain_14b_full/*.safetensors >/dev/null
+print('midtrain checkpoint:', latest_checkpoint(sys.argv[1]))" "$MIDTRAIN"
+ls "$MIDTRAIN"/config.json "$MIDTRAIN"/*.safetensors >/dev/null
 
 # 4. Dry-run, then launch on all 8 GPUs.
 GPU_IDS=0,1,2,3,4,5,6,7 bash scripts/launch_distributed.sh sft \
     configs/sft_14b_full.resolved.json --dry-run
 
 GPU_IDS=0,1,2,3,4,5,6,7 bash scripts/launch_distributed.sh sft \
-    configs/sft_14b_full.resolved.json 2>&1 | tee logs/sft_14b_full.log
+    configs/sft_14b_full.resolved.json 2>&1 | tee logs/sft_14b_frontier.log
 ```
 
 Expect: `model identity resolved ... revision_pinned_at_load=False` (correct —
-the base is now a directory), `sft: completion-only loss enabled`,
-`dropped_overlong=66`, then 1,677 steps over 6.5-8.5 hours.
+the base is now a directory) and `sft: completion-only loss enabled`.
+
+> **`dropped_overlong=66`, `1,677` steps and `6.5-8.5 hours` are projections, not
+> observations.** The step and drop counts come from tokenizing the full corpus
+> offline at `max_seq_length: 17408` (item 6); the wall time is a token-throughput
+> extrapolation from midtrain's measured 33.5 s/step, and SFT's padding profile and
+> quadratic attention term differ from midtrain's uniform 8192-token packing. No
+> full-corpus 8-rank SFT run has been measured. What *was* measured is a 4-step
+> real-14B run and a 34-step tiny-Qwen3 lifecycle (item 4). Treat the first 20
+> logged steps as the real s/step and re-derive from there.
 
 Do **not** set `KORE_RESOURCE_PREFLIGHT=strict` (F9). Ensure the output
 filesystem has **≥ 800 GB** free: `save_total_limit: 2` means a transient peak of
@@ -623,9 +655,12 @@ generation instead of restarting from step 0.
 ## Reproducing this report
 
 ```bash
-pytest tests/test_sft_launch_readiness.py -q            # 35 pass, no xfail
-pytest tests/test_sft_launch_readiness.py -q -m release # full 56,493-row corpus count
+pytest tests/test_sft_launch_readiness.py -q            # 36 pass, 1 deselected, no xfail
+pytest tests/test_sft_launch_readiness.py -q -m release # 1 test: full 56,493-row corpus count
 ```
+
+Both verified green at the current commit. `tests/test_docs_contract.py` pins the
+`36` above, so adding a test here forces this line to be updated.
 
 The GPU portions (items 4 and 6) are not in the test suite: they need two idle
 MI350X and ~500 GB of scratch. The exact configs used are recorded above.

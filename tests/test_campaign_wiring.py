@@ -321,8 +321,17 @@ def test_dagger_fold_appends_to_sft_corpus(monkeypatch, tmp_path):
 # 3. Evolutionary datagen stage
 # --------------------------------------------------------------------------- #
 def test_evolve_stage_callable_writes_shards(monkeypatch, tmp_path):
+    """The stage publishes one ``.evolve.jsonl`` pair per TRAIN task.
+
+    The records are real ``WinRecord``/``RankedGroupRecord``s and the teacher is the
+    stub, because the stage now publishes into the PRODUCTION record lane behind a
+    generation contract (it used to write bare JSONL that the production build
+    reader rejected and that no resume receipt covered). Skeletal fakes and a
+    teacher with no immutable revision are both refused, exactly as in datagen.
+    """
     import kore.data.evolve as ev
     import kore.env.kore_env as ke
+    from kore.data.schemas import RankedGroupRecord, WinRecord
 
     monkeypatch.setattr(ke, "KoreEnv", lambda task: object())
     monkeypatch.setattr(rc, "_teacher", lambda args: object())
@@ -331,15 +340,26 @@ def test_evolve_stage_callable_writes_shards(monkeypatch, tmp_path):
 
     def fake_evolve(task, generator, env, generations, cfg):
         captured["generations"] = generations
+        source = f"import triton\n\n\ndef k_{task.task_id}(x):\n    return x + 1\n"
         return SimpleNamespace(
-            wins=[{"type": "win", "task_id": task.task_id}],
-            groups=[{"type": "ranked_group", "task_id": task.task_id}],
+            wins=[WinRecord(
+                task_id=task.task_id,
+                trajectory=[{"role": "user", "content": "optimize"},
+                            {"role": "assistant", "content": f"FULL_KERNEL:\n{source}"}],
+                initial_wall_us=200.0, final_wall_us=100.0, speedup=2.0,
+                final_source=source, operation=task.operation, arch="gfx950")],
+            groups=[RankedGroupRecord(
+                task_id=task.task_id, parent_id=f"parent-{task.task_id}",
+                candidates=[{"source": source + f"# {i}\n", "wall_us": 100.0 * (i + 1),
+                             "snr_db": 40.0, "rank": i} for i in range(2)],
+                preferences=[[0, 1]], operation=task.operation, arch="gfx950")],
             stats={"best_speedup": 1.5},
         )
 
     monkeypatch.setattr(ev, "evolve_task", fake_evolve)
 
-    args = _args(["--tasks", "rmsnorm_aiter,gemm_bf16", "--evolve-generations", "2"])
+    args = _args(["--tasks", "rmsnorm_aiter,gemm_bf16", "--evolve-generations", "2",
+                  "--teacher", "stub"])
     ctx = {"data_root": tmp_path, "args": args, "dry": False,
            "tasks": [get_task("rmsnorm_aiter"), get_task("gemm_bf16")],
            "train_tasks": [get_task("rmsnorm_aiter"), get_task("gemm_bf16")]}

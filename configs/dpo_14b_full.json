@@ -22,6 +22,8 @@
   "lr_scheduler_type": "cosine",
   "warmup_ratio": 0.1,
   "num_train_epochs": 1.0,
+  "_comment_save_total_limit": "Stated explicitly rather than inherited, matching midtrain and sft: the Trainer rotates the previous checkpoint out AROUND each new save, so 1 leaves nothing for latest_checkpoint() to find if the process dies inside that window and the run silently restarts from step 0. Measured on gfx950: one 14B DPO checkpoint is 221 GB (13 fp32 shards + optimizer.bin + pytorch_model_fsdp.bin), so 2 retained means a transient peak of three during rotation -- provision >= 800 GB on the output filesystem.",
+  "save_total_limit": 2,
   "bf16": true,
   "gradient_checkpointing": true,
   "per_device_train_batch_size": 2,

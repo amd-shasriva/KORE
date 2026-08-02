@@ -1,8 +1,15 @@
-# KORE-RL Pre-Midtrain Dataset — Build Status (2026-07-30)
+# KORE-RL Pre-Midtrain Dataset — Build Status (2026-07-30) — SUPERSEDED SNAPSHOT
+
+> **Read [`../DATASET_STATUS.md`](../DATASET_STATUS.md) instead.** This file is a
+> point-in-time note from the 2026-07-30 build, kept only for the provenance and
+> code-change trail below. Its SFT row count is stale: the corpus was later
+> extended with the general-capability and curriculum slices and the shipped
+> `sft/multicap.jsonl` is **56,493 rows / 630,488,937 B** (verified on the cluster),
+> not 24,235. The DPO count below is still current.
 
 ## Built artifacts (Crusoe: /home/shasriva/Kore-RL/KORE/data/b05factory/)
-- sft/multicap.jsonl : 24,235 rows (kernel wins/gold/repair + 4,000 agentic tool-use); held-out-clean
-- dpo/pairs.jsonl    : 96,675 preference pairs (11,601 hard negatives = 12%); held-out-clean
+- sft/multicap.jsonl : 24,235 rows at the time of this snapshot — **now 56,493**; kernel wins/gold/repair + 4,000 agentic tool-use; held-out-clean
+- dpo/pairs.jsonl    : 96,675 preference pairs (11,601 hard negatives = 12%); held-out-clean — still current
 - Backups: /home/shasriva/kore_dataset_*.tgz , /home/shasriva/kore_frontier_backup_*.tgz
 
 ## Provenance

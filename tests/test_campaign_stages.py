@@ -25,22 +25,31 @@ pure helper (``soup_sweep_materialized``, ``StageGate``, the artifact contract),
 the helper is driven directly as well, so a passing test means the DECISION was
 made correctly and not merely that a stub was called.
 
-Two real defects were found while writing this and are pinned here:
-``test_build_refuses_a_dpo_set_below_the_hard_negative_floor`` (the >=8% floor was
-computed and logged but never enforced) and
-``test_sequential_datagen_publishes_a_resumable_receipted_shard`` (the sequential
-datagen path wrote shards that its own resume check and the production build
-reader both reject). Both are fixed in ``scripts/run_campaign.py``.
+Five real defects are pinned here, all fixed in ``scripts/run_campaign.py`` (and,
+for the fourth, ``kore/data/schemas.py``):
 
-A third, latent one is deliberately NOT asserted as behavior, because it is
-currently unreachable: ``_stage_build`` reads its raw records with ``typed=True``,
-and the typed dataclasses drop the ``provenance_root`` / ``_provenance`` keys that
-``registry.is_heldout_record`` uses for the ``heldout_lineage`` decision. Today
-every generated record belongs to a REGISTERED task, so the root is resolved from
-the registry instead and nothing leaks - the registry currently has zero lineage
-descendants. ``test_the_campaign_holdout_filter_is_the_registry_authority_verbatim``
-pins the authority itself so the gap is visible if records ever start carrying
-their own provenance root.
+  1. ``test_build_refuses_a_dpo_set_below_the_hard_negative_floor`` - the >=8%
+     reward-hack floor was computed, formatted into a log line, and never enforced.
+  2. ``test_sequential_datagen_publishes_a_resumable_receipted_shard`` - the
+     sequential datagen path wrote shards that its own resume check and the
+     production build reader both reject.
+  3. ``test_evolve_publishes_a_resumable_production_lane_shard`` and
+     ``test_sequential_agentic_publishes_a_resumable_receipted_shard`` - the same
+     bare-``write_jsonl`` defect in the other two shard-producing stages. The
+     agentic one was the worst of the three: ``assemble._agentic_rows`` reads that
+     directory with ``mode="production_strict"`` unconditionally, so the build
+     stage raised on its own agentic slice in EVERY campaign mode.
+  4. ``test_build_excludes_a_record_whose_own_provenance_root_is_heldout`` - the
+     typed record dataclasses dropped the ``provenance_root`` key that
+     ``registry.is_heldout_record`` uses for its ``heldout_lineage`` decision, so
+     ``_stage_build``'s ``typed=True`` read silently reclassified a held-out
+     lineage descendant as trainable. Latent (the registry has no lineage
+     descendants today: 1289 train / 43 ``near_probe`` / 2 ``whole_family`` / 0
+     ``heldout_lineage``) but a hole in the defence of a repo with a MEASURED
+     contamination history, so section 1 now drives the path end to end.
+  5. ``test_grpo_refuses_a_value_model_with_no_heldout_ranking_skill`` - defect
+     class 1 again: the value model's held-out ranking quality was measured, logged
+     and dropped, and the bench prefilter measures only its top-k.
 """
 
 from __future__ import annotations
@@ -56,6 +65,7 @@ from kore.data.schemas import (
     RankedGroupRecord,
     RepairRecord,
     WinRecord,
+    record_from_dict,
     stamp_production_record,
     write_jsonl,
 )
@@ -327,6 +337,192 @@ def test_the_campaign_holdout_filter_is_the_registry_authority_verbatim():
         True, True, True, True, False]
     # ...and an id the campaign reserved for eval this run is honored on top.
     assert rc._rec_is_heldout(records[-1], {"rmsnorm_aiter"}) is True
+
+
+# --- the heldout_lineage branch, end to end -------------------------------- #
+def _lineage_kernel(tag: str) -> str:
+    """A STRUCTURALLY distinct kernel.
+
+    ``_stage_build`` runs ``dedup_near_source(per_fingerprint_cap=1)`` over the
+    wins, which collapses kernels differing only by renaming/whitespace/comments
+    and keeps the fastest. A canary that shares ``_kernel``'s shape would be
+    deduped against the train wins and the test would pass for the wrong reason.
+    """
+    return (
+        "import triton\nimport triton.language as tl\n\n\n"
+        f"@triton.jit\ndef {tag}(inp, out, n, BLOCK: tl.constexpr):\n"
+        "    pid = tl.program_id(0)\n"
+        "    offs = pid * BLOCK + tl.arange(0, BLOCK)\n"
+        "    mask = offs < n\n"
+        "    acc = tl.load(inp + offs, mask=mask, other=0.0)\n"
+        "    acc = acc * tl.rsqrt(tl.sum(acc * acc) / n + 1e-6)\n"
+        "    tl.store(out + offs, acc, mask=mask)\n"
+    )
+
+
+def _lineage_win(task_id: str, *, root: str | None, tag: str) -> dict:
+    """A win under a FRESH, unregistered, otherwise-trainable identity.
+
+    ``rmsnorm`` on ``gfx950`` under an id the registry has never seen classifies as
+    TRAIN (measured), so ``provenance_root`` is the ONLY thing that can hold this
+    record out - which is exactly what makes the assertion below meaningful. It is
+    built as a raw dict because a declared root is the point of the fixture.
+    """
+    source = _lineage_kernel(tag)
+    record = _win(task_id, "rmsnorm", tag, speedup=3.0)
+    row = record.to_dict()
+    row.update({
+        "final_source": source,
+        "trajectory": [
+            {"role": "user", "content": f"optimize\n```python\n{source}\n```"},
+            {"role": "assistant", "content": f"FULL_KERNEL:\n```python\n{source}\n```"},
+        ],
+    })
+    if root is not None:
+        row["provenance_root"] = root
+    return row
+
+
+def test_build_excludes_a_record_whose_own_provenance_root_is_heldout(
+        tmp_path, monkeypatch):
+    """REGRESSION for a real defect: the typed read dropped the lineage root.
+
+    A near-generalization probe reserves its whole LINEAGE - anything sharing its
+    ``provenance_root`` - because a descendant of a held-out probe carries the
+    probe's kernel. ``_stage_build`` reads raw records with ``typed=True`` and the
+    typed dataclasses had no ``provenance_root`` column, so
+    ``registry.is_heldout_record`` (which reads a dataclass through ``__dict__``)
+    saw no declared root, fell back to the record's own unregistered ``task_id``,
+    and classified a lineage descendant as TRAIN.
+
+    Asserted on the EMITTED corpus with a canary, per this file's convention.
+    """
+    probe = _heldout_task("near_probe")
+    descendant = "rmsnorm_lineage_child"
+    _seed_train_shards(tmp_path, "rmsnorm_aiter", "rmsnorm", "rms")
+    _write_shard(tmp_path, "wins", descendant,
+                 [_lineage_win(descendant, root=probe.task_id,
+                               tag=HELDOUT_MARK + "_lineage")])
+
+    # The campaign never named this id and the registry has never seen it, so the
+    # ONLY thing that can hold it out is the root it declares for itself.
+    ctx = _build_ctx(tmp_path, monkeypatch, tasks=["rmsnorm_aiter"])
+    assert descendant not in ctx["eval_task_ids"]
+    assert split_decision(probe).reason == "near_probe"
+
+    rc._stage_build(ctx)
+
+    sft_rows, dpo_rows = _products(tmp_path)
+    assert HELDOUT_MARK not in json.dumps(sft_rows), \
+        "a held-out probe's lineage descendant reached the SFT mix"
+    assert HELDOUT_MARK not in json.dumps(dpo_rows)
+
+
+def test_the_same_record_without_a_lineage_root_does_train(tmp_path, monkeypatch):
+    """The control for the test above, so it cannot pass vacuously.
+
+    Byte-for-byte the same record with no ``provenance_root`` DOES reach the SFT
+    mix, which proves the exclusion is caused by the declared lineage root and not
+    by the RFT gate, the near-dup dedup, or the mixer dropping it anyway.
+    """
+    descendant = "rmsnorm_lineage_child"
+    _seed_train_shards(tmp_path, "rmsnorm_aiter", "rmsnorm", "rms")
+    _write_shard(tmp_path, "wins", descendant,
+                 [_lineage_win(descendant, root=None, tag="LINEAGE_FREE_CANARY")])
+
+    ctx = _build_ctx(tmp_path, monkeypatch, tasks=["rmsnorm_aiter"])
+    assert is_heldout_record({"type": "win", "task_id": descendant,
+                              "operation": "rmsnorm", "arch": "gfx950"}) is False
+    rc._stage_build(ctx)
+
+    sft_rows, _dpo_rows = _products(tmp_path)
+    assert "LINEAGE_FREE_CANARY" in json.dumps(sft_rows)
+
+
+def test_the_typed_read_carries_the_lineage_root_the_split_depends_on():
+    """The unit-level pin under the corpus assertion above.
+
+    ``registry.record_split_decision`` resolves a root from ``provenance_root``,
+    then ``_provenance["root"]``, then the registry. Both declared spellings have
+    to survive ``from_dict`` on all three record types, and a typed record must
+    reach the SAME verdict as the raw dict it was decoded from - otherwise reading
+    typed is a silent downgrade of the held-out filter.
+    """
+    probe = _heldout_task("near_probe")
+    raws = [
+        {"type": "win", "schema_version": 2, "task_id": "rmsnorm_child",
+         "trajectory": [{"role": "user", "content": "u"},
+                        {"role": "assistant", "content": "a"}],
+         "initial_wall_us": 200.0, "final_wall_us": 100.0, "speedup": 2.0,
+         "final_source": "src", "operation": "rmsnorm", "arch": "gfx950",
+         "provenance_root": probe.task_id},
+        {"type": "repair", "schema_version": 2, "task_id": "rmsnorm_child",
+         "failure_class": "snr_fail", "parent_hash": "p", "error_text": "e",
+         "messages": [{"role": "user", "content": "u"},
+                      {"role": "assistant", "content": "a"}],
+         "operation": "rmsnorm", "arch": "gfx950",
+         "_provenance": {"root": probe.task_id}},
+        {"type": "ranked_group", "schema_version": 2, "task_id": "rmsnorm_child",
+         "parent_id": "p", "candidates": [{"source": "a", "rank": 0},
+                                          {"source": "b", "rank": 1}],
+         "preferences": [[0, 1]], "operation": "rmsnorm", "arch": "gfx950",
+         "provenance_root": probe.task_id},
+    ]
+    for raw in raws:
+        typed = record_from_dict(raw, validate=False)
+        assert typed.provenance_root == probe.task_id, type(typed).__name__
+        assert is_heldout_record(raw) is True
+        assert is_heldout_record(typed) is True, type(typed).__name__
+        assert rc._rec_is_heldout(typed, set()) is True
+        # ...and the root survives a write/read round trip, not just the decode.
+        assert typed.to_dict()["provenance_root"] == probe.task_id
+
+    # An undeclared root still resolves from the registry, so a plain trainable
+    # record is untouched by any of this.
+    plain = record_from_dict(dict(raws[0], task_id="rmsnorm_aiter",
+                                  provenance_root=None), validate=False)
+    assert plain.provenance_root is None
+    assert rc._rec_is_heldout(plain, set()) is False
+
+
+def test_the_typed_read_carries_the_declared_dtype_the_split_depends_on():
+    """The sibling hole in the SAME split decision, closed the same way.
+
+    ``split_decision_for_identity`` reserves anything outside ``TRAIN_DTYPES`` as
+    ``foreign_dtype``. ``arch`` was already a column on all three record types so
+    that guard survived the typed read; ``dtype`` was not, so a record declaring a
+    foreign dtype under an unregistered id was ``foreign_dtype`` as a raw dict and
+    ``train`` once typed.
+    """
+    from kore.tasks.registry import record_split_decision
+
+    raw = {"type": "win", "schema_version": 2, "task_id": "rmsnorm_fresh_child",
+           "trajectory": [{"role": "user", "content": "u"},
+                          {"role": "assistant", "content": "a"}],
+           "initial_wall_us": 200.0, "final_wall_us": 100.0, "speedup": 2.0,
+           "final_source": "src", "operation": "rmsnorm", "arch": "gfx950",
+           "dtype": "float64"}
+    typed = record_from_dict(raw, validate=False)
+    assert typed.dtype == "float64"
+    assert record_split_decision(raw).reason == "foreign_dtype"
+    assert record_split_decision(typed).reason == "foreign_dtype"
+    assert rc._rec_is_heldout(typed, set()) is True
+
+    # ...and a trained dtype is still trainable, so this is a filter not a blanket.
+    trained = record_from_dict(dict(raw, dtype="bf16"), validate=False)
+    assert rc._rec_is_heldout(trained, set()) is False
+
+
+def test_a_malformed_leakage_provenance_field_is_refused_rather_than_ignored():
+    """A non-string root or dtype would degrade to "not declared" and reclassify
+    the record as trainable, so strict validation rejects it instead."""
+    from kore.data.schemas import RecordValidationError, validate_record_dict
+
+    for key in ("provenance_root", "dtype"):
+        row = _lineage_win("rmsnorm_child", root=None, tag="malformed")
+        row[key] = 17
+        with pytest.raises(RecordValidationError, match=key):
+            validate_record_dict(row)
 
 
 def test_build_holds_out_a_foreign_arch_record_from_a_trainable_family(
@@ -1572,3 +1768,404 @@ def test_reverify_on_a_fresh_run_is_a_clean_no_op(tmp_path, monkeypatch):
         reverify, "run_reverify",
         lambda *a, **k: pytest.fail("reverify ran with nothing on disk"))
     rc._stage_reverify(_datagen_ctx(tmp_path, tasks=["rmsnorm_aiter"]))
+
+
+# --------------------------------------------------------------------------- #
+# 7. _stage_evolve - the third shard producer: production lane + resume receipt
+# --------------------------------------------------------------------------- #
+def _evolve_ctx(tmp_path, *extra_argv, tasks=None):
+    task_ids = list(tasks or ["rmsnorm_aiter"])
+    args = _args(["--tasks", ",".join(task_ids), "--data-root", str(tmp_path),
+                  "--teacher", "stub", "--evolve-generations", "2",
+                  "--campaign-mode", "development", *extra_argv])
+    ctx = {"data_root": tmp_path, "args": args, "dry": False,
+           "tasks": [get_task(t) for t in task_ids]}
+    rc._apply_split(ctx)
+    return ctx
+
+
+def _stub_evolve(monkeypatch, calls: list, *, wins=1, groups=1):
+    """Wire the stage to a scripted search. The PUBLICATION path is untouched."""
+    import kore.data.evolve as evolve
+    import kore.env.kore_env as kore_env
+
+    monkeypatch.setattr(rc, "_teacher", lambda args: SimpleNamespace(kind="stub"))
+    monkeypatch.setattr(kore_env, "KoreEnv",
+                        lambda task, **kw: SimpleNamespace(task=task))
+
+    def fake_evolve_task(task, generator, env, generations=4, cfg=None):
+        calls.append((task.task_id, generations, getattr(cfg, "seed", None)))
+        return SimpleNamespace(
+            wins=[_win(task.task_id, task.operation, f"{task.task_id}_ev{i}")
+                  for i in range(wins)],
+            groups=[_group(task.task_id, task.operation, f"{task.task_id}_eg{i}")
+                    for i in range(groups)],
+            stats={"best_speedup": 2.0})
+
+    monkeypatch.setattr(evolve, "evolve_task", fake_evolve_task)
+
+
+def _evolve_contract_for(ctx, task_id: str, *, generations: int = 2,
+                         config_seed: int = 0) -> dict:
+    return rc._evolve_contract(ctx, get_task(task_id), generations=generations,
+                               config_seed=config_seed)
+
+
+def test_evolve_publishes_a_resumable_production_lane_shard(tmp_path, monkeypatch):
+    """REGRESSION for a real defect, the same one the sequential datagen path had.
+
+    ``_stage_evolve`` wrote its ``.evolve.jsonl`` shards with a bare ``write_jsonl``.
+    Two consequences, both measured: ``read_jsonl(mode="production_strict")`` -
+    what ``_stage_build`` uses in production - rejected every record with
+    ``record.data_lane_version: expected production lane 'kore-datagen-v1'``, so a
+    production campaign with ``--evolve`` could not build at all; and there was no
+    durable receipt of any kind, so every rerun re-ran the whole teacher+GPU D-MAB
+    search and then OVERWROTE the previous run's verified wins.
+    """
+    from kore.data.schemas import read_jsonl
+
+    calls: list = []
+    _stub_evolve(monkeypatch, calls)
+    ctx = _evolve_ctx(tmp_path)
+    rc._stage_evolve(ctx)
+    assert calls, "nothing was evolved"
+
+    for kind in ("wins", "groups"):
+        # the production build stage reads these back under the strict envelope
+        rows = read_jsonl(tmp_path / kind / f"rmsnorm_aiter.evolve.jsonl",
+                          typed=True, mode="production_strict")
+        assert rows, f"the {kind} shard is empty"
+    assert rc._evolve_done(tmp_path, "rmsnorm_aiter",
+                           _evolve_contract_for(ctx, "rmsnorm_aiter")) is True
+
+    calls.clear()
+    rc._stage_evolve(ctx)
+    assert calls == [], "a rerun re-ran a completed evolutionary search"
+
+
+def test_evolve_regenerates_when_its_receipt_is_deleted(tmp_path, monkeypatch):
+    """Resume must fill HOLES: deleting the receipt is the documented way to force
+    a task's search to run again."""
+    calls: list = []
+    _stub_evolve(monkeypatch, calls)
+    ctx = _evolve_ctx(tmp_path)
+    rc._stage_evolve(ctx)
+
+    (tmp_path / "evolve" / "rmsnorm_aiter.complete.json").unlink()
+    calls.clear()
+    rc._stage_evolve(ctx)
+    assert [task_id for task_id, _g, _s in calls] == ["rmsnorm_aiter"]
+
+
+def test_evolve_does_not_resume_a_shard_that_changed_underneath_it(
+        tmp_path, monkeypatch):
+    """``scripts/evolve_wins.py`` merges into these SAME files additively, so a
+    receipt is only worth its binding to the exact bytes it described."""
+    calls: list = []
+    _stub_evolve(monkeypatch, calls)
+    ctx = _evolve_ctx(tmp_path)
+    rc._stage_evolve(ctx)
+    contract = _evolve_contract_for(ctx, "rmsnorm_aiter")
+
+    shard = tmp_path / "wins" / "rmsnorm_aiter.evolve.jsonl"
+    shard.write_text(shard.read_text() * 2)          # another producer appended
+    assert rc._evolve_done(tmp_path, "rmsnorm_aiter", contract) is False
+
+    # ...and a shard the receipt never accounted for is caught too.
+    rc._stage_evolve(ctx)
+    (tmp_path / "groups" / "extra.evolve.jsonl").write_text("")
+    _write_shard(tmp_path, "groups", "rmsnorm_aiter.evolve",
+                 [_group("rmsnorm_aiter", "rmsnorm", "foreign")])
+    assert rc._evolve_done(tmp_path, "rmsnorm_aiter", contract) is False
+
+
+def test_evolve_does_not_resume_across_a_different_generation_contract(
+        tmp_path, monkeypatch):
+    """A shard produced at a different ``--evolve-generations`` (or a different
+    per-task config seed) is not the shard this run asked for."""
+    calls: list = []
+    _stub_evolve(monkeypatch, calls)
+    ctx = _evolve_ctx(tmp_path)
+    rc._stage_evolve(ctx)
+
+    assert rc._evolve_done(
+        tmp_path, "rmsnorm_aiter",
+        _evolve_contract_for(ctx, "rmsnorm_aiter", generations=99)) is False
+    assert rc._evolve_done(
+        tmp_path, "rmsnorm_aiter",
+        _evolve_contract_for(ctx, "rmsnorm_aiter", config_seed=7)) is False
+
+    calls.clear()
+    deeper = _evolve_ctx(tmp_path, "--evolve-generations", "9")
+    rc._stage_evolve(deeper)
+    assert [task_id for task_id, _g, _s in calls] == ["rmsnorm_aiter"]
+    assert calls[0][1] == 9
+
+
+def test_a_completed_search_that_found_nothing_is_not_retried_forever(
+        tmp_path, monkeypatch):
+    """The one place evolve's completion semantics legitimately differ from datagen.
+
+    Evolve is a SEARCH; a task where nothing beat the vendor baseline produced zero
+    wins as a TERMINAL outcome. The datagen completion vocabulary would classify
+    that shard as ``EMPTY_FAILURE`` and re-run the whole search on every resume,
+    which is why the evolve receipt is its own thing rather than a reuse.
+    """
+    calls: list = []
+    _stub_evolve(monkeypatch, calls, wins=0, groups=0)
+    ctx = _evolve_ctx(tmp_path)
+    rc._stage_evolve(ctx)
+
+    assert calls, "the search did not run"
+    assert not (tmp_path / "wins" / "rmsnorm_aiter.evolve.jsonl").exists()
+    assert (tmp_path / "evolve" / "rmsnorm_aiter.complete.json").exists()
+
+    calls.clear()
+    rc._stage_evolve(ctx)
+    assert calls == [], "an exhausted search was re-run from scratch"
+
+
+def test_a_shard_from_a_superseded_contract_does_not_strand_the_resume(
+        tmp_path, monkeypatch):
+    """The corner where a receipt can describe a corpus that is not on disk.
+
+    A first run publishes a wins shard; a second run under a DIFFERENT contract
+    re-runs the search and this time finds no wins. If the superseded wins shard
+    were left behind, the receipt would no longer account for it, the resume guard
+    would read not-done forever, and the whole search would re-run on every single
+    resume - the exact cost this receipt exists to avoid. The publish is
+    authoritative for both paths, so the stale shard goes.
+    """
+    calls: list = []
+    _stub_evolve(monkeypatch, calls)
+    rc._stage_evolve(_evolve_ctx(tmp_path))
+    assert (tmp_path / "wins" / "rmsnorm_aiter.evolve.jsonl").exists()
+
+    # the deeper search finds groups but no wins
+    calls.clear()
+    _stub_evolve(monkeypatch, calls, wins=0, groups=1)
+    deeper = _evolve_ctx(tmp_path, "--evolve-generations", "9")
+    rc._stage_evolve(deeper)
+    assert calls, "the changed contract did not re-run the search"
+    assert not (tmp_path / "wins" / "rmsnorm_aiter.evolve.jsonl").exists()
+    assert (tmp_path / "groups" / "rmsnorm_aiter.evolve.jsonl").exists()
+
+    calls.clear()
+    rc._stage_evolve(deeper)
+    assert calls == [], "a superseded shard stranded the resume guard"
+
+
+def test_evolve_runs_only_on_train_split_tasks(tmp_path, monkeypatch):
+    """Evolving a held-out task would manufacture training data from the eval
+    distribution - the most expensive possible way to contaminate the split."""
+    held = heldout_tasks()[0]
+    calls: list = []
+    _stub_evolve(monkeypatch, calls)
+
+    ctx = _evolve_ctx(tmp_path, tasks=["rmsnorm_aiter", held.task_id])
+    rc._stage_evolve(ctx)
+
+    assert [task_id for task_id, _g, _s in calls] == ["rmsnorm_aiter"]
+    assert not (tmp_path / "wins" / f"{held.task_id}.evolve.jsonl").exists()
+
+
+def test_evolve_dry_run_touches_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(rc, "_teacher",
+                        lambda args: pytest.fail("a dry run contacted the teacher"))
+    ctx = _evolve_ctx(tmp_path)
+    ctx["dry"] = True
+    rc._stage_evolve(ctx)
+    assert list(tmp_path.iterdir()) == []
+
+
+# --------------------------------------------------------------------------- #
+# 8. _stage_agentic live/sequential - the shard the SFT assembler reads back
+# --------------------------------------------------------------------------- #
+def _stub_live_agentic(monkeypatch, calls: list, *, n: int = 1):
+    import kore.data.gen_agentic as gen_agentic
+    import kore.env.kore_env as kore_env
+    from kore.agent.schema import AgenticTrajectoryRecord
+
+    monkeypatch.setattr(rc, "_teacher", lambda args: SimpleNamespace(kind="stub"))
+    monkeypatch.setattr(kore_env, "KoreEnv",
+                        lambda task, **kw: SimpleNamespace(task=task))
+    monkeypatch.setattr(rc, "_datagen_plan", lambda ctx: (1, 1))
+
+    def fake_generate(task, teacher, env, n=1, max_turns=6, keep_only_useful=True):
+        calls.append(task.task_id)
+        source = _kernel(f"{task.task_id}_agentic")
+        return [
+            AgenticTrajectoryRecord(
+                task_id=task.task_id,
+                messages=[
+                    {"role": "user", "content": "optimize this kernel"},
+                    {"role": "assistant",
+                     "content": '<tool_call>{"name": "bench"}</tool_call>'},
+                    {"role": "tool", "content": '{"tool": "bench", "wall_us": 100.0}'},
+                    {"role": "assistant", "content": f"FULL_KERNEL:\n{source}"},
+                ],
+                tool_trace=[{"turn": 0, "name": "bench", "result": "100us"}],
+                best_kernel=source, best_reward=1.0, turns_to_best=1, success=True,
+                reflections=[], phase_trace=[{"turn": 0, "phase": "optimize"}],
+                provenance={"category": "optimize"}, gpu="gfx950")
+            for _ in range(n)
+        ]
+
+    monkeypatch.setattr(gen_agentic, "generate_agentic_trajectories", fake_generate)
+
+
+def test_sequential_agentic_publishes_a_resumable_receipted_shard(
+        tmp_path, monkeypatch):
+    """REGRESSION for a real defect, and the most consequential of the three.
+
+    The live agentic path (``--agentic live`` with ``--datagen-workers 1``) wrote
+    bare JSONL, so it had no completion receipt and its records were outside the
+    production lane. Unlike datagen and evolve there is no development escape
+    hatch here: ``assemble._agentic_rows`` - the only reader of this directory,
+    reached from ``_stage_build`` via ``build_multicap_dataset`` - hardcodes
+    ``mode="production_strict"``, so the build stage RAISED on its own agentic
+    slice in every campaign mode.
+    """
+    import kore.data.assemble as assemble
+    from kore.data.parallel_datagen import shard_done
+    from kore.data.schemas import read_jsonl
+
+    calls: list = []
+    _stub_live_agentic(monkeypatch, calls)
+    ctx = _agentic_ctx(tmp_path, "--agentic", "live", "--datagen-workers", "1")
+    rc._stage_agentic(ctx)
+    assert calls == ["rmsnorm_aiter"]
+
+    assert shard_done(tmp_path, "rmsnorm_aiter", "agentic",
+                      gate="quota_only") is True
+    assert read_jsonl(tmp_path / "agentic" / "rmsnorm_aiter.jsonl", typed=False,
+                      mode="production_strict")
+    # the assembler that feeds the SFT tool-use slice can now read it back
+    rows = assemble._agentic_rows(tmp_path)
+    assert rows and all(row["messages"] for row in rows)
+
+    calls.clear()
+    rc._stage_agentic(ctx)
+    assert calls == [], "a rerun regenerated a completed agentic shard"
+
+
+def test_agentic_regenerates_a_shard_that_was_deleted(tmp_path, monkeypatch):
+    calls: list = []
+    _stub_live_agentic(monkeypatch, calls)
+    ctx = _agentic_ctx(tmp_path, "--agentic", "live", "--datagen-workers", "1")
+    rc._stage_agentic(ctx)
+
+    (tmp_path / "agentic" / "rmsnorm_aiter.jsonl").unlink()
+    (tmp_path / "agentic" / "rmsnorm_aiter.jsonl.complete.json").unlink()
+    calls.clear()
+    rc._stage_agentic(ctx)
+    assert calls == ["rmsnorm_aiter"]
+
+
+def test_the_live_agentic_shard_satisfies_the_agentic_artifact_contract(
+        tmp_path, monkeypatch):
+    """End to end: what the live path publishes is also what the campaign will
+    accept as a completed agentic stage."""
+    calls: list = []
+    _stub_live_agentic(monkeypatch, calls)
+    ctx = _agentic_ctx(tmp_path, "--agentic", "live", "--datagen-workers", "1")
+    ctx["lineage"] = _lineage()
+    ctx["train_task_ids"] = ["rmsnorm_aiter"]
+    rc._stage_agentic(ctx)
+
+    artifact = rc._capture_stage_artifact(ctx, "agentic")
+    assert artifact["outputs"] and artifact["digest"]
+
+
+# --------------------------------------------------------------------------- #
+# 9. _stage_grpo - the value model is only adopted if it ranks held-out groups
+# --------------------------------------------------------------------------- #
+def _grpo_ctx(tmp_path, *extra_argv):
+    args = _args(["--tasks", "rmsnorm_aiter", "--data-root", str(tmp_path),
+                  "--no-grpo-curriculum", "--campaign-mode", "development",
+                  *extra_argv])
+    return {"data_root": tmp_path, "args": args, "dry": False, "base": "base_model",
+            "tasks": [get_task("rmsnorm_aiter")],
+            "train_tasks": [get_task("rmsnorm_aiter")],
+            "sft_ckpt": "sft_ckpt", "dpo_ckpt": "dpo_ckpt", "eval_task_ids": []}
+
+
+def _run_grpo(monkeypatch, tmp_path, *, metrics):
+    """Run the stage with a scripted value-model training result; return the cfg."""
+    import kore.policy.grpo as grpo_mod
+    import kore.value.replay_train as replay_train
+
+    _no_torch(monkeypatch)
+    seen: list = []
+    monkeypatch.setattr(grpo_mod, "train_grpo",
+                        lambda cfg, tasks=None: seen.append(cfg) or "grpo_ckpt")
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
+    if metrics is not None:
+        monkeypatch.setattr(replay_train, "train_value_from_groups",
+                            lambda groups_dir, out_path, **kw: dict(metrics))
+    rc._stage_grpo(_grpo_ctx(tmp_path))
+    assert len(seen) == 1
+    return seen[0]
+
+
+def _value_metrics(**overrides) -> dict:
+    metrics = {"backend": "sklearn", "n_groups": 40, "n_train_groups": 32,
+               "n_test_groups": 8, "n_candidates": 160,
+               "heldout_group_rank_corr": 0.62,
+               "heldout_group_top_k_recall": 0.75, "top_k": 1,
+               "ranker_fitted": True, "out_path": "runs/value/value_model.pkl"}
+    metrics.update(overrides)
+    return metrics
+
+
+def test_grpo_adopts_a_value_model_that_ranks_heldout_groups(tmp_path, monkeypatch):
+    cfg = _run_grpo(monkeypatch, tmp_path, metrics=_value_metrics())
+    assert cfg.value_prefilter is True
+    assert cfg.value_model_path.endswith("value_model.pkl")
+
+
+@pytest.mark.parametrize("overrides, why", [
+    ({"heldout_group_rank_corr": 0.0}, "no measurable ordering signal"),
+    ({"heldout_group_rank_corr": -0.4}, "ranks the group BACKWARDS"),
+    ({"ranker_fitted": False}, "the pairwise ranker never fitted"),
+    ({"heldout_group_rank_corr": None}, "the metric is missing entirely"),
+])
+def test_grpo_refuses_a_value_model_with_no_heldout_ranking_skill(
+        tmp_path, monkeypatch, overrides, why):
+    """REGRESSION for a real defect of the same class as the DPO floor.
+
+    ``train_value_from_groups`` measures whether the fitted ranker recovers the
+    within-group order on a HELD-OUT split and documents the shortfall as the
+    caller's to act on. The rank-corr was interpolated into a log line and the
+    model was then adopted unconditionally. This matters more than a dead metric:
+    the bench prefilter MEASURES ONLY THE TOP-K it is handed, so a ranker with no
+    (or inverted) ordering skill discards the genuinely-best candidates before
+    they are ever benched. Fall back to the source heuristic instead.
+    """
+    cfg = _run_grpo(monkeypatch, tmp_path, metrics=_value_metrics(**overrides))
+    assert cfg.value_prefilter is True, "the prefilter itself still runs"
+    assert getattr(cfg, "value_model_path", None) in (None, ""), why
+
+
+def test_grpo_still_honors_an_explicitly_supplied_value_model(tmp_path, monkeypatch):
+    """``--value-model-path`` is an operator's own artifact; the campaign never
+    trains over it, so the held-out check does not apply to it."""
+    import kore.policy.grpo as grpo_mod
+    import kore.value.replay_train as replay_train
+
+    _no_torch(monkeypatch)
+    seen: list = []
+    monkeypatch.setattr(grpo_mod, "train_grpo",
+                        lambda cfg, tasks=None: seen.append(cfg) or "grpo_ckpt")
+    monkeypatch.setattr(rc, "_retention_gate", lambda *a, **k: None)
+    monkeypatch.setattr(
+        replay_train, "train_value_from_groups",
+        lambda *a, **k: pytest.fail("retrained over an explicit value model"))
+
+    args = _args(["--tasks", "rmsnorm_aiter", "--data-root", str(tmp_path),
+                  "--no-grpo-curriculum", "--campaign-mode", "development",
+                  "--value-model-path", "runs/value/mine.pkl"])
+    ctx = _grpo_ctx(tmp_path)
+    ctx["args"] = args
+    rc._stage_grpo(ctx)
+    assert seen[0].value_model_path == "runs/value/mine.pkl"

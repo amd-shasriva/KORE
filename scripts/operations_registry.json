@@ -252,6 +252,18 @@
       "role": "single-node 8-rank stage-2 DPO launcher (trains the SFT output; requeue-safe)"
     },
     {
+      "path": "scripts/spur_eval_ab_1node.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "one-node gfx950 checkpoint A/B: generate + held-out LM loss + retention per arm, then verify/cold-cache bench both arms on one device and emit the paired report (docs/EVAL_RESULTS.md)"
+    },
+    {
+      "path": "scripts/spur_eval_ab_cpu.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "CPU-only half of the checkpoint A/B (generation + held-out LM loss + retention); used when GPU submissions are being held"
+    },
+    {
       "path": "scripts/spur_gpu_smoke.sbatch",
       "classification": "diagnostic",
       "lifecycle": "active",

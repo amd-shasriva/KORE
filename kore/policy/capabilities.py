@@ -4,6 +4,15 @@ The legacy GRPO configuration remains constructible for inspection and old
 checkpoints, but a strict profile must prove that every requested feature has a
 real consumer in the selected runtime.  Silent fallback is a configuration
 error: ``requested_features`` and ``effective_features`` must be identical.
+
+Strict profiles are not the only lane that must be honest.  A research recipe
+(``strict_feature_validation`` false) still has to say what it will actually
+do, so :func:`audit_requested_capabilities` computes the same
+requested-vs-deliverable diff WITHOUT raising, and :func:`log_capability_audit`
+reports it loudly at launch.  Every feature in this module fails SAFE by
+design -- a missing artifact degrades to the legacy behavior rather than
+crashing -- which is exactly why an unaudited run can train a different recipe
+than the one written down and look perfectly healthy doing it.
 """
 
 from __future__ import annotations
@@ -529,6 +538,482 @@ def _effective_features(config: Any, requested: set[str]) -> set[str]:
     ):
         effective.discard("transform_discover")
     return effective
+
+
+# --------------------------------------------------------------------------- #
+# Non-strict capability audit
+#
+# ``resolve_grpo_features`` refuses an inert feature, but only a strict profile
+# runs it, and the strict profile bans six of the audited research levers
+# outright -- so the frontier recipes that most need the check are precisely the
+# ones that cannot adopt it.  The audit below is the part that generalizes: it
+# answers "which capability did this config request that this run cannot
+# deliver", never raises, and is cheap enough to run on every launch.
+#
+# Findings carry a ``scope``:
+#   "declared" - provable from the config alone (a topology or gating rule).
+#                A shipped config must have none; tests/test_grpo_recipe_honesty
+#                fails CI otherwise.
+#   "artifact" - depends on what is on THIS filesystem (a corpus, a checkpoint,
+#                a pickled model).  Correctly absent on a dev box, so it is
+#                reported at runtime rather than pinned in CI.
+# --------------------------------------------------------------------------- #
+DECLARED = "declared"
+ARTIFACT = "artifact"
+
+#: Promote the audit from a loud report to a hard failure.  Production
+#: launchers set this; research configs leave it unset.
+INERT_FEATURE_POLICY_ENV = "KORE_GRPO_INERT_FEATURES"
+
+
+class InertFeatureError(FeatureConfigurationError):
+    """Raised when the audit is configured to fail closed on an inert feature."""
+
+
+@dataclass(frozen=True)
+class CapabilityFinding:
+    """One requested capability this run cannot deliver."""
+
+    feature: str
+    scope: str
+    requested_by: tuple[str, ...]
+    reason: str
+    remedy: str
+
+    @property
+    def sort_key(self) -> tuple[str, str]:
+        return (self.scope, self.feature)
+
+    def describe(self) -> str:
+        fields_text = ", ".join(self.requested_by)
+        return (
+            f"{self.feature} [{self.scope}] requested by {fields_text}: "
+            f"{self.reason} FIX: {self.remedy}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "feature": self.feature,
+            "scope": self.scope,
+            "requested_by": list(self.requested_by),
+            "reason": self.reason,
+            "remedy": self.remedy,
+        }
+
+
+def _flag(config: Any, name: str) -> bool:
+    return bool(getattr(config, name, False))
+
+
+def _weight(config: Any, name: str) -> float:
+    try:
+        value = float(getattr(config, name, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) else 0.0
+
+
+def _under(root: Optional[Path], value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or root is None:
+        return path
+    return root / path
+
+
+def _value_model_defect(config: Any, root: Optional[Path]) -> Optional[str]:
+    """Why ``value_model_path`` will not produce a trained ranker (None = it will).
+
+    Mirrors ``kore.value.rerank.load_default_model``: an unset path yields no
+    model at all, and a path that is not a readable file cannot be unpickled.
+    Staleness against the current featurizer is only decidable by loading the
+    artifact, so it is named in the remedy rather than probed here.
+    """
+    path = getattr(config, "value_model_path", None)
+    if not path:
+        return (
+            "value_model_path is unset, so load_default_model(None) returns None "
+            "and the trained value model is never installed"
+        )
+    if not _under(root, str(path)).is_file():
+        return f"value_model_path {str(path)!r} is not a readable file"
+    return None
+
+
+def _coevolution_root(config: Any) -> Optional[str]:
+    """The archive root ``_build_opus_scores`` will mine (its own derivation)."""
+    distill = getattr(config, "coevolve_distill_path", None)
+    return str(Path(str(distill)).parent) if distill else None
+
+
+def _archive_is_populated(root: Path) -> bool:
+    return any(root.glob("wins/*.jsonl")) or any(root.glob("groups/*.jsonl"))
+
+
+def _ref_checkpoint_defect(config: Any, root: Optional[Path]) -> Optional[str]:
+    """Why the KL retention anchor will not load (None = it will, or is a Hub id).
+
+    ``_load_ref_model`` prints and continues with NO anchor when the reference
+    cannot be loaded, so an unresolvable path silently drops ``ref_anchor_coef``
+    from the objective.  A bare Hub repo id is indistinguishable from a relative
+    directory by shape (both are ``a/b``), so the discriminator is whether the
+    PARENT exists locally: ``runs/`` does in this repo, ``Qwen/`` does not.
+    """
+    ref = getattr(config, "ref_checkpoint", None) or getattr(config, "model_id", None)
+    if not ref:
+        return "neither ref_checkpoint nor model_id names a reference model"
+    resolved = _under(root, str(ref))
+    if resolved.is_dir():
+        return None
+    if not resolved.parent.is_dir():
+        return None  # looks like a Hub repo id; resolution is the loader's job
+    return f"{str(ref)!r} is not a directory on this filesystem"
+
+
+def audit_requested_capabilities(
+    config: Any, *, root: Optional[str | os.PathLike[str]] = None
+) -> tuple[CapabilityFinding, ...]:
+    """Every capability ``config`` requests that this run cannot deliver.
+
+    Pure and total: never raises, never mutates, and touches the filesystem only
+    to answer whether a named artifact is there.  ``root`` anchors the relative
+    paths inside the config (defaults to the process cwd, which is what the
+    consuming code itself resolves against).
+    """
+    base = Path(root) if root is not None else None
+    found: list[CapabilityFinding] = []
+
+    def add(feature, scope, requested_by, reason, remedy) -> None:
+        found.append(
+            CapabilityFinding(
+                feature=feature,
+                scope=scope,
+                requested_by=tuple(requested_by),
+                reason=reason,
+                remedy=remedy,
+            )
+        )
+
+    agentic = _flag(config, "agentic")
+    distributed = _flag(config, "distributed")
+    coevolve = _flag(config, "coevolve")
+    use_search = _flag(config, "use_search")
+
+    # -- value model ------------------------------------------------------- #
+    value_defect = _value_model_defect(config, base)
+    if _flag(config, "value_prefilter"):
+        if agentic:
+            add(
+                "value_prefilter", DECLARED, ("value_prefilter", "agentic"),
+                "only the serial _rollout calls _prefilter_bench_indices; "
+                "_rollout_agentic never generates num_candidates_per_turn "
+                "candidates, so the bench prefilter never runs",
+                "set value_prefilter=false, or run this recipe with agentic=false",
+            )
+        elif value_defect:
+            add(
+                "value_prefilter", ARTIFACT,
+                ("value_prefilter", "value_model_path"),
+                f"{value_defect}; the prefilter silently degrades to the "
+                "heuristic cold-start ranker",
+                "train an artifact with kore.value.train_value against the "
+                "current kore.value.features layout and set value_model_path, "
+                "or set value_prefilter=false",
+            )
+    if _flag(config, "search_value_prior"):
+        if not use_search:
+            add(
+                "search_value_prior", DECLARED,
+                ("search_value_prior", "use_search"),
+                "the PUCT prior is only consulted by the search-then-distill "
+                "hook, which use_search gates off",
+                "enable use_search or set search_value_prior=false",
+            )
+        elif value_defect:
+            add(
+                "search_value_prior", ARTIFACT,
+                ("search_value_prior", "value_model_path"),
+                f"{value_defect}; _search_value_fn returns None and the search "
+                "falls back to its correctness-base prior",
+                "set value_model_path to a serviceable artifact, or set "
+                "search_value_prior=false",
+            )
+    if getattr(config, "value_model_path", None) and not (
+        _flag(config, "value_prefilter") or _flag(config, "search_value_prior")
+    ):
+        add(
+            "value_prefilter", DECLARED, ("value_model_path",),
+            "a value model is named but neither value_prefilter nor "
+            "search_value_prior consumes it",
+            "enable a consumer or set value_model_path=null",
+        )
+    # NB: num_candidates_per_turn / value_prefilter_k are deliberately NOT
+    # audited here. They are dead scalars rather than requested capabilities
+    # when the prefilter is off, and their dataclass defaults (8 / 4) are
+    # non-unit, so auditing them would fire on every default config and drown
+    # the real findings. The strict profile rejects them, and
+    # tests/test_grpo_recipe_honesty.py pins them for the shipped recipe.
+
+    # -- physics ----------------------------------------------------------- #
+    shaping_armed = (
+        _weight(config, "physics_shaping_weight") > 0.0
+        and bool(getattr(config, "physics_shaping_evidence_path", None))
+        and bool(getattr(config, "physics_shaping_evidence_fingerprint", None))
+    )
+    if _weight(config, "physics_shaping_weight") > 0.0 and not shaping_armed:
+        add(
+            "physics_shaping", DECLARED,
+            ("physics_shaping_weight", "physics_shaping_evidence_path",
+             "physics_shaping_evidence_fingerprint"),
+            "_physics_shaping_weight() returns 0.0 unless BOTH the evidence path "
+            "and its fingerprint are set, so the potential-based shaping term "
+            "contributes nothing",
+            "set physics_shaping_weight=0.0, or supply a fingerprint-pinned "
+            "evidence document in which the operator family actually passes "
+            "kore.reward.shaping.ShapingThresholds",
+        )
+    if shaping_armed:
+        evidence = str(getattr(config, "physics_shaping_evidence_path"))
+        if not _under(base, evidence).is_file():
+            add(
+                "physics_shaping", ARTIFACT,
+                ("physics_shaping_evidence_path",),
+                f"evidence document {evidence!r} is not a readable file; "
+                "evidence_for_task returns None for every task",
+                "materialize the evidence document or set "
+                "physics_shaping_weight=0.0",
+            )
+    if _flag(config, "physics_live_counters") and not (
+        shaping_armed or getattr(config, "reward_mode", "speedup") == "residual"
+    ):
+        add(
+            "physics_live_counters", DECLARED,
+            ("physics_live_counters", "physics_shaping_weight", "reward_mode"),
+            "counter collection is nested inside the shaping gate "
+            "(kore/agent/tools.py reads KORE_PHYSICS_LIVE_COUNTERS only within "
+            "the KORE_PHYSICS_SHAPING branch, and _dense_profile_weight() is "
+            "zero without evidence), so no counters are collected",
+            "set physics_live_counters=false, arm physics shaping, or use "
+            "reward_mode='residual'",
+        )
+
+    # -- co-evolution ------------------------------------------------------ #
+    coevolution_children = {
+        "coevolve_mint": "coevolve",
+        "coevolve_regret_vs_opus": "coevolve",
+        "adversarial_coevolve": "coevolve",
+        "coevolve_evolve_grammar": "coevolve_mint",
+    }
+    for child, parent in coevolution_children.items():
+        if _flag(config, child) and not _flag(config, parent):
+            add(
+                child, DECLARED, (child, parent),
+                f"{child} has no consumer without {parent}",
+                f"enable {parent} or set {child}=false",
+            )
+    distill = getattr(config, "coevolve_distill_path", None)
+    scores = getattr(config, "coevolve_opus_scores_path", None)
+    archive_root = _coevolution_root(config)
+    if _flag(config, "coevolve_regret_vs_opus") and coevolve:
+        if not distill:
+            add(
+                "coevolve_regret_vs_opus", DECLARED,
+                ("coevolve_regret_vs_opus", "coevolve_distill_path"),
+                "_build_opus_scores derives the archive root from "
+                "dirname(coevolve_distill_path); with no distill path it falls "
+                "back to the hardcoded data/full14b",
+                "set coevolve_distill_path under the corpus this lineage "
+                "actually trained on",
+            )
+        if scores and archive_root and str(Path(str(scores)).parent) != archive_root:
+            add(
+                "coevolve_regret_vs_opus", DECLARED,
+                ("coevolve_opus_scores_path", "coevolve_distill_path"),
+                f"the score cache lives under {str(Path(str(scores)).parent)!r} "
+                f"but the archive root is {archive_root!r}; build_opus_scores "
+                "treats a non-empty cache as authoritative, so a cache from "
+                "another root would override the scan entirely",
+                "put both paths under the same data root",
+            )
+        if archive_root:
+            resolved_root = _under(base, archive_root)
+            cached = scores and _under(base, str(scores)).is_file()
+            if not cached and not (
+                resolved_root.is_dir() and _archive_is_populated(resolved_root)
+            ):
+                add(
+                    "coevolve_regret_vs_opus", ARTIFACT,
+                    ("coevolve_distill_path",),
+                    f"archive root {archive_root!r} holds no wins/*.jsonl or "
+                    "groups/*.jsonl, so build_opus_scores returns {} and the "
+                    "regret curriculum is inert (it fails safe, silently)",
+                    "point coevolve_distill_path at a populated archive root",
+                )
+    if distill:
+        parent = _under(base, str(distill)).parent
+        if not parent.is_dir():
+            add(
+                "distillation", ARTIFACT, ("coevolve_distill_path",),
+                f"the distillation sink's directory {str(parent)!r} does not "
+                "exist, so verified wins cannot be recorded",
+                "create the directory or set coevolve_distill_path=null",
+            )
+
+    # -- rollout/update topology ------------------------------------------- #
+    if _flag(config, "rc_grpo") and agentic:
+        add(
+            "rc_grpo", DECLARED, ("rc_grpo", "agentic"),
+            "reward-control tokens are sampled but only _rollout consumes them; "
+            "_rollout_agentic never receives one, so RC-GRPO shapes nothing",
+            "set rc_grpo=false, or run with agentic=false",
+        )
+    if _flag(config, "sc_grpo") and distributed:
+        add(
+            "sc_grpo", DECLARED, ("sc_grpo", "distributed"),
+            "the SC-GRPO KL re-weighting block exists only in the "
+            "single-process loop; _train_grpo_distributed has no such block",
+            "set sc_grpo=false, or run with distributed=false",
+        )
+    if _flag(config, "dynamic_sampling") and not _flag(config, "starpo_s"):
+        add(
+            "dynamic_sampling", DECLARED, ("dynamic_sampling", "starpo_s"),
+            "oversample-and-refill is selected by the StarPO-S group selector",
+            "enable starpo_s or set dynamic_sampling=false",
+        )
+    if _flag(config, "agentic_transform_tools") and not agentic:
+        add(
+            "agentic_transform_tools", DECLARED,
+            ("agentic_transform_tools", "agentic"),
+            "the transform tool schemas are only advertised by the agentic "
+            "harness",
+            "enable agentic or set agentic_transform_tools=false",
+        )
+    if _flag(config, "search_bnb") and not use_search:
+        add(
+            "search_bnb", DECLARED, ("search_bnb", "use_search"),
+            "branch-and-bound pruning only applies inside the search hook",
+            "enable use_search or set search_bnb=false",
+        )
+    if _flag(config, "transform_discover") and not (
+        use_search or _flag(config, "agentic_transform_tools")
+    ):
+        add(
+            "transform_discover", DECLARED,
+            ("transform_discover", "use_search", "agentic_transform_tools"),
+            "discovered rewrites are merged into the transform action space, "
+            "which neither the search nor the agentic tools expose here",
+            "enable use_search or agentic_transform_tools, or set "
+            "transform_discover=false",
+        )
+
+    # -- retention anchor --------------------------------------------------- #
+    if _weight(config, "ref_anchor_coef") > 0.0:
+        defect = _ref_checkpoint_defect(config, base)
+        if defect:
+            add(
+                "ref_anchor", ARTIFACT, ("ref_anchor_coef", "ref_checkpoint"),
+                f"{defect}; _load_ref_model prints a warning and trains with NO "
+                "KL anchor, so the retention term is silently dropped",
+                "point ref_checkpoint at the post-SFT checkpoint, or set "
+                "ref_anchor_coef=0.0 to state that there is no anchor",
+            )
+
+    return tuple(sorted(found, key=lambda item: item.sort_key))
+
+
+def format_capability_audit(
+    findings: Sequence[CapabilityFinding], *, profile: Optional[str] = None
+) -> str:
+    """A banner an operator cannot miss in eight ranks of interleaved output."""
+    label = f" profile={profile}" if profile else ""
+    if not findings:
+        return f"[grpo-audit] OK{label}: every requested capability has a live consumer"
+    rule = "=" * 78
+    lines = [
+        rule,
+        f"[grpo-audit] {len(findings)} REQUESTED CAPABILITY/IES ARE INERT{label}",
+        "This run will NOT do what its config says. Every feature below fails",
+        "safe, so nothing will crash and nothing else will tell you.",
+        rule,
+    ]
+    lines.extend(f"  - {finding.describe()}" for finding in findings)
+    lines.append(rule)
+    return "\n".join(lines)
+
+
+def capability_audit_document(
+    config: Any, findings: Sequence[CapabilityFinding]
+) -> dict[str, Any]:
+    return {
+        "schema_version": "CapabilityAuditV1",
+        "production_profile": getattr(config, "production_profile", None),
+        "strict_feature_validation": bool(
+            getattr(config, "strict_feature_validation", False)
+        ),
+        "requested_features": sorted(_requested_features(config)),
+        "inert": [finding.to_dict() for finding in findings],
+    }
+
+
+def emit_capability_audit(
+    config: Any,
+    findings: Sequence[CapabilityFinding],
+    output_dir: str | os.PathLike[str],
+) -> Path:
+    """Persist the audit beside ``feature_manifest.json`` for post-hoc review."""
+    return _atomic_json_write(
+        Path(output_dir) / "capability_audit.json",
+        capability_audit_document(config, findings),
+    )
+
+
+def log_capability_audit(
+    config: Any,
+    *,
+    root: Optional[str | os.PathLike[str]] = None,
+    output_dir: Optional[str | os.PathLike[str]] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> tuple[CapabilityFinding, ...]:
+    """Audit, report loudly, optionally persist, and fail closed on request.
+
+    Called unconditionally at GRPO startup.  ``KORE_GRPO_INERT_FEATURES=error``
+    turns the report into an :class:`InertFeatureError` so a production launcher
+    can be fail-closed without adopting the whole strict profile (which bans six
+    of the audited research levers outright).
+    """
+    import sys
+
+    findings = audit_requested_capabilities(config, root=root)
+    report = format_capability_audit(
+        findings, profile=getattr(config, "production_profile", None)
+    )
+    try:
+        from kore.obs import get_logger
+
+        logger = get_logger("policy.capabilities")
+        if findings:
+            logger.warn(
+                "requested GRPO capabilities are inert",
+                count=len(findings),
+                features=sorted({finding.feature for finding in findings}),
+                detail=[finding.describe() for finding in findings],
+            )
+        else:
+            logger.info("GRPO capability audit clean")
+    except Exception:  # noqa: BLE001 - reporting must never break a launch
+        pass
+    print(report, file=sys.stderr, flush=True)
+
+    if output_dir is not None:
+        try:
+            emit_capability_audit(config, findings, output_dir)
+        except OSError:  # noqa: PERF203 - persistence is best-effort
+            pass
+
+    source = dict(os.environ if environ is None else environ)
+    policy = str(source.get(INERT_FEATURE_POLICY_ENV, "warn")).strip().lower()
+    if findings and policy == "error":
+        raise InertFeatureError(report)
+    return findings
 
 
 @dataclass(frozen=True)

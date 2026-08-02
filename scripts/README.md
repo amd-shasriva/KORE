@@ -8,34 +8,39 @@ Everything needed to run KORE end to end: the campaign orchestrator, the portabl
 
 ### Orchestration and launch
 
-| Script | Purpose |
-| --- | --- |
-| `run_campaign.py` | The orchestrator: 9 default stages (plus 2 opt-in, `reverify` and `evolve`), manifest resume, retention gates, and the full CLI |
-| `launch_distributed.sh` | `accelerate launch` wrapper for a single FSDP stage (`midtrain` / `sft` / `dpo` / `grpo`); selects `accelerate_fsdp_grpo.yaml` for GRPO and `accelerate_fsdp.yaml` otherwise |
-| `run_conductor_14b.sh` | Portable full-14B launcher — resolves the repo root from its own path, uses the project venv, and loads `.env.local` |
-| `tmux_campaign.sh` | Run the conductor launcher in a durable detached tmux session (`kore14b`) |
-| `run_e2e_14b.sh` | Bounded end-to-end validation run over a representative task set |
-| `run_full_14b.sh` | Full-14B launcher with hardcoded dev-node paths (`/root/Kore-rl/kore`); not portable — use `run_conductor_14b.sh` |
-| `run_v2_reuse_14b.sh` | Rerun that reuses existing verified kernels instead of regenerating: `reverify` (re-measure, no teacher) → `datagen` (coverage holes only) → `build` → `midtrain … eval`, pinned to specific GPUs |
-| `run_grpo_resilient.sh` | GRPO launcher for a heavily shared node: selects the GPUs free right now and retries across transient VRAM spikes from other users' jobs |
+Lifecycle is from `scripts/operations_registry.json`; **deprecated** scripts exit
+64 in production unless `KORE_ALLOW_DEPRECATED_DEV=1`.
+
+| Script | Lifecycle | Purpose |
+| --- | --- | --- |
+| `run_campaign.py` | active | The orchestrator: 9 default stages (plus 2 opt-in, `reverify` and `evolve`), manifest resume, retention gates, and the full CLI |
+| `launch_distributed.sh` | active | `accelerate launch` wrapper for a single FSDP stage (`midtrain` / `sft` / `dpo` / `grpo`); selects `accelerate_fsdp_grpo.yaml` for GRPO and `accelerate_fsdp.yaml` otherwise |
+| `spur_supervise_datagen.py` | active | Production datagen entrypoint: submits and reaps SPUR array waves |
+| `spur_{midtrain,sft,dpo,grpo}_1node.sbatch` | active | Per-stage scheduler submission; rewrites the shipped config's `model_id` / `output_dir` for the `runs/*_14b_frontier` chain |
+| `run_conductor_14b.sh` | **deprecated** | Portable full-14B launcher — resolves the repo root from its own path, uses the project venv, and loads `.env.local` |
+| `tmux_campaign.sh` | **deprecated** | Run the conductor launcher in a durable detached tmux session (`kore14b`) |
+| `run_e2e_14b.sh` | **deprecated** | Bounded end-to-end validation run over a representative task set |
+| `run_full_14b.sh` | **deprecated** | Full-14B launcher with hardcoded dev-node paths (`/root/Kore-rl/kore`); not portable |
+| `run_v2_reuse_14b.sh` | **deprecated** | Rerun that reuses existing verified kernels instead of regenerating: `reverify` (re-measure, no teacher) → `datagen` (coverage holes only) → `build` → `midtrain … eval`, pinned to specific GPUs |
+| `run_grpo_resilient.sh` | **deprecated** | GRPO launcher for a heavily shared node: selects the GPUs free right now and retries across transient VRAM spikes from other users' jobs |
 
 ### Supervision and monitoring
 
-| Script | Purpose |
-| --- | --- |
-| `kore_monitor.py` | Read-only stage/health monitor: tails the live log and emits `ALERT` lines (never launches) |
-| `kore_supervise.py` | Keep a `run_campaign.py --full-ft` invocation alive across transient deaths (relaunch, resume via the manifest, sparse `ALERT`s) |
-| `kore_pause_after_datagen.py` | Halt the run cleanly at the `datagen → build` boundary so updated code can land before the training stages |
-| `kore_resume_supervise.py` | Wait for the pause sentinel, then relaunch `build → eval` on the updated code and supervise |
+| Script | Lifecycle | Purpose |
+| --- | --- | --- |
+| `kore_monitor.py` | active (diagnostic) | Read-only stage/health monitor: tails the live log and emits `ALERT` lines (never launches) |
+| `kore_supervise.py` | **deprecated** → `spur_supervise_datagen.py` | Keep a `run_campaign.py --full-ft` invocation alive across transient deaths (relaunch, resume via the manifest, sparse `ALERT`s) |
+| `kore_pause_after_datagen.py` | **deprecated** (destructive) → scheduler job dependencies | Halt the run cleanly at the `datagen → build` boundary so updated code can land before the training stages |
+| `kore_resume_supervise.py` | **deprecated** → scheduler job dependencies | Wait for the pause sentinel, then relaunch `build → eval` on the updated code and supervise |
 
 ### Shared-node SFT gate
 
-| Script | Purpose |
-| --- | --- |
-| `run_sft_gate.py` | Standalone SFT retention gate — score the base model vs. the finished SFT checkpoint and apply the gate, with no (re)training; on PASS, mark `sft` done in the manifest |
-| `run_sft_gate_dynamic.sh` | Co-tenant-safe wrapper that runs `run_sft_gate.py` on currently-idle GPUs and resumes via the per-benchmark score cache |
-| `sft_finish_dynamic.sh` | Finish the campaign's `build,sft` stages on the idle GPUs of a shared node, masking to those GPUs and resuming on any death |
-| `gpu_pick_hip.py` | Pick idle GPUs and report them as HIP/torch indices (rocm-smi physical order and HIP index order differ on this node) |
+| Script | Lifecycle | Purpose |
+| --- | --- | --- |
+| `run_sft_gate.py` | **deprecated** → campaign retention gate | Standalone SFT retention gate — score the base model vs. the finished SFT checkpoint and apply the gate, with no (re)training; on PASS, mark `sft` done in the manifest |
+| `run_sft_gate_dynamic.sh` | **deprecated** → scheduler retention-gate job | Co-tenant-safe wrapper that runs `run_sft_gate.py` on currently-idle GPUs and resumes via the per-benchmark score cache |
+| `sft_finish_dynamic.sh` | **deprecated** → scheduler SFT + gate jobs | Finish the campaign's `build,sft` stages on the idle GPUs of a shared node, masking to those GPUs and resuming on any death |
+| `gpu_pick_hip.py` | active (diagnostic) | Pick idle GPUs and report them as HIP/torch indices (rocm-smi physical order and HIP index order differ on this node) |
 
 ### Smokes and proofs
 
@@ -100,18 +105,59 @@ flowchart LR
 
 ---
 
-## Running the full campaign (recommended path)
+## Running the full campaign (production path)
+
+**The tmux/conductor path is deprecated and refuses to run.**
+`scripts/operations_registry.json` classifies `tmux_campaign.sh`,
+`run_conductor_14b.sh`, `run_full_14b.sh`, `run_e2e_14b.sh`,
+`run_v2_reuse_14b.sh`, `run_grpo_resilient.sh`, `kore_supervise.py`,
+`kore_resume_supervise.py`, `kore_pause_after_datagen.py`, `run_sft_gate.py`,
+`run_sft_gate_dynamic.sh` and `sft_finish_dynamic.sh` as `deprecated` (or
+`destructive`). Each exits **64** with `is deprecated and disabled for
+production` unless `KORE_ALLOW_DEPRECATED_DEV=1` is exported. An earlier revision
+of this page presented `bash scripts/tmux_campaign.sh` as the *recommended*
+path; running it verbatim today does nothing but print that refusal.
+
+The production path is the site scheduler:
 
 ```bash
-bash scripts/tmux_campaign.sh              # start in a durable tmux session 'kore14b'
-tmux attach -t kore14b                     # watch (Ctrl-b d to detach)
-tail -f runs/full/logs/campaign_*.log      # follow the log
-bash scripts/tmux_campaign.sh --status     # status without attaching
+# 1) datagen — the supervisor submits and reaps SPUR array waves
+python scripts/spur_supervise_datagen.py --repo "$PWD" --python "$VIRTUAL_ENV/bin/python"
+
+# 2) training — one sbatch per stage, each with an explicit allocation.
+#    Defaults chain midtrain -> sft -> dpo -> grpo through runs/*_14b_frontier.
+sbatch scripts/spur_midtrain_1node.sbatch
+sbatch scripts/spur_sft_1node.sbatch      # from runs/midtrain_14b_frontier
+sbatch scripts/spur_dpo_1node.sbatch      # from runs/sft_14b_frontier
+sbatch scripts/spur_grpo_1node.sbatch     # from runs/dpo_14b_frontier
+
+# 3) inside an allocation, launch_distributed.sh is the active single-stage
+#    FSDP launcher (add --dry-run to print the accelerate command only)
+bash scripts/launch_distributed.sh sft configs/sft_14b_full.json --dry-run
 ```
 
-`run_conductor_14b.sh` is portable (resolves the repo root from its own path, uses `~/kore-venv`, sources `.env.local`, and prepends the venv `bin` to `PATH` so `accelerate` resolves for FSDP) and overridable via env: `KORE_STAGES`, `KORE_DATAGEN_WORKERS` (default 64), `KORE_PY`, `KORE_TMUX`. Datagen and agentic are teacher-API-bound, so they oversubscribe the 8 GPUs (8 workers per GPU by default) for throughput; the training stages use full-parameter FSDP.
+For local, non-promotable bring-up drive `run_campaign.py` directly with an
+explicit weakened mode — the default `production` mode is fail-closed and exits 1
+with `missing --use-hf` otherwise:
 
-> Use `run_conductor_14b.sh` everywhere. `run_full_14b.sh` hardcodes dev-node paths and will not run on the conductor node.
+```bash
+PYTHONPATH=. python scripts/run_campaign.py --dry-run --use-hf --tasks rmsnorm_aiter,gemm_bf16
+PYTHONPATH=. python scripts/run_campaign.py --campaign-mode development --lora --tasks rmsnorm_aiter
+```
+
+The deprecated wrappers are retained as development compatibility tools, and the
+sections below still describe them accurately — read them as history plus a
+dev-only escape hatch, not as the supported path. `run_conductor_14b.sh` is
+portable (resolves the repo root from its own path, uses `~/kore-venv`, sources
+`.env.local`, and prepends the venv `bin` to `PATH` so `accelerate` resolves for
+FSDP) and overridable via env: `KORE_STAGES`, `KORE_DATAGEN_WORKERS` (default
+64), `KORE_PY`, `KORE_TMUX`. It also still exports the dead `KORE_PEAK_HBM_BW` /
+`KORE_PEAK_BF16` overrides, which have no effect (see
+[`docs/P0_RESULTS.md`](../docs/P0_RESULTS.md)).
+
+`tests/test_operations_registry.py` pins the classifications and
+`tests/test_docs_contract.py` keeps this page from recommending a script the
+registry calls deprecated.
 
 ---
 
@@ -156,7 +202,7 @@ On a shared node the campaign's `sft` stage couples (re)training with the retent
 
 ## Ephemeral-node resume playbook
 
-Files persist under your account, and the campaign is manifest- and shard-resumable. If a reservation ends mid-run, re-reserve the node and re-run `bash scripts/tmux_campaign.sh` — it continues from where it stopped.
+Files persist under your account, and the campaign is manifest- and shard-resumable. If a reservation ends mid-run, re-reserve and resubmit the stage's sbatch (`spur_*_1node.sbatch`) or re-run `spur_supervise_datagen.py` for datagen — both continue from the manifest and the immutable shard state. (`bash scripts/tmux_campaign.sh`, which an earlier revision named here, is deprecated and exits 64.)
 
 ---
 

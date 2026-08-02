@@ -7,7 +7,7 @@ tasks spanning every operator family that matters for LLM training and inference
 RL training and the open-source / AMD community.
 
 This document is the build spec. It is grounded in the KORE task ABI
-(`kore/kore/tasks/base.py`, `_genops.py`, `aiter_ref.py`, `aiter_ref_attn.py`,
+(`kore/tasks/base.py`, `_genops.py`, `aiter_ref.py`, `aiter_ref_attn.py`,
 `registry.py`) and complements `DATASET_SPEC.md` (which covers the *training-record*
 corpus). This doc covers the **task artifacts themselves** (the environments), the
 authoring harness that produces them at scale, and the release plan for KORE-Bench.
@@ -651,7 +651,7 @@ int8/fp8 per-token) · `aiter.gemm_a8w8_bpreshuffle` (fp8 per-token) ·
 / `aiter.ops.triton.topk.topk` / `aiter.ops.triton.softmax.softmax` ·
 `tensor_model_parallel_fused_allreduce_rmsnorm` (comm-fused).
 
-**Sources:** KORE `kore/kore/tasks/{aiter_ref.py, aiter_ref_attn.py, _genops.py, base.py,
+**Sources:** KORE `kore/tasks/{aiter_ref.py, aiter_ref_attn.py, _genops.py, base.py,
 registry.py}`; ROCm/ATOM `docs/model_ops_guide.md`; ROCm/aiter `op_tests/` + README + ROCm
 blog (AITER); ROCm/aotriton README (0.12b, PyTorch SDPA); linkedin/Liger-Kernel; flagos-ai/
 FlagGems (216 ops, Apache-2.0); GPUMODE/KernelBook + ScalingIntelligence/KernelBench (HF);

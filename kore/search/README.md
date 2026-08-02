@@ -2,7 +2,7 @@
 
 AlphaKernel treats the verified environment ([`kore/env`](../env/README.md)) as a **perfect but expensive simulator**: every leaf is *exactly* labeled correct/incorrect by the oracle and, when correct, *measured* by the timing harness. Over that oracle it runs an AlphaZero-style **best-first search** whose "moves" are kernel *transformations* (the ε-typed calculus in [`kore/transform`](../transform/README.md)) and whose "value" is the **pessimistic (LCB) measured speedup**. Orchestration is pure CPU; all GPU work is injected through `env`, so the whole engine is exercisable with scripted fakes.
 
-In the flagship 14B configuration search runs as a **throttled, off-policy search-then-distill hook** after the on-policy GRPO gradient (`use_search: true`, `search_budget: 16`, `search_every: 50`): it produces distillation targets and never contributes on-policy credit (see [Wiring into GRPO](#wiring-into-grpo)).
+In the flagship 14B configuration search runs as a **throttled, off-policy search-then-distill hook** after the on-policy GRPO gradient (`use_search: true`, `search_budget: 32`, `search_every: 50` in `configs/grpo_14b_full.json`): it produces distillation targets and never contributes on-policy credit (see [Wiring into GRPO](#wiring-into-grpo)).
 
 ---
 
@@ -83,7 +83,7 @@ res = search_from_kernel(
 `kore.policy.grpo._maybe_search_then_distill` is the only production entry point, sound and cheap by construction:
 
 - **Post-gradient, off-policy.** It runs *after* the on-policy update is built and banks any faster verified kernel as an **off-policy distillation target** (for later expert-iteration / RFT). The search result is never attributed to the on-policy gradient, so there is no credit-assignment coupling.
-- **Throttled and bounded.** It fires once every `search_every` (50) steps, on the **single best correct group only**, with `budget=search_budget` (16) benches — so the extra verifier cost is bounded (`≈ steps/50 × 16` benches over the run), not multiplied across every rollout. It runs **rank 0 only** (rank 0 owns the distill sink; other ranks wait at the next all-gather, well under the collective timeout).
+- **Throttled and bounded.** It fires once every `search_every` (50) steps, on the **single best correct group only**, with `budget=search_budget` (32 in the flagship config) benches — so the extra verifier cost is bounded (`≈ steps/50 × 32`, i.e. ~1,280 benches over a 2,000-step run), not multiplied across every rollout. It runs **rank 0 only** (rank 0 owns the distill sink; other ranks wait at the next all-gather, well under the collective timeout).
 - **Fail-safe.** `use_search` off, no distill sink, or any exception is a silent no-op. The env verifies every result, so a search can never bank an incorrect kernel.
 
 ```mermaid
@@ -91,7 +91,7 @@ flowchart LR
   GRAD[on-policy GRPO gradient] --> HOOK{step % search_every == 0?}
   HOOK -->|no| NEXT[next step]
   HOOK -->|yes, rank 0| BEST[pick best correct group]
-  BEST --> AK[search_from_kernel · budget=16]
+  BEST --> AK[search_from_kernel · budget=search_budget]
   AK -->|faster verified kernel| SINK[(off-policy distill sink)]
   AK -->|else / any error| NEXT
 ```

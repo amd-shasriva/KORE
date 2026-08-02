@@ -19,12 +19,27 @@
 # SFT output therefore also anchors the reference to the SFT policy, which is the
 # intended recipe - nothing extra to pass.
 #
-# SINGLE NODE, no multi-node variant: 96,675 preference pairs at an effective
-# batch of 128 pairs/step (2 x 8 x 8 ranks) for 1 epoch is ~755 optimizer steps.
-# Each step is heavier than SFT's (chosen+rejected concatenated, plus a no-grad
-# reference forward), so budget roughly 8-11 h - one 23 h allocation, with the
-# self-requeue below covering an overrun. midtrain's multi-node variants exist
-# for a much larger token budget that DPO does not have.
+# THIS LAUNCHER RUNS ONE NON-ITERATIVE DPO PASS. scripts/run_campaign.py defaults
+# --dpo-rounds to 2 and would instead run the iterative on-policy DAgger loop
+# (relabel from the current checkpoint -> aggregate -> retrain against a REFRESHED
+# frozen reference). Those are different Stage-2 recipes; this one is the single
+# pass over the pre-built preference corpus. Round N of the iterative recipe is
+# just this launcher re-invoked with FROM_STAGE set to round N-1's output.
+#
+# SINGLE NODE, no multi-node variant: 96,675 preference pairs, but the corpus
+# carries per-pair `weight` and kore.policy.dpo.apply_pref_weights consumes it by
+# DETERMINISTIC MULTIPLICITY (weight>=1 -> round(weight) copies, 0<weight<1 -> kept
+# with probability weight, weight<=0 -> dropped). Measured on the real corpus that
+# is 96,675 -> 167,054 effective rows, a 1.728x multiplier, and it is ON by default
+# (KORE_PREF_TRAIN_WEIGHTING=0 disables it). At an effective batch of 128 pairs/step
+# (2 x 8 x 8 ranks) for 1 epoch that is 1,305 optimizer steps, NOT the 755 the
+# unweighted count implies. Each step is heavier than SFT's (chosen+rejected
+# concatenated, plus a no-grad reference forward). Measured 9.3 s/step at 2 ranks,
+# seq ~2.2k, micro-batch 1 -> 1,559 tok/s/GPU; the corpus is 673.8M tokens/epoch
+# (chosen+rejected, weighted), so 8 ranks project to roughly 13-19 h. That fits ONE
+# 23 h allocation, but with as little as 4 h of margin at the pessimistic end, so
+# the self-requeue below is load-bearing rather than a formality. midtrain's
+# multi-node variants exist for a much larger token budget that DPO does not have.
 #
 # RESUME: dpo.py calls latest_checkpoint(output_dir) and passes it to
 # trainer.train(resume_from_checkpoint=...); that helper walks candidates

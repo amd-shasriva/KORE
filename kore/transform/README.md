@@ -73,7 +73,7 @@ The per-`(op, dtype)` default budget is `dtype_tolerance × op_scale` (fp32 `0.0
 
 ## Relation typing
 
-`exact` means **bit-preserving**: a rewrite that can move a bit is typed `approx`. `approx` means **intended within ε**. Both are backstopped by the downstream SNR gate, which is the correctness authority; the relation is an action-space prior, not a proof. The typing is regression-pinned in `tests/test_relation_typing.py`, which asserts the `exact` == bit-preserving invariant and the ε-lattice composition rules.
+`exact` means **bit-preserving**: a rewrite that can move a bit is typed `approx`. `approx` means **intended within ε**. Both are backstopped by the downstream SNR gate, which is the correctness authority; the relation is an action-space prior, not a proof. The typing is regression-pinned in `kore/transform/tests/test_relation_typing.py`, which asserts the `exact` == bit-preserving invariant and the ε-lattice composition rules.
 
 ---
 

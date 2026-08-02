@@ -29,6 +29,9 @@ LOG="$REPO/runs/pipeline_driver.log"
 MIDTRAIN_OUT="$REPO/runs/midtrain_14b_base"
 SFT_OUT="$REPO/runs/sft_14b_frontier"
 MIDTRAIN_CFG="$REPO/data/b05factory/launch/midtrain_base_32gpu.json"
+# Short enough to schedule against a busy cluster, long enough that the
+# per-segment startup (model load + tokenize, a few minutes) stays amortized.
+SEGMENT_WALLTIME="${KORE_SEGMENT_WALLTIME:-03:00:00}"
 
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
@@ -106,25 +109,49 @@ wait_for_job() {
   return 1
 }
 
+# ------------------------------------------------------------ training loop ---
+# Run a training stage in SEGMENTS rather than as one long reservation.
+#
+# An 8-hour exclusive 4-node request is a large ask on a busy cluster and sits
+# behind every shorter job; a 3-hour one fits far more scheduling windows. This
+# is only safe because the trainer auto-resumes: kore/policy/midtrain.py calls
+# latest_checkpoint(output_dir) and hands it to trainer.train(), and that helper
+# walks candidates newest-first so a segment killed mid-save falls back to the
+# previous complete checkpoint instead of restarting from step 0.
+#
+# So each segment picks up where the last stopped, and the loop ends when the
+# consolidated checkpoint verifies -- not when the scheduler says a job exited.
+# Cost of a segment boundary is at most `save_steps` of recomputation.
+run_training_stage() {
+  local name="$1" jobname="$2" outdir="$3" walltime="$4"; shift 4
+  local seg job
+  if checkpoint_complete "$outdir"; then log "$name: already complete"; return 0; fi
+  for seg in $(seq 1 40); do
+    job="$(existing_job "$jobname")"
+    if [ -n "$job" ]; then
+      log "$name: adopting in-flight job $job (segment $seg)"
+    else
+      log "$name: segment $seg (walltime $walltime)"
+      job="$(submit_until_accepted "$name" --time="$walltime" "$@")" || return 1
+    fi
+    note "${name}_job" "$job"
+    wait_for_job "$job" "$name-seg$seg"
+    if checkpoint_complete "$outdir"; then
+      log "$name: COMPLETE and verified after $seg segment(s)"; note "$name" "complete"; return 0
+    fi
+    if [ -d "$outdir" ]; then
+      log "$name: segment $seg ended short; resuming from $(ls -1d "$outdir"/checkpoint-* 2>/dev/null | tail -1 | xargs -r basename)"
+    else
+      log "$name: segment $seg produced no output at all -- check runs/$jobname-$job.out"
+    fi
+  done
+  log "$name: exhausted segment budget"; note "$name" "failed"; return 1
+}
+
 # ---------------------------------------------------------------- stage 0 ----
 step_midtrain() {
-  if checkpoint_complete "$MIDTRAIN_OUT"; then log "midtrain: already complete"; return 0; fi
-  local job; job="$(existing_job kore-mid)"
-  if [ -n "$job" ]; then log "midtrain: adopting running job $job"
-  else
-    log "midtrain: submitting"
-    job="$(submit_until_accepted midtrain "$REPO/scripts/spur_midtrain_4node.sbatch" "$MIDTRAIN_CFG")" || return 1
-  fi
-  note midtrain_job "$job"
-  wait_for_job "$job" midtrain
-  if checkpoint_complete "$MIDTRAIN_OUT"; then
-    log "midtrain: COMPLETE and verified"; note midtrain "complete"; return 0
-  fi
-  log "midtrain: job ended but checkpoint is INCOMPLETE -- retrying once (resume is supported)"
-  job="$(submit_until_accepted midtrain "$REPO/scripts/spur_midtrain_4node.sbatch" "$MIDTRAIN_CFG")" || return 1
-  wait_for_job "$job" midtrain-resume
-  checkpoint_complete "$MIDTRAIN_OUT" || { log "midtrain: STILL incomplete, stopping"; note midtrain "failed"; return 1; }
-  log "midtrain: COMPLETE after resume"; note midtrain "complete"; return 0
+  run_training_stage midtrain kore-mid "$MIDTRAIN_OUT" "$SEGMENT_WALLTIME" \
+    "$REPO/scripts/spur_midtrain_4node.sbatch" "$MIDTRAIN_CFG"
 }
 
 # ---------------------------------------------------------------- eval A/B ---
@@ -147,24 +174,9 @@ step_eval() {
 
 # ---------------------------------------------------------------- stage 1 ----
 step_sft() {
-  if checkpoint_complete "$SFT_OUT"; then log "sft: already complete"; return 0; fi
   checkpoint_complete "$MIDTRAIN_OUT" || { log "sft: refusing to start, midtrain is not complete"; return 1; }
-  local job; job="$(existing_job kore-sft)"
-  if [ -n "$job" ]; then log "sft: adopting running job $job"
-  else
-    log "sft: submitting from $MIDTRAIN_OUT"
-    job="$(submit_until_accepted sft "$REPO/scripts/spur_sft_1node.sbatch" \
-             "$REPO/configs/sft_14b_full.json" "$MIDTRAIN_OUT" "$SFT_OUT")" || return 1
-  fi
-  note sft_job "$job"
-  wait_for_job "$job" sft
-  if checkpoint_complete "$SFT_OUT"; then log "sft: COMPLETE and verified"; note sft "complete"; return 0; fi
-  log "sft: job ended but checkpoint is INCOMPLETE -- retrying once (resume is supported)"
-  job="$(submit_until_accepted sft "$REPO/scripts/spur_sft_1node.sbatch" \
-           "$REPO/configs/sft_14b_full.json" "$MIDTRAIN_OUT" "$SFT_OUT")" || return 1
-  wait_for_job "$job" sft-resume
-  checkpoint_complete "$SFT_OUT" || { log "sft: STILL incomplete, stopping"; note sft "failed"; return 1; }
-  log "sft: COMPLETE after resume"; note sft "complete"; return 0
+  run_training_stage sft kore-sft "$SFT_OUT" "$SEGMENT_WALLTIME" \
+    "$REPO/scripts/spur_sft_1node.sbatch" "$REPO/configs/sft_14b_full.json" "$MIDTRAIN_OUT" "$SFT_OUT"
 }
 
 log "================ pipeline driver start (HEAD $(git rev-parse --short HEAD)) ================"

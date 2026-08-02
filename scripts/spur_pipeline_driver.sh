@@ -76,14 +76,16 @@ existing_job() {
 submit_until_accepted() {
   local name="$1"; shift
   local attempt job state
-  for attempt in $(seq 1 200); do
+  for attempt in $(seq 1 2000); do
     job="$(sbatch "$@" 2>&1 | grep -oE '[0-9]+$')"
-    if [ -z "$job" ]; then log "  $name: submit produced no job id (attempt $attempt)"; sleep 300; continue; fi
-    sleep 40
+    if [ -z "$job" ]; then [ $((attempt % 10)) -eq 1 ] && log "  $name: submit produced no job id (attempt $attempt)"; sleep 60; continue; fi
+    sleep 25
     state="$(squeue -u "$USER" -h -j "$job" -o '%T %R' 2>/dev/null)"
     case "$state" in
       RUNNING*)            log "  $name: job $job RUNNING"; echo "$job"; return 0 ;;
-      *JobHoldMaxRequeue*) scancel "$job" 2>/dev/null; log "  $name: attempt $attempt held, retrying"; sleep 240 ;;
+      *JobHoldMaxRequeue*) scancel "$job" 2>/dev/null
+                           [ $((attempt % 10)) -eq 1 ] && log "  $name: attempt $attempt held, retrying"
+                           sleep 45 ;;
       PENDING*)            log "  $name: job $job queued normally ($state)"; echo "$job"; return 0 ;;
       "")                  log "  $name: job $job left the queue immediately -- check its log"; echo "$job"; return 0 ;;
       *)                   log "  $name: job $job state=$state"; echo "$job"; return 0 ;;

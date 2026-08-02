@@ -181,8 +181,28 @@ step_eval() {
 }
 
 # ---------------------------------------------------------------- stage 1 ----
+# SFT's peak is three 221GB checkpoints coexisting during rotation. Starting it
+# without that headroom does not fail fast -- it dies hours in, having burned a
+# GPU allocation. Midtrain's own optimizer checkpoints are the obvious reclaim
+# (SFT loads the consolidated shards, not those), but deleting them is a human
+# decision, so this gate stops the pipeline and says exactly what it needs.
+SFT_PEAK_GB="${KORE_SFT_PEAK_GB:-700}"
+
+disk_free_gb() { df -BG --output=avail "$REPO" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+
 step_sft() {
   checkpoint_complete "$MIDTRAIN_OUT" || { log "sft: refusing to start, midtrain is not complete"; return 1; }
+  local free; free="$(disk_free_gb)"; free="${free:-0}"
+  if [ "$free" -lt "$SFT_PEAK_GB" ]; then
+    log "sft: HOLDING. ${free}GB free, need ~${SFT_PEAK_GB}GB for three 221GB checkpoints."
+    log "sft: reclaimable now that midtrain's consolidated weights are verified:"
+    du -sh "$MIDTRAIN_OUT"/checkpoint-* 2>/dev/null | while read -r sz d; do log "sft:   $sz  $d"; done
+    log "sft: those are optimizer state for a FINISHED run; SFT reads the"
+    log "sft: consolidated shards, not them. Awaiting a human decision -- nothing deleted."
+    note sft "held_insufficient_disk"
+    note sft_free_gb "$free"
+    return 2
+  fi
   run_training_stage sft kore-sft "$SFT_OUT" "$SEGMENT_WALLTIME" \
     "$REPO/scripts/spur_sft_1node.sbatch" "$REPO/configs/sft_14b_full.json" "$MIDTRAIN_OUT" "$SFT_OUT"
 }
@@ -196,7 +216,13 @@ step_midtrain    || { log "STOP: midtrain failed"; note pipeline "failed_midtrai
 # neither arm follows instructions yet.
 step_eval "$MIDTRAIN_OUT" midtrain "midtrain_base" \
           "Qwen/Qwen3-14B-Base" "0b0bd3732e2c374d483664439ea334928b65f304"
-step_sft         || { log "STOP: sft failed"; note pipeline "failed_sft"; exit 1; }
+step_sft; _sft_rc=$?
+if [ "$_sft_rc" = "2" ]; then
+  log "================ pipeline HELD before SFT (disk); midtrain + its eval are complete ================"
+  note pipeline "held_before_sft"; exit 0
+elif [ "$_sft_rc" != "0" ]; then
+  log "STOP: sft failed"; note pipeline "failed_sft"; exit 1
+fi
 # The headline comparison: our instruction-tuned model against the vendor's
 # instruction-tuned model, both of which follow instructions, so the kernel
 # funnel is finally a fair question.

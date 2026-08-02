@@ -181,24 +181,80 @@ step_eval() {
 }
 
 # ---------------------------------------------------------------- stage 1 ----
+# Reclaim a finished stage's optimizer state, and ONLY that.
+#
+# A checkpoint-N directory holds Adam moments, RNG and scheduler state. It
+# exists to resume the run that wrote it. Once that run has emitted consolidated
+# model-*.safetensors, the next stage loads those and never reads checkpoint-N
+# again -- so for a FINISHED stage it is pure dead weight, at 221GB apiece.
+#
+# Deleting weights would be unrecoverable without a ~20h rerun, so every
+# precondition below must hold, and the function refuses rather than guesses:
+#   1. the consolidated index resolves and EVERY shard it names exists,
+#   2. no shard is zero-length (a truncated write passes an existence check),
+#   3. the thing being removed matches checkpoint-* under that exact directory.
+# It also does nothing at all unless space is actually short: keeping resumable
+# state costs nothing when there is room for it.
+reclaim_optimizer_state() {
+  local outdir="$1" need="$2" free before after
+  free="$(disk_free_gb)"; free="${free:-0}"
+  if [ "$free" -ge "$need" ]; then
+    log "reclaim: ${free}GB free >= ${need}GB needed; keeping resumable state in $(basename "$outdir")"
+    return 0
+  fi
+  if ! checkpoint_complete "$outdir"; then
+    log "reclaim: REFUSING -- $(basename "$outdir") has no verified consolidated checkpoint"
+    return 1
+  fi
+  # A shard can exist and still be truncated, which an existence check passes.
+  # Size must be given in BYTES: `-size -1M` rounds up to whole units, so a 1KB
+  # file counts as 1 and never matches "less than 1M" -- a unit test caught this
+  # guard silently passing a deliberately truncated shard. Real shards here are
+  # ~4.6GB, so anything under 100MiB is corrupt rather than merely small.
+  if find "$outdir" -maxdepth 1 -name 'model-*.safetensors' -size -104857600c 2>/dev/null | grep -q .; then
+    log "reclaim: REFUSING -- a consolidated shard in $(basename "$outdir") is under 100MiB (truncated?)"
+    find "$outdir" -maxdepth 1 -name 'model-*.safetensors' -size -104857600c -printf '  reclaim:   %s bytes  %p\n' 2>/dev/null
+    return 1
+  fi
+  local n; n=$(ls -1d "$outdir"/checkpoint-* 2>/dev/null | wc -l)
+  [ "$n" -eq 0 ] && { log "reclaim: nothing to reclaim in $(basename "$outdir")"; return 0; }
+  before="$free"
+  log "reclaim: ${free}GB free < ${need}GB needed; consolidated weights verified, removing $n optimizer checkpoint(s):"
+  for ck in "$outdir"/checkpoint-*; do
+    [ -d "$ck" ] || continue
+    log "reclaim:   $(du -sh "$ck" 2>/dev/null | cut -f1)  $ck"
+    rm -rf "$ck"
+  done
+  sleep 10
+  after="$(disk_free_gb)"
+  log "reclaim: ${before}GB -> ${after}GB free"
+  checkpoint_complete "$outdir" \
+    && log "reclaim: consolidated weights re-verified intact after reclaim" \
+    || log "reclaim: WARNING consolidated weights no longer verify -- investigate before SFT"
+  note reclaimed_gb "$(( after - before ))"
+}
+
 # SFT's peak is three 221GB checkpoints coexisting during rotation. Starting it
 # without that headroom does not fail fast -- it dies hours in, having burned a
-# GPU allocation. Midtrain's own optimizer checkpoints are the obvious reclaim
-# (SFT loads the consolidated shards, not those), but deleting them is a human
-# decision, so this gate stops the pipeline and says exactly what it needs.
+# GPU allocation. reclaim_optimizer_state above frees midtrain's own checkpoints
+# to make that headroom automatically; this gate is the backstop for when even
+# that is not enough, or when reclaim refused because something looked wrong.
 SFT_PEAK_GB="${KORE_SFT_PEAK_GB:-700}"
 
 disk_free_gb() { df -BG --output=avail "$REPO" 2>/dev/null | tail -1 | tr -dc '0-9'; }
 
 step_sft() {
   checkpoint_complete "$MIDTRAIN_OUT" || { log "sft: refusing to start, midtrain is not complete"; return 1; }
+  # Midtrain is finished and its A/B eval has run, so its optimizer state is
+  # now dead weight. Reclaim it if -- and only if -- space is short.
+  reclaim_optimizer_state "$MIDTRAIN_OUT" "$SFT_PEAK_GB"
   local free; free="$(disk_free_gb)"; free="${free:-0}"
   if [ "$free" -lt "$SFT_PEAK_GB" ]; then
-    log "sft: HOLDING. ${free}GB free, need ~${SFT_PEAK_GB}GB for three 221GB checkpoints."
-    log "sft: reclaimable now that midtrain's consolidated weights are verified:"
-    du -sh "$MIDTRAIN_OUT"/checkpoint-* 2>/dev/null | while read -r sz d; do log "sft:   $sz  $d"; done
-    log "sft: those are optimizer state for a FINISHED run; SFT reads the"
-    log "sft: consolidated shards, not them. Awaiting a human decision -- nothing deleted."
+    log "sft: HOLDING. ${free}GB free after reclaim, need ~${SFT_PEAK_GB}GB for three 221GB checkpoints."
+    log "sft: reclaim already ran; either it refused (see its REFUSING line above)"
+    log "sft: or the space it freed was not enough. Remaining large items:"
+    du -sh "$REPO"/runs/* 2>/dev/null | sort -rh | head -5 | while read -r sz d; do log "sft:   $sz  $d"; done
+    log "sft: not starting SFT into a disk wall -- this needs a look."
     note sft "held_insufficient_disk"
     note sft_free_gb "$free"
     return 2

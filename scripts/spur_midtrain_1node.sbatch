@@ -34,6 +34,28 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
 export HF_HOME=/home/shasriva/.cache/huggingface
 export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
 export NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+
+# Compile scratch. Triton and Inductor default to the compute node's local /tmp,
+# which is small and shared: job 28059 died on all 8 ranks within seconds with
+# "LLVM ERROR: IO failure on output stream: No space left on device" while /home
+# had 1.1 TB free. Node-local is faster when it has room, so prefer it and fall
+# back to shared home, and say which was chosen so a repeat is diagnosable.
+KORE_SCRATCH_MIN_GB="${KORE_SCRATCH_MIN_GB:-60}"
+_local_free_gb() { df -BG --output=avail "${1:-/tmp}" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+_avail="$(_local_free_gb /tmp)"; _avail="${_avail:-0}"
+if (( _avail >= KORE_SCRATCH_MIN_GB )); then
+    KORE_SCRATCH="/tmp/kore-${SLURM_JOB_ID:-$$}"
+    echo "[midtrain-1node] compile scratch: node-local /tmp (${_avail}G free)"
+else
+    KORE_SCRATCH="$REPO/runs/.scratch/${SLURM_JOB_ID:-$$}"
+    echo "[midtrain-1node] compile scratch: shared home (node /tmp only ${_avail}G < ${KORE_SCRATCH_MIN_GB}G)"
+fi
+mkdir -p "$KORE_SCRATCH"/{tmp,triton,inductor}
+export TMPDIR="$KORE_SCRATCH/tmp"
+export TRITON_CACHE_DIR="$KORE_SCRATCH/triton"
+export TORCHINDUCTOR_CACHE_DIR="$KORE_SCRATCH/inductor"
+trap 'rm -rf "$KORE_SCRATCH"' EXIT
+
 echo "[midtrain-1node] host=$(hostname) gpus=$VISIBLE_GPUS"
 CFG="${1:-$REPO/data/b05factory/launch/midtrain_8gpu.json}"
 echo "[midtrain-1node] cfg=$CFG"

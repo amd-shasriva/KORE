@@ -72,13 +72,33 @@ sys.exit(0 if shards and all((d / s).exists() for s in shards) else 1)
 PY
 }
 
+# Read the queue, distinguishing "the controller answered and the job is not
+# there" from "the controller did not answer". Collapsing those is dangerous:
+# spurctld does refuse connections intermittently (observed: "failed to connect
+# to spurctld ... Connection refused"), and on failure squeue prints nothing,
+# which every caller below would otherwise read as a job that has finished.
+# Prints the listing and returns 0 on success; returns 2 if unreachable.
+squeue_snapshot() {
+  local out rc
+  out="$(squeue -u "$USER" -h -o "$1" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ] || printf '%s' "$out" \
+       | grep -qiE 'failed to connect|transport error|connection refused|^error:'; then
+    return 2
+  fi
+  printf '%s' "$out"
+}
+
 # Adopt an existing job for this stage whether it is RUNNING or merely QUEUED.
 # Matching only RUNNING is a duplicate-submission bug: an 8-node job can sit in
 # PENDING(Resources) for a long time, and submitting a second one wastes an
 # allocation and races two writers into the same output directory. A job HELD by
 # the controller is deliberately not adopted -- that one does need resubmitting.
+# Returns 2 if the controller is unreachable, so callers do not mistake silence
+# for "no job is running" and submit a duplicate on top of a live one.
 existing_job() {
-  squeue -u "$USER" -h -o "%i %j %T %R" 2>/dev/null \
+  local snap
+  snap="$(squeue_snapshot "%i %j %T %R")" || return 2
+  printf '%s\n' "$snap" \
     | awk -v n="$1" '$2 ~ n && $3 !~ /COMPLET|CANCEL|FAIL/ && $0 !~ /JobHoldMaxRequeue/ {print $1; exit}'
 }
 
@@ -105,12 +125,23 @@ submit_until_accepted() {
   return 1
 }
 
+# Block until the job genuinely leaves the queue. A controller outage must not
+# be read as completion, and a single clean read that omits the job is not quite
+# enough either, so require two consecutive good reads before believing it.
 wait_for_job() {
-  local job="$1" name="$2" i
+  local job="$1" name="$2" i snap misses=0 fails=0
   for i in $(seq 1 20000); do
-    squeue -u "$USER" -h -j "$job" >/dev/null 2>&1 || true
-    if ! squeue -u "$USER" -h -o "%i" 2>/dev/null | grep -qx "$job"; then
-      log "  $name: job $job left the queue"; return 0
+    if snap="$(squeue_snapshot "%i")"; then
+      fails=0
+      if printf '%s\n' "$snap" | grep -qx "$job"; then
+        misses=0
+      else
+        misses=$((misses + 1))
+        if [ "$misses" -ge 2 ]; then log "  $name: job $job left the queue"; return 0; fi
+      fi
+    else
+      fails=$((fails + 1)); misses=0
+      [ $(((fails - 1) % 15)) -eq 0 ] && log "  $name: controller unreachable (${fails}x); holding position, not assuming the job ended"
     fi
     sleep 120
   done
@@ -132,10 +163,18 @@ wait_for_job() {
 # Cost of a segment boundary is at most `save_steps` of recomputation.
 run_training_stage() {
   local name="$1" jobname="$2" outdir="$3" walltime="$4"; shift 4
-  local seg job
+  local seg job rc
   if checkpoint_complete "$outdir"; then log "$name: already complete"; return 0; fi
   for seg in $(seq 1 40); do
-    job="$(existing_job "$jobname")"
+    # Never submit while the controller is unreachable. existing_job cannot see
+    # an in-flight job then, so a blind submit would put a second 8-GPU writer
+    # into the same output directory as the live one.
+    while :; do
+      job="$(existing_job "$jobname")"; rc=$?
+      [ "$rc" -ne 2 ] && break
+      log "$name: controller unreachable; waiting rather than risking a duplicate submission"
+      sleep 120
+    done
     if [ -n "$job" ]; then
       log "$name: adopting in-flight job $job (segment $seg)"
     else

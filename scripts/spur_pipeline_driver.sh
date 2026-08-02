@@ -61,7 +61,15 @@ sys.exit(0 if shards and all((d / s).exists() for s in shards) else 1)
 PY
 }
 
-running_job() { squeue -u "$USER" -h -o "%i %j %T" 2>/dev/null | awk -v n="$1" '$2 ~ n && $3=="RUNNING" {print $1; exit}'; }
+# Adopt an existing job for this stage whether it is RUNNING or merely QUEUED.
+# Matching only RUNNING is a duplicate-submission bug: an 8-node job can sit in
+# PENDING(Resources) for a long time, and submitting a second one wastes an
+# allocation and races two writers into the same output directory. A job HELD by
+# the controller is deliberately not adopted -- that one does need resubmitting.
+existing_job() {
+  squeue -u "$USER" -h -o "%i %j %T %R" 2>/dev/null \
+    | awk -v n="$1" '$2 ~ n && $3 !~ /COMPLET|CANCEL|FAIL/ && $0 !~ /JobHoldMaxRequeue/ {print $1; exit}'
+}
 
 # Submit, and treat a JobHoldMaxRequeue as "the controller said no, ask again".
 # Returns the job id of a job that is RUNNING or legitimately PENDING.
@@ -99,7 +107,7 @@ wait_for_job() {
 # ---------------------------------------------------------------- stage 0 ----
 step_midtrain() {
   if checkpoint_complete "$MIDTRAIN_OUT"; then log "midtrain: already complete"; return 0; fi
-  local job; job="$(running_job kore-mid)"
+  local job; job="$(existing_job kore-mid)"
   if [ -n "$job" ]; then log "midtrain: adopting running job $job"
   else
     log "midtrain: submitting"
@@ -139,7 +147,7 @@ step_eval() {
 step_sft() {
   if checkpoint_complete "$SFT_OUT"; then log "sft: already complete"; return 0; fi
   checkpoint_complete "$MIDTRAIN_OUT" || { log "sft: refusing to start, midtrain is not complete"; return 1; }
-  local job; job="$(running_job kore-sft)"
+  local job; job="$(existing_job kore-sft)"
   if [ -n "$job" ]; then log "sft: adopting running job $job"
   else
     log "sft: submitting from $MIDTRAIN_OUT"

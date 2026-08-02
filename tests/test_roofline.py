@@ -210,3 +210,140 @@ def test_occupancy_is_sku_explicit():
         model=R.make_physical_model("mi300x"))
     assert cdna4.occupancy == pytest.approx(0.5)
     assert cdna3.occupancy == pytest.approx(0.25)
+
+
+# --------------------------------------------------------------------------- #
+# Attention / MoE / routing work models
+#
+# These four families were blanket-excluded as indefensible. That is true of the
+# families in general -- backward passes, MLA, unnamed variants -- but not of
+# the specific forms below, and excluding them dropped exactly the operators
+# that dominate real serving from every physics claim.
+# --------------------------------------------------------------------------- #
+_PREFILL = {"B": 1, "H": 32, "KV": 8, "S": 2048, "D": 128}
+_DECODE = {"B": 8, "H": 32, "KV": 8, "Skv": 4096, "D": 128}
+
+
+def test_gqa_decode_arithmetic_intensity_is_exactly_the_gqa_ratio():
+    """AI = H/KV for a decode step, independently of B, Skv and D.
+
+    FLOPs are 4*B*H*Skv*D and the KV cache read is 2*B*KV*Skv*D*elem, so the
+    query and output terms cancel in the limit and the ratio is the number of
+    query heads sharing each KV head. This is the reason decode is memory-bound
+    and is a strong check that the model is not merely self-consistent.
+    """
+    for h, kv in ((32, 8), (32, 32), (64, 8), (16, 2)):
+        dims = {**_DECODE, "H": h, "KV": kv}
+        work = R.estimate_work("flash_attn_decode", dims, "bf16")
+        assert work is not None
+        # Exact once the O(B*H*D) query/output term is removed.
+        kv_bytes = 2.0 * dims["B"] * kv * dims["Skv"] * dims["D"] * 2
+        assert work.flops / kv_bytes == pytest.approx(h / kv, rel=1e-12)
+
+
+def test_causal_prefill_intensity_matches_the_closed_form():
+    """AI = (H*S) / (2*(H+KV)) for causal prefill."""
+    work = R.estimate_work("flash_attn_prefill", _PREFILL, "bf16")
+    assert work is not None
+    h, kv, s = _PREFILL["H"], _PREFILL["KV"], _PREFILL["S"]
+    assert work.flops / work.bytes == pytest.approx((h * s) / (2.0 * (h + kv)))
+
+
+def test_causal_masking_halves_the_prefill_matmuls():
+    causal = R.estimate_work("flash_attn_prefill", _PREFILL, "bf16")
+    dense = R.estimate_work("flash_attn_noncausal_prefill", _PREFILL, "bf16")
+    assert causal is not None and dense is not None
+    assert dense.flops == pytest.approx(2.0 * causal.flops)
+    # Mandatory traffic is identical: the mask changes no tensor that moves.
+    assert dense.bytes == pytest.approx(causal.bytes)
+
+
+def test_attention_traffic_excludes_the_score_matrix():
+    """The floor is Q+K+V read and O written -- never the S x S scores.
+
+    A model that materialized scores would scale with S^2; this must scale
+    linearly in S.
+    """
+    small = R.estimate_work("flash_attn_prefill", {**_PREFILL, "S": 1024}, "bf16")
+    large = R.estimate_work("flash_attn_prefill", {**_PREFILL, "S": 2048}, "bf16")
+    assert small is not None and large is not None
+    assert large.bytes == pytest.approx(2.0 * small.bytes)   # linear, not quadratic
+    assert large.flops == pytest.approx(4.0 * small.flops)   # quadratic, as it must be
+
+
+def test_decode_is_memory_bound_and_prefill_is_compute_bound():
+    model = R.make_physical_model("mi350x")
+    prefill = R.evaluate_roofline(
+        R.estimate_work("flash_attn_prefill", _PREFILL, "bf16"), model)
+    decode = R.evaluate_roofline(
+        R.estimate_work("flash_attn_decode", _DECODE, "bf16"), model)
+    assert prefill.bound == "compute"
+    assert decode.bound == "memory"
+
+
+def test_moe_traffic_is_dominated_by_activated_expert_weights():
+    dims = {"M": 256, "E": 32, "topk": 8, "D": 1024, "I": 768}
+    work = R.estimate_work("fused_moe_silu", dims, "bf16")
+    assert work is not None
+    activated = min(dims["M"] * dims["topk"], dims["E"])
+    weight_bytes = 3.0 * activated * dims["I"] * dims["D"] * 2
+    token_bytes = 2.0 * dims["M"] * dims["D"] * 2
+    assert work.bytes == pytest.approx(weight_bytes + token_bytes)
+    assert weight_bytes > 100 * token_bytes, "weights must dominate at serving batch"
+    assert work.flops == pytest.approx(6.0 * dims["M"] * dims["topk"] * dims["D"] * dims["I"])
+
+
+def test_moe_expert_traffic_saturates_at_the_expert_count():
+    """Past M*topk >= E every expert is already paid for exactly once."""
+    base = {"E": 32, "topk": 8, "D": 1024, "I": 768}
+    few = R.estimate_work("fused_moe_silu", {**base, "M": 256}, "bf16")
+    many = R.estimate_work("fused_moe_silu", {**base, "M": 4096}, "bf16")
+    assert few is not None and many is not None
+    weight = 3.0 * 32 * base["I"] * base["D"] * 2
+    assert few.bytes - 2.0 * 256 * base["D"] * 2 == pytest.approx(weight)
+    assert many.bytes - 2.0 * 4096 * base["D"] * 2 == pytest.approx(weight)
+
+
+def test_topk_router_writes_int32_indices_alongside_the_weights():
+    dims = {"M": 4096, "E": 32, "topk": 8}
+    work = R.estimate_work("topk_softmax", dims, "bf16")
+    assert work is not None
+    expected = dims["M"] * dims["E"] * 2 + dims["M"] * dims["topk"] * 2 \
+        + dims["M"] * dims["topk"] * 4
+    assert work.bytes == pytest.approx(expected)
+
+
+def test_indefensible_members_of_these_families_still_get_no_model():
+    """Widening the estimator must not become a generic fallback."""
+    for op, dims in (
+        ("flash_attn_backward", _PREFILL),
+        ("attn_bwd", _PREFILL),
+        ("mla_decode", {"B": 8, "H": 32, "Skv": 4096, "D": 128}),
+        ("some_unnamed_moe", {"M": 4, "E": 4}),
+        ("router_generic", {"M": 4, "E": 4}),
+        ("flash_attn_prefill", {"B": 1, "H": 32}),          # missing dims
+    ):
+        assert R.estimate_work(op, dims, "bf16") is None, op
+
+
+def test_every_modelled_form_declares_its_assumptions():
+    for op, dims in (("flash_attn_prefill", _PREFILL),
+                     ("flash_attn_decode", _DECODE),
+                     ("paged_attn_decode", _DECODE),
+                     ("topk_softmax", {"M": 4096, "E": 32, "topk": 8}),
+                     ("fused_moe_silu", {"M": 256, "E": 32, "topk": 8, "D": 1024, "I": 768})):
+        work = R.estimate_work(op, dims, "bf16")
+        assert work is not None and work.assumptions, op
+        assert work.model_kind == "mandatory-lower-bound"
+        # A mandatory lower bound is safe to use as a speed-of-light ceiling.
+        assert work.integrity_safe, op
+
+
+def test_paged_decode_costs_the_same_mandatory_traffic_as_contiguous_decode():
+    """Paging changes the addressing, not the bytes that must move."""
+    contiguous = R.estimate_work("flash_attn_decode", _DECODE, "bf16")
+    paged = R.estimate_work("paged_attn_decode", _DECODE, "bf16")
+    assert contiguous is not None and paged is not None
+    assert paged.bytes == pytest.approx(contiguous.bytes)
+    assert paged.flops == pytest.approx(contiguous.flops)
+    assert any("block table" in a for a in paged.assumptions)

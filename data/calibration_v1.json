@@ -1,4 +1,5 @@
 {
+  "_fingerprint_note": "Reissued when the model fingerprint was widened from v1 to v2. v1 bound only the peaks, so --expect-model-fingerprint accepted a run whose FLOPs/bytes estimator had changed; v2 binds work_model_digest as well. The measured peaks in this document are unchanged and were NOT re-measured: sha256:a6e01795829dd9a1c11752e12ff84825241f1e7d1e752c47dd2d926f7b858c7a -> sha256:74695c10e5ff5cf3d6799c38546258e1796be2e88840cd658abd99dd159c281f",
   "architecture": "gfx950",
   "calibration_id": "mi350x-stream-matmul-n8192-hbm512mb",
   "compute_flops_per_s": {
@@ -50,7 +51,7 @@
     "fp8": null,
     "hbm": 0.5954225528827134
   },
-  "model_fingerprint": "sha256:a6e01795829dd9a1c11752e12ff84825241f1e7d1e752c47dd2d926f7b858c7a",
+  "model_fingerprint": "sha256:74695c10e5ff5cf3d6799c38546258e1796be2e88840cd658abd99dd159c281f",
   "runtime": {
     "device_name": "AMD Instinct MI350X",
     "gcn_arch": "gfx950:sramecc+:xnack-",
@@ -61,5 +62,6 @@
   },
   "schema": "kore.runtime-calibration.v1",
   "sku": "MI350X",
-  "source": "runtime-measured-stream-matmul"
+  "source": "runtime-measured-stream-matmul",
+  "work_model_digest": "db29ba1a1a2a00b0"
 }

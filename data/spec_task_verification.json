@@ -1,0 +1,60 @@
+{
+  "artifact": "spec_task_verification",
+  "schema_version": "1.0",
+  "architecture": "gfx950",
+  "status": "PENDING",
+  "status_meaning": "NOT PROVEN. No spec-synthesis task in this family has been executed on gfx950 yet. This artifact exists so the absence is a recorded fact rather than a silence, and so no report can read a missing measurement as a pass.",
+  "produced_by": "scripts/verify_spec_tasks_e2e.py",
+  "launcher": "scripts/spur_verify_spec_1node.sbatch",
+  "what_would_make_this_proven": [
+    "For every task_id below: a real from-scratch Triton kernel compiles, clears the task's declared SNR gate on EVERY declared shape through the read-only oracle, survives the reward-hack scan and the post-timing re-verification, and yields performance_eligible == true under the paired cold-cache timing protocol.",
+    "For every task_id below: the declared signature stub does NOT pass, which is what makes the task synthesis rather than a task that ships its own answer."
+  ],
+  "attempt": {
+    "job_id": "34133",
+    "job_name": "kore-spec-verify",
+    "submitted": true,
+    "state_when_last_observed": "PENDING (QOSGrpNodeLimit)",
+    "why_not_completed": "The QoS caps 6 concurrent nodes and all 6 were held by a concurrent datagen campaign (job 33992 kore-sft plus six kore-agentic jobs, with ten more kore-agentic jobs queued ahead). Before a node freed, the only route to the cluster -- an SSH tunnel to 127.0.0.1:22023 -- stopped authenticating (the bridge host key still matches, so the host is unchanged; the key is being offered and refused), then began timing out during banner exchange. The job remains queued and its output will land in runs/spec-verify-34133.out on the cluster.",
+    "how_to_finish": "Restore the tunnel, then: ssh amd-spur, export SPUR_CONTROLLER_ADDR=http://crs-m2m-cpu-spur-005:6817, squeue -j 34133. If it has run, copy runs/spec_verification-34133.json over this file. If it was cancelled, resubmit scripts/spur_verify_spec_1node.sbatch."
+  },
+  "cpu_preflight": {
+    "status": "PASS",
+    "meaning": "Necessary, not sufficient. This is a static check and proves nothing about hardware: it does not compile a kernel, run an oracle, or take a timing.",
+    "tasks_checked": 24,
+    "checks": [
+      "the stub declares the required entry point and its body is exactly a raise",
+      "the stub contains no @triton.jit kernel",
+      "a from-scratch reference solution exists for every task and defines the same entry point",
+      "every spec names its entry point and states its SNR gate",
+      "no spec task gates looser than the gen_ task over the same operator and dtype"
+    ],
+    "pinned_by": "tests/test_spec_synthesis_contract.py"
+  },
+  "tasks": [
+    "spec_add_bf16",
+    "spec_add_fp32",
+    "spec_add_silu_bf16",
+    "spec_add_silu_fp32",
+    "spec_gelu_mul_bf16",
+    "spec_gelu_mul_fp32",
+    "spec_gelu_tanh_bf16",
+    "spec_gelu_tanh_fp32",
+    "spec_gemm_bias_silu_bf16",
+    "spec_gemm_bias_silu_fp32",
+    "spec_hardswish_bf16",
+    "spec_hardswish_fp32",
+    "spec_mish_bf16",
+    "spec_mish_fp32",
+    "spec_mul_sig_bf16",
+    "spec_mul_sig_fp32",
+    "spec_reglu_bf16",
+    "spec_reglu_fp32",
+    "spec_row_max_bf16",
+    "spec_row_max_fp32",
+    "spec_row_rms_bf16",
+    "spec_row_rms_fp32",
+    "spec_row_sum_bf16",
+    "spec_row_sum_fp32"
+  ]
+}

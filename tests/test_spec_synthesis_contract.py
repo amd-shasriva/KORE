@@ -182,3 +182,88 @@ def test_a_spec_task_shares_its_family_with_its_optimize_sibling():
         if sibling is None:
             continue
         assert registry.operator_family(task) == registry.operator_family(sibling)
+
+
+# --------------------------------------------------------------------------- #
+# Hardware evidence. These tasks are NOT yet proven on gfx950, and the point of
+# what follows is that the gap cannot be quoted away.
+# --------------------------------------------------------------------------- #
+VERIFICATION_ARTIFACT = "data/spec_task_verification.json"
+_ALLOWED_STATUSES = {"PENDING", "PASS", "FAIL"}
+
+
+def _evidence() -> dict:
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / VERIFICATION_ARTIFACT
+    assert path.is_file(), (
+        f"{VERIFICATION_ARTIFACT} is missing. A task family with no evidence "
+        "artifact at all is worse than one recorded as unproven: there is "
+        "nothing for a reader to check."
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_the_evidence_artifact_covers_exactly_the_live_spec_family():
+    """Evidence that names a different task set than the registry is stale.
+
+    This is the failure mode the AKA overlap disclosure already hit once: the
+    prose said "20/20" while the registry held 188 HIP tasks, because the number
+    lived somewhere nothing checked. Tying the artifact's task list to the live
+    family makes adding a spec task without re-recording evidence a test failure.
+    """
+    evidence = _evidence()
+    assert set(evidence["tasks"]) == {t.task_id for t in _spec_tasks()}
+
+
+def test_a_pending_verdict_is_never_readable_as_a_pass():
+    """PENDING must stay a third value, not a default of either outcome.
+
+    The whole reason this artifact exists while the measurement is outstanding is
+    so that "not measured" cannot be quietly rendered as "verified". If the status
+    is PENDING then the artifact must say so in a way a reader cannot miss, and it
+    must not carry per-task pass verdicts.
+    """
+    evidence = _evidence()
+    status = evidence["status"]
+    assert status in _ALLOWED_STATUSES
+
+    if status == "PENDING":
+        assert "NOT PROVEN" in evidence["status_meaning"]
+        # No per-task result rows may exist yet: a row would be a measurement,
+        # and there has been none.
+        assert "rows" not in evidence
+        # The reason has to name what blocked it, so the next reader can act.
+        assert evidence["attempt"]["why_not_completed"].strip()
+        # And the CPU pre-flight must not be dressed up as hardware evidence.
+        assert "proves nothing about hardware" in \
+            evidence["cpu_preflight"]["meaning"]
+
+
+def test_no_document_claims_the_spec_family_is_hardware_proven():
+    """Docs may describe the prover; they may not claim its verdict early.
+
+    A doc that says these tasks are proven, while the artifact says PENDING, is
+    exactly the drift the docs contract exists to prevent -- and it is the claim
+    that would let an unproven task be counted as coverage.
+    """
+    from pathlib import Path
+
+    if _evidence()["status"] == "PASS":
+        pytest.skip("family is proven; the prohibition no longer applies")
+
+    repo = Path(__file__).resolve().parents[1]
+    forbidden = ("spec tasks are proven", "spec family is proven",
+                 "24 proven spec", "proven spec-synthesis")
+    offenders = []
+    for doc in list(repo.glob("*.md")) + list(repo.glob("docs/*.md")) + \
+            list(repo.glob("kore/tasks/*.md")):
+        text = doc.read_text(encoding="utf-8").lower()
+        for phrase in forbidden:
+            if phrase in text:
+                offenders.append(f"{doc.relative_to(repo).as_posix()}: {phrase!r}")
+    assert not offenders, (
+        "these documents claim hardware proof the evidence artifact does not "
+        "record:\n- " + "\n- ".join(offenders)
+    )

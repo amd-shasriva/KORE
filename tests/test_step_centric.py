@@ -128,10 +128,10 @@ def test_a_first_turn_success_is_emitted_as_a_whole_trajectory():
     """The class step-centric structurally cannot reach.
 
     A revision needs a parent to improve on, so an episode that was correct on
-    turn 1 and never got faster yields no step at all. 1,576 of the overnight
-    campaign's 3,475 successful trajectories are exactly this, and their median
-    measured speedup is 1.58x -- so the discard was a representation gap, not a
-    quality filter.
+    turn 1 and never got faster yields no step at all. All 874 of the overnight
+    campaign's 3,617 successful trajectories that produced no step row are exactly
+    this shape, and their median measured speedup is 1.60x -- so the discard was a
+    representation gap, not a quality filter.
     """
     rec = _rec([True, True], [2.0, 2.0])
     assert extract_steps(rec) == [], "a no-gain second turn is not a step"
@@ -145,7 +145,7 @@ def test_a_first_turn_success_is_emitted_as_a_whole_trajectory():
 
 
 def test_a_never_correct_trajectory_is_never_emitted():
-    """Eight turns of failure teaches failure; 8,189 episodes look like this."""
+    """Eight turns of failure teaches failure; 8,900+ episodes look like this."""
     assert extract_full_trajectory(_rec([False] * 8, [None] * 8)) is None
 
 

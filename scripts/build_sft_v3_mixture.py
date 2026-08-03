@@ -144,11 +144,12 @@ def main() -> int:
         traj.extend(_rows(p))
 
     # Step-centric supervision alone is blind to a trajectory whose win was not a
-    # REVISION. Measured on the overnight campaign: 3,475 episodes reached a
-    # correct kernel and 1,942 of them produced no step row, 1,576 because they
-    # were correct on their first turn -- and their median measured speedup is
-    # 1.58x, so the discard is not a quality filter, it is a representation gap.
-    # A never-correct trajectory is still never emitted.
+    # REVISION. Measured on the overnight campaign: 3,617 episodes reached a
+    # correct kernel, 2,743 produced step rows, and all 874 that produced none were
+    # correct on their FIRST turn -- median measured speedup 1.60x -- so the
+    # discard is a representation gap, not a quality filter. It recovers 850 rows
+    # (4,614 -> 5,464, +18.4%) for 12.5% more tokens. A never-correct trajectory is
+    # still never emitted.
     if args.full_trajectories:
         step_rows, step_stats = decompose_with_trajectories(
             traj, min_gain=args.min_gain, max_speedup=args.max_speedup,

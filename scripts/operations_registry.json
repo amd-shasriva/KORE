@@ -451,6 +451,13 @@
       "role": "single-node 8-rank legacy-14B multi-turn GRPO launcher (ZeRO-2, in-process rollout replica; spans requeues); a 30B RL launch must supply a reviewed 30B recipe"
     },
     {
+      "path": "scripts/spur_hip_verify_1node.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "one-node GPU launcher for verify_hip_seeds.py + verify_hip_tasks_e2e.py; the login node is CPU-only with no hipcc, so compute-node verification needs a job"
+    },
+    {
       "path": "scripts/spur_kernelbench_1node.sbatch",
       "classification": "diagnostic",
       "lifecycle": "active",

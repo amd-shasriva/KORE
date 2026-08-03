@@ -56,7 +56,9 @@ _KNOWN_FEATURES = (
     "gtpo_codesim",
     "physics_live_counters",
     "physics_shaping",
+    "profiling_reward",
     "rc_grpo",
+    "rejection_sampling",
     "roofline_gate",
     "sc_grpo",
     "search_bnb",
@@ -85,7 +87,9 @@ _EXPECTED_PHASE = {
     "dynamic_sampling": "rollout",
     "physics_live_counters": "rollout",
     "physics_shaping": "rollout",
+    "profiling_reward": "rollout",
     "rc_grpo": "rollout",
+    "rejection_sampling": "rollout",
     "roofline_gate": "rollout",
     "transform_discover": "rollout",
     "use_search": "rollout",
@@ -190,6 +194,7 @@ def _requested_features(config: Any) -> set[str]:
         "gtpo_codesim": "gtpo_codesim",
         "physics_live_counters": "physics_live_counters",
         "rc_grpo": "rc_grpo",
+        "rejection_sampling": "rejection_sampling",
         "roofline_gate": "roofline_gate",
         "sc_grpo": "sc_grpo",
         "search_bnb": "search_bnb",
@@ -204,6 +209,8 @@ def _requested_features(config: Any) -> set[str]:
             requested.add(feature)
     if float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0:
         requested.add("avspo")
+    if float(getattr(config, "profiling_reward_weight", 0.0) or 0.0) > 0.0:
+        requested.add("profiling_reward")
     if float(getattr(config, "physics_shaping_weight", 0.0) or 0.0) > 0.0:
         requested.add("physics_shaping")
     if getattr(config, "coevolve_distill_path", None):
@@ -919,6 +926,55 @@ def audit_requested_capabilities(
             "oversample-and-refill is selected by the StarPO-S group selector",
             "enable starpo_s or set dynamic_sampling=false",
         )
+    # -- coverage-aware profiling reward ----------------------------------- #
+    profiling_weight = _finite_or_none(
+        getattr(config, "profiling_reward_weight", 0.0)) or 0.0
+    if profiling_weight > 0.0:
+        correctness = _finite_or_none(
+            getattr(config, "correctness_weight", 0.3)) or 0.3
+        if not getattr(config, "profiling_reward_evidence_path", None):
+            add(
+                "profiling_reward", DECLARED,
+                ("profiling_reward_weight",),
+                "KoreEnv.collect_kernel_trace fails safe on a missing profiler, "
+                "an unexpected rocprofv3 export layout, or a driver that does not "
+                "honour --impl, so without a receipt proving it has produced a "
+                "usable trace on THIS hardware the coverage term silently "
+                "contributes 0.0 on every turn",
+                "run one measured job, record the receipt at "
+                "profiling_reward_evidence_path, or set "
+                "profiling_reward_weight=0.0",
+            )
+        elif profiling_weight >= correctness:
+            add(
+                "profiling_reward", DECLARED,
+                ("profiling_reward_weight", "correctness_weight"),
+                f"a coverage weight of {profiling_weight} is not below "
+                f"correctness_weight {correctness}, so shaping could outrank "
+                "correctness and invert the reward's lexicographic order; "
+                "_profiling_reward_weight() returns 0.0 rather than allow it",
+                "set profiling_reward_weight strictly below correctness_weight",
+            )
+        elif str(getattr(config, "reward_phase", "all")).lower() == "correctness":
+            add(
+                "profiling_reward", DECLARED,
+                ("profiling_reward_weight", "reward_phase"),
+                "the correctness curriculum phase masks every speed term, so the "
+                "coverage bonus is skipped for the whole phase",
+                "set profiling_reward_weight=0.0 for the correctness phase, or "
+                "run this config with reward_phase=latency/all",
+            )
+    if (bool(getattr(config, "prs_require_profile", False))
+            and profiling_weight <= 0.0):
+        add(
+            "rejection_sampling", DECLARED,
+            ("prs_require_profile", "profiling_reward_weight"),
+            "PRS can only reject on coverage that was actually collected, and "
+            "the kernel trace is only collected when the coverage reward is "
+            "armed; requiring a profile without it would reject every candidate",
+            "arm profiling_reward_weight, or set prs_require_profile=false",
+        )
+
     if (getattr(config, "advantage_estimator", trloo.GRPO) == trloo.TRLOO
             and float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0):
         add(

@@ -2,6 +2,9 @@
   "_comment_model": "PRODUCTION TARGET. Qwen3-Coder-30B-A3B-Instruct: 30.5B total / 3.3B active MoE (Qwen3MoeForCausalLM, 48 layers, 128 experts, 8 per token), Apache 2.0, 262k context. Chosen over Qwen3-32B dense and Qwen3.6-35B-A3B because it is code-specialized with a purpose-built function-call format, and our harness is tool-driven and the RL stage is multi-turn tool use. The 3.3B active footprint is what makes it deployable on device: ~10x less compute per token than a 32B dense at comparable memory.",
   "model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
 
+  "_comment_model_revision": "Hub commit b2cff646, resolved 2026-08-03 and verified against the downloaded snapshot: 16 shards, 18,867 tensors, all BF16, 30,532,122,624 parameters, 61,064,245,248 bytes. Without this key model_spec.resolve_model_identity refuses the load outright in production mode (UnpinnedModelError) and, in development, silently trains whatever the shared HF cache happens to hold -- on a cache several people write to, that is not a reproducible run.",
+  "model_revision": "b2cff646eb4bb1d68355c01b18ae02e7cf42d120",
+
   "_comment_no_midtrain": "There is no Base variant of this model, nor of Qwen3-32B or Qwen3.6-35B-A3B. Continued pretraining requires one (running it on an instruct model destroys instruction-following -- docs/EVAL_RESULTS.md), and the chat-vector residual requires a base/instruct PAIR. So the cpt recipe cannot reach production at all, and this trains instruct -> SFT -> RL, which is what Dr. Kernel and Kernel-Smith do anyway.",
 
   "dataset_path": "data/b05factory/sft/multicap_v2.jsonl",

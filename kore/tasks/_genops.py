@@ -1944,7 +1944,21 @@ def driver_main(ref, task_dir: str, argv=None) -> int:
         rc = _run_bench(ref, task_dir, shape, a.impl, a.warmup, a.iters)
         # post-timing correctness re-verification (anti stateful timing hack): runs
         # on LATE invocations of the cached candidate module.
-        if a.impl == "candidate":
+        #
+        # Suppressed under KORE_TRACE_BENCH_ONLY because a whole-process kernel
+        # trace cannot tell the two regions apart. Re-verification generates
+        # random inputs, runs the ATen reference and reduces an allclose, and on
+        # an elementwise task that is ~94% of the profiled dispatch time -- so
+        # coverage stops measuring "share of the workload" and starts measuring
+        # "share of the test rig", which a FASTER kernel scores LOWER on.
+        # Measured on gfx950: a correct seed reads 0.057 while a 46x slower
+        # version of it reads 0.739 (docs/evidence/coverage_denominator.md).
+        # Safe to skip here and only here: collect_kernel_trace is a
+        # measurement-only path that issues no verdict, and the anti-hack check
+        # still runs on every path that does. An env var rather than a flag so
+        # drivers that predate it ignore it instead of failing argparse.
+        if a.impl == "candidate" and os.environ.get(
+                "KORE_TRACE_BENCH_ONLY", "") not in ("1", "true", "True"):
             _run_correctness(ref, task_dir, shape)
         return rc
     return _run_correctness(ref, task_dir, shape)

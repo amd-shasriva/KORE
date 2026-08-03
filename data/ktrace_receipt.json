@@ -1,0 +1,181 @@
+{
+  "what": "KoreEnv.collect_kernel_trace produced usable rocprofv3 kernel traces on this hardware",
+  "generated_by": "scripts/make_ktrace_receipt.py",
+  "generated_at": "2026-08-03T16:36:51+0000",
+  "host": "cv350-tnndh2-b05-1.tnn.dcgpu",
+  "gpu_arch": "gfx950:sramecc+:xnack-",
+  "rocprofv3": "version: 1.1.0",
+  "tasks_probed": 16,
+  "tasks_traced": 10,
+  "tasks_with_coverage": 10,
+  "trace_success_rate": 0.625,
+  "parser_validation": "scripts/validate_rocprofv3_coverage.py (dominant/minor/decoy on gfx950)",
+  "observations": [
+    {
+      "task_id": "gen_add_bf16",
+      "seconds": 1.9,
+      "ok": true,
+      "n_dispatches": 14,
+      "candidate_kernels": [
+        "_add_kernel"
+      ],
+      "total_ns": 631753,
+      "coverage": 0.4520089338713073,
+      "n_candidate_dispatches": 5,
+      "never_ran": false
+    },
+    {
+      "task_id": "gen_add_fp16",
+      "seconds": 1.9,
+      "ok": true,
+      "n_dispatches": 14,
+      "candidate_kernels": [
+        "_add_kernel"
+      ],
+      "total_ns": 631393,
+      "coverage": 0.4486555916837849,
+      "n_candidate_dispatches": 5,
+      "never_ran": false
+    },
+    {
+      "task_id": "gen_add_fp32",
+      "seconds": 1.9,
+      "ok": true,
+      "n_dispatches": 12,
+      "candidate_kernels": [
+        "_add_kernel"
+      ],
+      "total_ns": 1150793,
+      "coverage": 0.4618302335867528,
+      "n_candidate_dispatches": 5,
+      "never_ran": false
+    },
+    {
+      "task_id": "gen_mul_bf16",
+      "seconds": 1.8,
+      "ok": true,
+      "n_dispatches": 14,
+      "candidate_kernels": [
+        "_mul_kernel"
+      ],
+      "total_ns": 14370434,
+      "coverage": 0.5865884774252469,
+      "n_candidate_dispatches": 5,
+      "never_ran": false
+    },
+    {
+      "task_id": "gen_mul_fp16",
+      "seconds": 1.8,
+      "ok": true,
+      "n_dispatches": 14,
+      "candidate_kernels": [
+        "_mul_kernel"
+      ],
+      "total_ns": 14836265,
+      "coverage": 0.2994688353167054,
+      "n_candidate_dispatches": 5,
+      "never_ran": false
+    },
+    {
+      "task_id": "gen_mul_fp32",
+      "seconds": 1.9,
+      "ok": true,
+      "n_dispatches": 12,
+      "candidate_kernels": [
+        "_mul_kernel"
+      ],
+      "total_ns": 3212936,
+      "coverage": 0.16138416700488276,
+      "n_candidate_dispatches": 5,
+      "never_ran": false
+    },
+    {
+      "task_id": "hip_add_bf16",
+      "seconds": 1.5,
+      "ok": false,
+      "error": "collect_kernel_trace returned no dispatches"
+    },
+    {
+      "task_id": "hip_add_fp16",
+      "seconds": 1.6,
+      "ok": false,
+      "error": "collect_kernel_trace returned no dispatches"
+    },
+    {
+      "task_id": "hip_add_fp32",
+      "seconds": 1.5,
+      "ok": false,
+      "error": "collect_kernel_trace returned no dispatches"
+    },
+    {
+      "task_id": "hip_mul_bf16",
+      "seconds": 1.5,
+      "ok": false,
+      "error": "collect_kernel_trace returned no dispatches"
+    },
+    {
+      "task_id": "hip_mul_fp16",
+      "seconds": 1.6,
+      "ok": false,
+      "error": "collect_kernel_trace returned no dispatches"
+    },
+    {
+      "task_id": "hip_mul_fp32",
+      "seconds": 1.4,
+      "ok": false,
+      "error": "collect_kernel_trace returned no dispatches"
+    },
+    {
+      "task_id": "softmax_bf16",
+      "seconds": 2.2,
+      "ok": true,
+      "n_dispatches": 230,
+      "candidate_kernels": [
+        "_softmax_kernel"
+      ],
+      "total_ns": 19537738,
+      "coverage": 0.03630896268544496,
+      "n_candidate_dispatches": 10,
+      "never_ran": false
+    },
+    {
+      "task_id": "gen_relu_bf16",
+      "seconds": 2.0,
+      "ok": true,
+      "n_dispatches": 11,
+      "candidate_kernels": [
+        "_relu_kernel"
+      ],
+      "total_ns": 15303679,
+      "coverage": 0.2908370595070636,
+      "n_candidate_dispatches": 5,
+      "never_ran": false
+    },
+    {
+      "task_id": "gen_relu_fp16",
+      "seconds": 2.0,
+      "ok": true,
+      "n_dispatches": 11,
+      "candidate_kernels": [
+        "_relu_kernel"
+      ],
+      "total_ns": 25448899,
+      "coverage": 0.5493779121839416,
+      "n_candidate_dispatches": 5,
+      "never_ran": false
+    },
+    {
+      "task_id": "gen_relu_fp32",
+      "seconds": 2.0,
+      "ok": true,
+      "n_dispatches": 10,
+      "candidate_kernels": [
+        "_relu_kernel"
+      ],
+      "total_ns": 3707364,
+      "coverage": 0.09518245308526489,
+      "n_candidate_dispatches": 5,
+      "never_ran": false
+    }
+  ]
+}

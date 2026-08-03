@@ -1890,6 +1890,15 @@ class KoreEnv:
             driver = workdir / "driver.py"
             env = (self._env(private_root=workdir / ".sandbox")
                    if self._sandbox_enabled else self._env())
+            # Confine the trace to the benched region. rocprofv3 profiles the whole
+            # process, so the driver's post-timing correctness re-verification lands
+            # in the same CSV as the benchmark and dilutes the denominator with
+            # input generation, the ATen reference and allclose reductions. That
+            # inverts the signal: measured on gfx950 a correct seed covered 0.057
+            # of its own trace while a 46x slower copy covered 0.739, because
+            # coverage was reporting share of the test harness rather than share
+            # of the work. Verdicts are unaffected -- this path issues none.
+            env["KORE_TRACE_BENCH_ONLY"] = "1"
             outdir = _tmp.mkdtemp(prefix="ktrace_", dir=str(workdir))
             # --bench-mode + --impl candidate for the same reason the PMC path needs
             # them: drivers honor --impl only in bench mode, so without it the trace

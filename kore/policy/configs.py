@@ -431,8 +431,19 @@ class GRPOConfig(DistributedMixin):
     # usable trace on THIS hardware. Required before the weight above can shape a
     # reward, for the same reason physics_shaping_evidence_path is required: the
     # collector fails safe, so an armed-but-unvalidated weight would state a reward
-    # the run silently never applies. rocprofv3's kernel-trace export layout is not
-    # confirmed on this ROCm build.
+    # the run silently never applies.
+    #
+    # The export layout IS now confirmed on gfx950 / rocprofiler-sdk 1.1.0, and a
+    # receipt can be produced with scripts/make_ktrace_receipt.py. That is still
+    # not sufficient to arm the weight above, and the reason is worth stating
+    # because the receipt looks like it settles the question: the trace path works,
+    # but the coverage MAGNITUDE it yields is not Amdahl's p. Coverage is measured
+    # on the candidate over a denominator that includes fixed harness work, so it
+    # rises as the kernel gets slower -- on gfx950 a correct seed read 0.057 and a
+    # 46x slower copy of it read 0.739. See docs/evidence/coverage_denominator.md.
+    # Amdahl's p is a property of the BASELINE workload and must not depend on the
+    # candidate at all. Until coverage is measured against a delimited region,
+    # leave this weight at 0.0 whatever the receipt says.
     profiling_reward_evidence_path: Optional[str] = None
     # Speedup above which a claim is treated as a gamed measurement rather than a
     # kernel, applied at reward time and not only at data-selection time. Defaults
@@ -450,7 +461,16 @@ class GRPOConfig(DistributedMixin):
     rejection_aggregate: str = "geometric"  # "geometric" | "arithmetic" | "min"
     mrs_min_quality: float = 0.0
     mrs_require_improvement: bool = False
-    prs_min_coverage: float = 0.1
+    # 0.0 means "reject only the decoy": a candidate whose own kernels never
+    # dispatched. That check is hardware-validated and sound. The lazy-optimisation
+    # check above it is NOT, at any positive threshold derived from today's
+    # traces. Across ten CORRECT seed kernels on gfx950 coverage ranged 0.036 to
+    # 0.587 purely from harness overhead, so the old 0.1 default rejected correct
+    # gen_relu_fp32 (0.095) and softmax_bf16 (0.036) as lazy while a deliberately
+    # 46x-slowed kernel scored 0.739 and passed. Raise this only once coverage is
+    # measured over a delimited benched region --
+    # docs/evidence/coverage_denominator.md has the numbers and what it would take.
+    prs_min_coverage: float = 0.0
     # OFF by default and deliberately: the profiler is not available for every task
     # on every node, so rejecting every unprofiled candidate would silently narrow
     # training to the profilable subset while the filter's statistics looked like a

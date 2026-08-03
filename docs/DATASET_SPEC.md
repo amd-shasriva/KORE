@@ -14,7 +14,7 @@ the 30B target has no Base sibling for either CPT or a residual merge.
 
 ## Task pool before trajectories
 
-The static registry contains 1,522 tasks, of which 1,477 are trainable. It
+The static registry contains 1,546 tasks, of which 1,501 are trainable. It
 cannot grow in place: the taxonomy digest guards split manifests, so adding a
 directory would invalidate a campaign already in flight.
 
@@ -73,12 +73,30 @@ Correctness is gated before speed. The task driver uses the FP32 oracle across
 declared shapes, plus adversarial and determinism checks when enabled. Timings
 are cold-cache, paired, and variance-gated.
 
-There are two baseline lanes. Of 1,522 registry tasks, 106 use a production
+There are two baseline lanes. Of 1,546 registry tasks, 110 use a production
 vendor baseline: 63 declare AITER, 4 declare hipBLASLt, runtime resolution adds
-33 `gemm_fusion` hipBLASLt tasks and 6 gated activations using AITER. The
+35 `gemm_fusion` hipBLASLt tasks and 8 gated activations using AITER. The
 remaining 93%, including all 1,052 generated breadth tasks and all 188 HIP C++
 tasks, use torch. A torch-lane speedup is useful for training but is not
 evidence of beating a production library.
+
+## Task kinds, and why "has a seed" was not one fact
+
+Every registry and pool task ships a seed artifact, which read as uniform
+"optimize an existing kernel" coverage. Measured by
+`scripts/seed_provenance_partition.py`, it is not: of the 14,924 tasks datagen
+resolves, **1,351 (9.1%) carry a real device kernel** (1,331 Triton, 20 HIP) and
+**13,573 (90.9%) carry eager torch**, which cannot be edited faster and has to
+be replaced by a kernel written from scratch. The corpus was already
+predominantly synthesis; the framing simply did not say so.
+
+The 24 `spec_*` tasks are the one shape that was genuinely absent. They declare
+`task_kind: spec_synthesis`, carry the contract as prose in `spec.md`, and ship a
+seed that is a signature stub with no body — so the specification is something
+the model must read rather than a reference it can paraphrase. Their oracle, SNR
+gate, adversarial battery and timing protocol are `_genops`' unchanged. They are
+proven by `scripts/verify_spec_tasks_e2e.py`, which requires both that a real
+from-scratch kernel passes and that the stub does not.
 
 No HIP task declares a vendor baseline, and that is a measurement result rather
 than an omission: the one HIP operator whose production bar is a vendor kernel

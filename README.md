@@ -66,13 +66,21 @@ kernel generation. `scripts/spur_pipeline_driver.sh` therefore defaults
 
 ## Measurement discipline
 
-The registry has 1,522 tasks (1,334 Triton plus a 188-task HIP C++ family). 106
+The registry has 1,546 tasks (1,334 Triton, a 188-task HIP C++ family, and a
+24-task spec-synthesis family). 110
 are vendor-lane tasks: 63 declare AITER and 4
-declare hipBLASLt; runtime resolution adds 33 `gemm_fusion` hipBLASLt tasks and
-6 gated activations backed by AITER. The remaining 93%, including all 1,052
+declare hipBLASLt; runtime resolution adds 35 `gemm_fusion` hipBLASLt tasks and
+8 gated activations backed by AITER. The remaining 93%, including all 1,052
 generated breadth tasks and the whole HIP family, are torch-lane tasks. Vendor
 and torch speedups must not be pooled: a torch-lane result does not establish a
 production-library win.
+
+Two of those families are not "optimize this kernel": a spec-synthesis task
+carries its contract in prose and its seed is a signature stub, because the
+corpus was already 90.9% synthesis (the 13,570 external-pool seeds alias eager
+torch) and what was missing was a specification the model has to *read* rather
+than a reference it can paraphrase. Measure the split yourself with
+`scripts/seed_provenance_partition.py`.
 
 Every HIP task is proven runnable on real gfx950 before it is counted — compiled,
 verified through the same oracle, and timed under the same publication protocol —

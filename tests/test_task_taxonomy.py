@@ -23,21 +23,27 @@ from kore.tasks.base import Task
 # 90, fusion 36, reduction 33, elementwise 18, normalization 9, quantization 2.
 # ``gemm`` contributes nothing: hip_gemm is defined and verified but is not
 # timing-admissible on this host, so the generator does not materialize it.
+#
+# The 24 spec-synthesis tasks (kore/tasks/generate_spec.py) deliberately land in
+# the SAME families as their gen_ siblings over the same operators -- activation
+# +8, elementwise +4, fusion +4, reduction +6, gemm +2 -- because splitting one
+# operator across two families by task kind would let the same math be trained
+# and held out at once.
 EXPECTED_PRODUCT_COUNTS = {
-    "activation": 175,
+    "activation": 183,
     "attention": 147,
     "convolution": 120,
     "data_movement": 2,
-    "elementwise": 42,
-    "fusion": 139,
-    "gemm": 95,
+    "elementwise": 46,
+    "fusion": 143,
+    "gemm": 97,
     "mla": 1,
     "moe": 89,
     "normalization": 111,
     "paged_attention": 1,
     "positional": 7,
     "quantization": 35,
-    "reduction": 196,
+    "reduction": 202,
     "sampling": 84,
     "sequence": 94,
     "sparse": 16,
@@ -49,9 +55,12 @@ EXPECTED_PRODUCT_COUNTS = {
 # manifest authored before the finding is correctly stale. Adding the HIP C++
 # family moves it again, for the same reason and with the same consequence: a
 # split manifest frozen before the HIP tasks existed does not describe this
-# registry and must be re-frozen rather than reused.
+# registry and must be re-frozen rather than reused. The 24 spec-synthesis tasks
+# move it a third time: they are a new TASK KIND, not just new operators, so a
+# manifest frozen before them describes a registry that could not pose a
+# from-specification task at all.
 EXPECTED_TAXONOMY_DIGEST = (
-    "92e5acc60631afae19ef209cdd167a937fe196f698f0e87d7f478f171dbeebf5"
+    "2b93a555a7d9afb653718938b1242cebd5396af214f96d427786d3b4ac0406ac"
 )
 CONTAMINATED_HELDOUT_TASKS = frozenset({
     "genb_cv_conv2d_1x1_s2_fp16",
@@ -70,8 +79,9 @@ CONTAMINATED_HELDOUT_TASKS = frozenset({
 
 def test_whole_registry_has_complete_stable_classification():
     tasks = registry.all_tasks()
-    # 1,334 Triton + 188 HIP C++ (kore/tasks/generate_hip.py).
-    assert len(tasks) == 1_522
+    # 1,334 Triton + 188 HIP C++ (kore/tasks/generate_hip.py)
+    # + 24 spec-synthesis (kore/tasks/generate_spec.py).
+    assert len(tasks) == 1_546
     counts = Counter(registry.operator_family(task) for task in tasks)
     assert dict(sorted(counts.items())) == EXPECTED_PRODUCT_COUNTS
     assert set(counts) == set(taxonomy.PRODUCT_FAMILIES)
@@ -143,8 +153,9 @@ def test_split_manifest_is_immutable_complete_and_lineage_disjoint():
     manifest = registry.build_split_manifest()
     # The HIP family is 188 trainable tasks (168 more than the 20 it started as);
     # the held-out reservation is untouched by them, because every HIP task is a
-    # new identity with its own provenance root.
-    assert len(manifest.train_ids) == 1_477
+    # new identity with its own provenance root. The 24 spec-synthesis tasks add
+    # to the train split for the same reason and leave eval at 45.
+    assert len(manifest.train_ids) == 1_501
     assert len(manifest.eval_ids) == 45
     # Contaminated tasks stay in the held-out reservation and leave only the
     # zero-shot claim: 45 held out, 34 of them still scoreable.

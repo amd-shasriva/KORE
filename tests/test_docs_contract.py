@@ -395,21 +395,24 @@ def test_grpo_config_comment_keys_name_a_real_knob():
 # measurements, so changing an artifact must force an explicit edit here AND in
 # the prose, rather than silently invalidating the prose.
 # --------------------------------------------------------------------------- #
-# Task registry composition. 63 + 4 + 33 + 6 = 106 vendor-lane tasks; the
-# remaining 1,248 (92%) are torch-anchored. The total includes the 20-task HIP C++
+# Task registry composition. 63 + 4 + 35 + 8 = 110 vendor-lane tasks; the
+# remaining 1,436 (93%) are torch-anchored. The total includes the 188-task HIP C++
 # family, all of which are torch-baselined (their production baseline is the eager
-# torch path they have to beat).
-EXPECTED_TOTAL_TASKS = 1_522
+# torch path they have to beat), and the 24-task spec-synthesis family, whose
+# gemm_bias_silu and gelu_mul entries inherit the same vendor-upgraded bars as
+# their gen_ siblings -- which is why the vendor lane moved from 106 to 110
+# without any new vendor-declared task being authored.
+EXPECTED_TOTAL_TASKS = 1_546
 EXPECTED_GENB_TASKS = 1_052
 EXPECTED_AITER_DECLARED = 63
 EXPECTED_HIPBLASLT_DECLARED = 4
 # 1,279 + the 188-task HIP C++ family, every one of which declares a torch or
 # torch_compile bar: no HIP task is graded against a vendor kernel, because the
 # vendor GEMM is the one baseline whose own CV cannot clear the publication gate.
-EXPECTED_TORCH_DECLARED = 1_447
-EXPECTED_GEMM_FUSION_UPGRADED = 33
-EXPECTED_GATED_ACT_UPGRADED = 6
-EXPECTED_VENDOR_LANE = 106
+EXPECTED_TORCH_DECLARED = 1_471
+EXPECTED_GEMM_FUSION_UPGRADED = 35
+EXPECTED_GATED_ACT_UPGRADED = 8
+EXPECTED_VENDOR_LANE = 110
 # Metamorphic prong coverage: tasks whose operator contract is fixed by the
 # _genops generator spec, so a proven relation set exists.
 EXPECTED_METAMORPHIC_PLANNED = 168

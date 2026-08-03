@@ -243,6 +243,20 @@
       "role": "offline fail-closed Qwen3-32B model/resource preflight (read-only)"
     },
     {
+      "path": "scripts/probe_composable_kernel.sh",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "measure whether Composable Kernel headers exist and a minimal CK translation unit compiles on an episode-generating node; decides whether CK could be an output language at all"
+    },
+    {
+      "path": "scripts/probe_hip_gemm_timing.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "measure WHY hip_gemm is not timing-admissible: times the hipBLASLt baseline solo and interleaved with the seed at each candidate shape, and judges both with the environment's own unmodified 3% publication admission gate"
+    },
+    {
       "path": "scripts/prove_dense_reward.py",
       "classification": "diagnostic",
       "lifecycle": "active"
@@ -333,6 +347,13 @@
       "classification": "deprecated",
       "lifecycle": "deprecated",
       "replacement": "SPUR datagen plus scheduler training jobs"
+    },
+    {
+      "path": "scripts/seed_provenance_partition.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "read-only census that partitions trainable tasks by what each seed actually is (an existing device kernel vs plain eager torch), parsed from the seed's AST rather than from metadata"
     },
     {
       "path": "scripts/sft_finish_dynamic.sh",
@@ -567,6 +588,13 @@
       "production": true
     },
     {
+      "path": "scripts/spur_verify_spec_1node.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "one-node gfx950 launcher for verify_spec_tasks_e2e.py plus the CK probe"
+    },
+    {
       "path": "scripts/test_amd_gateway.py",
       "classification": "diagnostic",
       "lifecycle": "active"
@@ -589,20 +617,6 @@
       "lifecycle": "active"
     },
     {
-      "path": "scripts/seed_provenance_partition.py",
-      "classification": "diagnostic",
-      "lifecycle": "active",
-      "deletes_artifacts": false,
-      "role": "read-only census that partitions trainable tasks by what each seed actually is (an existing device kernel vs plain eager torch), parsed from the seed's AST rather than from metadata"
-    },
-    {
-      "path": "scripts/probe_hip_gemm_timing.py",
-      "classification": "diagnostic",
-      "lifecycle": "active",
-      "deletes_artifacts": false,
-      "role": "measure WHY hip_gemm is not timing-admissible: times the hipBLASLt baseline solo and interleaved with the seed at each candidate shape, and judges both with the environment's own unmodified 3% publication admission gate"
-    },
-    {
       "path": "scripts/verify_hip_seeds.py",
       "classification": "diagnostic",
       "lifecycle": "active",
@@ -615,6 +629,13 @@
       "lifecycle": "active",
       "deletes_artifacts": false,
       "role": "feed each task its own declared seed through the real KoreEnv and report compile/correctness/timing-eligibility; proves a task is runnable before it is claimed as coverage"
+    },
+    {
+      "path": "scripts/verify_spec_tasks_e2e.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "prove a spec-synthesis task is well-posed: a known-good from-scratch kernel clears the SNR gate on every declared shape and times cleanly through the real KoreEnv, AND the declared signature stub does not pass, so the task is neither a trap nor pre-solved"
     },
     {
       "path": "scripts/verify_tasks_gpu.py",

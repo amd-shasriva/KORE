@@ -67,8 +67,14 @@ EXPECTED_BAND_COUNTS = {
 }
 # Every train task the sweep measured now clears its own gate, so the default
 # eligibility policy removes nobody.  Pinned so a regression cannot arrive quietly.
-EXPECTED_TRAIN_TASKS = 1_477
-EXPECTED_ELIGIBLE_TRAIN_TASKS = 1_477
+# +24 for the spec-synthesis family. Like the HIP family these are UNMEASURED by
+# the genb_ breadth sweep, and for these the sweep could not apply even in
+# principle: it verifies a task by running its declared seed, and a spec task's
+# seed is a signature stub that is SUPPOSED to fail. They are proven instead by
+# scripts/verify_spec_tasks_e2e.py, which requires a real solution to pass the
+# same oracle AND the stub to fail.
+EXPECTED_TRAIN_TASKS = 1_501
+EXPECTED_ELIGIBLE_TRAIN_TASKS = 1_501
 EXPECTED_STRICT_ELIGIBLE_TRAIN_TASKS = 1_009
 # +188 for the HIP C++ family, none of which the gfx950 breadth sweep measured
 # (it ran with the genb_ prefix), so all 188 land in UNMEASURED rather than PASS.
@@ -77,7 +83,12 @@ EXPECTED_STRICT_ELIGIBLE_TRAIN_TASKS = 1_009
 # The two artifacts are separate because they measure different things -- the
 # breadth sweep bands Triton seeds by SNR, and the HIP run proves runnability
 # through the whole environment including the timing-admission gate.
-EXPECTED_UNMEASURED_TRAIN_TASKS = 468
+#
+# +24 for the spec-synthesis family, which the breadth sweep could not have
+# measured even if it had run: the sweep verifies a task by executing its
+# declared seed, and a spec task's seed is a stub whose failure is the point.
+# Their evidence is data/spec_task_verification.json.
+EXPECTED_UNMEASURED_TRAIN_TASKS = 492
 
 
 def _synthetic_artifact(path):
@@ -578,8 +589,8 @@ def test_unknown_verdicts_are_admitted_but_never_reported_as_verified():
         assert not decision.verdict.is_pass
 
     coverage = registry.hardware_verification_coverage()
-    assert coverage["tasks"] == 1_522
-    assert coverage["status_counts"]["UNKNOWN"] == 1_522 - 1_052
+    assert coverage["tasks"] == 1_546
+    assert coverage["status_counts"]["UNKNOWN"] == 1_546 - 1_052
     assert coverage["measured"] == 1_052
     assert coverage["artifact_digest"] == verification.report().digest
 

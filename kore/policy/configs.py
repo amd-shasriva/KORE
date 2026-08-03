@@ -271,6 +271,22 @@ class GRPOConfig(DistributedMixin):
     clip_ratio_low: float = 0.03           # GSPO sequence-ratio lower bound (was 0.2, inert)
     clip_ratio_high: float = 0.04          # asymmetric clip-higher, sequence scale
     adv_eps: float = 1e-6                  # group-normalization epsilon
+    # Dual-clip PPO (Ye et al. 2020). The clipped surrogate is bounded ABOVE for a
+    # positive advantage but not bounded BELOW for a negative one: as the ratio
+    # grows, r*A -> -inf and one sample can own the whole gradient. dual_clip_c > 1
+    # floors the surrogate at c*A where A < 0. 0.0 (or <= 1.0) disables it and
+    # reproduces clip_higher_ratio exactly. Cheap insurance whose only cost is that
+    # a very off-policy negative sample stops contributing more than c*A.
+    dual_clip_c: float = 3.0
+    # Rollout/training mismatch correction (truncated importance sampling). The
+    # sharded loop generates on a plain full-weight replica and trains through the
+    # FSDP wrapper, so the two evaluate the same weights on different code paths.
+    # With ppo_epochs=1 the measured weight sits within about a percent of 1.0, so
+    # this is defense-in-depth AND a diagnostic: a weight far from 1.0 is a bug
+    # report about rollout/training divergence, not something to correct away. Off
+    # by default so the shipped recipe does not claim a correction it does not need.
+    mismatch_correction: bool = False
+    mismatch_weight_cap: float = 2.0       # truncation bound on pi_train/pi_rollout
     ppo_epochs: int = 1                    # on-policy (was 2): sequence-ratio clip can't
                                            # safely protect a 2nd off-policy epoch uncalibrated
     # DAPO Overlong Filtering: a response within overlong_buffer_len tokens of the
@@ -363,6 +379,27 @@ class GRPOConfig(DistributedMixin):
     # sets 0.1 when anti-collapse is on; this makes standalone GRPO safe too.)
     variance_floor: float = 0.1            # AVSPO tau trigger (0 disables)
     avspo_virtual_k: int = 2               # #virtual samples injected at +/- tau
+
+    # --- Advantage estimator: "grpo" (pooled, self-inclusive) | "trloo" ---------
+    # "grpo" keeps the incumbent: pool the group's m*n per-turn samples, centre on
+    # their mean, divide by their std, with the AVSPO variance floor above.
+    #
+    # "trloo" is Dr. Kernel's turn-level REINFORCE leave-one-out estimator
+    # (arXiv 2602.05885). The pooled mean CONTAINS the sample it centres, and in
+    # multi-turn it also contains the later turns of that sample's own trajectory,
+    # which are downstream of the action being credited -- so the baseline cancels
+    # part of the long-horizon credit. Measured by exact enumeration
+    # (tests/test_trloo_advantages.py): pooled centring returns exactly (M-1)/M of
+    # the true gradient, the std term's error GROWS with the group, and on
+    # asymmetric MDPs the expected gradient can point the WRONG WAY. TRLOO instead
+    # centres each sample on the mean of the OTHER trajectories at the SAME turn,
+    # which is independent of the action and therefore unbiased.
+    #
+    # TRLOO deliberately applies NO std normalisation and BYPASSES the AVSPO
+    # variance floor: both are self-inclusive, and normalising away the bias
+    # correction defeats the purpose. Set variance_floor to 0.0 alongside it, or
+    # the capability audit will report the floor as an inert request.
+    advantage_estimator: str = "grpo"
     # Real SC-GRPO: for partial-solve groups, re-score other turns' tokens with a
     # correct kernel as an in-context demo (teacher) and weight the per-token PG
     # term by per-token KL(teacher||student). One extra forward per weighted sample.
@@ -378,6 +415,47 @@ class GRPOConfig(DistributedMixin):
     # --- Kevin multi-turn credit (best-kernel scoring + CoT masking) ---
     kevin_best_kernel_scoring: bool = True  # trajectory value = best correct kernel
     cot_masking: bool = True                # drop prior-turn thinking from context
+
+    # --- Profiling-based rewards + rejection sampling (kore.reward.coverage,
+    # --- kore.policy.rejection) ------------------------------------------------
+    # Coverage is the fraction of profiled GPU time the candidate's OWN kernels
+    # account for, combined with the measured speedup by Amdahl's law rather than
+    # added to it. Dr. Kernel's motivating pair: 0.014% coverage (optimised
+    # something irrelevant) versus 86.15% (real fusion). At 0.014% even an infinite
+    # local speedup is 1.00014x end to end, so a reward that pays for it is paying
+    # for the wrong behaviour. The term is bounded [0, 1] and scaled by this weight,
+    # which must stay BELOW correctness_weight so it can never outrank correctness.
+    # 0.0 disables the whole path (no trace is collected).
+    profiling_reward_weight: float = 0.0
+    # Receipt from a measured run proving KoreEnv.collect_kernel_trace produced a
+    # usable trace on THIS hardware. Required before the weight above can shape a
+    # reward, for the same reason physics_shaping_evidence_path is required: the
+    # collector fails safe, so an armed-but-unvalidated weight would state a reward
+    # the run silently never applies. rocprofv3's kernel-trace export layout is not
+    # confirmed on this ROCm build.
+    profiling_reward_evidence_path: Optional[str] = None
+    # Speedup above which a claim is treated as a gamed measurement rather than a
+    # kernel, applied at reward time and not only at data-selection time. Defaults
+    # to kore.data.agentic_filter.FilterPolicy's evidence-derived cap so the
+    # RL-time and data-time guards agree instead of drifting apart.
+    max_plausible_speedup: float = 12.0
+    # MRS/PRS. rejection_sampling gates both. MRS aggregates per-turn quality
+    # across turns ("geometric" is Dr. Kernel's reported default, and is dominated
+    # by the WEAKEST turn so one strong turn cannot carry a broken trajectory) and
+    # DECLINES when filtering would leave too few trajectories or collapse the
+    # group's reward variance -- the contrast a group-relative estimator learns
+    # from. PRS rejects a candidate whose kernels never dispatched (coverage 0.0:
+    # the decoy hack) or which covers less than prs_min_coverage of the runtime.
+    rejection_sampling: bool = False
+    rejection_aggregate: str = "geometric"  # "geometric" | "arithmetic" | "min"
+    mrs_min_quality: float = 0.0
+    mrs_require_improvement: bool = False
+    prs_min_coverage: float = 0.1
+    # OFF by default and deliberately: the profiler is not available for every task
+    # on every node, so rejecting every unprofiled candidate would silently narrow
+    # training to the profilable subset while the filter's statistics looked like a
+    # quality improvement.
+    prs_require_profile: bool = False
 
     # --- Retention: KL anchor to the post-SFT multi-capability checkpoint ---
     ref_checkpoint: Optional[str] = None    # defaults to model_id (the SFT ckpt)

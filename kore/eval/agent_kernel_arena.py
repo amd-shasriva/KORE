@@ -305,6 +305,24 @@ def evaluate_task(
     return res
 
 
+# Our HIP training tasks were written independently -- no AgentKernelArena
+# source, references or shapes were copied, because training on the benchmark
+# would destroy the only checkable "we beat Opus on HIP" claim we have. But
+# 20/20 of them share an OPERATOR with an AKA task (12 with hip2hip, 18 with
+# torch2hip), which is unavoidable: every kernel corpus contains gelu and
+# layernorm, and excluding the operators AKA happens to test would cripple the
+# model rather than make the comparison cleaner.
+#
+# The disclosure rides on the summary rather than living in a script someone
+# has to remember to run, so a number cannot be quoted without it.
+OPERATOR_OVERLAP_DISCLOSURE = (
+    "KORE HIP training tasks were authored independently; no AgentKernelArena "
+    "source, reference implementation or shape set was used. 20/20 share an "
+    "operator with an AKA task (12 hip2hip, 18 torch2hip). See "
+    "scripts/audit_hip_tasks.py for the per-task breakdown."
+)
+
+
 def summarize(results: Sequence[ArenaResult]) -> dict:
     """Per-type aggregates next to the published Opus number for that type."""
     import statistics
@@ -313,7 +331,11 @@ def summarize(results: Sequence[ArenaResult]) -> dict:
     for r in results:
         by_type.setdefault(r.task_type, []).append(r)
 
-    out: dict[str, Any] = {"n": len(results), "by_type": {}}
+    out: dict[str, Any] = {
+        "n": len(results),
+        "training_overlap_disclosure": OPERATOR_OVERLAP_DISCLOSURE,
+        "by_type": {},
+    }
     for ttype, rs in sorted(by_type.items()):
         speeds = [r.speedup for r in rs if r.correct and r.speedup]
         row = {

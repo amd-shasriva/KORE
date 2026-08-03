@@ -1,1156 +1,5481 @@
 {
   "artifact_type": "kore.hip-task-verification",
-  "schema_version": "1.0",
-  "recorded_at": "2026-08-03T08:42:39.865016+00:00",
-  "git_head": "c2ca442459f92f45d3e76e0e9b9a9620edbdf4b0",
+  "schema_version": "2.0",
+  "recorded_at": "2026-08-03T17:20:04.981213+00:00",
+  "git_head": "d2bd28f11740df081760117ae4496055e0d39f92",
+  "written_by": "scripts/write_hip_verification_evidence.py",
   "how_to_reproduce": [
-    "PYTHONPATH=. python scripts/verify_hip_seeds.py --gpu 0 --adversarial",
-    "PYTHONPATH=. python scripts/verify_hip_tasks_e2e.py --gpu 0 --verified-correctness",
-    "sbatch scripts/spur_hip_verify_1node.sbatch -   # on a cluster GPU node"
+    "for i in 0 1 2 3; do PYTHONPATH=. python scripts/verify_hip_tasks_e2e.py --gpu $((i+4)) --shard $i/4 --verified-correctness --json /tmp/hipverify/shard$i.json & done; wait",
+    "PYTHONPATH=. python scripts/write_hip_verification_evidence.py --run '/tmp/hipverify/shard*.json' --out data/hip_task_verification.json"
   ],
   "host": {
     "note": "local dev host, 8x AMD Instinct MI350X; same gfx950/CDNA4 architecture as the MI355X product target",
-    "device": "gfx950:sramecc+:xnack-",
-    "torch": "2.10.0+rocm7.0",
     "torch_hip": "7.0.51831",
-    "hipcc": "HIP version: 7.2.53211-c2d9476115"
+    "hipcc": "HIP version: 7.2.53211-c2d9476115",
+    "rocm_home": "/opt/rocm-7.2.3"
   },
-  "toolchain": {
-    "available": true,
-    "hipcc": "/usr/bin/hipcc",
-    "ninja": "/home/shasriva/kore-venv/bin/ninja",
-    "torch_hip_version": "7.0.51831",
-    "rocm_home": "/opt/rocm-7.2.3",
-    "missing": [],
-    "detail": ""
+  "gate": "each task evaluated through kore.env.kore_env.KoreEnv with its OWN declared seed as the candidate, adversarial regimes enabled, full paired publication timing protocol at the unmodified 3% CV gate",
+  "summary": {
+    "registry_hip_tasks": 188,
+    "measured": 188,
+    "compiled_and_correct": 188,
+    "runnable_every_run": 173,
+    "runnable_in_some_run": 173,
+    "runs": 1,
+    "note": "correctness is deterministic and holds for every measured task; the gap between runnable_every_run and compiled_and_correct is TIMING ADMISSION, a measurement-noise gate. A task that fails it still yields a correct episode -- it just carries no speedup reward that run."
   },
-  "end_to_end": {
-    "gate": "each task evaluated through kore.env.kore_env.KoreEnv with its OWN declared seed as the candidate, adversarial regimes enabled, full paired publication timing protocol",
-    "n_tasks": 20,
-    "n_runnable": 20,
-    "rows": [
-      {
-        "task_id": "hip_dequant_mxfp4_mxfp4",
-        "backend": "hip",
-        "dtype": "mxfp4",
-        "operation": "hip_dequant_mxfp4",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 999.0,
-        "snr_by_shape": {
-          "minimal": 999.0,
-          "primary": 999.0,
-          "validation_0": 999.0,
-          "validation_1": 999.0,
-          "validation_2": 999.0
-        },
-        "gate_db": 40.0,
-        "speedup": 11.768878776757184,
-        "wall_by_shape": {
-          "minimal": 0.10959900170564651,
-          "primary": 0.10923899710178375,
-          "validation_0": 0.11027900129556656,
-          "validation_1": 0.10868000239133835,
-          "validation_2": 0.11063899844884872
-        },
-        "cv_pct": 0.4660026853298711,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 16.2,
-        "runnable": true
+  "rows": [
+    {
+      "task_id": "hip_abs_bf16",
+      "operation": "hip_abs",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_gelu_tanh_bf16",
-        "backend": "hip",
-        "dtype": "bf16",
-        "operation": "hip_gelu_tanh",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 999.0,
-        "snr_by_shape": {
-          "minimal": 999.0,
-          "primary": 999.0,
-          "validation_0": 999.0,
-          "validation_1": 999.0,
-          "validation_2": 999.0
-        },
-        "gate_db": 35.0,
-        "speedup": 0.5921666805842817,
-        "wall_by_shape": {
-          "minimal": 0.14503900706768036,
-          "primary": 0.1303589940071106,
-          "validation_0": 0.1459590047597885,
-          "validation_1": 0.14567899703979492,
-          "validation_2": 0.1459989994764328
-        },
-        "cv_pct": 0.9823742178222847,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.3,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9060312039181295
+      ],
+      "candidate_cv_pct_by_run": [
+        0.23956775700022342
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_abs_fp16",
+      "operation": "hip_abs",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_gelu_tanh_fp16",
-        "backend": "hip",
-        "dtype": "fp16",
-        "operation": "hip_gelu_tanh",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 111.89,
-        "snr_by_shape": {
-          "minimal": 111.9,
-          "primary": 111.89,
-          "validation_0": 111.9,
-          "validation_1": 111.9,
-          "validation_2": 111.9
-        },
-        "gate_db": 35.0,
-        "speedup": 0.5964637243192211,
-        "wall_by_shape": {
-          "minimal": 0.1435990035533905,
-          "primary": 0.12811900675296783,
-          "validation_0": 0.14355899393558502,
-          "validation_1": 0.14379900693893433,
-          "validation_2": 0.14343899488449097
-        },
-        "cv_pct": 1.193654918808876,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 15.1,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9233028884769313
+      ],
+      "candidate_cv_pct_by_run": [
+        2.250861865142967
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_abs_fp32",
+      "operation": "hip_abs",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_gelu_tanh_fp32",
-        "backend": "hip",
-        "dtype": "fp32",
-        "operation": "hip_gelu_tanh",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 162.49,
-        "snr_by_shape": {
-          "minimal": 162.5,
-          "primary": 162.49,
-          "validation_0": 162.5,
-          "validation_1": 162.5,
-          "validation_2": 162.5
-        },
-        "gate_db": 35.0,
-        "speedup": 0.8591648054974452,
-        "wall_by_shape": {
-          "minimal": 0.16495800018310547,
-          "primary": 0.14555799961090088,
-          "validation_0": 0.16339799761772156,
-          "validation_1": 0.1640789955854416,
-          "validation_2": 0.1640789955854416
-        },
-        "cv_pct": 0.44226662634173397,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.4,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9627350619151404
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5931411824174964
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_add_relu_bf16",
+      "operation": "hip_add_add_relu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_layernorm_bf16",
-        "backend": "hip",
-        "dtype": "bf16",
-        "operation": "hip_layernorm",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 96.74,
-        "snr_by_shape": {
-          "minimal": 97.67,
-          "primary": 98.03,
-          "validation_0": 96.74,
-          "validation_1": 98.07,
-          "validation_2": 97.0
-        },
-        "gate_db": 30.0,
-        "speedup": 0.5804872573231911,
-        "wall_by_shape": {
-          "minimal": 0.18375800549983978,
-          "primary": 0.18483799695968628,
-          "validation_0": 0.18655799329280853,
-          "validation_1": 0.20499800145626068,
-          "validation_2": 0.19147799909114838
-        },
-        "cv_pct": 0.6387057811099799,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.8,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8508432829142154
+      ],
+      "candidate_cv_pct_by_run": [
+        2.081108408566628
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_add_relu_fp16",
+      "operation": "hip_add_add_relu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_layernorm_fp16",
-        "backend": "hip",
-        "dtype": "fp16",
-        "operation": "hip_layernorm",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 105.83,
-        "snr_by_shape": {
-          "minimal": 107.13,
-          "primary": 107.32,
-          "validation_0": 106.73,
-          "validation_1": 107.64,
-          "validation_2": 105.83
-        },
-        "gate_db": 30.0,
-        "speedup": 0.5548922851397218,
-        "wall_by_shape": {
-          "minimal": 0.1826779991388321,
-          "primary": 0.18327799439430237,
-          "validation_0": 0.18643799424171448,
-          "validation_1": 0.2035979926586151,
-          "validation_2": 0.1897979974746704
-        },
-        "cv_pct": 0.4342943875390944,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 15.7,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8355235612268109
+      ],
+      "candidate_cv_pct_by_run": [
+        1.9026719110252879
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_add_relu_fp32",
+      "operation": "hip_add_add_relu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_layernorm_fp32",
-        "backend": "hip",
-        "dtype": "fp32",
-        "operation": "hip_layernorm",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 121.78,
-        "snr_by_shape": {
-          "minimal": 121.78,
-          "primary": 143.72,
-          "validation_0": 124.7,
-          "validation_1": 143.94,
-          "validation_2": 141.69
-        },
-        "gate_db": 30.0,
-        "speedup": 0.5771353134181523,
-        "wall_by_shape": {
-          "minimal": 0.2519969940185547,
-          "primary": 0.23847800493240356,
-          "validation_0": 0.3204770088195801,
-          "validation_1": 0.24515800178050995,
-          "validation_2": 0.2500370144844055
-        },
-        "cv_pct": 0.7488650705152017,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 15.1,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8699928547483133
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5687854285948335
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_bf16",
+      "operation": "hip_add",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_quant_fp8_pertoken_fp8_e4m3fn",
-        "backend": "hip",
-        "dtype": "fp8_e4m3fn",
-        "operation": "hip_quant_fp8_pertoken",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 56.73,
-        "snr_by_shape": {
-          "minimal": 56.73,
-          "primary": 57.19,
-          "validation_0": 58.07,
-          "validation_1": 57.56,
-          "validation_2": 56.83
-        },
-        "gate_db": 20.0,
-        "speedup": 3.319349479925302,
-        "wall_by_shape": {
-          "minimal": 0.14063799381256104,
-          "primary": 0.13807900249958038,
-          "validation_0": 0.1499989926815033,
-          "validation_1": 0.14719900488853455,
-          "validation_2": 0.14115899801254272
-        },
-        "cv_pct": 0.5650861815963945,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 15.2,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8991889871141152
+      ],
+      "candidate_cv_pct_by_run": [
+        1.105308295344541
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_fp16",
+      "operation": "hip_add",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_rmsnorm_bf16",
-        "backend": "hip",
-        "dtype": "bf16",
-        "operation": "hip_rmsnorm",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 95.08,
-        "snr_by_shape": {
-          "minimal": 97.6,
-          "primary": 99.06,
-          "validation_0": 95.08,
-          "validation_1": 97.9,
-          "validation_2": 97.67
-        },
-        "gate_db": 30.0,
-        "speedup": 0.7060464321561729,
-        "wall_by_shape": {
-          "minimal": 0.14447900652885437,
-          "primary": 0.1419990062713623,
-          "validation_0": 0.15755799412727356,
-          "validation_1": 0.15151800215244293,
-          "validation_2": 0.14819900691509247
-        },
-        "cv_pct": 0.4401262174442383,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 15.1,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9065975391877411
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5316803264174434
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_fp32",
+      "operation": "hip_add",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_rmsnorm_fp16",
-        "backend": "hip",
-        "dtype": "fp16",
-        "operation": "hip_rmsnorm",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 106.85,
-        "snr_by_shape": {
-          "minimal": 107.73,
-          "primary": 107.42,
-          "validation_0": 107.27,
-          "validation_1": 108.16,
-          "validation_2": 106.85
-        },
-        "gate_db": 30.0,
-        "speedup": 0.6138659691639807,
-        "wall_by_shape": {
-          "minimal": 0.14391900599002838,
-          "primary": 0.14091899991035461,
-          "validation_0": 0.15567900240421295,
-          "validation_1": 0.1491989940404892,
-          "validation_2": 0.1465590000152588
-        },
-        "cv_pct": 0.30812705290938774,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 15.2,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9483316853198003
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6550900158557901
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_gelu_bf16",
+      "operation": "hip_add_gelu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_rmsnorm_fp32",
-        "backend": "hip",
-        "dtype": "fp32",
-        "operation": "hip_rmsnorm",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 144.72,
-        "snr_by_shape": {
-          "minimal": 145.53,
-          "primary": 145.68,
-          "validation_0": 145.32,
-          "validation_1": 146.24,
-          "validation_2": 144.72
-        },
-        "gate_db": 30.0,
-        "speedup": 0.8032139568690803,
-        "wall_by_shape": {
-          "minimal": 0.2054779976606369,
-          "primary": 0.1863979995250702,
-          "validation_0": 0.21719799935817719,
-          "validation_1": 0.1693190038204193,
-          "validation_2": 0.20063799619674683
-        },
-        "cv_pct": 0.5134284064614048,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.9,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.7601406628830606
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7081069401401706
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_gelu_fp16",
+      "operation": "hip_add_gelu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 108.42,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 108.42,
+        "primary": 108.48,
+        "validation_0": 108.42,
+        "validation_1": 108.42,
+        "validation_2": 108.42
       },
-      {
-        "task_id": "hip_silu_bf16",
-        "backend": "hip",
-        "dtype": "bf16",
-        "operation": "hip_silu",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 999.0,
-        "snr_by_shape": {
-          "minimal": 999.0,
-          "primary": 999.0,
-          "validation_0": 999.0,
-          "validation_1": 999.0,
-          "validation_2": 999.0
-        },
-        "gate_db": 35.0,
-        "speedup": 0.6351149169490682,
-        "wall_by_shape": {
-          "minimal": 0.13627900183200836,
-          "primary": 0.12123899906873703,
-          "validation_0": 0.13603900372982025,
-          "validation_1": 0.13599799573421478,
-          "validation_2": 0.1361989974975586
-        },
-        "cv_pct": 1.1060867034270938,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.2,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.7770177914983143
+      ],
+      "candidate_cv_pct_by_run": [
+        0.47238168957622956
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_gelu_fp32",
+      "operation": "hip_add_gelu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 163.94,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 163.94,
+        "primary": 163.94,
+        "validation_0": 163.94,
+        "validation_1": 163.94,
+        "validation_2": 163.94
       },
-      {
-        "task_id": "hip_silu_fp16",
-        "backend": "hip",
-        "dtype": "fp16",
-        "operation": "hip_silu",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 111.42,
-        "snr_by_shape": {
-          "minimal": 111.42,
-          "primary": 111.43,
-          "validation_0": 111.42,
-          "validation_1": 111.42,
-          "validation_2": 111.42
-        },
-        "gate_db": 35.0,
-        "speedup": 0.6391143975070688,
-        "wall_by_shape": {
-          "minimal": 0.1348789930343628,
-          "primary": 0.12111900001764297,
-          "validation_0": 0.13531899452209473,
-          "validation_1": 0.13531899452209473,
-          "validation_2": 0.1353590041399002
-        },
-        "cv_pct": 1.0688022310760241,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.4,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9073170993612326
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7149528003850231
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_mul_bf16",
+      "operation": "hip_add_mul",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_silu_fp32",
-        "backend": "hip",
-        "dtype": "fp32",
-        "operation": "hip_silu",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 151.59,
-        "snr_by_shape": {
-          "minimal": 151.59,
-          "primary": 151.59,
-          "validation_0": 151.59,
-          "validation_1": 151.59,
-          "validation_2": 151.59
-        },
-        "gate_db": 35.0,
-        "speedup": 0.8867995391633904,
-        "wall_by_shape": {
-          "minimal": 0.15931899845600128,
-          "primary": 0.1415189951658249,
-          "validation_0": 0.15859900414943695,
-          "validation_1": 0.15831899642944336,
-          "validation_2": 0.1584780067205429
-        },
-        "cv_pct": 0.38237271427913727,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.2,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8926034169634335
+      ],
+      "candidate_cv_pct_by_run": [
+        1.3352904553657943
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_mul_fp16",
+      "operation": "hip_add_mul",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_silu_mul_bf16",
-        "backend": "hip",
-        "dtype": "bf16",
-        "operation": "hip_silu_mul",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 999.0,
-        "snr_by_shape": {
-          "minimal": 999.0,
-          "primary": 999.0,
-          "validation_0": 999.0,
-          "validation_1": 999.0,
-          "validation_2": 999.0
-        },
-        "gate_db": 35.0,
-        "speedup": 1.1567143317409385,
-        "wall_by_shape": {
-          "minimal": 0.1467989981174469,
-          "primary": 0.13215799629688263,
-          "validation_0": 0.14743900299072266,
-          "validation_1": 0.14755800366401672,
-          "validation_2": 0.1473580002784729
-        },
-        "cv_pct": 0.7042918524269224,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.4,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8805362570584108
+      ],
+      "candidate_cv_pct_by_run": [
+        2.691102603872908
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_mul_fp32",
+      "operation": "hip_add_mul",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_silu_mul_fp16",
-        "backend": "hip",
-        "dtype": "fp16",
-        "operation": "hip_silu_mul",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 104.32,
-        "snr_by_shape": {
-          "minimal": 104.41,
-          "primary": 104.32,
-          "validation_0": 104.41,
-          "validation_1": 104.41,
-          "validation_2": 104.41
-        },
-        "gate_db": 35.0,
-        "speedup": 1.1819711365935317,
-        "wall_by_shape": {
-          "minimal": 0.14423799514770508,
-          "primary": 0.13011899590492249,
-          "validation_0": 0.14451900124549866,
-          "validation_1": 0.14423899352550507,
-          "validation_2": 0.1441580057144165
-        },
-        "cv_pct": 0.5002277277897791,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.7,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8814145044299624
+      ],
+      "candidate_cv_pct_by_run": [
+        0.779429949085057
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_mul_relu_bf16",
+      "operation": "hip_add_mul_relu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_silu_mul_fp32",
-        "backend": "hip",
-        "dtype": "fp32",
-        "operation": "hip_silu_mul",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 151.16,
-        "snr_by_shape": {
-          "minimal": 151.16,
-          "primary": 151.16,
-          "validation_0": 151.16,
-          "validation_1": 151.16,
-          "validation_2": 151.16
-        },
-        "gate_db": 35.0,
-        "speedup": 1.4735173056897373,
-        "wall_by_shape": {
-          "minimal": 0.21659700572490692,
-          "primary": 0.1935179978609085,
-          "validation_0": 0.215598002076149,
-          "validation_1": 0.215598002076149,
-          "validation_2": 0.21571800112724304
-        },
-        "cv_pct": 0.5039972219522906,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.5,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8214053707427887
+      ],
+      "candidate_cv_pct_by_run": [
+        1.7478430603871844
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_mul_relu_fp16",
+      "operation": "hip_add_mul_relu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_softmax_rows_bf16",
-        "backend": "hip",
-        "dtype": "bf16",
-        "operation": "hip_softmax_rows",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 93.7,
-        "snr_by_shape": {
-          "minimal": 97.01,
-          "primary": 96.64,
-          "validation_0": 94.38,
-          "validation_1": 93.7,
-          "validation_2": 96.65
-        },
-        "gate_db": 30.0,
-        "speedup": 0.4143404804906103,
-        "wall_by_shape": {
-          "minimal": 0.20039799809455872,
-          "primary": 0.21091799437999725,
-          "validation_0": 0.20007799565792084,
-          "validation_1": 0.23699800670146942,
-          "validation_2": 0.21807800233364105
-        },
-        "cv_pct": 0.9720380312420646,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.4,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8300779306390025
+      ],
+      "candidate_cv_pct_by_run": [
+        0.8058044814922314
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_mul_relu_fp32",
+      "operation": "hip_add_mul_relu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_softmax_rows_fp16",
-        "backend": "hip",
-        "dtype": "fp16",
-        "operation": "hip_softmax_rows",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 101.62,
-        "snr_by_shape": {
-          "minimal": 102.77,
-          "primary": 103.19,
-          "validation_0": 101.62,
-          "validation_1": 102.65,
-          "validation_2": 103.31
-        },
-        "gate_db": 30.0,
-        "speedup": 0.4111993763434064,
-        "wall_by_shape": {
-          "minimal": 0.19819800555706024,
-          "primary": 0.20779800415039062,
-          "validation_0": 0.19791799783706665,
-          "validation_1": 0.23479799926280975,
-          "validation_2": 0.21487799286842346
-        },
-        "cv_pct": 0.8949943139106499,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.8,
-        "runnable": true
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.878193802540301
+      ],
+      "candidate_cv_pct_by_run": [
+        0.4520439124817323
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_relu_bf16",
+      "operation": "hip_add_relu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "task_id": "hip_softmax_rows_fp32",
-        "backend": "hip",
-        "dtype": "fp32",
-        "operation": "hip_softmax_rows",
-        "compiled": true,
-        "correct": true,
-        "flagged_hack": false,
-        "hack_reason": null,
-        "infra_error": false,
-        "snr_db": 137.38,
-        "snr_by_shape": {
-          "minimal": 137.38,
-          "primary": 137.38,
-          "validation_0": 137.38,
-          "validation_1": 137.38,
-          "validation_2": 140.39
-        },
-        "gate_db": 30.0,
-        "speedup": 0.5454898019284306,
-        "wall_by_shape": {
-          "minimal": 0.2517569959163666,
-          "primary": 0.24323800206184387,
-          "validation_0": 0.3169170022010803,
-          "validation_1": 0.2699980139732361,
-          "validation_2": 0.24935799837112427
-        },
-        "cv_pct": 0.6326527479251066,
-        "performance_eligible": true,
-        "timing_protocol": "kore-paired-v2",
-        "timing_grade": "publication",
-        "error_text": "",
-        "seconds": 14.7,
-        "runnable": true
-      }
-    ]
-  },
-  "seed_level": {
-    "rows": [
-      {
-        "op": "gelu_tanh",
-        "dtype": "bf16",
-        "gate_db": 35.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 15.2,
-        "snr_by_shape": {
-          "minimal": 999.0,
-          "primary": 999.0
-        },
-        "worst_snr_db": 999.0,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1315,
-        "baseline_ms": 0.0748,
-        "seed_speedup": 0.569
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8871697420624685
+      ],
+      "candidate_cv_pct_by_run": [
+        1.2551762776739122
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_relu_fp16",
+      "operation": "hip_add_relu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "gelu_tanh",
-        "dtype": "fp16",
-        "gate_db": 35.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 109.12,
-          "primary": 111.89
-        },
-        "worst_snr_db": 109.12,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1295,
-        "baseline_ms": 0.0745,
-        "seed_speedup": 0.575
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.8964888569622037
+      ],
+      "candidate_cv_pct_by_run": [
+        2.7875336558174757
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: paired ratio CV 3.308% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_add_relu_fp32",
+      "operation": "hip_add_relu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "gelu_tanh",
-        "dtype": "fp32",
-        "gate_db": 35.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 162.65,
-          "primary": 162.49
-        },
-        "worst_snr_db": 162.49,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1474,
-        "baseline_ms": 0.1254,
-        "seed_speedup": 0.85
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8925871533235599
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6782313313807151
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_silu_bf16",
+      "operation": "hip_add_silu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "gemm",
-        "dtype": "bf16",
-        "gate_db": 25.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 15.1,
-        "snr_by_shape": {
-          "minimal": 999.0,
-          "primary": 85.27
-        },
-        "worst_snr_db": 85.27,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 8.19,
-        "baseline_ms": 0.1202,
-        "seed_speedup": 0.015
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8797228222655566
+      ],
+      "candidate_cv_pct_by_run": [
+        0.8727062661631243
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_silu_fp16",
+      "operation": "hip_add_silu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "gemm",
-        "dtype": "fp16",
-        "gate_db": 25.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 89.35,
-          "primary": 93.43
-        },
-        "worst_snr_db": 89.35,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 8.1663,
-        "baseline_ms": 0.1246,
-        "seed_speedup": 0.015
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8884555451793095
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5439206431411208
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_add_silu_fp32",
+      "operation": "hip_add_silu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "gemm",
-        "dtype": "fp32",
-        "gate_db": 25.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 136.05,
-          "primary": 126.76
-        },
-        "worst_snr_db": 126.76,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 8.3672,
-        "baseline_ms": 1.0534,
-        "seed_speedup": 0.126
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9269500058419958
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6497019898889337
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_dequant_mxfp4_mxfp4",
+      "operation": "hip_dequant_mxfp4",
+      "dtype": "mxfp4",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 40.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "layernorm",
-        "dtype": "bf16",
-        "gate_db": 30.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 15.2,
-        "snr_by_shape": {
-          "minimal": 117.42,
-          "primary": 98.03
-        },
-        "worst_snr_db": 98.03,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1861,
-        "baseline_ms": 0.1115,
-        "seed_speedup": 0.599
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        11.968941791591627
+      ],
+      "candidate_cv_pct_by_run": [
+        0.44024754331596017
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_div_bf16",
+      "operation": "hip_div",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "layernorm",
-        "dtype": "fp16",
-        "gate_db": 30.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 119.19,
-          "primary": 107.54
-        },
-        "worst_snr_db": 107.54,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1852,
-        "baseline_ms": 0.1076,
-        "seed_speedup": 0.581
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.9166142177849116
+      ],
+      "candidate_cv_pct_by_run": [
+        3.0310013884183897
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: candidate CV 3.031% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_div_fp16",
+      "operation": "hip_div",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "layernorm",
-        "dtype": "fp32",
-        "gate_db": 30.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 143.37,
-          "primary": 143.72
-        },
-        "worst_snr_db": 143.37,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.238,
-        "baseline_ms": 0.1687,
-        "seed_speedup": 0.709
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8876493435175393
+      ],
+      "candidate_cv_pct_by_run": [
+        1.986449945347155
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_div_fp32",
+      "operation": "hip_div",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "rmsnorm",
-        "dtype": "bf16",
-        "gate_db": 30.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 15.1,
-        "snr_by_shape": {
-          "minimal": 999.0,
-          "primary": 99.06
-        },
-        "worst_snr_db": 99.06,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1432,
-        "baseline_ms": 0.1076,
-        "seed_speedup": 0.752
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9440750258913705
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6454917851626821
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_elu_bf16",
+      "operation": "hip_elu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "rmsnorm",
-        "dtype": "fp16",
-        "gate_db": 30.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 102.02,
-          "primary": 107.5
-        },
-        "worst_snr_db": 102.02,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1413,
-        "baseline_ms": 0.0996,
-        "seed_speedup": 0.705
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8585091349115747
+      ],
+      "candidate_cv_pct_by_run": [
+        1.086006668240022
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_elu_fp16",
+      "operation": "hip_elu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "rmsnorm",
-        "dtype": "fp32",
-        "gate_db": 30.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 145.02,
-          "primary": 145.76
-        },
-        "worst_snr_db": 145.02,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1872,
-        "baseline_ms": 0.164,
-        "seed_speedup": 0.876
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8783125466889825
+      ],
+      "candidate_cv_pct_by_run": [
+        0.8667873932808571
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_elu_fp32",
+      "operation": "hip_elu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "silu",
-        "dtype": "bf16",
-        "gate_db": 35.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 15.1,
-        "snr_by_shape": {
-          "minimal": 999.0,
-          "primary": 999.0
-        },
-        "worst_snr_db": 999.0,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1235,
-        "baseline_ms": 0.0778,
-        "seed_speedup": 0.63
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9514632094101908
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7064035993029744
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_exp_bf16",
+      "operation": "hip_exp",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "silu",
-        "dtype": "fp16",
-        "gate_db": 35.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 109.83,
-          "primary": 111.43
-        },
-        "worst_snr_db": 109.83,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1223,
-        "baseline_ms": 0.0783,
-        "seed_speedup": 0.64
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9024452894375969
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7387386841585619
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_exp_fp16",
+      "operation": "hip_exp",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "silu",
-        "dtype": "fp32",
-        "gate_db": 35.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 151.52,
-          "primary": 151.59
-        },
-        "worst_snr_db": 151.52,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.143,
-        "baseline_ms": 0.1271,
-        "seed_speedup": 0.889
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9138907483341882
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6362892469472186
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_exp_fp32",
+      "operation": "hip_exp",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "silu_mul",
-        "dtype": "bf16",
-        "gate_db": 35.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 15.0,
-        "snr_by_shape": {
-          "minimal": 999.0,
-          "primary": 999.0
-        },
-        "worst_snr_db": 999.0,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1325,
-        "baseline_ms": 0.152,
-        "seed_speedup": 1.147
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9562796878355718
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9479415564003203
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_fma_bf16",
+      "operation": "hip_fma",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "silu_mul",
-        "dtype": "fp16",
-        "gate_db": 35.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 99.63,
-          "primary": 104.49
-        },
-        "worst_snr_db": 99.63,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1299,
-        "baseline_ms": 0.1514,
-        "seed_speedup": 1.165
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.866063748255579
+      ],
+      "candidate_cv_pct_by_run": [
+        2.765597438142379
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_fma_fp16",
+      "operation": "hip_fma",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "silu_mul",
-        "dtype": "fp32",
-        "gate_db": 35.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 150.74,
-          "primary": 151.16
-        },
-        "worst_snr_db": 150.74,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.1926,
-        "baseline_ms": 0.2876,
-        "seed_speedup": 1.494
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.860016432141077
+      ],
+      "candidate_cv_pct_by_run": [
+        1.7081374796165327
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_fma_fp32",
+      "operation": "hip_fma",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 148.88,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 148.88,
+        "primary": 148.88,
+        "validation_0": 148.88,
+        "validation_1": 148.88,
+        "validation_2": 148.88
       },
-      {
-        "op": "softmax_rows",
-        "dtype": "bf16",
-        "gate_db": 30.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 15.2,
-        "snr_by_shape": {
-          "minimal": 85.55,
-          "primary": 97.13
-        },
-        "worst_snr_db": 85.55,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.213,
-        "baseline_ms": 0.0873,
-        "seed_speedup": 0.41
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8950959925720761
+      ],
+      "candidate_cv_pct_by_run": [
+        2.4510101418825725
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_fma_gelu_bf16",
+      "operation": "hip_fma_gelu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 136.48,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 137.06,
+        "primary": 136.48,
+        "validation_0": 137.06,
+        "validation_1": 137.06,
+        "validation_2": 137.06
       },
-      {
-        "op": "softmax_rows",
-        "dtype": "fp16",
-        "gate_db": 30.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 100.11,
-          "primary": 103.19
-        },
-        "worst_snr_db": 100.11,
-        "adversarial_worst_snr_db": 999.0,
-        "candidate_ms": 0.2094,
-        "baseline_ms": 0.0857,
-        "seed_speedup": 0.409
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9113666871245723
+      ],
+      "candidate_cv_pct_by_run": [
+        1.5621728785821543
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_fma_gelu_fp16",
+      "operation": "hip_fma_gelu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 105.18,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 105.27,
+        "primary": 105.18,
+        "validation_0": 105.27,
+        "validation_1": 105.27,
+        "validation_2": 105.27
       },
-      {
-        "op": "softmax_rows",
-        "dtype": "fp32",
-        "gate_db": 30.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 142.2,
-          "primary": 144.59
-        },
-        "worst_snr_db": 142.2,
-        "adversarial_worst_snr_db": 161.53,
-        "candidate_ms": 0.2422,
-        "baseline_ms": 0.1743,
-        "seed_speedup": 0.72
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8933896493901023
+      ],
+      "candidate_cv_pct_by_run": [
+        0.682867046109883
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_fma_gelu_fp32",
+      "operation": "hip_fma_gelu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 147.73,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 147.73,
+        "primary": 147.73,
+        "validation_0": 147.73,
+        "validation_1": 147.73,
+        "validation_2": 147.73
       },
-      {
-        "op": "quant_fp8_pertoken",
-        "dtype": "fp8_e4m3fn",
-        "gate_db": 20.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.3,
-        "snr_by_shape": {
-          "minimal": 56.76,
-          "primary": 57.24
-        },
-        "worst_snr_db": 56.76,
-        "candidate_ms": 0.1399,
-        "baseline_ms": 0.4946,
-        "seed_speedup": 3.535
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8955562652601721
+      ],
+      "candidate_cv_pct_by_run": [
+        0.3899648857836307
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_fma_relu_bf16",
+      "operation": "hip_fma_relu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
       },
-      {
-        "op": "dequant_mxfp4",
-        "dtype": "mxfp4",
-        "gate_db": 40.0,
-        "hack_reason": null,
-        "compiled": true,
-        "gate_cleared": true,
-        "compile_s": 0.0,
-        "snr_by_shape": {
-          "minimal": 999.0,
-          "primary": 999.0
-        },
-        "worst_snr_db": 999.0,
-        "candidate_ms": 0.1094,
-        "baseline_ms": 1.3264,
-        "seed_speedup": 12.124
-      }
-    ]
-  },
-  "known_limitations": {
-    "hip_gemm": "compiles and verifies at 85-130 dB but is NOT timing-admissible on this host: the hipBLASLt baseline's own CV measures 3.4-5.6% against the 3% publication gate. Defined in kore/tasks/hip_ops.py with timing_admissible=False; not generated.",
-    "mxfp6": "no task: torch.float6_e2m3fn/float6_e3m2fn are absent from this stack.",
-    "cluster_compute_node": "hipcc availability on spur GPU compute nodes is UNVERIFIED; the login node is CPU-only with no hipcc. scripts/spur_hip_verify_1node.sbatch checks it.",
-    "timing_gate_flicker": "with 5 paired repeats and a 3% CV limit, a marginal task flickers between eligible and ineligible run to run. Observed 19-20/20 per batch across five batches; every task has been observed eligible."
-  }
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8727739233198468
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9274426713558649
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_fma_relu_fp16",
+      "operation": "hip_fma_relu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8754055325738642
+      ],
+      "candidate_cv_pct_by_run": [
+        0.47661095967235767
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_fma_relu_fp32",
+      "operation": "hip_fma_relu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 148.88,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 148.88,
+        "primary": 148.88,
+        "validation_0": 148.88,
+        "validation_1": 148.88,
+        "validation_2": 148.88
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8792202498593445
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6964704482012983
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_gelu_erf_bf16",
+      "operation": "hip_gelu_erf",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.8401250159030336
+      ],
+      "candidate_cv_pct_by_run": [
+        3.118582430782429
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: candidate CV 3.119% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_gelu_erf_fp16",
+      "operation": "hip_gelu_erf",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.86816439611081
+      ],
+      "candidate_cv_pct_by_run": [
+        1.025922269681248
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_gelu_erf_fp32",
+      "operation": "hip_gelu_erf",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9548453917426885
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7288295223067457
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_gelu_mul_bf16",
+      "operation": "hip_gelu_mul",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.7759022661204906
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5793454971957556
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_gelu_mul_fp16",
+      "operation": "hip_gelu_mul",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 104.25,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 104.25,
+        "primary": 104.36,
+        "validation_0": 104.25,
+        "validation_1": 104.25,
+        "validation_2": 104.25
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.7817214304568069
+      ],
+      "candidate_cv_pct_by_run": [
+        0.40791898300181206
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_gelu_mul_fp32",
+      "operation": "hip_gelu_mul",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 161.96,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 161.97,
+        "primary": 161.96,
+        "validation_0": 161.97,
+        "validation_1": 161.97,
+        "validation_2": 161.97
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.916359922760823
+      ],
+      "candidate_cv_pct_by_run": [
+        1.2624031331798202
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_gelu_quick_bf16",
+      "operation": "hip_gelu_quick",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        2.1617927177326783
+      ],
+      "candidate_cv_pct_by_run": [
+        3.271146083482224
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): primary: candidate CV 3.271% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_gelu_quick_fp16",
+      "operation": "hip_gelu_quick",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 113.05,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 113.07,
+        "primary": 113.05,
+        "validation_0": 113.07,
+        "validation_1": 113.07,
+        "validation_2": 113.07
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        2.307622133423326
+      ],
+      "candidate_cv_pct_by_run": [
+        2.4529024116736626
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_gelu_quick_fp32",
+      "operation": "hip_gelu_quick",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 148.49,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 148.49,
+        "primary": 148.49,
+        "validation_0": 148.49,
+        "validation_1": 148.49,
+        "validation_2": 148.49
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        2.8483993615900203
+      ],
+      "candidate_cv_pct_by_run": [
+        0.836647194048107
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_gelu_tanh_bf16",
+      "operation": "hip_gelu_tanh",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5908817160940844
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7855136395148394
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_gelu_tanh_fp16",
+      "operation": "hip_gelu_tanh",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 111.89,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 111.9,
+        "primary": 111.89,
+        "validation_0": 111.9,
+        "validation_1": 111.9,
+        "validation_2": 111.9
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5833807208876309
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9724286926547119
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_gelu_tanh_fp32",
+      "operation": "hip_gelu_tanh",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 162.49,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 162.5,
+        "primary": 162.49,
+        "validation_0": 162.5,
+        "validation_1": 162.5,
+        "validation_2": 162.5
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8623131701746295
+      ],
+      "candidate_cv_pct_by_run": [
+        0.3227189565970074
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_hardsigmoid_bf16",
+      "operation": "hip_hardsigmoid",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9144700233301144
+      ],
+      "candidate_cv_pct_by_run": [
+        2.280967451069752
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_hardsigmoid_fp16",
+      "operation": "hip_hardsigmoid",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9080577409678299
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7609250251833497
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_hardsigmoid_fp32",
+      "operation": "hip_hardsigmoid",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 145.25,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 145.25,
+        "primary": 145.25,
+        "validation_0": 145.25,
+        "validation_1": 145.25,
+        "validation_2": 145.25
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9559348567711573
+      ],
+      "candidate_cv_pct_by_run": [
+        0.3516116649121142
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_hardswish_bf16",
+      "operation": "hip_hardswish",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.7582397304470094
+      ],
+      "candidate_cv_pct_by_run": [
+        18.194752830193867
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: baseline CV 19.165% exceeds 3.000%; primary: candidate CV 18.195% exceeds 3.000%; validation_0: baseline CV 6.038% exceeds 3.000%; validation_2: candidate CV 14.778% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_hardswish_fp16",
+      "operation": "hip_hardswish",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8961467963093578
+      ],
+      "candidate_cv_pct_by_run": [
+        0.4966853488107547
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_hardswish_fp32",
+      "operation": "hip_hardswish",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 145.91,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 145.91,
+        "primary": 145.91,
+        "validation_0": 145.91,
+        "validation_1": 145.91,
+        "validation_2": 145.91
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9420481363649322
+      ],
+      "candidate_cv_pct_by_run": [
+        1.954051707737748
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_hardtanh_bf16",
+      "operation": "hip_hardtanh",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9268010943228366
+      ],
+      "candidate_cv_pct_by_run": [
+        2.3438360660833846
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_hardtanh_fp16",
+      "operation": "hip_hardtanh",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9101326124331036
+      ],
+      "candidate_cv_pct_by_run": [
+        0.4621511438313658
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_hardtanh_fp32",
+      "operation": "hip_hardtanh",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9692574825837077
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6822884163867593
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_l2_normalize_bf16",
+      "operation": "hip_l2_normalize",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 91.09,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 98.06,
+        "primary": 99.71,
+        "validation_0": 91.09,
+        "validation_1": 98.07,
+        "validation_2": 97.83
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.6019333091760629
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6772228380294756
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_l2_normalize_fp16",
+      "operation": "hip_l2_normalize",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 106.85,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 107.35,
+        "primary": 107.69,
+        "validation_0": 106.85,
+        "validation_1": 109.31,
+        "validation_2": 107.86
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.6144175817672415
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5086713902284926
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_l2_normalize_fp32",
+      "operation": "hip_l2_normalize",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 138.47,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 138.47,
+        "primary": 147.96,
+        "validation_0": 141.48,
+        "validation_1": 148.18,
+        "validation_2": 148.01
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.7273198050855182
+      ],
+      "candidate_cv_pct_by_run": [
+        0.3812055328778034
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_layernorm_bf16",
+      "operation": "hip_layernorm",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 96.74,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 97.67,
+        "primary": 98.03,
+        "validation_0": 96.74,
+        "validation_1": 98.07,
+        "validation_2": 97.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5743152929067735
+      ],
+      "candidate_cv_pct_by_run": [
+        1.6393723183126432
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_layernorm_fp16",
+      "operation": "hip_layernorm",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 105.83,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 107.13,
+        "primary": 107.32,
+        "validation_0": 106.73,
+        "validation_1": 107.64,
+        "validation_2": 105.83
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5579821951601868
+      ],
+      "candidate_cv_pct_by_run": [
+        1.2679274170398576
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_layernorm_fp32",
+      "operation": "hip_layernorm",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 142.99,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 143.54,
+        "primary": 143.72,
+        "validation_0": 143.25,
+        "validation_1": 143.94,
+        "validation_2": 142.99
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.587823150886081
+      ],
+      "candidate_cv_pct_by_run": [
+        0.2523705023243166
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_leaky_relu_bf16",
+      "operation": "hip_leaky_relu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8919463772439924
+      ],
+      "candidate_cv_pct_by_run": [
+        0.8791795843709681
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_leaky_relu_fp16",
+      "operation": "hip_leaky_relu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9063339811984875
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9298663043175123
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_leaky_relu_fp32",
+      "operation": "hip_leaky_relu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9453471311969188
+      ],
+      "candidate_cv_pct_by_run": [
+        2.1178510753610387
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_log_bf16",
+      "operation": "hip_log",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.889489351491865
+      ],
+      "candidate_cv_pct_by_run": [
+        0.44467144773102724
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_log_fp16",
+      "operation": "hip_log",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 106.3,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 106.44,
+        "primary": 106.3,
+        "validation_0": 106.44,
+        "validation_1": 106.44,
+        "validation_2": 106.44
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9098781953804428
+      ],
+      "candidate_cv_pct_by_run": [
+        0.648985546844343
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_log_fp32",
+      "operation": "hip_log",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 146.22,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 146.22,
+        "primary": 146.22,
+        "validation_0": 146.22,
+        "validation_1": 146.22,
+        "validation_2": 146.22
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9611945900585549
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7754324599628096
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_log_softmax_rows_bf16",
+      "operation": "hip_log_softmax_rows",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 95.13,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 98.42,
+        "primary": 96.38,
+        "validation_0": 100.83,
+        "validation_1": 96.37,
+        "validation_2": 95.13
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5135240948160232
+      ],
+      "candidate_cv_pct_by_run": [
+        0.41299037280804257
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_log_softmax_rows_fp16",
+      "operation": "hip_log_softmax_rows",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 105.45,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 106.3,
+        "primary": 105.5,
+        "validation_0": 106.73,
+        "validation_1": 105.45,
+        "validation_2": 106.43
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5133948589075759
+      ],
+      "candidate_cv_pct_by_run": [
+        0.45553503096820586
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_log_softmax_rows_fp32",
+      "operation": "hip_log_softmax_rows",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 113.71,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 113.71,
+        "primary": 117.23,
+        "validation_0": 120.75,
+        "validation_1": 114.25,
+        "validation_2": 117.23
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5833419080894333
+      ],
+      "candidate_cv_pct_by_run": [
+        0.31636531663172207
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_maximum_bf16",
+      "operation": "hip_maximum",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9072371495961553
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9033888098939299
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_maximum_fp16",
+      "operation": "hip_maximum",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9041247787634278
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9668170722286991
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_maximum_fp32",
+      "operation": "hip_maximum",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9326749773333268
+      ],
+      "candidate_cv_pct_by_run": [
+        0.4533907837040559
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_minimum_bf16",
+      "operation": "hip_minimum",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.896814850704542
+      ],
+      "candidate_cv_pct_by_run": [
+        1.0621783858570197
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_minimum_fp16",
+      "operation": "hip_minimum",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8842006258520191
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6927770411324482
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_minimum_fp32",
+      "operation": "hip_minimum",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9434505983806407
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5868826248177256
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_mish_bf16",
+      "operation": "hip_mish",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.9685963150820392
+      ],
+      "candidate_cv_pct_by_run": [
+        7.463736012656131
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: candidate CV 4.928% exceeds 3.000%; primary: paired ratio CV 3.049% exceeds 3.000%; validation_0: candidate CV 7.464% exceeds 3.000%; validation_1: candidate CV 5.363% exceeds 3.000%; validation_2: candidate CV 6.490% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_mish_fp16",
+      "operation": "hip_mish",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 95.98,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 95.99,
+        "primary": 95.98,
+        "validation_0": 95.99,
+        "validation_1": 95.99,
+        "validation_2": 95.99
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.9948655639379281
+      ],
+      "candidate_cv_pct_by_run": [
+        6.706881197561298
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: candidate CV 5.393% exceeds 3.000%; validation_0: candidate CV 5.191% exceeds 3.000%; validation_1: candidate CV 6.707% exceeds 3.000%; validation_2: baseline CV 3.718% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_mish_fp32",
+      "operation": "hip_mish",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.9089816898548438
+      ],
+      "candidate_cv_pct_by_run": [
+        4.3379287011094805
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: baseline CV 4.156% exceeds 3.000%; primary: candidate CV 3.483% exceeds 3.000%; validation_0: candidate CV 3.218% exceeds 3.000%; validation_1: candidate CV 4.338% exceeds 3.000%; validation_2: baseline CV 4.355% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_mul_bf16",
+      "operation": "hip_mul",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8948100278322658
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9100731613644402
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_mul_fp16",
+      "operation": "hip_mul",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8915138494039564
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9078758834493896
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_mul_fp32",
+      "operation": "hip_mul",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9448862208677173
+      ],
+      "candidate_cv_pct_by_run": [
+        0.572145319627268
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_mul_relu_bf16",
+      "operation": "hip_mul_relu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8884197291395739
+      ],
+      "candidate_cv_pct_by_run": [
+        2.5223805722949373
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_mul_relu_fp16",
+      "operation": "hip_mul_relu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8803862324099413
+      ],
+      "candidate_cv_pct_by_run": [
+        1.115599989749974
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_mul_relu_fp32",
+      "operation": "hip_mul_relu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9058209483755968
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6297933330490859
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_mul_tanh_bf16",
+      "operation": "hip_mul_tanh",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.7976254960349244
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9394102543237184
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_mul_tanh_fp16",
+      "operation": "hip_mul_tanh",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.7865204498511266
+      ],
+      "candidate_cv_pct_by_run": [
+        2.0229039557976054
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_mul_tanh_fp32",
+      "operation": "hip_mul_tanh",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9169389997516647
+      ],
+      "candidate_cv_pct_by_run": [
+        1.2988664945980177
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_neg_bf16",
+      "operation": "hip_neg",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9152971977119855
+      ],
+      "candidate_cv_pct_by_run": [
+        2.51837860970305
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_neg_fp16",
+      "operation": "hip_neg",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9143350918376507
+      ],
+      "candidate_cv_pct_by_run": [
+        0.43353025474003537
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_neg_fp32",
+      "operation": "hip_neg",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9593775025957352
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9284648666225428
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_quant_fp8_pertoken_fp8_e4m3fn",
+      "operation": "hip_quant_fp8_pertoken",
+      "dtype": "fp8_e4m3fn",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 56.73,
+      "gate_db": 20.0,
+      "snr_by_shape": {
+        "minimal": 56.73,
+        "primary": 57.19,
+        "validation_0": 58.07,
+        "validation_1": 57.56,
+        "validation_2": 56.83
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        3.3165243182574224
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5046214798140863
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_reciprocal_bf16",
+      "operation": "hip_reciprocal",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8943986401195105
+      ],
+      "candidate_cv_pct_by_run": [
+        1.5352866638559455
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_reciprocal_fp16",
+      "operation": "hip_reciprocal",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9102137311711944
+      ],
+      "candidate_cv_pct_by_run": [
+        2.314771993312849
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_reciprocal_fp32",
+      "operation": "hip_reciprocal",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9330615618907011
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7252527952666439
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_reglu_bf16",
+      "operation": "hip_reglu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.872232094916083
+      ],
+      "candidate_cv_pct_by_run": [
+        1.0058403310919566
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_reglu_fp16",
+      "operation": "hip_reglu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8817341599821258
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7417354182672599
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_reglu_fp32",
+      "operation": "hip_reglu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9192898210373867
+      ],
+      "candidate_cv_pct_by_run": [
+        0.4511072938197442
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_relu6_bf16",
+      "operation": "hip_relu6",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8923285344610316
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6923092950531338
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_relu6_fp16",
+      "operation": "hip_relu6",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9149802333543741
+      ],
+      "candidate_cv_pct_by_run": [
+        0.8283174742092536
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_relu6_fp32",
+      "operation": "hip_relu6",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.954411026846602
+      ],
+      "candidate_cv_pct_by_run": [
+        0.8618433938377716
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_relu_bf16",
+      "operation": "hip_relu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9196061368599221
+      ],
+      "candidate_cv_pct_by_run": [
+        0.4421078371092379
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_relu_fp16",
+      "operation": "hip_relu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9205013123033619
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5501092907649208
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_relu_fp32",
+      "operation": "hip_relu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9455373767846467
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7718133416947055
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_rmsnorm_bf16",
+      "operation": "hip_rmsnorm",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 95.08,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 97.6,
+        "primary": 99.06,
+        "validation_0": 95.08,
+        "validation_1": 97.9,
+        "validation_2": 97.67
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.6973086921631398
+      ],
+      "candidate_cv_pct_by_run": [
+        0.18928178227320766
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_rmsnorm_fp16",
+      "operation": "hip_rmsnorm",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 106.85,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 107.73,
+        "primary": 107.42,
+        "validation_0": 107.27,
+        "validation_1": 108.16,
+        "validation_2": 106.85
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.6164992167366687
+      ],
+      "candidate_cv_pct_by_run": [
+        2.344622073704429
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_rmsnorm_fp32",
+      "operation": "hip_rmsnorm",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 144.72,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 145.53,
+        "primary": 145.68,
+        "validation_0": 145.32,
+        "validation_1": 146.24,
+        "validation_2": 144.72
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8072392244081571
+      ],
+      "candidate_cv_pct_by_run": [
+        0.708908684222578
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_amax_abs_bf16",
+      "operation": "hip_row_amax_abs",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        1.4367645904166768
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5929292320626781
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_amax_abs_fp16",
+      "operation": "hip_row_amax_abs",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        1.4533183548907613
+      ],
+      "candidate_cv_pct_by_run": [
+        0.3409927135486546
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_amax_abs_fp32",
+      "operation": "hip_row_amax_abs",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        1.2038039272503798
+      ],
+      "candidate_cv_pct_by_run": [
+        0.663384736319842
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_l1_bf16",
+      "operation": "hip_row_l1",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 91.36,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 91.36,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5862248212828148
+      ],
+      "candidate_cv_pct_by_run": [
+        0.4430903321780499
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_l1_fp16",
+      "operation": "hip_row_l1",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 97.38,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 97.38,
+        "primary": 103.4,
+        "validation_0": 999.0,
+        "validation_1": 109.42,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5937893523523273
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7766013957236833
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_l1_fp32",
+      "operation": "hip_row_l1",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 146.68,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 146.85,
+        "primary": 146.96,
+        "validation_0": 146.68,
+        "validation_1": 147.08,
+        "validation_2": 147.02
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8981064187914922
+      ],
+      "candidate_cv_pct_by_run": [
+        1.5652106539434751
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_l2_bf16",
+      "operation": "hip_row_l2",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 84.29,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 90.31,
+        "validation_2": 84.29
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5873625496480832
+      ],
+      "candidate_cv_pct_by_run": [
+        0.4209344351825261
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_l2_fp16",
+      "operation": "hip_row_l2",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 102.35,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 102.35,
+        "primary": 102.35,
+        "validation_0": 999.0,
+        "validation_1": 105.36,
+        "validation_2": 102.35
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5970053380463377
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7965796765173749
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_l2_fp32",
+      "operation": "hip_row_l2",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 148.36,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 148.36,
+        "primary": 148.52,
+        "validation_0": 148.59,
+        "validation_1": 148.74,
+        "validation_2": 148.57
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9007538093882751
+      ],
+      "candidate_cv_pct_by_run": [
+        0.26339124084846566
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_logsumexp_bf16",
+      "operation": "hip_row_logsumexp",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 82.77,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 82.77,
+        "validation_0": 999.0,
+        "validation_1": 87.43,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        1.200056229304087
+      ],
+      "candidate_cv_pct_by_run": [
+        0.8780597282958026
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_logsumexp_fp16",
+      "operation": "hip_row_logsumexp",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 96.0,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 98.44,
+        "primary": 999.0,
+        "validation_0": 96.0,
+        "validation_1": 102.48,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        1.1562303302847763
+      ],
+      "candidate_cv_pct_by_run": [
+        1.1850624618148207
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_logsumexp_fp32",
+      "operation": "hip_row_logsumexp",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 145.95,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 146.74,
+        "primary": 145.98,
+        "validation_0": 148.01,
+        "validation_1": 146.17,
+        "validation_2": 145.95
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        2.0093292832202683
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5658639384949969
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_max_bf16",
+      "operation": "hip_row_max",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8113939071312967
+      ],
+      "candidate_cv_pct_by_run": [
+        0.25500177183940337
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_max_fp16",
+      "operation": "hip_row_max",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8198651138386033
+      ],
+      "candidate_cv_pct_by_run": [
+        0.46555456793446837
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_max_fp32",
+      "operation": "hip_row_max",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        1.0
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7212573524814583
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_mean_bf16",
+      "operation": "hip_row_mean",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 84.36,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 84.36,
+        "primary": 132.42,
+        "validation_0": 90.45,
+        "validation_1": 144.45,
+        "validation_2": 96.23
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.568165564006628
+      ],
+      "candidate_cv_pct_by_run": [
+        0.3853070443034062
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_mean_fp16",
+      "operation": "hip_row_mean",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 102.2,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 102.32,
+        "primary": 102.29,
+        "validation_0": 108.53,
+        "validation_1": 106.39,
+        "validation_2": 102.2
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5737938243217311
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6124433139111108
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_mean_fp32",
+      "operation": "hip_row_mean",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 131.81,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 133.97,
+        "primary": 135.57,
+        "validation_0": 131.81,
+        "validation_1": 139.14,
+        "validation_2": 135.35
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8899729963838451
+      ],
+      "candidate_cv_pct_by_run": [
+        1.549931556900833
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_min_bf16",
+      "operation": "hip_row_min",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8107470883987195
+      ],
+      "candidate_cv_pct_by_run": [
+        0.2994930049360929
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_min_fp16",
+      "operation": "hip_row_min",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8168529321362528
+      ],
+      "candidate_cv_pct_by_run": [
+        0.2763438818995033
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_min_fp32",
+      "operation": "hip_row_min",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        1.0
+      ],
+      "candidate_cv_pct_by_run": [
+        0.46204217853336255
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_rms_bf16",
+      "operation": "hip_row_rms",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 87.3,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 87.3,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5693537676905238
+      ],
+      "candidate_cv_pct_by_run": [
+        0.47302842544908175
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_rms_fp16",
+      "operation": "hip_row_rms",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 102.35,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 102.35,
+        "primary": 105.36,
+        "validation_0": 999.0,
+        "validation_1": 108.37,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5775436050359142
+      ],
+      "candidate_cv_pct_by_run": [
+        2.213277132593334
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_rms_fp32",
+      "operation": "hip_row_rms",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 147.0,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 148.16,
+        "primary": 148.21,
+        "validation_0": 148.32,
+        "validation_1": 148.42,
+        "validation_2": 147.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8224185321074964
+      ],
+      "candidate_cv_pct_by_run": [
+        1.5860193362308599
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_sum_bf16",
+      "operation": "hip_row_sum",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 84.36,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 84.36,
+        "primary": 132.42,
+        "validation_0": 90.45,
+        "validation_1": 144.45,
+        "validation_2": 168.5
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5727302958064965
+      ],
+      "candidate_cv_pct_by_run": [
+        0.42722697876235405
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_sum_fp16",
+      "operation": "hip_row_sum",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 101.3,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 102.32,
+        "primary": 102.29,
+        "validation_0": 108.53,
+        "validation_1": 106.39,
+        "validation_2": 101.3
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5777612603132098
+      ],
+      "candidate_cv_pct_by_run": [
+        0.4796460901521553
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_row_sum_fp32",
+      "operation": "hip_row_sum",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 131.81,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 133.97,
+        "primary": 135.57,
+        "validation_0": 131.81,
+        "validation_1": 139.14,
+        "validation_2": 135.57
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.896207250885921
+      ],
+      "candidate_cv_pct_by_run": [
+        1.3006723794465824
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_rsqrt_bf16",
+      "operation": "hip_rsqrt",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.6365908828622406
+      ],
+      "candidate_cv_pct_by_run": [
+        0.4194950666803512
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_rsqrt_fp16",
+      "operation": "hip_rsqrt",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.6636274519989284
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7343825448658172
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_rsqrt_fp32",
+      "operation": "hip_rsqrt",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 150.65,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 150.65,
+        "primary": 150.65,
+        "validation_0": 150.65,
+        "validation_1": 150.65,
+        "validation_2": 150.65
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9061863705176635
+      ],
+      "candidate_cv_pct_by_run": [
+        2.285881291562883
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_selu_bf16",
+      "operation": "hip_selu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8755499871414935
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7814501940971681
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_selu_fp16",
+      "operation": "hip_selu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8873474146186449
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5517841549431148
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_selu_fp32",
+      "operation": "hip_selu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 149.98,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 149.98,
+        "primary": 149.98,
+        "validation_0": 149.98,
+        "validation_1": 149.98,
+        "validation_2": 149.98
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9341421149616089
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6245057660412208
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sigmoid_bf16",
+      "operation": "hip_sigmoid",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.844858278977197
+      ],
+      "candidate_cv_pct_by_run": [
+        1.0136358161668662
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sigmoid_fp16",
+      "operation": "hip_sigmoid",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.8662824087716662
+      ],
+      "candidate_cv_pct_by_run": [
+        3.503977892992723
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: candidate CV 3.504% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_sigmoid_fp32",
+      "operation": "hip_sigmoid",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.929701847835544
+      ],
+      "candidate_cv_pct_by_run": [
+        1.0023411400797029
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sigmoid_mul_bf16",
+      "operation": "hip_sigmoid_mul",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8763633656830502
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5552320224045718
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sigmoid_mul_fp16",
+      "operation": "hip_sigmoid_mul",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8830927461328483
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5608449385833352
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sigmoid_mul_fp32",
+      "operation": "hip_sigmoid_mul",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9126053607596134
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6881470578023735
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sign_bf16",
+      "operation": "hip_sign",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8982549446804055
+      ],
+      "candidate_cv_pct_by_run": [
+        1.2984974765002573
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sign_fp16",
+      "operation": "hip_sign",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9063055646014735
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7182929576434174
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sign_fp32",
+      "operation": "hip_sign",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9511458730466025
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9263952823046453
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_silu_bf16",
+      "operation": "hip_silu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.6321407187025717
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6747861059087604
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_silu_fp16",
+      "operation": "hip_silu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 111.42,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 111.42,
+        "primary": 111.43,
+        "validation_0": 111.42,
+        "validation_1": 111.42,
+        "validation_2": 111.42
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.6431641598587099
+      ],
+      "candidate_cv_pct_by_run": [
+        0.551521357636807
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_silu_fp32",
+      "operation": "hip_silu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 151.59,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 151.59,
+        "primary": 151.59,
+        "validation_0": 151.59,
+        "validation_1": 151.59,
+        "validation_2": 151.59
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8784121303619393
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7949218658985044
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_silu_mul_bf16",
+      "operation": "hip_silu_mul",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.7973675623166201
+      ],
+      "candidate_cv_pct_by_run": [
+        0.7985264392135412
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_silu_mul_fp16",
+      "operation": "hip_silu_mul",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 104.32,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 104.41,
+        "primary": 104.32,
+        "validation_0": 104.41,
+        "validation_1": 104.41,
+        "validation_2": 104.41
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.824162023262174
+      ],
+      "candidate_cv_pct_by_run": [
+        1.3547307784767018
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_silu_mul_fp32",
+      "operation": "hip_silu_mul",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 151.16,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 151.16,
+        "primary": 151.16,
+        "validation_0": 151.16,
+        "validation_1": 151.16,
+        "validation_2": 151.16
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9283758822811069
+      ],
+      "candidate_cv_pct_by_run": [
+        1.3427080813165937
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_softmax_rows_bf16",
+      "operation": "hip_softmax_rows",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 93.7,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 97.01,
+        "primary": 96.64,
+        "validation_0": 94.38,
+        "validation_1": 93.7,
+        "validation_2": 96.65
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.42162341782383356
+      ],
+      "candidate_cv_pct_by_run": [
+        0.88366623360011
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_softmax_rows_fp16",
+      "operation": "hip_softmax_rows",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 101.62,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 102.77,
+        "primary": 103.19,
+        "validation_0": 101.62,
+        "validation_1": 102.65,
+        "validation_2": 103.31
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.41309509601716554
+      ],
+      "candidate_cv_pct_by_run": [
+        0.46936140687450045
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_softmax_rows_fp32",
+      "operation": "hip_softmax_rows",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 141.01,
+      "gate_db": 30.0,
+      "snr_by_shape": {
+        "minimal": 144.31,
+        "primary": 144.56,
+        "validation_0": 144.22,
+        "validation_1": 141.01,
+        "validation_2": 144.6
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5432587436426844
+      ],
+      "candidate_cv_pct_by_run": [
+        1.0652063161651346
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_softplus_bf16",
+      "operation": "hip_softplus",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        1.0320341683989414
+      ],
+      "candidate_cv_pct_by_run": [
+        5.1977027527080795
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: baseline CV 5.003% exceeds 3.000%; primary: baseline CV 3.029% exceeds 3.000%; validation_0: candidate CV 5.198% exceeds 3.000%; validation_1: candidate CV 3.397% exceeds 3.000%; validation_2: candidate CV 4.780% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_softplus_fp16",
+      "operation": "hip_softplus",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.9511152209967635
+      ],
+      "candidate_cv_pct_by_run": [
+        6.236890622332916
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: baseline CV 5.963% exceeds 3.000%; primary: baseline CV 4.471% exceeds 3.000%; validation_0: candidate CV 6.237% exceeds 3.000%; validation_1: candidate CV 5.054% exceeds 3.000%; validation_2: candidate CV 3.994% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_softplus_fp32",
+      "operation": "hip_softplus",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.9949411900706613
+      ],
+      "candidate_cv_pct_by_run": [
+        4.9821459779622375
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: baseline CV 5.299% exceeds 3.000%; validation_0: candidate CV 4.691% exceeds 3.000%; validation_1: candidate CV 4.982% exceeds 3.000%; validation_2: candidate CV 4.261% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_softsign_bf16",
+      "operation": "hip_softsign",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        2.339185562395304
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9432849658759758
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_softsign_fp16",
+      "operation": "hip_softsign",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        2.3743124382531766
+      ],
+      "candidate_cv_pct_by_run": [
+        1.0862211728070796
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_softsign_fp32",
+      "operation": "hip_softsign",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        2.867316634270273
+      ],
+      "candidate_cv_pct_by_run": [
+        0.9880959963536169
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sqrt_bf16",
+      "operation": "hip_sqrt",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8876039471309476
+      ],
+      "candidate_cv_pct_by_run": [
+        1.4935810475975022
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sqrt_fp16",
+      "operation": "hip_sqrt",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.7109533318211233
+      ],
+      "candidate_cv_pct_by_run": [
+        13.15245416090385
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: candidate CV 4.640% exceeds 3.000%; primary: candidate CV 3.608% exceeds 3.000%; validation_0: candidate CV 13.152% exceeds 3.000%; validation_1: candidate CV 8.864% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_sqrt_fp32",
+      "operation": "hip_sqrt",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9449318041064799
+      ],
+      "candidate_cv_pct_by_run": [
+        0.6494518311666613
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_square_bf16",
+      "operation": "hip_square",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9080017470752619
+      ],
+      "candidate_cv_pct_by_run": [
+        0.39118072759331485
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_square_fp16",
+      "operation": "hip_square",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9221904465459044
+      ],
+      "candidate_cv_pct_by_run": [
+        0.4326250580290618
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_square_fp32",
+      "operation": "hip_square",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9499794564579489
+      ],
+      "candidate_cv_pct_by_run": [
+        0.8395456458456179
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sub_bf16",
+      "operation": "hip_sub",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.8964356464376149
+      ],
+      "candidate_cv_pct_by_run": [
+        2.2455336068750573
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): primary: paired ratio CV 3.367% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_sub_fp16",
+      "operation": "hip_sub",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8910874825299101
+      ],
+      "candidate_cv_pct_by_run": [
+        0.45936320191388225
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sub_fp32",
+      "operation": "hip_sub",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9364585076353239
+      ],
+      "candidate_cv_pct_by_run": [
+        1.0738382306937047
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sub_relu_bf16",
+      "operation": "hip_sub_relu",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9065095665147159
+      ],
+      "candidate_cv_pct_by_run": [
+        0.44301521266376087
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sub_relu_fp16",
+      "operation": "hip_sub_relu",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8964835099130338
+      ],
+      "candidate_cv_pct_by_run": [
+        0.5596014319362288
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_sub_relu_fp32",
+      "operation": "hip_sub_relu",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.9134245129685756
+      ],
+      "candidate_cv_pct_by_run": [
+        0.3861198393035017
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_tanh_act_bf16",
+      "operation": "hip_tanh_act",
+      "dtype": "bf16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.5933379388070567
+      ],
+      "candidate_cv_pct_by_run": [
+        0.265738748829973
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    },
+    {
+      "task_id": "hip_tanh_act_fp16",
+      "operation": "hip_tanh_act",
+      "dtype": "fp16",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 0,
+      "speedup_by_run": [
+        0.5380355303913762
+      ],
+      "candidate_cv_pct_by_run": [
+        50.40192925425142
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 0,
+      "last_error": "timing not admitted (measurement noise): minimal: candidate CV 50.402% exceeds 3.000%"
+    },
+    {
+      "task_id": "hip_tanh_act_fp32",
+      "operation": "hip_tanh_act",
+      "dtype": "fp32",
+      "runs": 1,
+      "compiled": true,
+      "correct": true,
+      "flagged_hack": false,
+      "infra_error": false,
+      "worst_snr_db": 999.0,
+      "gate_db": 35.0,
+      "snr_by_shape": {
+        "minimal": 999.0,
+        "primary": 999.0,
+        "validation_0": 999.0,
+        "validation_1": 999.0,
+        "validation_2": 999.0
+      },
+      "timing_admitted_runs": 1,
+      "speedup_by_run": [
+        0.8740259895523874
+      ],
+      "candidate_cv_pct_by_run": [
+        0.3593122624515918
+      ],
+      "timing_protocol": "kore-paired-v2",
+      "runnable_runs": 1,
+      "last_error": ""
+    }
+  ]
 }

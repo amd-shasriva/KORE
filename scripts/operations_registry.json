@@ -224,6 +224,12 @@
       "entrypoint": false
     },
     {
+      "path": "scripts/make_ktrace_receipt.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "produce the profiling_reward_evidence_path receipt by running KoreEnv.collect_kernel_trace on real tasks"
+    },
+    {
       "path": "scripts/merge_datagen_roots.py",
       "classification": "destructive",
       "lifecycle": "active",
@@ -368,6 +374,12 @@
       "classification": "deprecated",
       "lifecycle": "deprecated",
       "replacement": "SPUR datagen plus scheduler training jobs"
+    },
+    {
+      "path": "scripts/seed_provenance_partition.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "partition seed provenance for datagen shard assignment"
     },
     {
       "path": "scripts/sft_finish_dynamic.sh",
@@ -631,6 +643,18 @@
       "classification": "deprecated",
       "lifecycle": "deprecated",
       "replacement": "scripts/spur_supervise_datagen.py"
+    },
+    {
+      "path": "scripts/validate_evolve_gpu.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "first-hardware validation of kore.search.evolve_agent against a real KoreEnv"
+    },
+    {
+      "path": "scripts/validate_rocprofv3_coverage.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "hardware validation of the rocprofv3 kernel-trace path: dominant/minor/decoy workloads on gfx950"
     },
     {
       "path": "scripts/verify_breadth.py",

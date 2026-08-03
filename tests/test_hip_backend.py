@@ -405,6 +405,64 @@ def test_no_mxfp6_task_is_claimed():
 
 
 # --------------------------------------------------------------------------- #
+# No HIP task may be claimed without committed gfx950 evidence
+# --------------------------------------------------------------------------- #
+def _verification_artifact() -> dict:
+    import json
+
+    path = Path(__file__).resolve().parents[1] / "data/hip_task_verification.json"
+    return json.loads(path.read_text())
+
+
+def test_every_hip_task_has_committed_gfx950_evidence():
+    """An unproven task is worse than a missing one.
+
+    It costs GPU time at datagen and reports as a model error, so "we added N
+    tasks" has to mean "N tasks were compiled, verified through the real oracle
+    and timed on real gfx950". This ties the registry to
+    ``data/hip_task_verification.json``, which
+    ``scripts/write_hip_verification_evidence.py`` builds from actual runs --
+    so adding a task without measuring it fails here rather than at datagen.
+    """
+    artifact = _verification_artifact()
+    rows = {row["task_id"]: row for row in artifact["rows"]}
+    live = {task.task_id for task in all_tasks() if task.backend == "hip"}
+
+    missing = sorted(live - set(rows))
+    assert not missing, (
+        f"{len(missing)} HIP task(s) have no gfx950 evidence: {missing[:8]}. "
+        "Run scripts/verify_hip_tasks_e2e.py and regenerate the artifact.")
+
+    unmeasured = sorted(t for t in live if not rows[t].get("runs"))
+    assert not unmeasured, f"HIP tasks present but never measured: {unmeasured[:8]}"
+
+    broken = sorted(
+        t for t in live
+        if not (rows[t].get("compiled") and rows[t].get("correct")
+                and not rows[t].get("infra_error")
+                and not rows[t].get("flagged_hack")))
+    assert not broken, (
+        f"HIP tasks in the registry that did not compile/verify on gfx950: {broken}")
+
+    assert artifact["summary"]["registry_hip_tasks"] == len(live), (
+        "the evidence artifact was built against a different registry; "
+        "regenerate it")
+
+
+def test_every_hip_task_cleared_its_own_snr_gate_on_hardware():
+    """Correctness is the gate that must never be soft, so it is checked per task."""
+    artifact = _verification_artifact()
+    live = {task.task_id for task in all_tasks() if task.backend == "hip"}
+    short = [
+        (row["task_id"], row["worst_snr_db"], row["gate_db"])
+        for row in artifact["rows"]
+        if row["task_id"] in live and row.get("runs")
+        and float(row["worst_snr_db"]) < float(row["gate_db"])
+    ]
+    assert not short, f"HIP tasks recorded below their own SNR gate: {short}"
+
+
+# --------------------------------------------------------------------------- #
 # Decontamination must see HIP sources
 # --------------------------------------------------------------------------- #
 def test_heldout_index_covers_hip_sources():

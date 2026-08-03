@@ -431,17 +431,30 @@ def test_source_generators_emit_serializable_explicit_policies():
 
 def test_whole_registry_has_explicit_status_and_hidden_family_coverage():
     report = audit_registry_shapes()
-    assert report.task_count == 1354
+    assert report.task_count == 1546
     assert report.ok, report.failures[:10]
     assert report.explicit_status_tasks == report.task_count
-    assert report.claim_eligible_tasks == report.task_count
-    assert report.unsupported_tasks == 0
-    assert not report.unsupported_families
+    # Not every task can back a speedup claim any more, and that is by design:
+    # a spec-synthesis task asks for a kernel from a written specification, so it
+    # has no seed to be faster THAN. The invariant worth guarding is not a count
+    # but the membership -- anything inadmissible for claims must be one of those.
+    ineligible = [t for t in report.tasks if not t.claim_eligible]
+    assert all(t.task_id.startswith("spec_") for t in ineligible), [
+        t.task_id for t in ineligible if not t.task_id.startswith("spec_")][:10]
+    assert report.claim_eligible_tasks == report.task_count - len(ineligible)
+    assert report.unsupported_tasks == len(ineligible)
+    # Same reason: the unsupported families are exactly the families those
+    # spec-synthesis tasks belong to, and they must not add up to more tasks
+    # than the spec tasks themselves -- that would mean a real optimisation task
+    # had quietly lost its shape support.
+    assert sum(report.unsupported_families.values()) == len(ineligible), (
+        report.unsupported_families)
     assert report.generated_candidates > 0
     assert report.odd_candidates > 0
     assert report.hidden_shapes > 0
     assert report.eligible_family_hidden_coverage
-    assert sum(report.eligible_family_hidden_coverage.values()) == report.task_count
+    assert (sum(report.eligible_family_hidden_coverage.values())
+            == report.claim_eligible_tasks)
     assert all(task.originals_preserved for task in report.tasks)
     assert all(task.hidden_train_overlap == 0 for task in report.tasks)
     assert all(

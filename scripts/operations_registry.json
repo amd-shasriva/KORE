@@ -91,6 +91,13 @@
       "note": "filters and decontaminates agentic shards into an SFT slice; never mutates the shards it reads"
     },
     {
+      "path": "scripts/build_hipkittens_sft.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "builds the HipKittens knowledge SFT slice from a read-only MIT-licensed checkout; decontaminates against the held-out eval and dedups against the existing mixture before writing, and writes only --out/--report"
+    },
+    {
       "path": "scripts/build_residual.py",
       "classification": "active",
       "lifecycle": "active",

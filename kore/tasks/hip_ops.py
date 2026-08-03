@@ -29,14 +29,35 @@ Provenance and benchmark hygiene
 These kernels are written here, from the operator definitions.  No source is
 copied from AgentKernelArena, and the seeds deliberately do not reuse its
 reference implementations, because AKA is the benchmark this project scores
-against to compare with Opus -- see :mod:`kore.tasks.hip_provenance` for the
-operator-level overlap disclosure that keeps that comparison honest.
+against to compare with Opus.  The operator-level overlap that remains is
+measured by ``scripts/audit_hip_tasks.py`` and disclosed on the evaluation
+summary itself, in :data:`kore.eval.agent_kernel_arena.OPERATOR_OVERLAP`.
 
 Seeds are correct but deliberately unoptimised: a grid-stride elementwise loop,
 a one-block-per-row reduction, a naive shared-memory GEMM tile.  That is the
 point -- the seed has to compile and pass its own gate so the task is runnable,
 while leaving the tiling, vectorisation and intrinsic selection that HipKittens
 shows to be worth 1.3-3.0x as the thing the model has to discover.
+
+Which baseline a task is graded against
+---------------------------------------
+Not every torch call is an honest bar, and the difference is per operator:
+
+* A SINGLE torch op (``torch.relu``, ``torch.softmax``, ``linalg.vector_norm``)
+  already lowers to one fused ROCm kernel.  Eager torch IS the production path,
+  so that is the baseline.
+* A CHAIN (``relu(a + b)``, ``silu(a) * b``, ``x.pow(2).mean(-1).sqrt()``) runs
+  as several kernels eagerly, and ``torch.compile`` fuses it into one for free.
+  Those ops set ``baseline_compile`` and are graded against the FUSED kernel,
+  because beating the unfused chain would measure the absence of a compiler
+  rather than the quality of the kernel.  ``kore.tasks._genops`` applies the same
+  rule to its Triton fusion families.
+
+Nothing here is claimed without being run.  ``scripts/verify_hip_tasks_e2e.py``
+feeds every task its own seed through the real environment on gfx950, and
+``scripts/write_hip_verification_evidence.py`` records the outcome in
+``data/hip_task_verification.json``; ``tests/test_hip_backend.py`` fails if a
+registry task is missing from that artifact.
 """
 
 from __future__ import annotations

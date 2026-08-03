@@ -20,7 +20,7 @@ The block below is a transcription of the non-comment fields in
   "model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
   "model_revision": "b2cff646eb4bb1d68355c01b18ae02e7cf42d120",
   "dataset_path": "data/b05factory/sft/multicap_v2.jsonl",
-  "output_dir": "runs/sft_coder30b_a3b",
+  "output_dir": "/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b",
   "use_lora": false,
   "distributed": true,
   "bf16": true,
@@ -72,7 +72,7 @@ unavailable:
 ```bash
 export SPUR_CONTROLLER_ADDR="http://crs-m2m-cpu-spur-005:6817"
 sbatch scripts/spur_sft_1node.sbatch \
-  configs/sft_coder30b_a3b.json - runs/sft_coder30b_a3b
+  configs/sft_coder30b_a3b.json - /shared_nfs/shasriva/kore/runs/sft_coder30b_a3b
 ```
 
 `-` tells the resolver to keep the config's `model_id`, preventing a legacy stage

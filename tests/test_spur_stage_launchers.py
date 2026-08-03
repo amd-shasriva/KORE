@@ -48,10 +48,9 @@ STAGE_LAUNCHERS = {
     "grpo": "scripts/spur_grpo_1node.sbatch",
 }
 
-#: The three launchers added for the missing stages. They share one contract, so
-#: they are asserted together rather than one test per file.
+#: SFT, DPO, and GRPO share the scheduler-launcher mechanics even though only
+#: the direct-instruct SFT launcher is currently a production operation.
 NEW_STAGE_LAUNCHERS = ("sft", "dpo", "grpo")
-
 
 def _text(relative: str) -> str:
     return (REPO / relative).read_text()
@@ -124,13 +123,19 @@ def test_each_launcher_drives_its_own_stage(stage):
         )
 
 
-def test_the_three_added_launchers_are_registered_as_production_operations():
+def test_stage_launchers_distinguish_live_sft_from_legacy_14b_stages():
     registry = json.loads((SCRIPTS / "operations_registry.json").read_text())
     records = {record["path"]: record for record in registry["scripts"]}
-    for stage in NEW_STAGE_LAUNCHERS:
+
+    sft = records[STAGE_LAUNCHERS["sft"]]
+    assert sft["classification"] == "active"
+    assert sft["production"] is True
+
+    for stage in ("dpo", "grpo"):
         record = records[STAGE_LAUNCHERS[stage]]
         assert record["classification"] == "active"
-        assert record["production"] is True
+        assert record.get("production") is not True
+        assert "14B" in record["role"]
 
 
 # --------------------------------------------------------------------------- #

@@ -2,11 +2,12 @@
 
 Step-centric rows are not the only thing worth keeping, and this module also owns
 the other half -- see :func:`extract_full_trajectory`. Measured on the overnight
-campaign: 3,475 trajectories reached a correct kernel and 1,942 of them (55.9%)
-produced no step row at all, because 1,576 were correct on their FIRST turn and a
-step needs a "before" to improve on. Those are not weak trajectories -- their
-median measured speedup is 1.58x and 507 of them cleared 2x -- they are simply
-invisible to a representation built around revisions.
+campaign with this module's own functions: 3,617 trajectories reached a correct
+kernel, 2,743 produced step rows, and the remaining 874 (24.2%) produced none.
+Every single one of those 874 was correct on its FIRST turn with no later gain
+above the noise floor -- a step needs a parent to improve on, so the whole
+zero-step class is exactly the class a revision cannot represent. They are not
+weak trajectories: their median measured speedup is 1.60x and 214 clear 2x.
 
 
 Kernel-Smith's central finding is that a model trained on whole optimization
@@ -196,12 +197,13 @@ def extract_full_trajectory(
     execution feedback, where Kernel-Smith uses step-centric revisions. Doing only
     the latter throws away every trajectory whose win was not a *revision*: a
     first-turn success has no parent to improve on, so :func:`extract_steps`
-    cannot represent it however good the kernel was.
+    cannot represent it however good the kernel was. That is 874 of the campaign's
+    3,617 successful trajectories, all of them first-turn wins.
 
     Two rules make this safe to train on:
 
     * **Never emit a trajectory that did not reach correctness.** Eight turns of
-      failure teaches failure, and the campaign has 8,189 of them.
+      failure teaches failure, and the campaign has more than 8,900 of them.
     * **End on the best correct turn.** Everything after the win is by
       construction a non-improvement or a regression, and training through it
       teaches the model to keep editing a kernel that was already right.
@@ -288,7 +290,7 @@ def decompose_with_trajectories(
     episode produced no step row. A step row's messages are a PREFIX of the whole
     trajectory, so emitting both for one episode puts the same tokens in the
     corpus twice, and content-hash dedup does not catch a prefix. Residual mode
-    fills the hole -- the 55.9% of successful trajectories that currently
+    fills the hole -- the 24.2% of successful trajectories that currently
     contribute nothing -- without reweighting the trajectories that already do.
 
     Set ``only_residual=False`` to reproduce Dr. Kernel's setup, where every

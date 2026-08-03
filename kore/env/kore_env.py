@@ -62,6 +62,7 @@ from kore.policy.budget import (
     charge_evaluation_work,
     check_evaluation_budget,
 )
+from kore.env import hip_toolchain as _hip
 from kore.reward.reward import Observation, scan_for_hacks
 from kore.reward.reward import _worst_speedup
 from kore.reward.stats import cv_pct as _cv_pct
@@ -273,6 +274,7 @@ _COMPILE_ERR = re.compile(
     re.IGNORECASE,
 )
 # Infrastructure failure (NOT the kernel's fault) - never cache, never train on.
+_HIP_TOOLCHAIN_ERR = _hip.TOOLCHAIN_ABSENCE_PATTERN
 _INFRA_ERR = re.compile(
     r"(hipError|HIP error|out of memory|hipErrorOutOfMemory|CUDA error|"
     r"no CUDA-capable|device-side assert|ECC|Xid|"
@@ -303,6 +305,31 @@ def _parse_driver_capabilities(text: str) -> dict:
 
 def _supports_batch_bench(caps: dict) -> bool:
     return all(caps.get(k) == v for k, v in _BATCH_CAPABILITIES.items())
+
+
+def _task_source_files(task: Task) -> list[Path]:
+    """Task assets staged into an evaluation workdir, in a stable order.
+
+    Was ``dir.glob("*.py")``, which silently dropped a HIP task's ``.hip``
+    baseline before the workdir was built.  The suffix list is closed
+    (:data:`kore.env.hip_toolchain.STAGED_SUFFIXES`) rather than "everything in
+    the directory": these files are copied next to a running candidate, so the
+    set has to stay something a reviewer can enumerate.  The candidate artifact
+    itself is never staged from the task directory -- it is written by the
+    environment -- so a stray ``kernel.py``/``kernel.hip`` left in a task
+    directory cannot shadow the candidate under evaluation.
+    """
+    task_dir = getattr(task, "dir", None)
+    if task_dir is None:
+        return []
+    reserved = set(_hip.CANDIDATE_FILENAMES.values())
+    out: list[Path] = []
+    for path in sorted(Path(task_dir).iterdir()):
+        if not path.is_file() or path.name in reserved:
+            continue
+        if path.suffix in _hip.STAGED_SUFFIXES:
+            out.append(path)
+    return out
 
 
 def _parse_timing_pairs(block: str, expected_count: int) -> tuple[list[dict], Optional[str]]:
@@ -627,7 +654,7 @@ class KoreEnv:
                     ),
                 )
 
-        hack = scan_for_hacks(source)
+        hack = scan_for_hacks(source, _hip.source_language(task.backend))
         if hack:
             _ev("WARN", "eval_hack", task=task.task_id, reason=hack, source_sha=source_sha)
             return Observation(compiled=False, dtype=task.dtype, flagged_hack=True,
@@ -885,6 +912,17 @@ class KoreEnv:
         # thrashing on context switches. Overridable via the env.
         env.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "4")
         env.setdefault("MAX_JOBS", "4")   # ninja/C++ ext build parallelism per driver
+        # HIP C++ tasks compile through torch.utils.cpp_extension, which needs
+        # three things this env did not previously provide: ninja on PATH (the
+        # console script lives beside sys.executable and is NOT on PATH when the
+        # interpreter is invoked by absolute path), PYTORCH_ROCM_ARCH pinned to
+        # the task's own target (measured: 15.4s vs 114.6s per compile), and a
+        # STABLE extension cache -- HOME is redirected to the per-eval TMPDIR
+        # above, and torch's default cache lives under HOME, so every HIP eval
+        # would otherwise pay a full cold compile.
+        if _hip.is_hip_backend(getattr(active_task, "backend", None)):
+            env = _hip.compile_environment(
+                env, selection["effective_gpu_target"] or active_task.gpu_target)
         return env
 
     def _exec(self, cmd, workdir, env, timeout):
@@ -919,7 +957,8 @@ class KoreEnv:
         source = self._active_source
         if source is None:
             try:
-                source = (Path(workdir) / "kernel.py").read_text()
+                source = (Path(workdir)
+                          / _hip.candidate_filename_for_task(task)).read_text()
             except OSError:
                 source = ""
         try:
@@ -993,16 +1032,18 @@ class KoreEnv:
         if cached is not None:
             return cached
         files: dict[str, str] = {}
-        task_dir = getattr(task, "dir", None)
-        if task_dir is not None:
-            for path in sorted(Path(task_dir).glob("*.py")):
-                try:
-                    files[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
-                except OSError:
-                    files[path.name] = "unreadable"
+        # Every file that will be STAGED, not just the Python ones: a HIP task's
+        # ``.hip`` baseline is part of its identity, and a descriptor blind to it
+        # would let an edited oracle reuse another oracle's cached verdict.
+        for path in _task_source_files(task):
+            try:
+                files[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                files[path.name] = "unreadable"
         descriptor = {
             "task_id": cache_key,
             "dtype": str(getattr(task, "dtype", "")),
+            "backend": _hip.normalize_backend(getattr(task, "backend", "")),
             "gpu_target": str(getattr(task, "gpu_target", "")),
             "shapes": [
                 {
@@ -1011,7 +1052,7 @@ class KoreEnv:
                 }
                 for shape in (getattr(task, "shapes", None) or [])
             ],
-            "python_files": files,
+            "task_files": files,
         }
         self._task_descriptor_cache[cache_key] = descriptor
         return descriptor
@@ -1037,6 +1078,12 @@ class KoreEnv:
                 return "compile", _tail(out)
         if timed_out:
             return "infra", "timeout"
+        # A missing ninja/hipcc raises a Python RuntimeError with a traceback, so
+        # the compile branch below would charge a broken node to the candidate and
+        # report a node-wide outage as a near-100% model error rate. Toolchain
+        # absence is checked FIRST and is always infra.
+        if _HIP_TOOLCHAIN_ERR.search(out):
+            return "infra", f"hip toolchain unavailable: {_tail(out)}"
         if _INFRA_ERR.search(out):
             return "infra", _tail(out)
         if returncode < 0 or returncode == 137:  # signal / OOM-kill
@@ -1055,7 +1102,7 @@ class KoreEnv:
         self._last_profiler_seconds = 0.0
         # stage isolated sources; make the oracle/driver READ-ONLY so a kernel
         # cannot corrupt reference.py for future evals.
-        task_sources = list(task.dir.glob("*.py"))
+        task_sources = _task_source_files(task)
         # Sandbox-only task-source budget gate (skipped on the default path).
         if self._sandbox_enabled:
             task_bytes = sum(p.stat().st_size for p in task_sources)
@@ -1075,8 +1122,9 @@ class KoreEnv:
             dst = workdir / p.name
             shutil.copy(p, dst)
             os.chmod(dst, 0o444)
-        (workdir / "kernel.py").write_text(source)
-        os.chmod(workdir / "kernel.py", 0o444)
+        candidate_name = _hip.candidate_filename_for_task(task)
+        (workdir / candidate_name).write_text(source)
+        os.chmod(workdir / candidate_name, 0o444)
         driver = workdir / "driver.py"
         env = (self._env(task=task, private_root=workdir / ".sandbox")
                if self._sandbox_enabled else self._env(task))
@@ -1731,7 +1779,7 @@ class KoreEnv:
         previous_source, previous_task = self._active_source, self._active_task
         self._active_source, self._active_task = source, self.task
         try:
-            task_sources = list(self.task.dir.glob("*.py"))
+            task_sources = _task_source_files(self.task)
             if self._sandbox_enabled and (
                     sum(p.stat().st_size for p in task_sources)
                     > self.isolation_policy.budget.max_task_bytes):
@@ -1741,8 +1789,9 @@ class KoreEnv:
                 dst = workdir / p.name
                 shutil.copy(p, dst)
                 os.chmod(dst, 0o444)
-            (workdir / "kernel.py").write_text(source)
-            os.chmod(workdir / "kernel.py", 0o444)
+            candidate_name = _hip.candidate_filename_for_task(self.task)
+            (workdir / candidate_name).write_text(source)
+            os.chmod(workdir / candidate_name, 0o444)
             driver = workdir / "driver.py"
             env = (self._env(private_root=workdir / ".sandbox")
                    if self._sandbox_enabled else self._env())

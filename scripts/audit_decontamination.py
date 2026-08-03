@@ -110,22 +110,30 @@ def main() -> int:
     ngram_hits = 0
     ngram_detail = []
     try:
-        from kore.data.decontam import build_heldout_ngrams, signal_ngram_set
+        from kore.data.decontam import analyze_text_contamination, build_heldout_ngrams
 
-        ref = build_heldout_ngrams()
-        if ref:
-            refsets = ref if isinstance(ref, (list, tuple, set)) else [ref]
-            flat = set()
-            for r in refsets:
-                if isinstance(r, (set, frozenset)):
-                    flat |= r
+        # Delegate to the module's own matcher rather than intersecting n-gram
+        # sets by hand. Two ways the hand-rolled version was wrong: HoldoutIndex
+        # subclasses set, so iterating it yields shingle STRINGS and the
+        # union-of-reference-sets it tried to build was always empty, which made
+        # this check structurally incapable of reporting a hit; and had the union
+        # been built, flagging any single shared shingle would have marked
+        # essentially every Triton row. analyze_text_contamination compares
+        # against each reference separately with the containment denominator on
+        # the held-out side, which is the check that was intended.
+        index = build_heldout_ngrams()
+        if index.references:
             for txt in texts:
-                sig = signal_ngram_set(txt)
-                if sig and flat and (sig & flat):
-                    ngram_hits += 1
-                    if len(ngram_detail) < 3:
-                        ngram_detail.append(sorted(sig & flat)[:2])
+                match = analyze_text_contamination(txt, index)
+                if match is None:
+                    continue
+                ngram_hits += 1
+                if len(ngram_detail) < 3:
+                    ngram_detail.append(
+                        f"{match.reason} score={match.score:.3f} "
+                        f"ref={match.reference_id}")
             print(f"[ngrams]   of {len(texts):,} sampled rows, overlapping: {ngram_hits:,}")
+            print(f"             references indexed: {len(index.references)}")
             for d in ngram_detail:
                 print(f"             e.g. {d}")
         else:

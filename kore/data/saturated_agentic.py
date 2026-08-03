@@ -596,9 +596,43 @@ def _set_stop(stop_event, result, lock, reason: str) -> None:
 
 
 def _import_get_task():
-    from kore.tasks.registry import get_task
+    """Resolve a task id against the registry first, then the external pool.
 
-    return get_task
+    The partition plans over registry + pool (~14.5k tasks) but this returned
+    the registry's ``get_task``, which knows only its own ~1.3k. Every pool task
+    therefore raised ``KeyError`` at episode start: 98% of a campaign failing
+    instantly while reporting a spectacular throughput number, precisely because
+    failures are fast. The counter said 13,277 episodes/hour and 3,267 of 3,325
+    episodes were errors.
+
+    Registry first, so its entries keep precedence: they carry the authoritative
+    train/held-out split, and a pool id shadowing one could pull a held-out task
+    into training. The pool is loaded lazily and cached, so a registry-only
+    campaign never pays to read it.
+    """
+    from kore.tasks.registry import get_task as _registry_get_task
+
+    pool: dict = {}
+    pool_loaded = [False]
+
+    def resolve(task_id: str):
+        try:
+            return _registry_get_task(task_id)
+        except KeyError:
+            if not pool_loaded[0]:
+                pool_loaded[0] = True
+                try:
+                    from kore.tasks.external import load_pool
+
+                    pool.update({t.task_id: t for t in load_pool()})
+                except Exception:  # noqa: BLE001 - fall through to the KeyError
+                    pass
+            task = pool.get(task_id)
+            if task is None:
+                raise
+            return task
+
+    return resolve
 
 
 def _import_generator():

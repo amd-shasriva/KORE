@@ -91,6 +91,13 @@
       "note": "builds/verifies the instruction-residual transfer; writes only its --out dir"
     },
     {
+      "path": "scripts/build_task_pool.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "mines external PyTorch modules into the decontaminated task pool; writes only its --out dir and never touches kore/tasks/"
+    },
+    {
       "path": "scripts/build_sft_v2_mixture.py",
       "classification": "active",
       "lifecycle": "active",
@@ -334,6 +341,13 @@
       "lifecycle": "active",
       "deletes_artifacts": false,
       "note": "compute-node launcher for build_sft_v2_mixture.py; the one job that needs network"
+    },
+    {
+      "path": "scripts/spur_build_task_pool.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "CPU-only compute-node launcher for build_task_pool.py; needs network for the pinned datasets"
     },
     {
       "path": "scripts/spur_datagen_array.sbatch",

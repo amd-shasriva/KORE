@@ -179,7 +179,13 @@ _SCREEN_TIMEOUT = 8
 #: OOM reaper -- which Python cannot catch, so it takes the whole pool down. A
 #: hard rlimit turns that same allocation into a MemoryError the worker reports
 #: as an ordinary drop.
-WORKER_ADDRESS_SPACE_BYTES = 8 * 1024 ** 3
+#
+# 24 GiB, not the 8 GiB that looks sufficient for a 1M-element probe: RLIMIT_AS
+# bounds VIRTUAL address space, and torch reserves arenas and thread stacks far
+# beyond its resident set. Measured on 400 KernelBook rows, an 8 GiB cap could
+# not even import scipy inside the worker and cost 7 otherwise-admissible tasks;
+# 24 GiB reproduces the unlimited-baseline acceptance exactly.
+WORKER_ADDRESS_SPACE_BYTES = 24 * 1024 ** 3
 
 
 def _init_worker(dtype: str, timeout: int) -> None:

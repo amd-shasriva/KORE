@@ -267,6 +267,12 @@
       "role": "dry-run-first JSONL shard migration CLI (writes gated behind --apply)"
     },
     {
+      "path": "scripts/mixture_composition.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "break an SFT mixture down by source with row and token counts, so the AMD-native fraction is measured rather than recalled"
+    },
+    {
       "path": "scripts/pilot_agentic_throughput.py",
       "classification": "diagnostic",
       "lifecycle": "active",

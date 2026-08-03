@@ -75,12 +75,24 @@ def main() -> int:
     ap.add_argument("--min-gain", type=float, default=0.05)
     ap.add_argument("--max-speedup", type=float, default=50.0)
     ap.add_argument("--max-seq-tokens", type=int, default=17408)
+    ap.add_argument("--full-trajectories", dest="full_trajectories",
+                    action="store_true", default=True,
+                    help="also emit a full trajectory for each SUCCESSFUL episode "
+                         "that yielded no step row (default: on)")
+    ap.add_argument("--no-full-trajectories", dest="full_trajectories",
+                    action="store_false",
+                    help="step-centric rows only (the pre-measurement behaviour)")
+    ap.add_argument("--all-full-trajectories", action="store_true",
+                    help="emit a full trajectory for EVERY successful episode, not "
+                         "just those with no step row (Dr. Kernel's setup; the "
+                         "step row's messages are a prefix, so this duplicates "
+                         "tokens content-hash dedup cannot see)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
     from kore.data.decontam import heldout_families, heldout_task_ids, record_family
-    from kore.data.step_centric import decompose
+    from kore.data.step_centric import decompose, decompose_with_trajectories
 
     ids = {t for t in heldout_task_ids() if t}
     fams = {f for f in heldout_families() if f}
@@ -130,13 +142,32 @@ def main() -> int:
         if "telemetry" in p.name:
             continue          # per-attempt failures, not trajectories
         traj.extend(_rows(p))
-    step_rows, step_stats = decompose(traj, min_gain=args.min_gain,
-                                      max_speedup=args.max_speedup)
+
+    # Step-centric supervision alone is blind to a trajectory whose win was not a
+    # REVISION. Measured on the overnight campaign: 3,475 episodes reached a
+    # correct kernel and 1,942 of them produced no step row, 1,576 because they
+    # were correct on their first turn -- and their median measured speedup is
+    # 1.58x, so the discard is not a quality filter, it is a representation gap.
+    # A never-correct trajectory is still never emitted.
+    if args.full_trajectories:
+        step_rows, step_stats = decompose_with_trajectories(
+            traj, min_gain=args.min_gain, max_speedup=args.max_speedup,
+            only_residual=not args.all_full_trajectories,
+        )
+    else:
+        step_rows, step_stats = decompose(traj, min_gain=args.min_gain,
+                                          max_speedup=args.max_speedup)
     print(f"  trajectories={step_stats['trajectories']:,} "
           f"with_steps={step_stats['with_steps']:,} steps={step_stats['steps']:,} "
           f"(fix={step_stats['fix_steps']:,} speedup={step_stats['speedup_steps']:,})")
+    if args.full_trajectories:
+        print(f"  reached_correct={step_stats['reached_correct']:,} "
+              f"full_trajectories={step_stats['full_trajectories']:,} "
+              f"skipped_has_steps={step_stats['full_skipped_has_steps']:,} "
+              f"never_correct_dropped={step_stats['never_correct_dropped']:,}")
     for rec in step_rows:
-        admit(rec, "amd_step")
+        admit(rec, "amd_step" if rec.get("_source") == "kernel_step_centric"
+              else "amd_full_traj")
 
     for rel in args.recover:
         print(f"\nrecover: {rel}")

@@ -1,5 +1,14 @@
 """Decompose agentic trajectories into step-centric supervision.
 
+Step-centric rows are not the only thing worth keeping, and this module also owns
+the other half -- see :func:`extract_full_trajectory`. Measured on the overnight
+campaign: 3,475 trajectories reached a correct kernel and 1,942 of them (55.9%)
+produced no step row at all, because 1,576 were correct on their FIRST turn and a
+step needs a "before" to improve on. Those are not weak trajectories -- their
+median measured speedup is 1.58x and 507 of them cleared 2x -- they are simply
+invisible to a representation built around revisions.
+
+
 Kernel-Smith's central finding is that a model trained on whole optimization
 trajectories learns to imitate a *search*, while what you actually want is a
 strong LOCAL IMPROVER inside an evolutionary loop -- something that, shown a
@@ -154,6 +163,95 @@ def extract_steps(
     return steps
 
 
+@dataclass
+class FullTrajectory:
+    """One whole successful episode, ending on the turn that won it."""
+
+    task_id: str
+    messages: list
+    turns: int                     # assistant turns kept
+    first_correct_turn: int        # 1-based
+    best_turn: int                 # 1-based; the turn this row ends on
+    best_speedup: Optional[float]
+
+    def to_row(self) -> dict:
+        return {
+            "messages": self.messages,
+            "_source": "kernel_full_trajectory",
+            "_task_id": self.task_id,
+            "_turns": self.turns,
+            "_first_correct_turn": self.first_correct_turn,
+            "_best_turn": self.best_turn,
+            "_best_speedup": self.best_speedup,
+        }
+
+
+def extract_full_trajectory(
+    record: dict,
+    max_speedup: float = 50.0,
+) -> Optional[FullTrajectory]:
+    """The whole episode as one row, truncated at the turn that won it.
+
+    Dr. Kernel builds its cold start from FULL multi-turn trajectories with
+    execution feedback, where Kernel-Smith uses step-centric revisions. Doing only
+    the latter throws away every trajectory whose win was not a *revision*: a
+    first-turn success has no parent to improve on, so :func:`extract_steps`
+    cannot represent it however good the kernel was.
+
+    Two rules make this safe to train on:
+
+    * **Never emit a trajectory that did not reach correctness.** Eight turns of
+      failure teaches failure, and the campaign has 8,189 of them.
+    * **End on the best correct turn.** Everything after the win is by
+      construction a non-improvement or a regression, and training through it
+      teaches the model to keep editing a kernel that was already right.
+
+    The reward-hacking guard from :func:`extract_steps` applies unchanged: a
+    trajectory whose best "speedup" is three orders of magnitude is a decoy, and
+    ending a row on it would teach exactly the metric-cheating that RL will later
+    be free to exploit.
+    """
+    prov = record.get("provenance") or {}
+    correct = [bool(c) for c in (prov.get("turn_correct") or [])]
+    speedups = [_f(s) for s in (prov.get("turn_speedups") or [])]
+    messages = list(record.get("messages") or [])
+    task_id = str(record.get("task_id") or "")
+
+    turns = _assistant_turn_indices(messages)
+    if not turns or not any(correct):
+        return None
+
+    first_correct = correct.index(True)
+    # The winning turn is the fastest CORRECT one; with no timing anywhere, the
+    # first correct turn is the only defensible end point -- it is the earliest
+    # place the episode is known to be right, and later turns carry no evidence
+    # that they are still right about anything.
+    best_turn = first_correct
+    best_speedup = None
+    for index, is_correct in enumerate(correct):
+        if not is_correct or index >= len(speedups):
+            continue
+        candidate = speedups[index]
+        if candidate is None:
+            continue
+        if best_speedup is None or candidate > best_speedup:
+            best_speedup, best_turn = candidate, index
+
+    if best_speedup is not None and best_speedup > max_speedup:
+        return None
+    if best_turn >= len(turns):
+        return None
+
+    return FullTrajectory(
+        task_id=task_id,
+        messages=messages[: turns[best_turn] + 1],
+        turns=best_turn + 1,
+        first_correct_turn=first_correct + 1,
+        best_turn=best_turn + 1,
+        best_speedup=best_speedup,
+    )
+
+
 def decompose(
     records: Iterable[dict],
     min_gain: float = MIN_GAIN,
@@ -175,4 +273,59 @@ def decompose(
             stats["fix_steps" if s.kind == "fix" else "speedup_steps"] += 1
             rows.append(s.to_row())
     log.metric("step_centric_decompose", **stats)
+    return rows, stats
+
+
+def decompose_with_trajectories(
+    records: Iterable[dict],
+    min_gain: float = MIN_GAIN,
+    max_speedup: float = 50.0,
+    only_residual: bool = True,
+) -> tuple[list[dict], dict]:
+    """Step-centric rows, plus a full-trajectory row for the successes they miss.
+
+    ``only_residual`` (the default) emits a full trajectory ONLY when the same
+    episode produced no step row. A step row's messages are a PREFIX of the whole
+    trajectory, so emitting both for one episode puts the same tokens in the
+    corpus twice, and content-hash dedup does not catch a prefix. Residual mode
+    fills the hole -- the 55.9% of successful trajectories that currently
+    contribute nothing -- without reweighting the trajectories that already do.
+
+    Set ``only_residual=False`` to reproduce Dr. Kernel's setup, where every
+    successful trajectory is a cold-start example in its own right.
+    """
+    rows: list[dict] = []
+    stats = {
+        "trajectories": 0, "with_steps": 0, "steps": 0,
+        "fix_steps": 0, "speedup_steps": 0,
+        "reached_correct": 0, "full_trajectories": 0,
+        "full_rejected_hack": 0, "full_skipped_has_steps": 0,
+        "never_correct_dropped": 0,
+    }
+    for rec in records:
+        stats["trajectories"] += 1
+        steps = extract_steps(rec, min_gain=min_gain, max_speedup=max_speedup)
+        if steps:
+            stats["with_steps"] += 1
+        for s in steps:
+            stats["steps"] += 1
+            stats["fix_steps" if s.kind == "fix" else "speedup_steps"] += 1
+            rows.append(s.to_row())
+
+        prov = rec.get("provenance") or {}
+        if not any(bool(c) for c in (prov.get("turn_correct") or [])):
+            stats["never_correct_dropped"] += 1
+            continue
+        stats["reached_correct"] += 1
+        if steps and only_residual:
+            stats["full_skipped_has_steps"] += 1
+            continue
+        full = extract_full_trajectory(rec, max_speedup=max_speedup)
+        if full is None:
+            stats["full_rejected_hack"] += 1
+            continue
+        stats["full_trajectories"] += 1
+        rows.append(full.to_row())
+
+    log.metric("step_centric_decompose_with_trajectories", **stats)
     return rows, stats

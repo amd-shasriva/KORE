@@ -50,6 +50,16 @@ def task_prompt(task) -> str:
     op = getattr(task, "operation", tid)
     gpu = getattr(task, "gpu_target", "gfx942")
     dtype = getattr(task, "dtype", "")
+    if getattr(task, "is_spec_synthesis", False):
+        spec = getattr(task, "spec_source", "") or ""
+        return "\n\n".join([
+            f"Write the {op} kernel (task '{tid}', dtype={dtype or 'n/a'}) for AMD "
+            f"{gpu} from the specification below. There is no starting "
+            "implementation. Keep it numerically correct (pass the SNR gate) and "
+            "make it as fast as possible. Output the COMPLETE kernel under the "
+            "FULL_KERNEL contract.",
+            spec.strip(),
+        ]).strip()
     parts = [
         f"Optimize the {op} kernel (task '{tid}', dtype={dtype or 'n/a'}) for AMD "
         f"{gpu}. Keep it numerically correct (pass the SNR gate) and make it as "

@@ -43,7 +43,21 @@ REGIME_SHAPES = {
 
 @dataclass(frozen=True)
 class OpSpec:
-    """One shape-preserving operator, as a constructor and a forward line."""
+    """One shape-preserving operator, as a constructor and a forward line.
+
+    ``weights`` is what makes a parameterized operator ANSWERABLE. A submodule
+    holds its weights inside the module, where the candidate kernel can never see
+    them; the driver hands the kernel exactly the tensors ``get_inputs()``
+    returns, so a task built from ``nn.Linear`` asks the kernel to reproduce a
+    number computed from a tensor it was not given. Measured on the overnight
+    campaign: synthetic pool tasks reached a correct kernel in 4 of 956 episodes.
+    Declaring the weights as extra forward ARGUMENTS instead makes the same
+    operator a well-posed kernel task -- the reference is still torch, and only
+    the candidate is held to computing rather than delegating.
+
+    Each entry is ``(suffix, shape_expr)``; the rendered forward takes them as
+    positional arguments after ``x`` and ``get_inputs()`` draws them.
+    """
 
     name: str
     regime: str
@@ -51,30 +65,45 @@ class OpSpec:
     ctor: Optional[str]  # ``nn.Module`` constructor, or None for a functional op
     body: str            # forward body; ``{m}`` is the submodule attribute
     needs: tuple[str, ...] = ()
+    weights: tuple[tuple[str, str], ...] = ()
 
 
 # --------------------------------------------------------------------------- #
 # Operator sets, categorized as popcorn does
 # --------------------------------------------------------------------------- #
 SEQ_CORE: tuple[OpSpec, ...] = (
-    OpSpec("linear", "seq", "core", "nn.Linear(c, c)", "x = self.{m}(x)"),
-    OpSpec("linear_nobias", "seq", "core", "nn.Linear(c, c, bias=False)",
-           "x = self.{m}(x)"),
-    OpSpec("conv1d", "seq", "core", "nn.Conv1d(c, c, 3, padding=1)",
-           "x = self.{m}(x.transpose(1, 2)).transpose(1, 2)"),
-    OpSpec("layernorm", "seq", "core", "nn.LayerNorm(c)", "x = self.{m}(x)"),
-    OpSpec("rmsnorm", "seq", "core", "nn.Parameter(torch.ones(c))",
-           "x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6) * self.{m}"),
-    OpSpec("groupnorm", "seq", "core", "nn.GroupNorm(4, c)",
-           "x = self.{m}(x.transpose(1, 2)).transpose(1, 2)"),
+    OpSpec("linear", "seq", "core", None,
+           "x = torch.nn.functional.linear(x, {w0}, {w1})",
+           weights=(("w", "(c, c)"), ("b", "(c,)"))),
+    OpSpec("linear_nobias", "seq", "core", None,
+           "x = torch.nn.functional.linear(x, {w0})",
+           weights=(("w", "(c, c)"),)),
+    OpSpec("conv1d", "seq", "core", None,
+           "x = torch.nn.functional.conv1d("
+           "x.transpose(1, 2), {w0}, padding=1).transpose(1, 2)",
+           weights=(("w", "(c, c, 3)"),)),
+    OpSpec("layernorm", "seq", "core", None,
+           "x = torch.nn.functional.layer_norm(x, (x.shape[-1],), {w0}, {w1})",
+           weights=(("g", "(c,)"), ("b", "(c,)"))),
+    OpSpec("rmsnorm", "seq", "core", None,
+           "x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6) * {w0}",
+           weights=(("g", "(c,)"),)),
+    OpSpec("groupnorm", "seq", "core", None,
+           "x = torch.nn.functional.group_norm("
+           "x.transpose(1, 2), 4, {w0}, {w1}).transpose(1, 2)",
+           weights=(("g", "(c,)"), ("b", "(c,)"))),
     OpSpec("bmm_self", "seq", "core", None,
            "x = torch.softmax(x @ x.transpose(-1, -2) / 8.0, dim=-1) @ x"),
-    OpSpec("gated_mlp", "seq", "compound", "nn.Linear(c, 2 * c)",
-           "a, b = self.{m}(x).chunk(2, dim=-1)\n        x = a * torch.sigmoid(b)"),
-    OpSpec("residual_linear", "seq", "compound", "nn.Linear(c, c)",
-           "x = x + self.{m}(x)"),
-    OpSpec("residual_norm", "seq", "compound", "nn.LayerNorm(c)",
-           "x = x + self.{m}(x)"),
+    OpSpec("gated_mlp", "seq", "compound", None,
+           "a, b = torch.nn.functional.linear(x, {w0}).chunk(2, dim=-1)\n"
+           "        x = a * torch.sigmoid(b)",
+           weights=(("w", "(2 * c, c)"),)),
+    OpSpec("residual_linear", "seq", "compound", None,
+           "x = x + torch.nn.functional.linear(x, {w0})",
+           weights=(("w", "(c, c)"),)),
+    OpSpec("residual_norm", "seq", "compound", None,
+           "x = x + torch.nn.functional.layer_norm(x, (x.shape[-1],), {w0})",
+           weights=(("g", "(c,)"),)),
     OpSpec("scaled_softmax", "seq", "supporting", None,
            "x = torch.softmax(x * 0.5, dim=-1)"),
     OpSpec("log_softmax", "seq", "supporting", None,
@@ -87,23 +116,34 @@ SEQ_CORE: tuple[OpSpec, ...] = (
 )
 
 IMG_CORE: tuple[OpSpec, ...] = (
-    OpSpec("conv2d_3x3", "img", "core", "nn.Conv2d(c, c, 3, padding=1)",
-           "x = self.{m}(x)"),
-    OpSpec("conv2d_1x1", "img", "core", "nn.Conv2d(c, c, 1)", "x = self.{m}(x)"),
-    OpSpec("conv2d_5x5", "img", "core", "nn.Conv2d(c, c, 5, padding=2)",
-           "x = self.{m}(x)"),
-    OpSpec("depthwise_conv", "img", "core", "nn.Conv2d(c, c, 3, padding=1, groups=c)",
-           "x = self.{m}(x)"),
-    OpSpec("convtranspose2d", "img", "core",
-           "nn.ConvTranspose2d(c, c, 3, padding=1)", "x = self.{m}(x)"),
-    OpSpec("batchnorm2d", "img", "core", "nn.BatchNorm2d(c)", "x = self.{m}(x)"),
-    OpSpec("groupnorm2d", "img", "core", "nn.GroupNorm(4, c)", "x = self.{m}(x)"),
-    OpSpec("instancenorm2d", "img", "core", "nn.InstanceNorm2d(c, affine=True)",
-           "x = self.{m}(x)"),
-    OpSpec("residual_conv", "img", "compound", "nn.Conv2d(c, c, 3, padding=1)",
-           "x = x + self.{m}(x)"),
-    OpSpec("se_gate", "img", "compound", "nn.Conv2d(c, c, 1)",
-           "x = x * torch.sigmoid(self.{m}(x.mean(dim=(2, 3), keepdim=True)))"),
+    OpSpec("conv2d_3x3", "img", "core", None,
+           "x = torch.nn.functional.conv2d(x, {w0}, padding=1)",
+           weights=(("w", "(c, c, 3, 3)"),)),
+    OpSpec("conv2d_1x1", "img", "core", None,
+           "x = torch.nn.functional.conv2d(x, {w0})",
+           weights=(("w", "(c, c, 1, 1)"),)),
+    OpSpec("conv2d_5x5", "img", "core", None,
+           "x = torch.nn.functional.conv2d(x, {w0}, padding=2)",
+           weights=(("w", "(c, c, 5, 5)"),)),
+    OpSpec("depthwise_conv", "img", "core", None,
+           "x = torch.nn.functional.conv2d(x, {w0}, padding=1, groups=x.shape[1])",
+           weights=(("w", "(c, 1, 3, 3)"),)),
+    OpSpec("convtranspose2d", "img", "core", None,
+           "x = torch.nn.functional.conv_transpose2d(x, {w0}, padding=1)",
+           weights=(("w", "(c, c, 3, 3)"),)),
+    OpSpec("groupnorm2d", "img", "core", None,
+           "x = torch.nn.functional.group_norm(x, 4, {w0}, {w1})",
+           weights=(("g", "(c,)"), ("b", "(c,)"))),
+    OpSpec("instancenorm2d", "img", "core", None,
+           "x = torch.nn.functional.instance_norm(x, weight={w0}, bias={w1})",
+           weights=(("g", "(c,)"), ("b", "(c,)"))),
+    OpSpec("residual_conv", "img", "compound", None,
+           "x = x + torch.nn.functional.conv2d(x, {w0}, padding=1)",
+           weights=(("w", "(c, c, 3, 3)"),)),
+    OpSpec("se_gate", "img", "compound", None,
+           "x = x * torch.sigmoid(torch.nn.functional.conv2d("
+           "x.mean(dim=(2, 3), keepdim=True), {w0}))",
+           weights=(("w", "(c, c, 1, 1)"),)),
     OpSpec("avgpool_keep", "img", "supporting", None,
            "x = torch.nn.functional.avg_pool2d(x, 3, stride=1, padding=1)"),
     OpSpec("maxpool_keep", "img", "supporting", None,
@@ -143,19 +183,25 @@ import torch.nn as nn
 
 
 class {cls}(nn.Module):
-    """Synthesized {regime} module: {chain}."""
+    """Synthesized {regime} module: {chain}.
+
+    Every learnable tensor arrives as a forward ARGUMENT, so the oracle is a
+    function of the tensors a candidate kernel is handed. A module that kept its
+    weights internally would be unanswerable: the driver passes the kernel only
+    what ``get_inputs()`` returns.
+    """
 
     def __init__(self, c={channels}):
         super().__init__()
-{ctors}
+        self.c = c
 
-    def forward(self, x):
+    def forward(self, x{params}):
 {body}
         return x
 
 
 def get_inputs():
-    return [torch.rand({shape})]
+    return [torch.rand({shape}){weight_draws}]
 
 
 def get_init_inputs():
@@ -167,26 +213,35 @@ def render_module(chain: Sequence[OpSpec], regime: str) -> tuple[str, str]:
     """Render one chain as ``(class_name, module_source)``."""
     shape = REGIME_SHAPES[regime]
     channels = shape[2] if regime == "seq" else shape[1]
-    ctor_lines: list[str] = []
     body_lines: list[str] = []
+    param_names: list[str] = []
+    weight_draws: list[str] = []
     for index, op in enumerate(chain):
-        attribute = f"op{index}"
-        if op.ctor:
-            ctor_lines.append(f"        self.{attribute} = {op.ctor}")
-        for line in op.body.format(m=attribute).split("\n"):
+        names: list[str] = []
+        for suffix, shape_expr in op.weights:
+            name = f"p{index}_{suffix}"
+            names.append(name)
+            param_names.append(name)
+            literal = shape_expr.replace("c", str(channels))
+            # Centred draws: a weight from ``rand`` alone is all-positive, which
+            # makes a stacked chain's activations grow with fan-in instead of
+            # staying in a range the fp32 oracle and the kernel both resolve well.
+            weight_draws.append(f"torch.rand({literal}) - 0.5")
+        substitutions = {f"w{slot}": name for slot, name in enumerate(names)}
+        substitutions["m"] = f"op{index}"
+        rendered = op.body.format(**substitutions)
+        for line in rendered.split("\n"):
             body_lines.append(f"        {line}" if not line.startswith(" ") else line)
-    if not ctor_lines:
-        ctor_lines.append("        self.scale = nn.Parameter(torch.ones(1))")
-        body_lines.append("        x = x * self.scale")
     name = "SynthModel_" + "_".join(op.name for op in chain)
     source = MODULE_TEMPLATE.format(
         cls=name,
         regime=regime,
         chain=" -> ".join(op.name for op in chain),
         channels=channels,
-        ctors="\n".join(ctor_lines),
+        params="".join(f", {p}" for p in param_names),
         body="\n".join(body_lines),
         shape=list(shape),
+        weight_draws="".join(f", {d}" for d in weight_draws),
     )
     return name, source
 

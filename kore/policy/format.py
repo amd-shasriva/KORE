@@ -635,6 +635,13 @@ def build_task_prompt(task: Any) -> str:
     a bare "optimize task X" one-shot. ``task`` is any object exposing ``dtype``,
     ``operation``, ``gpu_target``, ``backend``, ``comparison_baseline``, ``seed_source``.
     """
+    if getattr(task, "is_spec_synthesis", False):
+        return (f"Write a {task.dtype} {task.operation} kernel for AMD "
+                f"{task.gpu_target} (backend: {task.backend}) from the "
+                f"specification below; there is no starting implementation. "
+                f"Baseline to beat: {task.comparison_baseline}. "
+                f"Return ANALYSIS, PROPOSED_CHANGE, and a complete FULL_KERNEL.\n\n"
+                f"{getattr(task, 'spec_source', '')}")
     return (f"Optimize a {task.dtype} {task.operation} kernel for AMD {task.gpu_target} "
             f"(backend: {task.backend}). Baseline to beat: {task.comparison_baseline}. "
             f"Return ANALYSIS, PROPOSED_CHANGE, and a complete FULL_KERNEL.\n\n"

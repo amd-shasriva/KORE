@@ -66,12 +66,19 @@ kernel generation. `scripts/spur_pipeline_driver.sh` therefore defaults
 
 ## Measurement discipline
 
-The registry has 1,354 tasks (1,334 Triton plus a 20-task HIP C++ family). 106
+The registry has 1,522 tasks (1,334 Triton plus a 188-task HIP C++ family). 106
 are vendor-lane tasks: 63 declare AITER and 4
 declare hipBLASLt; runtime resolution adds 33 `gemm_fusion` hipBLASLt tasks and
-6 gated activations backed by AITER. The remaining 92%, including all 1,052
-generated breadth tasks, are torch-lane tasks. Vendor and torch speedups must
-not be pooled: a torch-lane result does not establish a production-library win.
+6 gated activations backed by AITER. The remaining 93%, including all 1,052
+generated breadth tasks and the whole HIP family, are torch-lane tasks. Vendor
+and torch speedups must not be pooled: a torch-lane result does not establish a
+production-library win.
+
+Every HIP task is proven runnable on real gfx950 before it is counted — compiled,
+verified through the same oracle, and timed under the same publication protocol —
+and the evidence is `data/hip_task_verification.json`. A HIP task whose torch
+baseline is a multi-kernel CHAIN is graded against `torch.compile`, not against
+unfused eager torch, so its speedup is not a measurement of the compiler's absence.
 
 The production correctness oracle combines reseeded random trials, adversarial
 fills when `KORE_VERIFIED_CORRECTNESS=1`, determinism, and post-timing

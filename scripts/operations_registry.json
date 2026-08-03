@@ -98,6 +98,13 @@
       "note": "writes the v2 SFT mixture; never mutates the base mixture it reads"
     },
     {
+      "path": "scripts/build_sft_v3_mixture.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "builds the v3 SFT mixture from step-centric AMD trajectories, recovered rows and the v2 base; never mutates its inputs"
+    },
+    {
       "path": "scripts/build_task_pool.py",
       "classification": "active",
       "lifecycle": "active",

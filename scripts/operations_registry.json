@@ -77,6 +77,13 @@
       "note": "read-only audit of a training file against the held-out eval set"
     },
     {
+      "path": "scripts/aiter_bwd_dispatch_probe.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "records AITER backward dispatch and optional timing on gfx950; output is a run-specific diagnostic artifact"
+    },
+    {
       "path": "scripts/build_agentic_sft_slice.py",
       "classification": "active",
       "lifecycle": "active",
@@ -88,7 +95,7 @@
       "classification": "active",
       "lifecycle": "active",
       "deletes_artifacts": false,
-      "note": "builds/verifies the instruction-residual transfer; writes only its --out dir"
+      "note": "14B-only instruction-residual experiment; writes only its --out dir and cannot apply to the instruct-only 30B target"
     },
     {
       "path": "scripts/build_sft_v2_mixture.py",
@@ -264,6 +271,14 @@
       "replacement": "scheduler-approved training submission"
     },
     {
+      "path": "scripts/run_evolve_agent.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "production": false,
+      "note": "drives kore.search.evolve_agent over a task shard: population, strategy-niched archive, harness-proposed mutations, stabilised measurement. Append-only JSONL per shard. production=false: CPU-verified against scripted fakes only, never yet run on a gfx950 node"
+    },
+    {
       "path": "scripts/run_e2e_14b.sh",
       "classification": "deprecated",
       "lifecycle": "deprecated",
@@ -336,6 +351,13 @@
       "note": "requeue-safe node job for the multi-turn agentic campaign"
     },
     {
+      "path": "scripts/spur_aiter_bwd_probe.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "one-node launcher for the gfx950 AITER backward-dispatch diagnostic"
+    },
+    {
       "path": "scripts/spur_aka_1node.sbatch",
       "classification": "diagnostic",
       "lifecycle": "active",
@@ -348,6 +370,14 @@
       "lifecycle": "active",
       "deletes_artifacts": false,
       "note": "compute-node launcher for audit_decontamination.py"
+    },
+    {
+      "path": "scripts/spur_evolve_agent_1node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "production": false,
+      "note": "one-node launcher for run_evolve_agent.py; refuses to start without a visible GPU or with <20G free on the shared /home. Takes ONE node under the QoS cap. production=false until it has been run on gfx950"
     },
     {
       "path": "scripts/spur_build_mixture_1node.sbatch",
@@ -380,8 +410,7 @@
       "path": "scripts/spur_dpo_1node.sbatch",
       "classification": "active",
       "lifecycle": "active",
-      "production": true,
-      "role": "single-node 8-rank stage-2 DPO launcher (trains the SFT output; requeue-safe)"
+      "role": "14B-only DPO launcher retained for reproducibility; preference pairs discard execution evidence available to RL"
     },
     {
       "path": "scripts/spur_eval_ab_1node.sbatch",
@@ -405,8 +434,7 @@
       "path": "scripts/spur_grpo_1node.sbatch",
       "classification": "active",
       "lifecycle": "active",
-      "production": true,
-      "role": "single-node 8-rank stage-3 multi-turn GRPO launcher (ZeRO-2, in-process rollout replica; spans requeues)"
+      "role": "single-node 8-rank legacy-14B multi-turn GRPO launcher (ZeRO-2, in-process rollout replica; spans requeues); a 30B RL launch must supply a reviewed 30B recipe"
     },
     {
       "path": "scripts/spur_kernelbench_1node.sbatch",
@@ -418,43 +446,37 @@
       "path": "scripts/spur_midtrain_1node.sbatch",
       "classification": "active",
       "lifecycle": "active",
-      "production": true,
-      "role": "single-node 8-rank midtrain launcher (defaults to midtrain_8gpu.json)"
+      "role": "14B-only midtrain launcher retained for experiment reproduction"
     },
     {
       "path": "scripts/spur_midtrain_3node.sbatch",
       "classification": "active",
       "lifecycle": "active",
-      "production": true,
-      "role": "3-node 24-rank FSDP midtrain launcher (defaults to midtrain_24gpu.json)"
+      "role": "14B-only 24-rank midtrain launcher retained for experiment reproduction"
     },
     {
       "path": "scripts/spur_midtrain_3node_dedicated.sbatch",
       "classification": "active",
       "lifecycle": "active",
-      "production": true,
-      "role": "3-node 24-rank FSDP midtrain launcher on the dedicated non-preemptible allocation"
+      "role": "14B-only dedicated midtrain launcher retained for experiment reproduction"
     },
     {
       "path": "scripts/spur_midtrain_4node.sbatch",
       "classification": "active",
       "lifecycle": "active",
-      "production": true,
-      "role": "4-node 32-rank FSDP midtrain launcher (defaults to midtrain_32gpu.json)"
+      "role": "14B-only 32-rank midtrain launcher retained for experiment reproduction"
     },
     {
       "path": "scripts/spur_midtrain_8node_dedicated.sbatch",
       "classification": "active",
       "lifecycle": "active",
-      "production": true,
-      "role": "8-node 64-rank FSDP midtrain launcher on the dedicated non-preemptible allocation"
+      "role": "14B-only dedicated midtrain launcher retained for experiment reproduction"
     },
     {
       "path": "scripts/spur_midtrain_multinode.sbatch",
       "classification": "active",
       "lifecycle": "active",
-      "production": true,
-      "role": "N-node 64-rank FSDP midtrain launcher (defaults to midtrain_64gpu.json)"
+      "role": "14B-only multinode midtrain launcher retained for experiment reproduction"
     },
     {
       "path": "scripts/spur_partition.py",
@@ -467,14 +489,14 @@
       "classification": "active",
       "lifecycle": "active",
       "production": true,
-      "role": "unattended stage driver: midtrain -> A/B eval -> SFT -> A/B eval, gated on verified consolidated checkpoints rather than scheduler state, resubmitting through JobHoldMaxRequeue; stops before DPO"
+      "role": "unattended production driver: direct instruct -> SFT -> A/B evaluation; KORE_RECIPE=cpt retains the 14B-only midtrain/residual experiment and stops before DPO"
     },
     {
       "path": "scripts/spur_residual_1node.sbatch",
       "classification": "active",
       "lifecycle": "active",
       "deletes_artifacts": false,
-      "note": "compute-node launcher for build_residual.py"
+      "note": "compute-node launcher for the 14B-only residual experiment"
     },
     {
       "path": "scripts/spur_resolve_launch_config.py",
@@ -488,7 +510,7 @@
       "classification": "active",
       "lifecycle": "active",
       "production": true,
-      "role": "single-node 8-rank stage-1 SFT launcher (trains the midtrain output; requeue-safe)"
+      "role": "single-node 8-rank SFT launcher; production must pass configs/sft_coder30b_a3b.json and '-' to preserve the direct instruct starting model"
     },
     {
       "path": "scripts/spur_stage_array.sbatch",

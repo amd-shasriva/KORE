@@ -109,3 +109,50 @@ def test_broken_pool_does_not_mask_the_keyerror(monkeypatch):
     monkeypatch.setitem(sys.modules, "kore.tasks.external", ext)
     with pytest.raises(KeyError):
         _import_get_task()("anything")
+
+
+def test_concurrent_resolvers_all_wait_for_a_slow_pool_load(monkeypatch):
+    """The race that cost ~870 episodes: a slow load must not be skipped.
+
+    load_pool() takes ~60s for 13.5k tasks. An earlier version set the
+    "loaded" flag before the load returned, so every other worker saw it,
+    found an empty dict and re-raised the original KeyError. With 32 workers
+    that failed the first ~870 episodes at 28,000/hour -- fast enough that the
+    throughput counter looked like a triumph.
+    """
+    import threading
+    import time as _time
+
+    reg = types.ModuleType("kore.tasks.registry")
+    reg.get_task = lambda tid: (_ for _ in ()).throw(KeyError(tid))
+    monkeypatch.setitem(sys.modules, "kore.tasks.registry", reg)
+
+    loads = []
+    ext = types.ModuleType("kore.tasks.external")
+
+    def slow_load():
+        loads.append(1)
+        _time.sleep(0.3)                      # stands in for the ~60s real load
+        return [_T("kbk_x", "pool")]
+
+    ext.load_pool = slow_load
+    monkeypatch.setitem(sys.modules, "kore.tasks.external", ext)
+
+    resolve = _import_get_task()
+    results, errors = [], []
+
+    def worker():
+        try:
+            results.append(resolve("kbk_x").origin)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"{len(errors)}/16 workers raced past the load: {errors[:2]}"
+    assert results == ["pool"] * 16
+    assert loads == [1], "the pool must load exactly once, not per worker"

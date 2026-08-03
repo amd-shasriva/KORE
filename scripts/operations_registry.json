@@ -77,6 +77,13 @@
       "note": "read-only audit of a training file against the held-out eval set"
     },
     {
+      "path": "scripts/build_agentic_sft_slice.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "filters and decontaminates agentic shards into an SFT slice; never mutates the shards it reads"
+    },
+    {
       "path": "scripts/build_residual.py",
       "classification": "active",
       "lifecycle": "active",

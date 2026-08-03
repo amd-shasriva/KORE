@@ -86,6 +86,8 @@ def generate_agentic_trajectories(
     max_turns: int = 8,
     keep_only_useful: bool = False,
     thinking: bool = True,
+    workers: int = 1,
+    env_factory=None,
 ) -> list[AgenticTrajectoryRecord]:
     """Run ``n`` agentic episodes and return their trajectory records.
 
@@ -100,10 +102,20 @@ def generate_agentic_trajectories(
         records: list[AgenticTrajectoryRecord] = []
         t_start = time.time()
         categories: Counter = Counter()
-        for idx in range(total):
-            harness = AgentHarness(task, teacher, env, max_turns=max_turns)
+
+        def _one(idx: int):
+            # Each episode needs its own env when running concurrently: the
+            # harness builds, tests and benches through it, and two episodes
+            # sharing one would interleave those. env_factory supplies a private
+            # one; without it we fall back to serialising env access, which
+            # still overlaps the teacher round-trips that dominate wall clock.
+            local_env = env_factory() if env_factory is not None else env
+            harness = AgentHarness(task, teacher, local_env, max_turns=max_turns)
             episode = harness.run()
             rec = episode_to_record(episode, task, teacher=teacher, thinking=thinking)
+            return idx, episode, rec
+
+        def _record(idx, episode, rec, done):
             tool_calls = [t.get("name") for t in episode.tool_trace]
             category = rec.provenance.get("category")
             categories[category] += 1
@@ -114,11 +126,38 @@ def generate_agentic_trajectories(
                 category=category, n_tool_calls=len(tool_calls),
                 tool_calls=tool_calls,
             )
-            dropped = keep_only_useful and category == "attempt"
-            if not dropped:
+            if not (keep_only_useful and category == "attempt"):
                 records.append(rec)
-            log.progress(idx + 1, total, "agentic", t_start=t_start,
-                         kept=len(records))
+            log.progress(done, total, "agentic", t_start=t_start, kept=len(records))
+
+        # Concurrency requires a private env per episode. Guarding a shared env
+        # with a lock would serialise the whole episode -- build, test and bench
+        # all run through it -- leaving the threads no work to overlap, so it
+        # would be serial execution wearing a thread pool. Refuse to pretend.
+        if workers > 1 and env_factory is None:
+            log.event("agentic_workers_ignored", requested=workers,
+                      reason="no env_factory; a shared env cannot be used concurrently")
+            workers = 1
+        if workers <= 1 or total <= 1:
+            for idx in range(total):
+                _record(*_one(idx), idx + 1)
+        else:
+            # Episodes are independent, and each turn is a teacher round-trip
+            # (network) plus a verification (GPU). Serially that leaves both
+            # idle waiting on the other; the loop was the throughput ceiling,
+            # not the gateway. Threads suffice because both legs release the
+            # GIL. Results are appended in completion order, so callers that
+            # need determinism must sort -- generation order is not meaningful
+            # here since every episode is an independent sample.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            done = 0
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_one, i) for i in range(total)]
+                for fut in as_completed(futures):
+                    idx, episode, rec = fut.result()
+                    done += 1
+                    _record(idx, episode, rec, done)
         log.metric(
             "agentic_summary", task=getattr(task, "task_id", None),
             episodes=total, kept=len(records), by_category=dict(categories),

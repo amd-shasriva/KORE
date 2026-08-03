@@ -43,8 +43,9 @@ assembly" cannot be executed against this repository at all.
 
 ### Why the Triton slice is the one that matters, and why it is not duplicative
 
-Another agent already ingested HipKittens (`kore/data/hipkittens.py`). That
-module made a deliberate and correct call: HipKittens kernels are C++ that
+Another agent is ingesting HipKittens, in a `kore.data` module that was still
+uncommitted when this was written. It made a deliberate and correct call:
+HipKittens kernels are C++ that
 `#include "kittens.cuh"`, so training them as `FULL_KERNEL` responses would
 teach the model to answer with code the harness cannot compile — negative
 transfer that looks like clean data. It therefore emits knowledge-QA rows

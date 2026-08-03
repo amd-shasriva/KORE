@@ -318,18 +318,50 @@ def test_the_gate_is_behavioural_so_unused_parameters_do_not_disqualify():
     assert outcome.accepted, f"{outcome.reason}: {outcome.detail}"
 
 
-def test_input_scalability_is_measured_not_assumed(accepted_spec):
-    """A weight input must not have its leading dimension scaled.
+#: A conv whose weight shape is pinned by the activation's channel count. Scaling
+#: the weight's leading dimension makes ``out_channels != in_channels``, which
+#: ``conv2d`` accepts once and then rejects on the next layer -- so this is the
+#: case where "scale every input" is not merely different, it is broken.
+CONV_MODULE = '''
+import torch
+import torch.nn as nn
+
+
+class TinyConv(nn.Module):
+    def __init__(self, c):
+        super().__init__()
+        self.c = c
+
+    def forward(self, x, w):
+        h = torch.nn.functional.conv2d(x, w, padding=1)
+        return torch.nn.functional.conv2d(h, w, padding=1)
+
+
+def get_inputs():
+    return [torch.rand([4, 16, 16, 16]), torch.rand((16, 16, 3, 3)) - 0.5]
+
+
+def get_init_inputs():
+    return [[], {'c': 16}]
+'''
+
+
+def test_input_scalability_is_measured_not_assumed():
+    """A weight whose shape is pinned by the activation must not be scaled.
 
     ``describe_tensor`` marks every input scalable, which is right for activations
-    and wrong for a weight: scaling a conv weight's out-channels breaks the
+    and wrong for a pinned weight: scaling a conv weight's out-channels breaks the
     forward at every scale above 1, and the module was then dropped as "no
-    runnable scale" -- a good task lost to a guess.
+    runnable scale" -- a good task lost to a guess rather than a measurement.
     """
-    assert accepted_spec.input_specs[0].scalable, "the activation should scale"
-    assert not any(spec.scalable for spec in accepted_spec.input_specs[1:]), \
-        "the weights must stay at their declared shape"
-    assert accepted_spec.primary_scale > 1
+    outcome = mining.screen_candidate(
+        _candidate(source=CONV_MODULE, name="TinyConv", entry="TinyConv")
+    )
+    assert outcome.accepted, f"{outcome.reason}: {outcome.detail}"
+    specs = outcome.spec.input_specs
+    assert specs[0].scalable, "the activation should scale"
+    assert not specs[1].scalable, "the weight must stay at its declared shape"
+    assert outcome.spec.primary_scale > 1
 
 
 def test_the_accepted_primary_shape_clears_the_optimization_floor(accepted_spec):

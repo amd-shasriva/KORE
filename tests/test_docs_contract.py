@@ -121,6 +121,11 @@ ABSENT_PATHS: dict[str, str] = {
     "data/b05factory/sft/kernel_multiturn_refine.jsonl":
         "cluster-only; the filtered trajectory slice reassemble.sh concatenates "
         "onto multicap.jsonl to rebuild multicap_v2.jsonl offline",
+    "data/b05factory/dpo/pairs.jsonl":
+        "cluster-only preference corpus (SPUR: 1,093,321,730 B); materialize with "
+        "data/release/reassemble.sh. Named in DATASET_STATUS.md; the check passed "
+        "only where the artifact happened to be materialized already, so a fresh "
+        "checkout failed on it",
     # ---- outputs the documented command itself creates --------------------- #
     "data/b05factory/sft/hipkittens.jsonl":
         "written by scripts/build_hipkittens_sft.py, the command "

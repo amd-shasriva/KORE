@@ -70,6 +70,93 @@ def clip_higher_ratio(ratio, advantage, lo: float = 0.2, hi: float = 0.28):
     return min(ratio * advantage, clipped * advantage)
 
 
+def dual_clip_ratio(ratio, advantage, lo: float = 0.2, hi: float = 0.28,
+                    c: float = 3.0):
+    """Dual-clip PPO: bound the surrogate when the advantage is NEGATIVE.
+
+    The standard clipped surrogate ``min(r*A, clip(r, 1-lo, 1+hi)*A)`` is bounded
+    above for ``A > 0`` -- the clip caps it at ``(1+hi)*A``. For ``A < 0`` it is
+    NOT bounded below: as ``r`` grows, ``r*A`` goes to minus infinity and ``min``
+    selects it, so the loss ``-surrogate`` grows without limit and one sample can
+    own the whole gradient. Dual-clip (Ye et al. 2020, "Mastering Complex Control
+    in MOBA Games") adds the floor ``c*A``, ``c > 1``:
+
+        A >= 0:  min(r*A, clip(r, 1-lo, 1+hi)*A)          # unchanged
+        A <  0:  max(min(r*A, clip(r, 1-lo, 1+hi)*A), c*A) # floored
+
+    ``c <= 1`` (or 0/None) disables the floor and returns
+    :func:`clip_higher_ratio` byte-for-byte, so this is a strict extension.
+
+    The floor may only be applied where ``A < 0``. Applying ``max(., c*A)``
+    unconditionally would REPLACE the surrogate whenever ``A > 0``, because then
+    ``c*A > (1+hi)*A``, silently turning the objective into an unclipped
+    ``c*A``. The sign test is therefore not an optimisation.
+
+    Works on plain floats (pure, unit-testable) and, in the training path, on a
+    differentiable 0-dim torch ``ratio`` -- the advantage is always a Python float
+    there, so the branch is decided outside the graph and the clamped region keeps
+    a well-defined zero gradient.
+    """
+    surrogate = clip_higher_ratio(ratio, advantage, lo, hi)
+    if not c or c <= 1.0:
+        return surrogate
+    if advantage >= 0.0:
+        return surrogate
+    floor = c * advantage                     # negative, so it is a lower bound
+    if hasattr(surrogate, "clamp"):
+        return surrogate.clamp(min=float(floor))
+    return max(surrogate, floor)
+
+
+def mismatch_weight(train_logp, rollout_logp, cap: float = 2.0) -> float:
+    """Truncated importance weight ``min(pi_train/pi_rollout, cap)``.
+
+    Corrects for the ROLLOUT policy not being exactly the policy being trained.
+    In this loop that gap is numerical rather than algorithmic: the sharded run
+    generates on a plain full-weight per-rank replica and trains through the FSDP
+    wrapper, so the two evaluate the same weights on different code paths. The
+    samples come from the replica, the gradient is wanted for the trainer, and the
+    ratio between them is the correction.
+
+    Truncation is a deliberate bias-for-variance trade: an untruncated weight has
+    unbounded variance, so a single sample whose rollout probability was tiny can
+    dominate a step. Capping bounds that at the cost of under-weighting the tail.
+    Only the upper tail is capped -- a small weight merely discounts one sample,
+    which is harmless.
+
+    Returns 1.0 (exactly no correction) when either log-prob is missing or
+    non-finite, rather than a fabricated weight. Because KORE's log-probs are
+    token-MEAN (the GSPO sequence ratio, not a summed-sequence ratio), a healthy
+    weight sits within about a percent of 1.0, so a cap near 2.0 is loose
+    defense-in-depth and a MEASURED weight far from 1.0 is a bug report about
+    rollout/training divergence rather than something to correct away.
+    """
+    train = _finite_float(train_logp)
+    rollout = _finite_float(rollout_logp)
+    if train is None or rollout is None:
+        return 1.0
+    try:
+        weight = math.exp(train - rollout)
+    except OverflowError:
+        weight = float("inf")
+    if not math.isfinite(weight) or weight < 0.0:
+        return float(cap) if cap and cap > 0.0 else 1.0
+    if cap and cap > 0.0:
+        return min(weight, float(cap))
+    return weight
+
+
+def _finite_float(value) -> Optional[float]:
+    """A usable float, or None. Tensors are accepted via ``float()``."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 def is_overlong(n_tokens: int, max_response_length: int, buffer_len: int) -> bool:
     """DAPO Overlong Filtering predicate (pure, unit-testable).
 
@@ -1010,7 +1097,8 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
                            clip_ratio_low: float = 0.2, clip_ratio_high: float = 0.28,
                            variance_floor: float = 0.0, avspo_virtual_k: int = 2,
                            adv_eps: float = _EPS, backward: bool = True,
-                           advantage_estimator: str = _trloo.GRPO):
+                           advantage_estimator: str = _trloo.GRPO,
+                           dual_clip_c: float = 0.0):
     """Micro-batched GRPO loss: one ``backward()`` per sample, grads accumulated.
 
     ``kept_groups`` is a list of groups (the StarPO-S-kept task groups); each
@@ -1083,7 +1171,8 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
             old_lp = _sample_field(sample, 3)
             if old_lp is not None:
                 ratio = torch.exp(lp - old_lp)  # turn-level geometric-mean (Turn-PPO)
-                pg = -clip_higher_ratio(ratio, adv, clip_ratio_low, clip_ratio_high)
+                pg = -dual_clip_ratio(ratio, adv, clip_ratio_low,
+                                      clip_ratio_high, dual_clip_c)
             else:
                 pg = -adv * lp  # vanilla PG (no stored old_logp)
             sc_w = _sample_field(sample, 5)
@@ -1132,6 +1221,40 @@ def _grpo_step_adv_stats(kept_groups, config):
             if len(s) > 2 and s[2] is not None:
                 n_kl += 1
     return (total / n if n else 0.0), n_kl
+
+
+def _grpo_step_mismatch_stat(kept_groups, cap: float = 2.0):
+    """Mean/max rollout-vs-training importance weight over kept samples.
+
+    A diagnostic first and a correction second. With ``ppo_epochs=1`` the stored
+    ``old_logp`` was recomputed on the same weights that will be trained, so a
+    healthy step reports a mean weight of essentially 1.0. A mean that drifts, or
+    a max pinned at the cap, says the rollout and training policies disagree --
+    FSDP resharding, a dtype change, a stale replica -- which is a bug to find
+    rather than a number to divide out.
+
+    Returns ``(mean, max)`` or ``(None, None)`` when no sample carries the pair,
+    so the logger records a null instead of a misleading 1.0.
+    """
+    weights: list[float] = []
+    for samples in kept_groups:
+        for s in samples:
+            old_lp = _sample_field(s, 3)
+            if old_lp is None:
+                continue
+            # ``old_logp`` is the rollout-time log-prob; ``ret`` carries no
+            # log-prob, so a training-side value is only available once the step
+            # has recomputed it. Where it has not, the weight is exactly 1.0 by
+            # construction and contributes no information -- so it is skipped
+            # rather than padded in, which would drag the mean toward 1.0 and hide
+            # a real divergence.
+            train_lp = _sample_field(s, 7)
+            if train_lp is None:
+                continue
+            weights.append(mismatch_weight(train_lp, old_lp, cap))
+    if not weights:
+        return None, None
+    return sum(weights) / len(weights), max(weights)
 
 
 def _grpo_step_kl_stat(kept_groups):
@@ -2470,7 +2593,8 @@ def _train_grpo_fallback(config, tasks):
                 ref_anchor_coef=config.ref_anchor_coef,
                 clip_ratio_low=config.clip_ratio_low, clip_ratio_high=config.clip_ratio_high,
                 variance_floor=config.variance_floor, avspo_virtual_k=config.avspo_virtual_k,
-                adv_eps=config.adv_eps, advantage_estimator=_estimator)
+                adv_eps=config.adv_eps, advantage_estimator=_estimator,
+                dual_clip_c=float(getattr(config, "dual_clip_c", 0.0) or 0.0))
             if n_terms == 0:
                 break
             _record_optimizer_tokens(
@@ -2830,14 +2954,15 @@ def _accumulate_grpo_grads_distributed(local_terms, logp_fn, *, accelerator,
                                        global_total_tokens: int, grad_scale: float,
                                        max_micro_steps: int, ref_anchor_coef: float,
                                        clip_ratio_low: float, clip_ratio_high: float,
-                                       tok, device):
+                                       tok, device, dual_clip_c: float = 0.0):
     """Sharded O(1-sample) micro-batched backward, kept in LOCKSTEP across ranks.
 
     ``local_terms`` is this rank's list of ``(advantage, sample)`` pairs (sample =
     ``[ret, gen_inputs, ref_logp, old_logp, n_tokens, sc_weight]``). Each real
     sample recomputes its token-mean log-prob against the SHARDED live policy
     (``logp_fn`` -> a collective forward), forms the DAPO clip-higher surrogate
-    ``-min(r*A, clip(r,1-lo,1+hi)*A)`` (+ k3 KL anchor), scales by
+    ``-min(r*A, clip(r,1-lo,1+hi)*A)``, floored at ``c*A`` where the advantage is
+    negative when ``dual_clip_c > 1`` (:func:`dual_clip_ratio`), (+ k3 KL anchor), scales by
     ``n_tok / global_total_tokens`` for a GLOBAL token-mean over the whole batch
     across ALL ranks, and backprops via ``accelerator.backward`` (FSDP/DeepSpeed
     reduce-scatter accumulates into the sharded grad).
@@ -2873,7 +2998,8 @@ def _accumulate_grpo_grads_distributed(local_terms, logp_fn, *, accelerator,
             old_lp = _sample_field(sample, 3)
             if old_lp is not None:
                 ratio = torch.exp(lp - old_lp)
-                pg = -clip_higher_ratio(ratio, adv, clip_ratio_low, clip_ratio_high)
+                pg = -dual_clip_ratio(ratio, adv, clip_ratio_low,
+                                      clip_ratio_high, dual_clip_c)
             else:
                 pg = -adv * lp
             sc_w = _sample_field(sample, 5)
@@ -3532,7 +3658,8 @@ def _train_grpo_distributed(config, tasks):
                 global_total_tokens=global_total_tokens, grad_scale=float(world),
                 max_micro_steps=max_micro, ref_anchor_coef=config.ref_anchor_coef,
                 clip_ratio_low=config.clip_ratio_low, clip_ratio_high=config.clip_ratio_high,
-                tok=tok, device=accelerator.device)
+                tok=tok, device=accelerator.device,
+                dual_clip_c=float(getattr(config, "dual_clip_c", 0.0) or 0.0))
             if n_terms:
                 _record_optimizer_tokens(config, local_tokens)
             accelerator.clip_grad_norm_(model.parameters(), config.max_grad_norm)

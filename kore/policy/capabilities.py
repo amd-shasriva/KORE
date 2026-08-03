@@ -243,6 +243,14 @@ def _finite_range(
         errors.append(f"{name} must be in {left}{minimum}{right}")
 
 
+def _finite_or_none(value: Any) -> Optional[float]:
+    """A finite float, or None for anything that is not a usable number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
 def validate_grpo_config(config: Any, *, strict: Optional[bool] = None) -> None:
     """Validate scalar budgets and, for strict profiles, feature topology."""
 
@@ -301,6 +309,28 @@ def validate_grpo_config(config: Any, *, strict: Optional[bool] = None) -> None:
             f"advantage_estimator must be one of {list(trloo.ESTIMATORS)}, "
             f"got {estimator!r}"
         )
+
+    # dual_clip_c is either disabled (<= 0) or a real floor (> 1). A value in
+    # (0, 1] would read as "enabled" while dual_clip_ratio ignores it, so the
+    # config would state a bound the update does not apply.
+    dual_clip = _finite_or_none(getattr(config, "dual_clip_c", 0.0))
+    if dual_clip is None:
+        errors.append("dual_clip_c must be a finite number")
+    elif 0.0 < dual_clip <= 1.0:
+        errors.append(
+            "dual_clip_c must be > 1.0 to floor the negative-advantage "
+            "surrogate, or <= 0.0 to disable it; "
+            f"{dual_clip} is silently inert"
+        )
+    _finite_range(config, "mismatch_weight_cap", errors, minimum=0.0)
+    if bool(getattr(config, "mismatch_correction", False)):
+        cap = _finite_or_none(getattr(config, "mismatch_weight_cap", 0.0))
+        if cap is None or cap <= 1.0:
+            errors.append(
+                "mismatch_correction needs mismatch_weight_cap > 1.0; a cap at "
+                "or below 1.0 would clamp every importance weight and turn the "
+                "correction into a uniform downscaling of the gradient"
+            )
 
     try:
         BudgetLimitsV1.from_mapping(getattr(config, "budget_limits", None))

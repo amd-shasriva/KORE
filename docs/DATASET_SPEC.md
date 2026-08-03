@@ -94,9 +94,17 @@ The 24 `spec_*` tasks are the one shape that was genuinely absent. They declare
 `task_kind: spec_synthesis`, carry the contract as prose in `spec.md`, and ship a
 seed that is a signature stub with no body — so the specification is something
 the model must read rather than a reference it can paraphrase. Their oracle, SNR
-gate, adversarial battery and timing protocol are `_genops`' unchanged. They are
-proven by `scripts/verify_spec_tasks_e2e.py`, which requires both that a real
-from-scratch kernel passes and that the stub does not.
+gate, adversarial battery and timing protocol are `_genops`' unchanged.
+
+**These 24 tasks are not yet proven on gfx950.** `scripts/verify_spec_tasks_e2e.py`
+is the prover — it requires both that a real from-scratch kernel clears the gate
+on every shape and times cleanly, and that the signature stub does not pass — but
+it has not run: the QoS node cap was fully held by a datagen campaign and cluster
+access was lost before a node freed. The outstanding state is recorded in
+`data/spec_task_verification.json` as `PENDING`, and
+`tests/test_spec_synthesis_contract.py` asserts that a `PENDING` verdict cannot be
+read as a pass and that no document claims otherwise. Until that artifact records
+`PASS`, this family must not be counted as verified coverage.
 
 No HIP task declares a vendor baseline, and that is a measurement result rather
 than an omission: the one HIP operator whose production bar is a vendor kernel

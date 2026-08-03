@@ -133,6 +133,12 @@
       "note": "builds the v3 SFT mixture from step-centric AMD trajectories, recovered rows and the v2 base; never mutates its inputs"
     },
     {
+      "path": "scripts/build_supplementary_shard.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "select the high-value families the main datagen wave under-samples and shard them for a loose box"
+    },
+    {
       "path": "scripts/build_task_pool.py",
       "classification": "active",
       "lifecycle": "active",
@@ -144,6 +150,12 @@
       "classification": "active",
       "lifecycle": "active",
       "role": "SPUR-compatible repair/groups worker"
+    },
+    {
+      "path": "scripts/datagen_failure_probe.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "split a datagen wave's failures by cause, separating over-subscription from bad kernels"
     },
     {
       "path": "scripts/datagen_half.sh",
@@ -215,6 +227,12 @@
       "classification": "deprecated",
       "lifecycle": "deprecated",
       "replacement": "scripts/spur_supervise_datagen.py"
+    },
+    {
+      "path": "scripts/launch_b501_supplementary.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "run the supplementary datagen wave on this host's genuinely-free GPUs"
     },
     {
       "path": "scripts/launch_distributed.sh",

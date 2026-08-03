@@ -1134,7 +1134,13 @@ class EvolveAgentConfig:
     #: Admissions with no new or improved niche before exploration is forced.
     collapse_window: int = 8
     seed: int = 0
-    reward_cfg: Any = CONFIG
+    # default_factory, not a bare default: CONFIG is a mutable (unhashable)
+    # dataclass instance, and from Python 3.11 that is a hard ValueError at class
+    # creation time rather than a warning. It raised on the cluster's 3.12.3 while
+    # passing on 3.10 here, which meant this whole module could not be IMPORTED
+    # there -- the failure surfaces at collection, so every evolve test errored
+    # out and the search would have died the moment RL tried to use it.
+    reward_cfg: Any = field(default_factory=lambda: CONFIG)
 
 
 @dataclass

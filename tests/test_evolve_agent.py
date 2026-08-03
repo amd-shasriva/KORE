@@ -740,6 +740,35 @@ def test_the_verifier_budget_is_a_hard_cap():
     assert len(env.calls) <= 5
 
 
+def test_a_budget_stop_is_not_recorded_as_a_wrong_kernel():
+    """"We did not measure it" and "it was wrong" are different facts.
+
+    Filing a budget stop under the incorrect count puts a verdict about a kernel
+    into the run log that no oracle ever produced - the same defect as a
+    fabricated timing, wearing a different hat. It also silently inflates the
+    failure rate of whatever the run was truncated in the middle of.
+    """
+    env = ScriptedEnv({}, default=("ok", 1.5))
+    evaluator = StableEvaluator(env, FakeTask(), Budget(1))
+    first = evaluator.screen(marked(kernel("a"), "a"))
+    stopped = evaluator.screen(marked(kernel("b"), "b"))
+
+    assert first.correct is True and first.budget_exhausted is False
+    assert stopped.budget_exhausted is True
+    assert stopped.verified is False
+    assert len(env.calls) == 1, "a stopped evaluation must not touch the verifier"
+
+    archive = Archive()
+    archive.add(candidate_from_trial(first, 1, None))
+    decision = archive.add(candidate_from_trial(stopped, 1, None))
+    assert decision.verdict == "unmeasured"
+    assert archive.verdict_counts()["incorrect"] == 0
+    assert archive.rejected == []            # not a guard rejection
+    assert len(archive.unmeasured) == 1
+    assert archive.summary()["unmeasured"] == 1
+    assert decision.candidate.admissible is False
+
+
 def test_a_crashing_verifier_is_a_datum_not_an_exception():
     class Exploding:
         def step(self, *a, **kw):

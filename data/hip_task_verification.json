@@ -1,0 +1,1156 @@
+{
+  "artifact_type": "kore.hip-task-verification",
+  "schema_version": "1.0",
+  "recorded_at": "2026-08-03T08:42:39.865016+00:00",
+  "git_head": "c2ca442459f92f45d3e76e0e9b9a9620edbdf4b0",
+  "how_to_reproduce": [
+    "PYTHONPATH=. python scripts/verify_hip_seeds.py --gpu 0 --adversarial",
+    "PYTHONPATH=. python scripts/verify_hip_tasks_e2e.py --gpu 0 --verified-correctness",
+    "sbatch scripts/spur_hip_verify_1node.sbatch -   # on a cluster GPU node"
+  ],
+  "host": {
+    "note": "local dev host, 8x AMD Instinct MI350X; same gfx950/CDNA4 architecture as the MI355X product target",
+    "device": "gfx950:sramecc+:xnack-",
+    "torch": "2.10.0+rocm7.0",
+    "torch_hip": "7.0.51831",
+    "hipcc": "HIP version: 7.2.53211-c2d9476115"
+  },
+  "toolchain": {
+    "available": true,
+    "hipcc": "/usr/bin/hipcc",
+    "ninja": "/home/shasriva/kore-venv/bin/ninja",
+    "torch_hip_version": "7.0.51831",
+    "rocm_home": "/opt/rocm-7.2.3",
+    "missing": [],
+    "detail": ""
+  },
+  "end_to_end": {
+    "gate": "each task evaluated through kore.env.kore_env.KoreEnv with its OWN declared seed as the candidate, adversarial regimes enabled, full paired publication timing protocol",
+    "n_tasks": 20,
+    "n_runnable": 20,
+    "rows": [
+      {
+        "task_id": "hip_dequant_mxfp4_mxfp4",
+        "backend": "hip",
+        "dtype": "mxfp4",
+        "operation": "hip_dequant_mxfp4",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 999.0,
+        "snr_by_shape": {
+          "minimal": 999.0,
+          "primary": 999.0,
+          "validation_0": 999.0,
+          "validation_1": 999.0,
+          "validation_2": 999.0
+        },
+        "gate_db": 40.0,
+        "speedup": 11.768878776757184,
+        "wall_by_shape": {
+          "minimal": 0.10959900170564651,
+          "primary": 0.10923899710178375,
+          "validation_0": 0.11027900129556656,
+          "validation_1": 0.10868000239133835,
+          "validation_2": 0.11063899844884872
+        },
+        "cv_pct": 0.4660026853298711,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 16.2,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_gelu_tanh_bf16",
+        "backend": "hip",
+        "dtype": "bf16",
+        "operation": "hip_gelu_tanh",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 999.0,
+        "snr_by_shape": {
+          "minimal": 999.0,
+          "primary": 999.0,
+          "validation_0": 999.0,
+          "validation_1": 999.0,
+          "validation_2": 999.0
+        },
+        "gate_db": 35.0,
+        "speedup": 0.5921666805842817,
+        "wall_by_shape": {
+          "minimal": 0.14503900706768036,
+          "primary": 0.1303589940071106,
+          "validation_0": 0.1459590047597885,
+          "validation_1": 0.14567899703979492,
+          "validation_2": 0.1459989994764328
+        },
+        "cv_pct": 0.9823742178222847,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.3,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_gelu_tanh_fp16",
+        "backend": "hip",
+        "dtype": "fp16",
+        "operation": "hip_gelu_tanh",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 111.89,
+        "snr_by_shape": {
+          "minimal": 111.9,
+          "primary": 111.89,
+          "validation_0": 111.9,
+          "validation_1": 111.9,
+          "validation_2": 111.9
+        },
+        "gate_db": 35.0,
+        "speedup": 0.5964637243192211,
+        "wall_by_shape": {
+          "minimal": 0.1435990035533905,
+          "primary": 0.12811900675296783,
+          "validation_0": 0.14355899393558502,
+          "validation_1": 0.14379900693893433,
+          "validation_2": 0.14343899488449097
+        },
+        "cv_pct": 1.193654918808876,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 15.1,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_gelu_tanh_fp32",
+        "backend": "hip",
+        "dtype": "fp32",
+        "operation": "hip_gelu_tanh",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 162.49,
+        "snr_by_shape": {
+          "minimal": 162.5,
+          "primary": 162.49,
+          "validation_0": 162.5,
+          "validation_1": 162.5,
+          "validation_2": 162.5
+        },
+        "gate_db": 35.0,
+        "speedup": 0.8591648054974452,
+        "wall_by_shape": {
+          "minimal": 0.16495800018310547,
+          "primary": 0.14555799961090088,
+          "validation_0": 0.16339799761772156,
+          "validation_1": 0.1640789955854416,
+          "validation_2": 0.1640789955854416
+        },
+        "cv_pct": 0.44226662634173397,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.4,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_layernorm_bf16",
+        "backend": "hip",
+        "dtype": "bf16",
+        "operation": "hip_layernorm",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 96.74,
+        "snr_by_shape": {
+          "minimal": 97.67,
+          "primary": 98.03,
+          "validation_0": 96.74,
+          "validation_1": 98.07,
+          "validation_2": 97.0
+        },
+        "gate_db": 30.0,
+        "speedup": 0.5804872573231911,
+        "wall_by_shape": {
+          "minimal": 0.18375800549983978,
+          "primary": 0.18483799695968628,
+          "validation_0": 0.18655799329280853,
+          "validation_1": 0.20499800145626068,
+          "validation_2": 0.19147799909114838
+        },
+        "cv_pct": 0.6387057811099799,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.8,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_layernorm_fp16",
+        "backend": "hip",
+        "dtype": "fp16",
+        "operation": "hip_layernorm",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 105.83,
+        "snr_by_shape": {
+          "minimal": 107.13,
+          "primary": 107.32,
+          "validation_0": 106.73,
+          "validation_1": 107.64,
+          "validation_2": 105.83
+        },
+        "gate_db": 30.0,
+        "speedup": 0.5548922851397218,
+        "wall_by_shape": {
+          "minimal": 0.1826779991388321,
+          "primary": 0.18327799439430237,
+          "validation_0": 0.18643799424171448,
+          "validation_1": 0.2035979926586151,
+          "validation_2": 0.1897979974746704
+        },
+        "cv_pct": 0.4342943875390944,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 15.7,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_layernorm_fp32",
+        "backend": "hip",
+        "dtype": "fp32",
+        "operation": "hip_layernorm",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 121.78,
+        "snr_by_shape": {
+          "minimal": 121.78,
+          "primary": 143.72,
+          "validation_0": 124.7,
+          "validation_1": 143.94,
+          "validation_2": 141.69
+        },
+        "gate_db": 30.0,
+        "speedup": 0.5771353134181523,
+        "wall_by_shape": {
+          "minimal": 0.2519969940185547,
+          "primary": 0.23847800493240356,
+          "validation_0": 0.3204770088195801,
+          "validation_1": 0.24515800178050995,
+          "validation_2": 0.2500370144844055
+        },
+        "cv_pct": 0.7488650705152017,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 15.1,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_quant_fp8_pertoken_fp8_e4m3fn",
+        "backend": "hip",
+        "dtype": "fp8_e4m3fn",
+        "operation": "hip_quant_fp8_pertoken",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 56.73,
+        "snr_by_shape": {
+          "minimal": 56.73,
+          "primary": 57.19,
+          "validation_0": 58.07,
+          "validation_1": 57.56,
+          "validation_2": 56.83
+        },
+        "gate_db": 20.0,
+        "speedup": 3.319349479925302,
+        "wall_by_shape": {
+          "minimal": 0.14063799381256104,
+          "primary": 0.13807900249958038,
+          "validation_0": 0.1499989926815033,
+          "validation_1": 0.14719900488853455,
+          "validation_2": 0.14115899801254272
+        },
+        "cv_pct": 0.5650861815963945,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 15.2,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_rmsnorm_bf16",
+        "backend": "hip",
+        "dtype": "bf16",
+        "operation": "hip_rmsnorm",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 95.08,
+        "snr_by_shape": {
+          "minimal": 97.6,
+          "primary": 99.06,
+          "validation_0": 95.08,
+          "validation_1": 97.9,
+          "validation_2": 97.67
+        },
+        "gate_db": 30.0,
+        "speedup": 0.7060464321561729,
+        "wall_by_shape": {
+          "minimal": 0.14447900652885437,
+          "primary": 0.1419990062713623,
+          "validation_0": 0.15755799412727356,
+          "validation_1": 0.15151800215244293,
+          "validation_2": 0.14819900691509247
+        },
+        "cv_pct": 0.4401262174442383,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 15.1,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_rmsnorm_fp16",
+        "backend": "hip",
+        "dtype": "fp16",
+        "operation": "hip_rmsnorm",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 106.85,
+        "snr_by_shape": {
+          "minimal": 107.73,
+          "primary": 107.42,
+          "validation_0": 107.27,
+          "validation_1": 108.16,
+          "validation_2": 106.85
+        },
+        "gate_db": 30.0,
+        "speedup": 0.6138659691639807,
+        "wall_by_shape": {
+          "minimal": 0.14391900599002838,
+          "primary": 0.14091899991035461,
+          "validation_0": 0.15567900240421295,
+          "validation_1": 0.1491989940404892,
+          "validation_2": 0.1465590000152588
+        },
+        "cv_pct": 0.30812705290938774,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 15.2,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_rmsnorm_fp32",
+        "backend": "hip",
+        "dtype": "fp32",
+        "operation": "hip_rmsnorm",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 144.72,
+        "snr_by_shape": {
+          "minimal": 145.53,
+          "primary": 145.68,
+          "validation_0": 145.32,
+          "validation_1": 146.24,
+          "validation_2": 144.72
+        },
+        "gate_db": 30.0,
+        "speedup": 0.8032139568690803,
+        "wall_by_shape": {
+          "minimal": 0.2054779976606369,
+          "primary": 0.1863979995250702,
+          "validation_0": 0.21719799935817719,
+          "validation_1": 0.1693190038204193,
+          "validation_2": 0.20063799619674683
+        },
+        "cv_pct": 0.5134284064614048,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.9,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_silu_bf16",
+        "backend": "hip",
+        "dtype": "bf16",
+        "operation": "hip_silu",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 999.0,
+        "snr_by_shape": {
+          "minimal": 999.0,
+          "primary": 999.0,
+          "validation_0": 999.0,
+          "validation_1": 999.0,
+          "validation_2": 999.0
+        },
+        "gate_db": 35.0,
+        "speedup": 0.6351149169490682,
+        "wall_by_shape": {
+          "minimal": 0.13627900183200836,
+          "primary": 0.12123899906873703,
+          "validation_0": 0.13603900372982025,
+          "validation_1": 0.13599799573421478,
+          "validation_2": 0.1361989974975586
+        },
+        "cv_pct": 1.1060867034270938,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.2,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_silu_fp16",
+        "backend": "hip",
+        "dtype": "fp16",
+        "operation": "hip_silu",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 111.42,
+        "snr_by_shape": {
+          "minimal": 111.42,
+          "primary": 111.43,
+          "validation_0": 111.42,
+          "validation_1": 111.42,
+          "validation_2": 111.42
+        },
+        "gate_db": 35.0,
+        "speedup": 0.6391143975070688,
+        "wall_by_shape": {
+          "minimal": 0.1348789930343628,
+          "primary": 0.12111900001764297,
+          "validation_0": 0.13531899452209473,
+          "validation_1": 0.13531899452209473,
+          "validation_2": 0.1353590041399002
+        },
+        "cv_pct": 1.0688022310760241,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.4,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_silu_fp32",
+        "backend": "hip",
+        "dtype": "fp32",
+        "operation": "hip_silu",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 151.59,
+        "snr_by_shape": {
+          "minimal": 151.59,
+          "primary": 151.59,
+          "validation_0": 151.59,
+          "validation_1": 151.59,
+          "validation_2": 151.59
+        },
+        "gate_db": 35.0,
+        "speedup": 0.8867995391633904,
+        "wall_by_shape": {
+          "minimal": 0.15931899845600128,
+          "primary": 0.1415189951658249,
+          "validation_0": 0.15859900414943695,
+          "validation_1": 0.15831899642944336,
+          "validation_2": 0.1584780067205429
+        },
+        "cv_pct": 0.38237271427913727,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.2,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_silu_mul_bf16",
+        "backend": "hip",
+        "dtype": "bf16",
+        "operation": "hip_silu_mul",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 999.0,
+        "snr_by_shape": {
+          "minimal": 999.0,
+          "primary": 999.0,
+          "validation_0": 999.0,
+          "validation_1": 999.0,
+          "validation_2": 999.0
+        },
+        "gate_db": 35.0,
+        "speedup": 1.1567143317409385,
+        "wall_by_shape": {
+          "minimal": 0.1467989981174469,
+          "primary": 0.13215799629688263,
+          "validation_0": 0.14743900299072266,
+          "validation_1": 0.14755800366401672,
+          "validation_2": 0.1473580002784729
+        },
+        "cv_pct": 0.7042918524269224,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.4,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_silu_mul_fp16",
+        "backend": "hip",
+        "dtype": "fp16",
+        "operation": "hip_silu_mul",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 104.32,
+        "snr_by_shape": {
+          "minimal": 104.41,
+          "primary": 104.32,
+          "validation_0": 104.41,
+          "validation_1": 104.41,
+          "validation_2": 104.41
+        },
+        "gate_db": 35.0,
+        "speedup": 1.1819711365935317,
+        "wall_by_shape": {
+          "minimal": 0.14423799514770508,
+          "primary": 0.13011899590492249,
+          "validation_0": 0.14451900124549866,
+          "validation_1": 0.14423899352550507,
+          "validation_2": 0.1441580057144165
+        },
+        "cv_pct": 0.5002277277897791,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.7,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_silu_mul_fp32",
+        "backend": "hip",
+        "dtype": "fp32",
+        "operation": "hip_silu_mul",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 151.16,
+        "snr_by_shape": {
+          "minimal": 151.16,
+          "primary": 151.16,
+          "validation_0": 151.16,
+          "validation_1": 151.16,
+          "validation_2": 151.16
+        },
+        "gate_db": 35.0,
+        "speedup": 1.4735173056897373,
+        "wall_by_shape": {
+          "minimal": 0.21659700572490692,
+          "primary": 0.1935179978609085,
+          "validation_0": 0.215598002076149,
+          "validation_1": 0.215598002076149,
+          "validation_2": 0.21571800112724304
+        },
+        "cv_pct": 0.5039972219522906,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.5,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_softmax_rows_bf16",
+        "backend": "hip",
+        "dtype": "bf16",
+        "operation": "hip_softmax_rows",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 93.7,
+        "snr_by_shape": {
+          "minimal": 97.01,
+          "primary": 96.64,
+          "validation_0": 94.38,
+          "validation_1": 93.7,
+          "validation_2": 96.65
+        },
+        "gate_db": 30.0,
+        "speedup": 0.4143404804906103,
+        "wall_by_shape": {
+          "minimal": 0.20039799809455872,
+          "primary": 0.21091799437999725,
+          "validation_0": 0.20007799565792084,
+          "validation_1": 0.23699800670146942,
+          "validation_2": 0.21807800233364105
+        },
+        "cv_pct": 0.9720380312420646,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.4,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_softmax_rows_fp16",
+        "backend": "hip",
+        "dtype": "fp16",
+        "operation": "hip_softmax_rows",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 101.62,
+        "snr_by_shape": {
+          "minimal": 102.77,
+          "primary": 103.19,
+          "validation_0": 101.62,
+          "validation_1": 102.65,
+          "validation_2": 103.31
+        },
+        "gate_db": 30.0,
+        "speedup": 0.4111993763434064,
+        "wall_by_shape": {
+          "minimal": 0.19819800555706024,
+          "primary": 0.20779800415039062,
+          "validation_0": 0.19791799783706665,
+          "validation_1": 0.23479799926280975,
+          "validation_2": 0.21487799286842346
+        },
+        "cv_pct": 0.8949943139106499,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.8,
+        "runnable": true
+      },
+      {
+        "task_id": "hip_softmax_rows_fp32",
+        "backend": "hip",
+        "dtype": "fp32",
+        "operation": "hip_softmax_rows",
+        "compiled": true,
+        "correct": true,
+        "flagged_hack": false,
+        "hack_reason": null,
+        "infra_error": false,
+        "snr_db": 137.38,
+        "snr_by_shape": {
+          "minimal": 137.38,
+          "primary": 137.38,
+          "validation_0": 137.38,
+          "validation_1": 137.38,
+          "validation_2": 140.39
+        },
+        "gate_db": 30.0,
+        "speedup": 0.5454898019284306,
+        "wall_by_shape": {
+          "minimal": 0.2517569959163666,
+          "primary": 0.24323800206184387,
+          "validation_0": 0.3169170022010803,
+          "validation_1": 0.2699980139732361,
+          "validation_2": 0.24935799837112427
+        },
+        "cv_pct": 0.6326527479251066,
+        "performance_eligible": true,
+        "timing_protocol": "kore-paired-v2",
+        "timing_grade": "publication",
+        "error_text": "",
+        "seconds": 14.7,
+        "runnable": true
+      }
+    ]
+  },
+  "seed_level": {
+    "rows": [
+      {
+        "op": "gelu_tanh",
+        "dtype": "bf16",
+        "gate_db": 35.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 15.2,
+        "snr_by_shape": {
+          "minimal": 999.0,
+          "primary": 999.0
+        },
+        "worst_snr_db": 999.0,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1315,
+        "baseline_ms": 0.0748,
+        "seed_speedup": 0.569
+      },
+      {
+        "op": "gelu_tanh",
+        "dtype": "fp16",
+        "gate_db": 35.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 109.12,
+          "primary": 111.89
+        },
+        "worst_snr_db": 109.12,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1295,
+        "baseline_ms": 0.0745,
+        "seed_speedup": 0.575
+      },
+      {
+        "op": "gelu_tanh",
+        "dtype": "fp32",
+        "gate_db": 35.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 162.65,
+          "primary": 162.49
+        },
+        "worst_snr_db": 162.49,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1474,
+        "baseline_ms": 0.1254,
+        "seed_speedup": 0.85
+      },
+      {
+        "op": "gemm",
+        "dtype": "bf16",
+        "gate_db": 25.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 15.1,
+        "snr_by_shape": {
+          "minimal": 999.0,
+          "primary": 85.27
+        },
+        "worst_snr_db": 85.27,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 8.19,
+        "baseline_ms": 0.1202,
+        "seed_speedup": 0.015
+      },
+      {
+        "op": "gemm",
+        "dtype": "fp16",
+        "gate_db": 25.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 89.35,
+          "primary": 93.43
+        },
+        "worst_snr_db": 89.35,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 8.1663,
+        "baseline_ms": 0.1246,
+        "seed_speedup": 0.015
+      },
+      {
+        "op": "gemm",
+        "dtype": "fp32",
+        "gate_db": 25.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 136.05,
+          "primary": 126.76
+        },
+        "worst_snr_db": 126.76,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 8.3672,
+        "baseline_ms": 1.0534,
+        "seed_speedup": 0.126
+      },
+      {
+        "op": "layernorm",
+        "dtype": "bf16",
+        "gate_db": 30.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 15.2,
+        "snr_by_shape": {
+          "minimal": 117.42,
+          "primary": 98.03
+        },
+        "worst_snr_db": 98.03,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1861,
+        "baseline_ms": 0.1115,
+        "seed_speedup": 0.599
+      },
+      {
+        "op": "layernorm",
+        "dtype": "fp16",
+        "gate_db": 30.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 119.19,
+          "primary": 107.54
+        },
+        "worst_snr_db": 107.54,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1852,
+        "baseline_ms": 0.1076,
+        "seed_speedup": 0.581
+      },
+      {
+        "op": "layernorm",
+        "dtype": "fp32",
+        "gate_db": 30.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 143.37,
+          "primary": 143.72
+        },
+        "worst_snr_db": 143.37,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.238,
+        "baseline_ms": 0.1687,
+        "seed_speedup": 0.709
+      },
+      {
+        "op": "rmsnorm",
+        "dtype": "bf16",
+        "gate_db": 30.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 15.1,
+        "snr_by_shape": {
+          "minimal": 999.0,
+          "primary": 99.06
+        },
+        "worst_snr_db": 99.06,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1432,
+        "baseline_ms": 0.1076,
+        "seed_speedup": 0.752
+      },
+      {
+        "op": "rmsnorm",
+        "dtype": "fp16",
+        "gate_db": 30.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 102.02,
+          "primary": 107.5
+        },
+        "worst_snr_db": 102.02,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1413,
+        "baseline_ms": 0.0996,
+        "seed_speedup": 0.705
+      },
+      {
+        "op": "rmsnorm",
+        "dtype": "fp32",
+        "gate_db": 30.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 145.02,
+          "primary": 145.76
+        },
+        "worst_snr_db": 145.02,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1872,
+        "baseline_ms": 0.164,
+        "seed_speedup": 0.876
+      },
+      {
+        "op": "silu",
+        "dtype": "bf16",
+        "gate_db": 35.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 15.1,
+        "snr_by_shape": {
+          "minimal": 999.0,
+          "primary": 999.0
+        },
+        "worst_snr_db": 999.0,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1235,
+        "baseline_ms": 0.0778,
+        "seed_speedup": 0.63
+      },
+      {
+        "op": "silu",
+        "dtype": "fp16",
+        "gate_db": 35.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 109.83,
+          "primary": 111.43
+        },
+        "worst_snr_db": 109.83,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1223,
+        "baseline_ms": 0.0783,
+        "seed_speedup": 0.64
+      },
+      {
+        "op": "silu",
+        "dtype": "fp32",
+        "gate_db": 35.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 151.52,
+          "primary": 151.59
+        },
+        "worst_snr_db": 151.52,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.143,
+        "baseline_ms": 0.1271,
+        "seed_speedup": 0.889
+      },
+      {
+        "op": "silu_mul",
+        "dtype": "bf16",
+        "gate_db": 35.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 15.0,
+        "snr_by_shape": {
+          "minimal": 999.0,
+          "primary": 999.0
+        },
+        "worst_snr_db": 999.0,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1325,
+        "baseline_ms": 0.152,
+        "seed_speedup": 1.147
+      },
+      {
+        "op": "silu_mul",
+        "dtype": "fp16",
+        "gate_db": 35.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 99.63,
+          "primary": 104.49
+        },
+        "worst_snr_db": 99.63,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1299,
+        "baseline_ms": 0.1514,
+        "seed_speedup": 1.165
+      },
+      {
+        "op": "silu_mul",
+        "dtype": "fp32",
+        "gate_db": 35.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 150.74,
+          "primary": 151.16
+        },
+        "worst_snr_db": 150.74,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.1926,
+        "baseline_ms": 0.2876,
+        "seed_speedup": 1.494
+      },
+      {
+        "op": "softmax_rows",
+        "dtype": "bf16",
+        "gate_db": 30.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 15.2,
+        "snr_by_shape": {
+          "minimal": 85.55,
+          "primary": 97.13
+        },
+        "worst_snr_db": 85.55,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.213,
+        "baseline_ms": 0.0873,
+        "seed_speedup": 0.41
+      },
+      {
+        "op": "softmax_rows",
+        "dtype": "fp16",
+        "gate_db": 30.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 100.11,
+          "primary": 103.19
+        },
+        "worst_snr_db": 100.11,
+        "adversarial_worst_snr_db": 999.0,
+        "candidate_ms": 0.2094,
+        "baseline_ms": 0.0857,
+        "seed_speedup": 0.409
+      },
+      {
+        "op": "softmax_rows",
+        "dtype": "fp32",
+        "gate_db": 30.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 142.2,
+          "primary": 144.59
+        },
+        "worst_snr_db": 142.2,
+        "adversarial_worst_snr_db": 161.53,
+        "candidate_ms": 0.2422,
+        "baseline_ms": 0.1743,
+        "seed_speedup": 0.72
+      },
+      {
+        "op": "quant_fp8_pertoken",
+        "dtype": "fp8_e4m3fn",
+        "gate_db": 20.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.3,
+        "snr_by_shape": {
+          "minimal": 56.76,
+          "primary": 57.24
+        },
+        "worst_snr_db": 56.76,
+        "candidate_ms": 0.1399,
+        "baseline_ms": 0.4946,
+        "seed_speedup": 3.535
+      },
+      {
+        "op": "dequant_mxfp4",
+        "dtype": "mxfp4",
+        "gate_db": 40.0,
+        "hack_reason": null,
+        "compiled": true,
+        "gate_cleared": true,
+        "compile_s": 0.0,
+        "snr_by_shape": {
+          "minimal": 999.0,
+          "primary": 999.0
+        },
+        "worst_snr_db": 999.0,
+        "candidate_ms": 0.1094,
+        "baseline_ms": 1.3264,
+        "seed_speedup": 12.124
+      }
+    ]
+  },
+  "known_limitations": {
+    "hip_gemm": "compiles and verifies at 85-130 dB but is NOT timing-admissible on this host: the hipBLASLt baseline's own CV measures 3.4-5.6% against the 3% publication gate. Defined in kore/tasks/hip_ops.py with timing_admissible=False; not generated.",
+    "mxfp6": "no task: torch.float6_e2m3fn/float6_e3m2fn are absent from this stack.",
+    "cluster_compute_node": "hipcc availability on spur GPU compute nodes is UNVERIFIED; the login node is CPU-only with no hipcc. scripts/spur_hip_verify_1node.sbatch checks it.",
+    "timing_gate_flicker": "with 5 paired repeats and a 3% CV limit, a marginal task flickers between eligible and ineligible run to run. Observed 19-20/20 per batch across five batches; every task has been observed eligible."
+  }
+}

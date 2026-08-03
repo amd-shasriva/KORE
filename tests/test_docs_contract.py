@@ -111,6 +111,13 @@ ABSENT_PATHS: dict[str, str] = {
     "data/b05factory/sft/multicap.jsonl":
         "cluster-only (SPUR: 630,488,937 B / 56,493 rows); materialize with "
         "data/release/reassemble.sh",
+    "data/b05factory/sft/multicap_v2.jsonl":
+        "cluster-only (SPUR: 864,715,542 B / 61,122 rows); the mixture SFT "
+        "trains on -- base mix plus 4,629 multi-turn refinement trajectories; "
+        "materialize with data/release/reassemble.sh",
+    "data/b05factory/sft/kernel_multiturn_refine.jsonl":
+        "cluster-only; the filtered trajectory slice reassemble.sh concatenates "
+        "onto multicap.jsonl to rebuild multicap_v2.jsonl offline",
     # ---- outputs the documented command itself creates --------------------- #
     "configs/sft_14b_full.resolved.json":
         "written by the resolve step in docs/SFT_READINESS.md's own launch command",

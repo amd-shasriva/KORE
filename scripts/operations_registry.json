@@ -56,6 +56,27 @@
       "lifecycle": "active"
     },
     {
+      "path": "scripts/audit_decontamination.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "read-only audit of a training file against the held-out eval set"
+    },
+    {
+      "path": "scripts/build_residual.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "builds/verifies the instruction-residual transfer; writes only its --out dir"
+    },
+    {
+      "path": "scripts/build_sft_v2_mixture.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "writes the v2 SFT mixture; never mutates the base mixture it reads"
+    },
+    {
       "path": "scripts/complete_base.py",
       "classification": "active",
       "lifecycle": "active",
@@ -239,6 +260,20 @@
       "lifecycle": "active"
     },
     {
+      "path": "scripts/spur_audit_1node.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "compute-node launcher for audit_decontamination.py"
+    },
+    {
+      "path": "scripts/spur_build_mixture_1node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "compute-node launcher for build_sft_v2_mixture.py; the one job that needs network"
+    },
+    {
       "path": "scripts/spur_datagen_array.sbatch",
       "classification": "active",
       "lifecycle": "active",
@@ -250,13 +285,6 @@
       "lifecycle": "active",
       "production": true,
       "role": "single-node 8-rank stage-2 DPO launcher (trains the SFT output; requeue-safe)"
-    },
-    {
-      "path": "scripts/spur_pipeline_driver.sh",
-      "classification": "active",
-      "lifecycle": "active",
-      "production": true,
-      "role": "unattended stage driver: midtrain -> A/B eval -> SFT -> A/B eval, gated on verified consolidated checkpoints rather than scheduler state, resubmitting through JobHoldMaxRequeue; stops before DPO"
     },
     {
       "path": "scripts/spur_eval_ab_1node.sbatch",
@@ -330,6 +358,20 @@
       "classification": "active",
       "lifecycle": "active",
       "production": true
+    },
+    {
+      "path": "scripts/spur_pipeline_driver.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "unattended stage driver: midtrain -> A/B eval -> SFT -> A/B eval, gated on verified consolidated checkpoints rather than scheduler state, resubmitting through JobHoldMaxRequeue; stops before DPO"
+    },
+    {
+      "path": "scripts/spur_residual_1node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "compute-node launcher for build_residual.py"
     },
     {
       "path": "scripts/spur_resolve_launch_config.py",

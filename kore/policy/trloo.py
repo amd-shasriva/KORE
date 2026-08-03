@@ -131,27 +131,39 @@ def turn_loo_advantages(
     if len(returns) != len(index):
         raise ValueError(
             f"returns/index length mismatch: {len(returns)} vs {len(index)}")
-    # Per turn id: the sum and count of every trajectory's return at that turn.
-    # A leave-one-out mean is then (total - mine) / (count - 1), which is O(n)
-    # overall instead of O(n^2) and, more importantly, is exact rather than an
-    # incrementally-accumulated float.
-    totals: dict[int, float] = {}
-    counts: dict[int, int] = {}
-    for r, (_, turn) in zip(returns, index):
-        totals[turn] = totals.get(turn, 0.0) + float(r)
-        counts[turn] = counts.get(turn, 0) + 1
+    # Two levels of aggregation per turn: the whole turn, and each trajectory's
+    # own contribution to it. Subtracting the second from the first leaves the
+    # peers, in O(n) and without accumulating float error sample by sample.
+    #
+    # Excluding the whole TRAJECTORY, rather than just the one sample, is what
+    # makes the trajectory id load-bearing. Today a trajectory contributes at most
+    # one sample per turn index, so the two agree -- but then an id collision
+    # (e.g. a sharded rollout emitting rank-local indices) would silently produce
+    # correct-looking numbers while the invariant it depends on was violated.
+    # Enforcing the documented semantics instead makes such a collision visible:
+    # colliding trajectories become each other's "self" and lose their baseline.
+    turn_total: dict[int, float] = {}
+    turn_count: dict[int, int] = {}
+    own_total: dict[tuple[int, int], float] = {}
+    own_count: dict[tuple[int, int], int] = {}
+    for r, (traj, turn) in zip(returns, index):
+        value = float(r)
+        turn_total[turn] = turn_total.get(turn, 0.0) + value
+        turn_count[turn] = turn_count.get(turn, 0) + 1
+        own_total[(turn, traj)] = own_total.get((turn, traj), 0.0) + value
+        own_count[(turn, traj)] = own_count.get((turn, traj), 0) + 1
 
     out: list[float] = []
-    for r, (_, turn) in zip(returns, index):
-        r = float(r)
-        n = counts[turn]
-        if n < 2:
-            # No other trajectory reached this turn. A constant baseline keeps
-            # the estimator unbiased; dropping the sample would not.
-            out.append(r)
+    for r, (traj, turn) in zip(returns, index):
+        value = float(r)
+        peers = turn_count[turn] - own_count[(turn, traj)]
+        if peers <= 0:
+            # No OTHER trajectory reached this turn. A constant baseline of 0.0
+            # keeps the estimator unbiased; dropping the sample would not.
+            out.append(value)
             continue
-        baseline = (totals[turn] - r) / (n - 1)
-        out.append(r - baseline)
+        baseline = (turn_total[turn] - own_total[(turn, traj)]) / peers
+        out.append(value - baseline)
     return out
 
 

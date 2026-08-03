@@ -477,6 +477,38 @@ def test_a_turn_only_one_trajectory_reached_keeps_its_return():
     assert advantages[4] == pytest.approx(4.0 - 2.0)
 
 
+def test_the_whole_trajectory_is_excluded_not_merely_the_one_sample():
+    """The baseline excludes trajectory ``i``, not just sample ``(i, t)``.
+
+    A trajectory contributes one sample per turn index today, so leaving out the
+    sample and leaving out the trajectory agree, and the trajectory id looks
+    decorative. It is not: if it were ignored, an id collision -- a sharded
+    rollout emitting rank-local indices, say -- would produce numbers that look
+    right while the invariant they rely on was broken. Excluding by trajectory
+    makes the collision visible instead, as the case below shows.
+    """
+    # Two samples claiming the SAME trajectory at turn 0, plus a genuine peer.
+    returns = [1.0, 3.0, 5.0]
+    index = [(0, 0), (0, 0), (1, 0)]
+    advantages = turn_loo_advantages(returns, index)
+    # Both trajectory-0 samples see only trajectory 1 -> baseline 5.0.
+    assert advantages[0] == pytest.approx(1.0 - 5.0)
+    assert advantages[1] == pytest.approx(3.0 - 5.0)
+    # Trajectory 1 sees both of trajectory 0's samples -> baseline (1+3)/2 = 2.0.
+    assert advantages[2] == pytest.approx(5.0 - 2.0)
+
+
+def test_colliding_trajectory_ids_lose_their_baseline_rather_than_faking_one():
+    """Every sample claiming trajectory 0 -> no peers -> constant-0 baseline.
+
+    This is the observable signature of the id-collision bug, and the reason
+    ``_rollout_slice_distributed`` maps its local index through ``_rank_slice``.
+    """
+    returns = [1.0, 2.0, 3.0]
+    index = [(0, 0), (0, 0), (0, 0)]
+    assert turn_loo_advantages(returns, index) == pytest.approx([1.0, 2.0, 3.0])
+
+
 def test_mismatched_returns_and_index_is_refused():
     """Silently zipping to the shorter list would drop real samples."""
     with pytest.raises(ValueError, match="length mismatch"):

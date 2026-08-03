@@ -363,6 +363,27 @@ class GRPOConfig(DistributedMixin):
     # sets 0.1 when anti-collapse is on; this makes standalone GRPO safe too.)
     variance_floor: float = 0.1            # AVSPO tau trigger (0 disables)
     avspo_virtual_k: int = 2               # #virtual samples injected at +/- tau
+
+    # --- Advantage estimator: "grpo" (pooled, self-inclusive) | "trloo" ---------
+    # "grpo" keeps the incumbent: pool the group's m*n per-turn samples, centre on
+    # their mean, divide by their std, with the AVSPO variance floor above.
+    #
+    # "trloo" is Dr. Kernel's turn-level REINFORCE leave-one-out estimator
+    # (arXiv 2602.05885). The pooled mean CONTAINS the sample it centres, and in
+    # multi-turn it also contains the later turns of that sample's own trajectory,
+    # which are downstream of the action being credited -- so the baseline cancels
+    # part of the long-horizon credit. Measured by exact enumeration
+    # (tests/test_trloo_advantages.py): pooled centring returns exactly (M-1)/M of
+    # the true gradient, the std term's error GROWS with the group, and on
+    # asymmetric MDPs the expected gradient can point the WRONG WAY. TRLOO instead
+    # centres each sample on the mean of the OTHER trajectories at the SAME turn,
+    # which is independent of the action and therefore unbiased.
+    #
+    # TRLOO deliberately applies NO std normalisation and BYPASSES the AVSPO
+    # variance floor: both are self-inclusive, and normalising away the bias
+    # correction defeats the purpose. Set variance_floor to 0.0 alongside it, or
+    # the capability audit will report the floor as an inert request.
+    advantage_estimator: str = "grpo"
     # Real SC-GRPO: for partial-solve groups, re-score other turns' tokens with a
     # correct kernel as an in-context demo (teacher) and weight the per-token PG
     # term by per-token KL(teacher||student). One extra forward per weighted sample.

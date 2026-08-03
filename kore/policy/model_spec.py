@@ -21,6 +21,7 @@ from typing import Any, Mapping, Optional
 UNRESOLVED = "MEASURE"
 _PINNED_REVISION_RE = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 _LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.")
+_EXPERT_RE = re.compile(r"^model\.layers\.\d+\.mlp\.experts\.(\d+)\.")
 
 
 class ModelSpecError(ValueError):
@@ -91,10 +92,43 @@ def _required_int(config: Mapping[str, Any], key: str) -> int:
 
 _DECODER_CLASSES = {
     "qwen3": "Qwen3DecoderLayer",
+    "qwen3_moe": "Qwen3MoeDecoderLayer",
     "qwen2": "Qwen2DecoderLayer",
     "llama": "LlamaDecoderLayer",
     "mistral": "MistralDecoderLayer",
 }
+
+# Model types whose decoder block holds a routed expert FFN instead of one dense
+# MLP. Their checkpoints carry ``mlp.experts.<i>.*`` + ``mlp.gate`` where a dense
+# model carries ``mlp.gate_proj``/``up_proj``/``down_proj``, so shape validation
+# has to branch. Membership here is a claim that the expert layout below matches
+# that family's modeling code, which is why it is an allowlist and not a
+# substring test on the model type.
+_MOE_MODEL_TYPES = frozenset({"qwen3_moe"})
+
+
+@dataclass(frozen=True)
+class MoESpec:
+    """Sparse-mixture-of-experts fields that change a checkpoint's tensor set.
+
+    ``decoder_sparse_step`` and ``mlp_only_layers`` decide, per layer, whether the
+    FFN is a routed expert bank or a plain dense MLP; :meth:`is_sparse_layer`
+    mirrors ``Qwen3MoeDecoderLayer.__init__`` exactly so validation expects the
+    same tensors the modeling code will look for.
+    """
+
+    num_experts: int
+    num_experts_per_tok: int
+    moe_intermediate_size: int
+    decoder_sparse_step: int
+    mlp_only_layers: tuple[int, ...]
+
+    def is_sparse_layer(self, layer_idx: int) -> bool:
+        return (
+            layer_idx not in self.mlp_only_layers
+            and self.num_experts > 0
+            and (layer_idx + 1) % self.decoder_sparse_step == 0
+        )
 
 
 @dataclass(frozen=True)
@@ -112,6 +146,12 @@ class ArchitectureSpec:
     head_dim: int
     vocab_size: int
     max_position_embeddings: int
+    # Defaulted and last so every existing dense ArchitectureSpec literal still
+    # constructs. Profile hashes DO shift (asdict now emits "moe": null), which
+    # is safe because a profile hash is only ever compared to one recomputed by
+    # the same code -- validate_for_load's TOCTOU re-check -- never to a value
+    # persisted by an older build.
+    moe: Optional[MoESpec] = None
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> "ArchitectureSpec":
@@ -183,6 +223,39 @@ class ArchitectureSpec:
             max_position_embeddings=_required_int(
                 config, "max_position_embeddings"
             ),
+            moe=cls._moe_from_config(config, model_type),
+        )
+
+    @staticmethod
+    def _moe_from_config(
+        config: Mapping[str, Any], model_type: str
+    ) -> Optional[MoESpec]:
+        """Read the expert layout, fail-closed, for a known sparse model type.
+
+        A missing or nonsensical expert field is an error rather than a silent
+        fall-through to the dense path: validating a 30B MoE against dense
+        ``mlp.gate_proj`` shapes would reject every real shard, and validating it
+        against nothing at all would accept a truncated expert bank.
+        """
+
+        if model_type not in _MOE_MODEL_TYPES:
+            return None
+        raw_only = config.get("mlp_only_layers", [])
+        if not isinstance(raw_only, (list, tuple)) or any(
+            isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in raw_only
+        ):
+            raise ArchitectureMismatchError(
+                f"config field 'mlp_only_layers' must be a list of layer indices, "
+                f"got {raw_only!r}"
+            )
+        return MoESpec(
+            num_experts=_required_int(config, "num_experts"),
+            num_experts_per_tok=_required_int(config, "num_experts_per_tok"),
+            moe_intermediate_size=_required_int(config, "moe_intermediate_size"),
+            # The modeling code computes (layer_idx + 1) % decoder_sparse_step,
+            # so a zero here is a ZeroDivisionError at model construction.
+            decoder_sparse_step=_required_int(config, "decoder_sparse_step"),
+            mlp_only_layers=tuple(sorted(raw_only)),
         )
 
     def assert_matches(self, expected: "ArchitectureSpec") -> None:
@@ -253,6 +326,45 @@ QWEN3_32B_PROFILE = ModelProfile(
     # Derived from the complete dense Qwen3-32B tensor shapes, and rechecked
     # against local safetensors metadata by ModelSpec.from_local_checkpoint.
     expected_parameter_count=32_762_123_264,
+)
+
+
+#: The production backbone. Sparse MoE: 30.5B total, ~3.3B active per token
+#: (128 experts, top-8, every layer routed because decoder_sparse_step=1 and
+#: mlp_only_layers is empty). Chosen over a dense 30B-class model because no
+#: Qwen at this size ships a Base variant, so the continued-pretraining recipe
+#: cannot transfer and the instruct -> SFT -> RL path is the only one available.
+QWEN3_CODER_30B_A3B_PROFILE = ModelProfile(
+    name="qwen3-coder-30b-a3b-instruct",
+    model_id="Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    revision="b2cff646eb4bb1d68355c01b18ae02e7cf42d120",
+    architecture=ArchitectureSpec(
+        model_type="qwen3_moe",
+        architecture="Qwen3MoeForCausalLM",
+        decoder_class="Qwen3MoeDecoderLayer",
+        hidden_size=2048,
+        # 6144 is the DENSE ffn width, which this checkpoint never instantiates
+        # (mlp_only_layers is empty), but it stays part of the identity because
+        # transformers reads it and a change to it would be a different model.
+        intermediate_size=6144,
+        num_hidden_layers=48,
+        num_attention_heads=32,
+        num_key_value_heads=4,
+        head_dim=128,
+        vocab_size=151936,
+        max_position_embeddings=262144,
+        moe=MoESpec(
+            num_experts=128,
+            num_experts_per_tok=8,
+            moe_intermediate_size=768,
+            decoder_sparse_step=1,
+            mlp_only_layers=(),
+        ),
+    ),
+    # Measured from the downloaded snapshot's safetensors headers on the cluster
+    # (16 shards, 18,867 tensors, all BF16), and independently reproduced from
+    # the config arithmetic; the Hub's own safetensors metadata agrees.
+    expected_parameter_count=30_532_122_624,
 )
 
 
@@ -728,6 +840,25 @@ def validate_checkpoint_compatibility(
             f"missing={missing[:8]}, extra={extra[:8]}"
         )
 
+    # Experts BEYOND num_experts are never loaded and never routed to, so the
+    # per-expert shape checks below (which only look up the experts the config
+    # promises) cannot see them. One pass over the names catches that.
+    if architecture.moe is not None:
+        overflow = sorted(
+            {
+                int(match.group(1))
+                for name in tensors
+                if (match := _EXPERT_RE.match(name)) is not None
+                and int(match.group(1)) >= architecture.moe.num_experts
+            }
+        )
+        if overflow:
+            raise CheckpointCompatibilityError(
+                "checkpoint contains expert indices beyond the configured "
+                f"num_experts={architecture.moe.num_experts}: {overflow[:8]}"
+            )
+
+    moe = architecture.moe
     for layer in range(architecture.num_hidden_layers):
         prefix = f"model.layers.{layer}"
         expected_shapes = {
@@ -735,12 +866,29 @@ def validate_checkpoint_compatibility(
             f"{prefix}.self_attn.k_proj.weight": (kv_width, hidden),
             f"{prefix}.self_attn.v_proj.weight": (kv_width, hidden),
             f"{prefix}.self_attn.o_proj.weight": (hidden, q_width),
-            f"{prefix}.mlp.gate_proj.weight": (intermediate, hidden),
-            f"{prefix}.mlp.up_proj.weight": (intermediate, hidden),
-            f"{prefix}.mlp.down_proj.weight": (hidden, intermediate),
             f"{prefix}.input_layernorm.weight": (hidden,),
             f"{prefix}.post_attention_layernorm.weight": (hidden,),
         }
+        if moe is not None and moe.is_sparse_layer(layer):
+            # Routed FFN: one router plus num_experts independent MLPs at
+            # moe_intermediate_size. Every expert is required, because a bank
+            # that is short a few experts still loads and still generates
+            # plausible text - the router just never selects the missing ones.
+            expert_width = moe.moe_intermediate_size
+            expected_shapes[f"{prefix}.mlp.gate.weight"] = (moe.num_experts, hidden)
+            for expert in range(moe.num_experts):
+                expert_prefix = f"{prefix}.mlp.experts.{expert}"
+                expected_shapes.update({
+                    f"{expert_prefix}.gate_proj.weight": (expert_width, hidden),
+                    f"{expert_prefix}.up_proj.weight": (expert_width, hidden),
+                    f"{expert_prefix}.down_proj.weight": (hidden, expert_width),
+                })
+        else:
+            expected_shapes.update({
+                f"{prefix}.mlp.gate_proj.weight": (intermediate, hidden),
+                f"{prefix}.mlp.up_proj.weight": (intermediate, hidden),
+                f"{prefix}.mlp.down_proj.weight": (hidden, intermediate),
+            })
         for name, shape in expected_shapes.items():
             _expect_shape(tensors, name, shape)
         _expect_shape(
@@ -1572,7 +1720,9 @@ __all__ = [
     "ModelProfile",
     "ModelSpec",
     "ModelSpecError",
+    "MoESpec",
     "QWEN3_32B_PROFILE",
+    "QWEN3_CODER_30B_A3B_PROFILE",
     "TensorMetadata",
     "UnpinnedModelError",
     "apply_runtime_settings",

@@ -23,6 +23,7 @@ inspected on CPU / in tests. The training entrypoints in ``sft.py`` / ``dpo.py``
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -648,18 +649,37 @@ class SoupConfig:
 
 # HF decoder-block class names by model family. Auto-wrap needs the exact class
 # so FSDP shards one transformer layer per unit (the ZeRO-3-equivalent recipe).
+#: Qwen names a sparse-MoE checkpoint by its ACTIVE parameter count, as an
+#: ``-A<n>B`` segment after the total size: ``Qwen3-30B-A3B``,
+#: ``Qwen3-235B-A22B``, ``Qwen3-Coder-30B-A3B-Instruct``. Nothing else in the
+#: family uses that segment, so it is the one reliable signal available from an
+#: id alone. Anchored to segment boundaries so a repo called ``...-a3bx`` or a
+#: local directory named ``.../data3b/...`` cannot trip it.
+_QWEN_MOE_ID_RE = re.compile(r"(?:^|[-_/])a\d+b(?:$|[-_/.])")
+
+
 def detect_transformer_layer_cls(model_id: str) -> str:
     """Best-effort map a HF ``model_id`` to its decoder layer class for FSDP wrap.
 
-    Covers the KORE bases: Qwen3 (14B/32B), DeepSeek-R1-Distill-Qwen (32B ->
-    Qwen2), DeepSeek-R1-Distill-Llama (70B -> Llama). Falls back to the Qwen3
-    block (the bring-up default). ``llama`` is checked first because the 70B id
-    contains ``Llama`` but not ``qwen``.
+    Covers the KORE bases: Qwen3 dense (14B/32B), Qwen3 sparse MoE (the
+    Qwen3-Coder-30B-A3B production backbone), DeepSeek-R1-Distill-Qwen (32B ->
+    Qwen2), DeepSeek-R1-Distill-Llama (70B -> Llama). Falls back to the dense
+    Qwen3 block (the bring-up default). ``llama`` is checked first because the
+    70B id contains ``Llama`` but not ``qwen``.
+
+    Getting this wrong is not a crash: ``TRANSFORMER_BASED_WRAP`` with a class
+    name that matches nothing in the module tree wraps NOTHING, so FSDP degrades
+    to one enormous flat parameter for the whole model and either OOMs or loses
+    every overlap the sharding was supposed to buy. That silence is why MoE gets
+    an explicit branch here rather than relying on the shipped config always
+    setting ``fsdp_transformer_layer_cls``.
     """
     mid = (model_id or "").lower()
     if "llama" in mid:
         return "LlamaDecoderLayer"
     if "qwen3" in mid:
+        if _QWEN_MOE_ID_RE.search(mid) or "moe" in mid:
+            return "Qwen3MoeDecoderLayer"
         return "Qwen3DecoderLayer"
     if "qwen2" in mid or "qwen" in mid:
         return "Qwen2DecoderLayer"

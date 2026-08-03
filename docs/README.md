@@ -1,30 +1,55 @@
-# `docs/` — deep-dive documentation
+# `docs/` — operational evidence
 
-Long-form documentation that complements the per-package READMEs. Start with the [repository README](../README.md) for the overview.
+KORE's production recipe is **Qwen/Qwen3-Coder-30B-A3B-Instruct → SFT →
+multi-turn RL** on AMD MI355X (`gfx950`). The model is a 30.5B-parameter MoE
+with 3.3B active parameters (48 layers, 128 experts, 8 selected per token);
+the active footprint is why it is viable for the on-device deliverable.
 
-| Doc | What it covers |
+| Doc | What it establishes |
 | --- | --- |
-| [`DISTRIBUTED.md`](DISTRIBUTED.md) | FSDP sizing per model scale, the one-command `--full-ft` launch, the manual sharded launch, and per-stage full-FT configuration. Read this before running multi-GPU training. |
-| [`DATASET_SPEC.md`](DATASET_SPEC.md) | Corpus design and the datagen record schemas (repair / ranked-group / win / agentic), the multi-capability SFT mix, and DPO pair construction — all on the vendor-relative speedup objective shared with GRPO. |
-| [`KORE_BENCH_BLUEPRINT.md`](KORE_BENCH_BLUEPRINT.md) | The kernel task taxonomy, operator families, and the benchmark release plan. |
-| [`P0_RESULTS.md`](P0_RESULTS.md) | The roofline validation study. Verdict `INTEGRITY_ONLY`: all three preregistered checks FAIL, so the roofline is usable as an integrity ceiling and a shaping potential but is **not** a validated predictor of speedup. Read this before quoting any physics number. |
-| [`SFT_READINESS.md`](SFT_READINESS.md) | Stage-1 SFT launch readiness: the measured 14B lifecycle (steps, checkpoint, resume), the three fixed blockers, and the launch command. |
-| [`E2E_SERVING_GATE.md`](E2E_SERVING_GATE.md) | How to provision a real SGLang/vLLM ROCm backend on gfx950, point the serving gate at it, and what it measured. |
-| [`FRONTIER_CLAIM_PROTOCOL.md`](FRONTIER_CLAIM_PROTOCOL.md) | The offline, preregistered adjudication layer for a frontier model-vs-system claim. |
-| [`GRPO_MIN_TRUSTWORTHY.md`](GRPO_MIN_TRUSTWORTHY.md) | The fail-closed `grpo_32b_min_trustworthy` profile contract — a semantic safety profile, not a 32B sizing claim. |
+| [`DISTRIBUTED.md`](DISTRIBUTED.md) | The 30B SFT launch contract and storage constraint. |
+| [`DATASET_SPEC.md`](DATASET_SPEC.md) | Data provenance, verification, task-pool and step-centric admission rules. |
+| [`KORE_BENCH_BLUEPRINT.md`](KORE_BENCH_BLUEPRINT.md) | Task taxonomy and benchmark scope. |
+| [`P0_RESULTS.md`](P0_RESULTS.md) | Why rooflines remain an integrity ceiling, not a validated speed predictor. |
+| [`E2E_SERVING_GATE.md`](E2E_SERVING_GATE.md) | Serving-gate procedure and limits. |
+| [`EVAL_RESULTS.md`](EVAL_RESULTS.md) | The failed 14B midtrain experiment that ruled out CPT on an instruct checkpoint. |
+| [`FRONTIER_CLAIM_PROTOCOL.md`](FRONTIER_CLAIM_PROTOCOL.md) | Requirements for a model-vs-system claim. |
 
-Midtrain builders should also read
-[`SOURCE_PROVENANCE.md`](SOURCE_PROVENANCE.md) and use the adjacent
-`source_metadata.schema.json` contract before rebuilding a production corpus.
+## Production decisions, with the failure modes they prevent
 
-## Objective alignment
+- **No production CPT or chat-vector merge.** No selected 30B-class Qwen offers
+  a Base checkpoint: Qwen3-32B, Qwen3.6-35B-A3B, and
+  Qwen3-Coder-30B-A3B are instruct-only. CPT needs a Base model, and the
+  residual transfer needs a same-family Base/Instruct pair. More importantly,
+  the 14B experiment in [`EVAL_RESULTS.md`](EVAL_RESULTS.md) showed that CPT on
+  an instruct model destroyed instruction-following. `KORE_RECIPE=direct` is
+  therefore the production default in `scripts/spur_pipeline_driver.sh`;
+  `KORE_RECIPE=cpt` is a 14B-only legacy experiment.
+- **No DPO production stage.** A kernel proposal can be compiled, checked, and
+  timed. That execution signal is stronger than an offline preference label.
+  The RL stage is multi-turn because each observation changes the next edit;
+  plain GRPO is biased in that setting, which is why the project uses its
+  multi-turn credit path rather than treating a transcript as one preference.
+- **Data diversity precedes volume.** The registry contributes 1,289 trainable
+  tasks. `scripts/build_task_pool.py` adds screened external tasks without
+  mutating registry manifests; the current pool is 14,859 plannable tasks and
+  14,461 eligible tasks after held-out screening (13,570 external tasks; 398
+  registry seeds excluded as contaminated).
+- **The SFT mix teaches local improvement, not search imitation.**
+  `kore/data/step_centric.py` retains correctness-preserving revisions that
+  fix a kernel or improve measured speed by at least 5%; it drops regressions,
+  no-ops, and suspicious speedups. `scripts/build_sft_v3_mixture.py` then
+  deduplicates and re-screens every source against held-out ids and families.
 
-SFT, DPO, and GRPO optimize the **same** objective. The SFT mix and DPO pairs are assembled on the vendor-relative **speedup** signal (`faster-correct > slower-correct > incorrect > non-compiling`), and GRPO's within-turn reward is that same speedup reward (`reward_mode=speedup`).
+AgentKernelArena is the external AMD bar: on gfx950, published Claude Opus
+means are 6.89x (`torch2hip`), 6.69x (`hip2hip`), and 2.13x
+(`triton2triton`). `scripts/run_agent_kernel_arena.py` runs the benchmark's
+declared compile, correctness, and performance commands in copied workspaces
+and scores with its formula; `scripts/spur_aka_1node.sbatch` is the GPU-node
+entrypoint. The local discovery filter reports 402 gfx950-runnable tasks from
+the 412-task suite.
 
-The physics enters GRPO only as a potential-based-shaping term (`physics_shaping_weight`) with potential `Φ = η = T_min/T_measured` online. The shaping offset is fed into GRPO's std-normalized group-relative per-turn advantage as a state-dependent baseline that densifies credit toward the roofline without changing the ranking of returns — which is why it is safe *regardless* of whether `Φ` predicts anything.
-
-> **`ρ` is not a validated target.** An earlier revision of this page described the counter-grounded refinement `ρ` as "validated at R² ≈ 0.98 offline". That figure is a shared-denominator artifact and does not survive the repository's own v2 controls: a `T_candidate`-only predictor scores higher (0.997), and on the preregistered normalized target over held-out task clusters the named model scores −0.458. The current adjudicator returns `INTEGRITY_ONLY` and authorizes empirical shaping for **no** operator family. See [`P0_RESULTS.md`](P0_RESULTS.md). Treat `η` as a variance-reduction heuristic, not a hardware signal the shaping "approximates".
-
-This is a training-objective alignment; datagen generation itself is unchanged.
-
-Related: the [`Kore-prelim-analysis`](../../Kore-prelim-analysis/) sibling repo is the self-contained P0 study (data + figures + reproduce steps); the [`papers/`](../../papers/) directory in the umbrella repo holds the annotated literature the methods draw on.
+Kernel-Smith-235B's reported KernelBench Triton speedup is 3.70 versus 3.33 for
+Claude-4.6-opus. Dr. Kernel-14B reports 31.6% single-pass and 47.8% with
+test-time scaling on KernelBench L2, versus 28.6% for GPT-5 and 26.7% for
+Claude-4.5-Sonnet. These are comparison bars, not KORE results.

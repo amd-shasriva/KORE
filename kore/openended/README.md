@@ -4,8 +4,8 @@ Instead of cycling tasks round-robin, KORE **co-evolves the curriculum with the 
 
 The package has two complementary halves:
 
-- **SELECT** — `controller.py` curriculum-selects tasks from the *fixed* registered menu (the intersection of the parametric space with the trainer's allowed list). This is what the flagship 14B GRPO run uses (`coevolve: true`).
-- **MINT** — `grammar.py` + `minter.py` mint net-new, correct-by-construction tasks beyond the registered menu, and `materialize.py` turns each into a runnable on-disk task dir, so the curriculum grows open-endedly instead of only re-weighting a fixed menu. Wired into `CoevolutionController` and enabled in the flagship (`coevolve_mint: true`, `coevolve_mint_batch: 6`), fail-safe by construction (a bad mint is skipped, never trained on; see [Open-ended task minting](#open-ended-task-minting-grammarpy--minterpy)).
+- **SELECT** — `controller.py` curriculum-selects tasks from the *fixed* registered menu (the intersection of the parametric space with the trainer's allowed list). The legacy 14B GRPO configuration enables this with `coevolve: true`; no 30B RL configuration is shipped yet.
+- **MINT** — `grammar.py` + `minter.py` mint net-new, correct-by-construction tasks beyond the registered menu, and `materialize.py` turns each into a runnable on-disk task dir, so the curriculum grows open-endedly instead of only re-weighting a fixed menu. It is wired into `CoevolutionController` and enabled by the legacy 14B experiment (`coevolve_mint: true`, `coevolve_mint_batch: 6`), fail-safe by construction (a bad mint is skipped, never trained on; see [Open-ended task minting](#open-ended-task-minting-grammarpy--minterpy)).
 
 ---
 
@@ -57,7 +57,7 @@ The generalization split can never leak through the curriculum. The parametric t
 
 ## Distributed determinism
 
-Under multi-rank FSDP GRPO, every rank builds the **same** controller (same `seed` + task list), and `next_task_id` is deterministic (driven by `seed + refills` and the proposer RNG, not by wall-clock or step index). The per-rollout feedback (`solve_rate`, `best_speedup`) is all-gathered across ranks before `record()`, so the archive update is rank-invariant — all ranks propose identical tasks and stay in lockstep. This is what makes the curriculum safe to enable on the 8-GPU production run.
+Under multi-rank FSDP GRPO, every rank builds the **same** controller (same `seed` + task list), and `next_task_id` is deterministic (driven by `seed + refills` and the proposer RNG, not by wall-clock or step index). The per-rollout feedback (`solve_rate`, `best_speedup`) is all-gathered across ranks before `record()`, so the archive update is rank-invariant — all ranks propose identical tasks and stay in lockstep. This is the distributed-safety condition a reviewed RL run must satisfy.
 
 ```python
 class CoevolutionController:
@@ -67,13 +67,15 @@ class CoevolutionController:
     def report() -> dict                          # frontier metrics
 ```
 
-Enabled via `coevolve: true` in [`configs/grpo_14b_full.json`](../../configs/README.md). See also: [`kore/policy/grpo.py`](../policy/README.md), [`kore/tasks`](../tasks/README.md).
+The legacy 14B example enables it via `coevolve: true` in
+[`configs/grpo_14b_full.json`](../../configs/README.md). See also:
+[`kore/policy/grpo.py`](../policy/README.md), [`kore/tasks`](../tasks/README.md).
 
 ---
 
 ## Open-ended task minting (`grammar.py` + `minter.py`)
 
-The controller above curriculum-selects from the *fixed* live registry (`python -c "from kore.tasks.registry import task_ids; print(len(task_ids()))"` prints its current size). `grammar.py` + `minter.py` grow it open-endedly: they mint net-new, correct-by-construction tasks, and `materialize.py` turns each into a runnable on-disk task dir, so the RL curriculum is no longer capped at the registered set. Minting is wired into `CoevolutionController` (`next_task_id` / `resolve_task`) behind the `coevolve_mint` GRPO flag and enabled in the flagship run (`coevolve_mint: true`, `coevolve_mint_batch: 6`).
+The controller above curriculum-selects from the *fixed* live registry (`python -c "from kore.tasks.registry import task_ids; print(len(task_ids()))"` prints its current size). `grammar.py` + `minter.py` grow it open-endedly: they mint net-new, correct-by-construction tasks, and `materialize.py` turns each into a runnable on-disk task dir, so the RL curriculum is no longer capped at the registered set. Minting is wired into `CoevolutionController` (`next_task_id` / `resolve_task`) behind the `coevolve_mint` GRPO flag; the checked-in 14B experiment enables it, while the 30B production path has not yet selected it.
 
 Minting is implemented and unit-tested (`kore/openended/tests/test_minter.py` covers the four moves, the construction gate, behavioral dedup, held-out rejection, fused-vs-sequential reference equality, niche placement, and a runnable-namespace round-trip). It is fail-safe: any bad mint or self-check mismatch is skipped and the loop falls back to registered tasks, so enabling it can never crash or corrupt the run. It is CPU-only (torch is imported lazily, only to build / gate / self-check references — never a GPU).
 

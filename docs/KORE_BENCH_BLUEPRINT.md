@@ -1,6 +1,12 @@
-# KORE-Bench: an open benchmark of hard AMD ROCm/Triton kernel-optimization tasks
+# KORE-Bench blueprint: candidate AMD ROCm/Triton task expansion
 
-**Goal.** An open benchmark of hard GPU-kernel-optimization tasks for **AMD Instinct MI350X
+> **Status — design blueprint, not a shipped benchmark or release plan.** The
+> repository is AMD-internal and its current production evaluation uses
+> AgentKernelArena and KernelBench-AMD. Counts, taxonomy targets, and release
+> language below are proposals that require an explicit task manifest and release
+> decision before they can be presented as results.
+
+**Goal.** A candidate benchmark of hard GPU-kernel-optimization tasks for **AMD Instinct MI350X
 (`gfx950` / CDNA4, the KORE target)**, where every task is graded against a **real production
 vendor baseline** (AITER / hipBLASLt / Composable Kernel / AOTriton), not torch-eager. 200–400
 tasks spanning every operator family that matters for LLM training and inference. Serves both KORE

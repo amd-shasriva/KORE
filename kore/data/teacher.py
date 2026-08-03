@@ -13,6 +13,7 @@ backend-agnostic.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
@@ -394,6 +395,12 @@ class ResilientTeacher:
         self._max_consec = int(max_consecutive_failures)
         self._consec = 0
         self._total_skipped = 0
+        # One teacher client is now shared by a node's worth of episode threads
+        # (the connection pool is the thing worth sharing). Unguarded increments
+        # lose failures to lost updates, and the outage detector is exactly the
+        # thing that must not undercount: missing the hard stop means a whole
+        # campaign quietly writes empty data.
+        self._counter_lock = threading.Lock()
 
     def __getattr__(self, name):  # delegate non-overridden attrs to the inner teacher
         return getattr(self._inner, name)
@@ -401,19 +408,22 @@ class ResilientTeacher:
     def generate(self, messages, **kwargs) -> str:
         try:
             out = self._inner.generate(messages, **kwargs)
-            self._consec = 0  # reset the outage counter on any success
+            with self._counter_lock:
+                self._consec = 0  # reset the outage counter on any success
             return out
         except Exception as e:  # noqa: BLE001 - retries already exhausted inside inner
-            self._consec += 1
-            self._total_skipped += 1
+            with self._counter_lock:
+                self._consec += 1
+                self._total_skipped += 1
+                consec, total = self._consec, self._total_skipped
             log.error("teacher.generate exhausted retries - SKIPPING this sample "
                       "(resilient); will hard-stop if the outage is sustained",
                       exc_type=type(e).__name__, exc=str(e)[:200],
-                      consecutive_failures=self._consec,
-                      max_consecutive=self._max_consec, total_skipped=self._total_skipped)
-            if self._consec >= self._max_consec:
+                      consecutive_failures=consec,
+                      max_consecutive=self._max_consec, total_skipped=total)
+            if consec >= self._max_consec:
                 raise RuntimeError(
-                    f"teacher unavailable: {self._consec} consecutive generation "
+                    f"teacher unavailable: {consec} consecutive generation "
                     f"failures (sustained outage) - stopping so the run can resume "
                     f"later rather than produce empty data") from e
             return ""

@@ -1036,17 +1036,43 @@ class HarnessProposer:
 # --------------------------------------------------------------------------- #
 # 7. The loop
 # --------------------------------------------------------------------------- #
+class _MeteredEnv:
+    """Counts the verifier calls the proposer makes, which the Budget cannot refuse.
+
+    :class:`~kore.agent.harness.AgentHarness` owns its own tool loop, so its
+    ``env.step`` traffic cannot be gated call-by-call without either aborting an
+    episode mid-flight - throwing away the turns already paid for - or handing the
+    model a fabricated failure ``Observation`` in place of a measurement. The
+    second is disqualifying: a synthetic compile failure is a claim about a kernel
+    that nothing evaluated. So the budget is enforced exactly on the measurements
+    :class:`StableEvaluator` owns, and the proposer's traffic is COUNTED here and
+    charged at the end of each generation. The overshoot is bounded by one
+    episode's tool calls and is reported as ``proposer_env_calls`` rather than
+    folded into a single number that would imply a precision this does not have.
+    """
+
+    def __init__(self, env):
+        self._env = env
+        self.calls = 0
+
+    def step(self, source, full_validation: bool = True, multi_shape: bool = True):
+        self.calls += 1
+        return self._env.step(source, full_validation=full_validation,
+                              multi_shape=multi_shape)
+
+    def __getattr__(self, name):
+        return getattr(self._env, name)
+
+
 @dataclass
 class EvolveAgentConfig:
     """Knobs for :func:`evolve`. Defaults are sized for one MI355X node."""
 
     generations: int = 8
-    #: Hard cap on verifier calls. Enforced exactly by StableEvaluator; the
-    #: proposer's own env traffic is metered but charged at generation
-    #: granularity, so an in-flight episode may overshoot by at most its turn
-    #: count. That bound is stated rather than hidden because pretending to a
-    #: precision the wrapper does not have is the same defect as a fabricated
-    #: timing.
+    #: Cap on verifier calls. Enforced exactly for the measurements
+    #: StableEvaluator owns; the proposer's own traffic is counted by
+    #: :class:`_MeteredEnv` and charged after each generation, so an in-flight
+    #: episode may overshoot by at most one episode's tool calls.
     max_env_calls: int = 400
     #: Reserve below which no new generation starts (screening + stabilisation
     #: for one generation's proposals).
@@ -1144,10 +1170,12 @@ def evolve(
                                 max_measures=cfg.max_measures)
     archive = Archive(capacity=cfg.archive_capacity, elite_band=cfg.elite_band,
                       min_gain=cfg.min_gain)
+    proposer_env = _MeteredEnv(env)
     scaling = BestAcrossSteps()
     task_id = str(getattr(task, "task_id", "task"))
     records: list[GenerationRecord] = []
     seen: set[str] = set()
+    proposer_calls_charged = 0
 
     def admit(trials: list, generation: int, parent: Optional[Candidate],
               turns: dict) -> int:
@@ -1190,9 +1218,10 @@ def evolve(
             parent = archive.sample_parent(rng, p_elite=cfg.p_elite,
                                            force_explore=force)
             exemplars = archive.exemplars(cfg.exemplars)
-            calls_before = evaluator.env_calls
+            calls_before = evaluator.env_calls + proposer_env.calls
 
-            proposals = proposer.propose(task, env, parent, exemplars, generation)
+            proposals = proposer.propose(task, proposer_env, parent, exemplars,
+                                         generation)
             trials: list[Trial] = []
             turns: dict[str, int] = {}
             for proposal in proposals:
@@ -1209,6 +1238,15 @@ def evolve(
             evaluator.stabilize(trials)
             admitted = admit(trials, generation, parent, turns)
 
+            # Charge the proposer's verifier traffic. ``spend`` consumes nothing
+            # when the request does not fit, so an overshoot is clamped to
+            # exhausted rather than silently forgiven - the next generation then
+            # sees a budget that reflects what the node actually paid for.
+            spent = proposer_env.calls - proposer_calls_charged
+            if spent and not budget.spend(spent):
+                budget.used = budget.total
+            proposer_calls_charged = proposer_env.calls
+
             champ = archive.champion()
             records.append(GenerationRecord(
                 generation=generation,
@@ -1222,7 +1260,7 @@ def evolve(
                 coverage=archive.coverage(),
                 mean_pairwise_distance=archive.mean_pairwise_distance(),
                 lineage_concentration=archive.lineage_concentration(),
-                env_calls=evaluator.env_calls - calls_before,
+                env_calls=evaluator.env_calls + proposer_env.calls - calls_before,
             ))
             log.metric("evolve_generation", task=task_id, generation=generation,
                        admitted=admitted, forced_explore=bool(force),
@@ -1231,7 +1269,11 @@ def evolve(
     stats = {
         "budget_total": budget.total,
         "budget_used": budget.used,
-        "env_calls": evaluator.env_calls,
+        # Split, not summed into one number: the first is exactly capped, the
+        # second is only counted, and a reader has to be able to tell which.
+        "measurement_env_calls": evaluator.env_calls,
+        "proposer_env_calls": proposer_env.calls,
+        "env_calls": evaluator.env_calls + proposer_env.calls,
         "generations_run": len(records),
         "rejected_hacks": sum(1 for c in archive.rejected if c.hack_reason),
         "rejected_implausible": sum(1 for c in archive.rejected
@@ -1240,9 +1282,9 @@ def evolve(
         # as "we ran out of budget", not as "these kernels were wrong".
         "unmeasured": len(archive.unmeasured),
     }
-    result = EvolveAgentResult(task_id=task_id, archive=archive, scaling=scaling,
-                               generations=records, env_calls=evaluator.env_calls,
-                               stats=stats)
+    result = EvolveAgentResult(
+        task_id=task_id, archive=archive, scaling=scaling, generations=records,
+        env_calls=evaluator.env_calls + proposer_env.calls, stats=stats)
     log.event("evolve_agent_done", task=task_id, **stats,
               best_speedup=scaling.best_speedup, coverage=archive.coverage())
     return result

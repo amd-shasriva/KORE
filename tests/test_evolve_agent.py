@@ -997,3 +997,33 @@ def test_evolve_with_the_real_harness_proposer():
     assert result.best.speedup_mean == pytest.approx(2.5)
     assert result.scaling.best_speedup == pytest.approx(2.5)
     assert result.archive.coverage() >= 2
+
+    # The harness runs its own tool loop, so its verifier traffic is counted
+    # rather than gated. It has to be counted SEPARATELY: reporting one env_calls
+    # number would imply the cap governs traffic it cannot refuse.
+    assert result.stats["proposer_env_calls"] > 0
+    assert result.stats["measurement_env_calls"] > 0
+    assert result.stats["env_calls"] == (result.stats["proposer_env_calls"]
+                                         + result.stats["measurement_env_calls"])
+    assert result.env_calls == len(env.calls)
+    assert result.stats["budget_used"] >= result.stats["proposer_env_calls"]
+
+
+def test_a_proposers_uncounted_traffic_cannot_hide_from_the_budget():
+    """A generation that spends the whole cap inside the harness must stop the run.
+
+    Without charging the proposer's calls, an agent that benches heavily inside
+    its own loop would run every configured generation regardless of the cap and
+    the reported budget would be fiction.
+    """
+    busy = [marked(kernel(f"b{i}", warps=[2, 4, 8][i % 3]), f"b{i}") for i in range(6)]
+    model = scripted_model([_tool_call("bench", {"kernel_src": s}) for s in busy] * 4)
+    env = ScriptedEnv({}, default=("ok", 1.1))
+    task = FakeTask()
+    task.seed_source = marked(kernel("seed"), "seed")
+
+    result = evolve(task, HarnessProposer(model, max_turns=6), env,
+                    EvolveAgentConfig(generations=6, max_env_calls=12,
+                                      generation_reserve=6, seed=0))
+    assert len(result.generations) < 6, "the cap did not stop the run"
+    assert result.stats["budget_used"] == result.stats["budget_total"]

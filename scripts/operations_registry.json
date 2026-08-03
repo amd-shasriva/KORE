@@ -152,6 +152,12 @@
       "replacement": "scripts/spur_submit_datagen.sh"
     },
     {
+      "path": "scripts/datagen_quality_probe.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "live yield check on an in-flight agentic datagen wave (fraction of trajectories reaching correctness)"
+    },
+    {
       "path": "scripts/deepen_wins.py",
       "classification": "active",
       "lifecycle": "active",

@@ -26,6 +26,7 @@ from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Optional, Sequence
 
+from kore.policy import trloo
 from kore.policy.budget import BudgetLedgerV1, BudgetLimitsV1
 
 
@@ -291,6 +292,15 @@ def validate_grpo_config(config: Any, *, strict: Optional[bool] = None) -> None:
     _finite_range(config, "max_grad_norm", errors, minimum=0.0, minimum_inclusive=False)
     _finite_range(config, "adv_eps", errors, minimum=0.0, minimum_inclusive=False)
     _finite_range(config, "gamma", errors, minimum=0.0, maximum=1.0)
+
+    # An unrecognised advantage estimator must not fall back silently: the whole
+    # point of naming one is that the run trains the estimator it asked for.
+    estimator = getattr(config, "advantage_estimator", trloo.GRPO)
+    if estimator not in trloo.ESTIMATORS:
+        errors.append(
+            f"advantage_estimator must be one of {list(trloo.ESTIMATORS)}, "
+            f"got {estimator!r}"
+        )
 
     try:
         BudgetLimitsV1.from_mapping(getattr(config, "budget_limits", None))
@@ -878,6 +888,17 @@ def audit_requested_capabilities(
             "dynamic_sampling", DECLARED, ("dynamic_sampling", "starpo_s"),
             "oversample-and-refill is selected by the StarPO-S group selector",
             "enable starpo_s or set dynamic_sampling=false",
+        )
+    if (getattr(config, "advantage_estimator", trloo.GRPO) == trloo.TRLOO
+            and float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0):
+        add(
+            "avspo", DECLARED, ("variance_floor", "advantage_estimator"),
+            "TRLOO computes turn-level leave-one-out advantages and never calls "
+            "avspo_advantages, so the variance floor and its virtual samples are "
+            "never applied; TRLOO is unnormalised on purpose, because every "
+            "self-inclusive statistic is exactly what biases the estimator",
+            "set variance_floor=0.0 with advantage_estimator=trloo, or use "
+            "advantage_estimator=grpo",
         )
     if _flag(config, "agentic_transform_tools") and not agentic:
         add(

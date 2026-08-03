@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from kore.obs import configure, get_logger, gpu_mem_snapshot
+from kore.policy import trloo as _trloo
 
 _EPS = 1e-6
 
@@ -945,10 +946,71 @@ def _sample_field(sample, idx, default=None):
     return sample[idx] if len(sample) > idx else default
 
 
+def group_sample_advantages(samples, *, variance_floor: float = 0.0,
+                            avspo_virtual_k: int = 2, adv_eps: float = _EPS,
+                            advantage_estimator: str = _trloo.GRPO):
+    """Advantages for one group's per-turn samples, under the selected estimator.
+
+    ``"grpo"`` keeps the incumbent :func:`anticollapse.avspo_advantages`: pool the
+    group's samples, centre on their mean, divide by their std, with the AVSPO
+    variance floor.
+
+    ``"trloo"`` uses :func:`kore.policy.trloo.turn_loo_advantages` instead --
+    each sample centred on the mean of the OTHER trajectories at the SAME turn,
+    which is independent of the credited action and therefore unbiased (see that
+    module for the measured size of the bias it removes). It needs each sample's
+    ``(trajectory_id, turn_id)`` key, which the rollout appends as the sample's
+    seventh field. If ANY sample lacks a usable key -- a hand-built test tuple, a
+    checkpoint rolled before the key existed -- we do NOT silently fall back to
+    the pooled estimator: that would train a different estimator than the config
+    asked for, quietly, which is the class of defect this repo's capability audit
+    exists to prevent. The caller gets ``None`` and is expected to raise.
+
+    Deliberately excludes the AVSPO floor under TRLOO: the floor injects virtual
+    samples into the normalisation statistics, and every self-inclusive statistic
+    is exactly what biases the estimator.
+    """
+    from kore.policy import anticollapse as ac
+
+    returns = [s[0] for s in samples]
+    if advantage_estimator == _trloo.TRLOO:
+        keys = _trloo.sample_turn_keys(samples)
+        if keys is None:
+            return None
+        return _trloo.turn_loo_advantages(returns, keys)
+    return ac.avspo_advantages(returns, variance_floor, avspo_virtual_k, adv_eps)
+
+
+class AdvantageKeyError(RuntimeError):
+    """TRLOO was requested but the samples carry no ``(trajectory, turn)`` key.
+
+    Raised rather than degraded: a run that asked for an unbiased estimator and
+    silently got the biased one is the exact failure the estimator was added to
+    remove, and it would be invisible in the loss curve.
+    """
+
+
+def _group_advantages_or_raise(samples, *, variance_floor: float,
+                               avspo_virtual_k: int, adv_eps: float,
+                               advantage_estimator: str):
+    advs = group_sample_advantages(
+        samples, variance_floor=variance_floor,
+        avspo_virtual_k=avspo_virtual_k, adv_eps=adv_eps,
+        advantage_estimator=advantage_estimator)
+    if advs is None:
+        raise AdvantageKeyError(
+            "advantage_estimator='trloo' needs each sample's "
+            "(trajectory_id, turn_id) key in field 6; this group has samples "
+            "without one, so the turn-level leave-one-out baseline cannot be "
+            "formed. Use advantage_estimator='grpo' or re-roll the group.")
+    return advs
+
+
 def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
                            clip_ratio_low: float = 0.2, clip_ratio_high: float = 0.28,
                            variance_floor: float = 0.0, avspo_virtual_k: int = 2,
-                           adv_eps: float = _EPS, backward: bool = True):
+                           adv_eps: float = _EPS, backward: bool = True,
+                           advantage_estimator: str = _trloo.GRPO):
     """Micro-batched GRPO loss: one ``backward()`` per sample, grads accumulated.
 
     ``kept_groups`` is a list of groups (the StarPO-S-kept task groups); each
@@ -969,9 +1031,12 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
         token-mean averaged over samples, the loss is
         ``sum_samples(n_tokens * per_sample_term) / sum_samples(n_tokens)`` - one
         global token-mean across the whole kept batch (DAPO length-debias).
-      * **AVSPO variance floor** (item 4a): group advantages come from
-        :func:`anticollapse.avspo_advantages` (virtual-sample injection when the
-        group std < ``variance_floor``).
+      * **AVSPO variance floor** (item 4a): under ``advantage_estimator="grpo"``
+        group advantages come from :func:`anticollapse.avspo_advantages`
+        (virtual-sample injection when the group std < ``variance_floor``).
+        ``advantage_estimator="trloo"`` replaces both with the unbiased
+        turn-level leave-one-out baseline and applies no normalisation
+        (:func:`group_sample_advantages`).
       * **SC-GRPO** (item 4b): a per-sample multiplicative ``sc_weight`` (from
         per-token KL(teacher||student)) scales the PG term.
       * k3 KL anchor ``ref_anchor_coef * (exp(d)-d-1)``, ``d = ref-logp`` (item 5
@@ -987,15 +1052,15 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
     """
     import torch
 
-    from kore.policy import anticollapse as ac
-
-    # Pass 1: per-group advantages (AVSPO floor) + global token normalizer.
+    # Pass 1: per-group advantages (AVSPO floor, or TRLOO) + token normalizer.
     group_advs: list[list[float]] = []
     n_terms = 0
     total_tokens = 0
     for samples in kept_groups:
-        returns = [s[0] for s in samples]
-        advs = ac.avspo_advantages(returns, variance_floor, avspo_virtual_k, adv_eps)
+        advs = _group_advantages_or_raise(
+            samples, variance_floor=variance_floor,
+            avspo_virtual_k=avspo_virtual_k, adv_eps=adv_eps,
+            advantage_estimator=advantage_estimator)
         group_advs.append(advs)
         for s in samples:
             if s[1]:  # non-empty gen_inputs -> a learnable sample
@@ -1039,21 +1104,28 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
 def _grpo_step_adv_stats(kept_groups, config):
     """Read-only recompute of mean|advantage| + KL-anchored sample count (logging).
 
-    Mirrors pass-1 of :func:`_accumulate_grpo_grads` exactly (AVSPO variance-floor
-    advantages) so the logged ``adv_absmean`` is faithful, without touching the
-    training path or its return. Pure/CPU-cheap.
+    Mirrors pass-1 of :func:`_accumulate_grpo_grads` exactly -- including which
+    ESTIMATOR is in force -- so the logged ``adv_absmean`` is faithful, without
+    touching the training path or its return. A logger that reported pooled
+    advantages while the trainer used TRLOO would make the switch invisible in the
+    step log, which is where anyone would look to confirm it took effect.
+    Pure/CPU-cheap.
     """
-    from kore.policy import anticollapse as ac
-
     tau = getattr(config, "variance_floor", 0.0)
     k = getattr(config, "avspo_virtual_k", 2)
     eps = getattr(config, "adv_eps", _EPS)
+    estimator = getattr(config, "advantage_estimator", _trloo.GRPO)
     total = 0.0
     n = 0
     n_kl = 0
     for samples in kept_groups:
-        returns = [s[0] for s in samples]
-        advs = ac.avspo_advantages(returns, tau, k, eps)
+        advs = group_sample_advantages(
+            samples, variance_floor=tau, avspo_virtual_k=k, adv_eps=eps,
+            advantage_estimator=estimator)
+        if advs is None:
+            # Diagnostics must never be the thing that kills a step; the training
+            # path raises on this, so reaching here means logging ran first.
+            return 0.0, 0
         for a, s in zip(advs, samples):
             total += abs(a)
             n += 1
@@ -2223,8 +2295,10 @@ def _train_grpo_fallback(config, tasks):
             phi_weight=_physics_shaping_weight(config))
         samples, codes = [], []
         for (ti, tu), ret in zip(index, returns):
+            # Field 6 is the (trajectory, turn) key TRLOO centres on. Here ``ti``
+            # already indexes the whole group, so it is global as required.
             samples.append([ret, turn_inputs[ti][tu], turn_ref[ti][tu],
-                            turn_old[ti][tu], turn_ntok[ti][tu], None])
+                            turn_old[ti][tu], turn_ntok[ti][tu], None, (ti, tu)])
             codes.append(turn_codes[ti][tu])
         correct_kernels = [turn_codes[ti][tu] for ti in range(G) for tu in range(len(traj_correct[ti]))
                            if traj_correct[ti][tu] and turn_codes[ti][tu]]
@@ -2387,14 +2461,16 @@ def _train_grpo_fallback(config, tasks):
         loss_value, n_terms, grad_norm = 0.0, 0, None
         for _epoch in range(ppo_epochs):
             opt.zero_grad()
-            if float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0:
+            _estimator = getattr(config, "advantage_estimator", _trloo.GRPO)
+            if (_estimator != _trloo.TRLOO
+                    and float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0):
                 _feature_invoked(config, "avspo")
             loss_value, n_terms = _accumulate_grpo_grads(
                 kept_groups, _logp_fn,
                 ref_anchor_coef=config.ref_anchor_coef,
                 clip_ratio_low=config.clip_ratio_low, clip_ratio_high=config.clip_ratio_high,
                 variance_floor=config.variance_floor, avspo_virtual_k=config.avspo_virtual_k,
-                adv_eps=config.adv_eps)
+                adv_eps=config.adv_eps, advantage_estimator=_estimator)
             if n_terms == 0:
                 break
             _record_optimizer_tokens(
@@ -2513,24 +2589,51 @@ def merge_across_ranks(per_rank: list[list]) -> list:
 def distributed_group_advantages(per_rank_returns: list[list[float]],
                                  variance_floor: float = 0.0,
                                  avspo_virtual_k: int = 2,
-                                 adv_eps: float = _EPS) -> list[list[float]]:
+                                 adv_eps: float = _EPS,
+                                 per_rank_keys: Optional[list[list]] = None,
+                                 advantage_estimator: str = _trloo.GRPO,
+                                 ) -> list[list[float]]:
     """Global (cross-rank) group-relative advantages, split back per rank.
 
     ``per_rank_returns[r]`` is rank ``r``'s per-turn Kevin returns for ONE rollout
-    group (the trajectories that rank rolled out). GRPO's baseline MUST be over the
+    group (the trajectories that rank rolled out). The baseline MUST be over the
     FULL group - every trajectory on every rank - so the returns are concatenated
-    (rank order), normalized ONCE via the AVSPO variance-floor advantages
-    (:func:`anticollapse.avspo_advantages`, ``tau=variance_floor``), and the
-    resulting advantages are sliced back to each rank in the SAME order. Each rank
-    therefore trains its own trajectories but with a globally-correct advantage.
+    (rank order), turned into advantages ONCE, and sliced back to each rank in the
+    SAME order. Each rank therefore trains its own trajectories but with a
+    globally-correct advantage.
 
-    Pure (no torch/dist) so the cross-rank normalization math is unit-testable by
-    simulating each rank's rewards.
+    Under ``advantage_estimator="grpo"`` that single normalization is the AVSPO
+    variance-floor advantage (:func:`anticollapse.avspo_advantages`,
+    ``tau=variance_floor``). Under ``"trloo"`` it is the turn-level leave-one-out
+    baseline, which additionally needs ``per_rank_keys[r]`` -- rank ``r``'s
+    ``(trajectory_id, turn_id)`` per sample, with ``trajectory_id`` GLOBAL to the
+    group. That is load-bearing: each rank indexes its own slice from 0, so
+    concatenating local ids would make rank 0's first trajectory and rank 1's
+    first trajectory look like one trajectory, and each would land in the other's
+    leave-one-out baseline -- reintroducing exactly the self-inclusion TRLOO
+    removes. ``_rollout_slice_distributed`` maps through ``_rank_slice`` to emit
+    global ids.
+
+    Returns ``None`` when TRLOO is asked for without usable keys, so the caller
+    fails loudly instead of quietly training the pooled estimator.
+
+    Pure (no torch/dist) so the cross-rank math is unit-testable by simulating
+    each rank's rewards.
     """
     from kore.policy import anticollapse as ac
 
     flat = merge_across_ranks(per_rank_returns)
-    advs = ac.avspo_advantages(flat, variance_floor, avspo_virtual_k, adv_eps)
+    if advantage_estimator == _trloo.TRLOO:
+        if per_rank_keys is None:
+            return None
+        keys = merge_across_ranks(per_rank_keys)
+        if len(keys) != len(flat) or not all(
+                isinstance(k, (tuple, list)) and len(k) == 2 for k in keys):
+            return None
+        advs = _trloo.turn_loo_advantages(
+            flat, [(int(a), int(b)) for a, b in keys])
+    else:
+        advs = ac.avspo_advantages(flat, variance_floor, avspo_virtual_k, adv_eps)
     out: list[list[float]] = []
     i = 0
     for chunk in per_rank_returns:
@@ -2972,8 +3075,12 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
         phi_weight=_physics_shaping_weight(config))
     samples, codes = [], []
     for (ti, tu), ret in zip(index, returns):
+        # ``ti`` indexes THIS rank's slice, so map it back through ``my`` to the
+        # trajectory's id within the whole group before it becomes the TRLOO key.
+        # Emitting the local index would make trajectory 0 of every rank collide,
+        # and each colliding trajectory would contaminate the others' baseline.
         samples.append([ret, turn_inputs[ti][tu], turn_ref[ti][tu],
-                        turn_old[ti][tu], turn_ntok[ti][tu], None])
+                        turn_old[ti][tu], turn_ntok[ti][tu], None, (my[ti], tu)])
         codes.append(turn_codes[ti][tu])
     correct_kernels = [turn_codes[ti][tu]
                        for ti in range(len(my)) for tu in range(len(traj_correct[ti]))
@@ -2987,6 +3094,7 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
                 _local_best_su = su
                 _local_best_src = (turn_codes[ti][tu] if tu < len(turn_codes[ti]) else None)
     return {"traj_scores": traj_scores, "returns": [s[0] for s in samples], "samples": samples,
+            "turn_keys": [s[6] for s in samples],
             "codes": codes, "correct_kernels": correct_kernels,
             "infra": sum(1 for inf in traj_infra for x in inf if x),
             "n_solved": sum(1 for tc in traj_correct if any(tc)), "n_traj": len(my),
@@ -3372,10 +3480,25 @@ def _train_grpo_distributed(config, tasks):
             g = groups[gi]
             # re-gather returns AFTER GTPO shaping so advantages see shaped returns.
             per_rank_returns = _all_gather_object(g["local"]["returns"], accelerator)
-            if float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0:
-                _feature_invoked(config, "avspo")
+            estimator = getattr(config, "advantage_estimator", _trloo.GRPO)
+            if estimator == _trloo.TRLOO:
+                # The leave-one-out baseline spans the whole group, so the keys
+                # have to be gathered exactly like the returns they align with.
+                per_rank_keys = _all_gather_object(
+                    g["local"].get("turn_keys"), accelerator)
+            else:
+                per_rank_keys = None
+                if float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0:
+                    _feature_invoked(config, "avspo")
             per_rank_adv = distributed_group_advantages(
-                per_rank_returns, config.variance_floor, config.avspo_virtual_k, config.adv_eps)
+                per_rank_returns, config.variance_floor, config.avspo_virtual_k,
+                config.adv_eps, per_rank_keys=per_rank_keys,
+                advantage_estimator=estimator)
+            if per_rank_adv is None:
+                raise AdvantageKeyError(
+                    "advantage_estimator='trloo' needs a (trajectory_id, "
+                    "turn_id) key per sample, gathered across ranks; this group "
+                    "has none, so the leave-one-out baseline cannot be formed")
             my_adv = per_rank_adv[rank] if rank < len(per_rank_adv) else []
             for adv, sample in zip(my_adv, g["local"]["samples"]):
                 if not sample[1]:

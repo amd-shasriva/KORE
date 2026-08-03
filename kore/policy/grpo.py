@@ -552,6 +552,92 @@ def _physics_shaping_weight(config) -> float:
     return weight
 
 
+def _profiling_reward_weight(config) -> float:
+    """Effective coverage-reward weight (0.0 => the whole path is inert).
+
+    Nonzero ONLY with a ``profiling_reward_evidence_path`` receipt, and the reason
+    is the same one ``_physics_shaping_weight`` exists for. ``collect_kernel_trace``
+    fails safe: no profiler, an unexpected export layout, a task whose driver does
+    not honour ``--impl`` -- all return ``None``. A weight armed without evidence
+    that the collector has ever produced a usable trace on this hardware would
+    therefore state a reward the run silently never applies, which is the exact
+    class of defect ``kore.policy.capabilities`` was written to catch. The receipt
+    is a measurement, not a formality: it is written by a run that observed a
+    non-None coverage.
+
+    Also refuses a weight at or above ``correctness_weight``: the coverage term is
+    shaping on top of a verified correctness verdict, and a shaping term that can
+    outrank correctness inverts the reward's lexicographic order.
+    """
+    try:
+        weight = float(getattr(config, "profiling_reward_weight", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(weight) or weight <= 0.0:
+        return 0.0
+    if not getattr(config, "profiling_reward_evidence_path", None):
+        return 0.0
+    try:
+        correctness = float(getattr(config, "correctness_weight", 0.3) or 0.3)
+    except (TypeError, ValueError):
+        correctness = 0.3
+    if weight >= correctness:
+        return 0.0
+    return weight
+
+
+def _coverage_bonus(env, task, code, obs, config):
+    """Coverage-aware profiling bonus for a CORRECT candidate + turn feedback.
+
+    Returns ``(term, feedback_text)``; ``(0.0, "")`` when inert or unmeasurable.
+
+    Flow: ``env.collect_kernel_trace(code)`` -> per-dispatch durations ->
+    :func:`kore.reward.coverage.kernel_coverage` against the ``@triton.jit`` names
+    in the candidate's OWN source -> :func:`kore.reward.coverage.profiling_reward`,
+    which combines the measured speedup and the measured coverage by Amdahl's law.
+
+    Fail-safe in the one direction that matters: any missing input yields ``0.0``
+    and never a guessed number, and the correctness verdict and the speedup reward
+    are untouched no matter what the profiler does. A candidate whose kernels never
+    dispatched (coverage exactly 0.0, the decoy hack) legitimately scores 0.0 here,
+    which is a measurement rather than a gap -- but it cannot go NEGATIVE, because
+    punishment belongs to the correctness tiers, not to a shaping term.
+    """
+    weight = _profiling_reward_weight(config)
+    if weight <= 0.0 or not getattr(obs, "validation_passed", False):
+        return 0.0, ""
+    if str(getattr(config, "reward_phase", "")).lower() == "correctness":
+        return 0.0, ""
+    try:
+        from kore.reward.coverage import (
+            candidate_kernel_names, coverage_feedback, kernel_coverage,
+            profiling_reward,
+        )
+
+        collect = getattr(env, "collect_kernel_trace", None)
+        if not callable(collect):
+            return 0.0, ""
+        dispatches = collect(code)
+        if not dispatches:
+            return 0.0, ""
+        report = kernel_coverage(dispatches, candidate_kernel_names(code))
+        if report is None:
+            return 0.0, ""
+        speedup = getattr(obs, "speedup", None)
+        reward = profiling_reward(
+            speedup, report.coverage, correct=True,
+            max_plausible_speedup=float(
+                getattr(config, "max_plausible_speedup", 12.0) or 12.0))
+        feedback = coverage_feedback(report, speedup)
+        if reward is None:
+            # Measurable coverage but no admissible reward (no timing, or a claimed
+            # speedup above the cap). Say so in the feedback; pay nothing.
+            return 0.0, ("\n" + feedback) if feedback else ""
+        return weight * reward.reward, ("\n" + feedback) if feedback else ""
+    except Exception:  # noqa: BLE001 - shaping is best-effort; never break a rollout
+        return 0.0, ""
+
+
 def _make_rollout_env(task, config=None, gpu=None, serial=True):
     """Construct the rollout :class:`KoreEnv`, disabling its INTERNAL profiling when
     the serial dense reward is active.
@@ -2411,6 +2497,14 @@ def _train_grpo_fallback(config, tasks):
             _feature_invoked(config, "credit_incorrect_turns")
         if _physics_shaping_weight(config) > 0.0:
             _feature_invoked(config, "physics_shaping")
+        # MRS: reject low-quality trajectories BEFORE the samples are built, so a
+        # rejected trajectory contributes no PG term and no advantage. Declines
+        # rather than collapsing the group's contrast (see kore.policy.rejection).
+        traj_infra, _mrs = _apply_mrs(
+            config, traj_rewards, traj_correct, traj_speedups, traj_infra)
+        if _mrs is not None:
+            _feature_invoked(config, "rejection_sampling")
+            log.debug("mrs", task=task.task_id, **_mrs.as_dict())
         returns, index = build_kevin_samples(
             traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra,
             credit_incorrect=bool(getattr(config, "credit_incorrect_turns", False)),
@@ -3194,6 +3288,16 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
         _feature_invoked(config, "credit_incorrect_turns")
     if _physics_shaping_weight(config) > 0.0:
         _feature_invoked(config, "physics_shaping")
+    # MRS on THIS rank's slice. Deliberately per-rank rather than cross-rank: the
+    # filter's variance check would otherwise need a gather before the samples
+    # exist, and a rank-local decision can only ever drop this rank's own
+    # trajectories -- it cannot desync the collectives, which tolerate ragged
+    # per-rank sample counts by design (the padding was built for infra drops).
+    traj_infra, _mrs = _apply_mrs(
+        config, traj_rewards, traj_correct, traj_speedups, traj_infra)
+    if _mrs is not None:
+        _feature_invoked(config, "rejection_sampling")
+        log.debug("mrs", task=task.task_id, rank=rank, **_mrs.as_dict())
     returns, index = build_kevin_samples(
         traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra,
         credit_incorrect=bool(getattr(config, "credit_incorrect_turns", False)),
@@ -3865,6 +3969,24 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
                 rr.flags.append(f"dense_profile+{dense_term:.3f}")
                 rr.detail = (f"{rr.detail} | dense-profile +{dense_term:.4f}"
                              if rr.detail else f"dense-profile +{dense_term:.4f}")
+            # Coverage-aware profiling reward (Dr. Kernel's PR): what SHARE of GPU
+            # time this kernel owns, combined with its speedup by Amdahl's law. A
+            # separate signal from the counter bonus above -- that one asks how
+            # efficiently the kernel runs, this one asks whether it is the kernel
+            # that matters. Inert -> (0.0, "") unless the weight is armed AND a
+            # measured collector receipt exists, so the default path never calls
+            # collect_kernel_trace. Feedback is appended even when the term is 0.0,
+            # because "your kernels are 3% of GPU time" is the most actionable thing
+            # the profiler can say to a model that is tuning the wrong loop.
+            cov_term, cov_fb = _coverage_bonus(env, task, code, obs, config)
+            if cov_fb:
+                dense_fb = f"{dense_fb}{cov_fb}"
+            if cov_term > 0.0:
+                rr.reward += cov_term
+                rr.flags.append(f"coverage+{cov_term:.3f}")
+                rr.detail = (f"{rr.detail} | coverage +{cov_term:.4f}"
+                             if rr.detail else f"coverage +{cov_term:.4f}")
+                _feature_invoked(config, "profiling_reward")
         gen_inputs = [(ids.detach(), seq)]
         n_tok = max(int(seq.shape[0]), 1)
         # DAPO importance-ratio anchor: detached policy token-mean logp at rollout.
@@ -4052,6 +4174,43 @@ def _agentic_per_turn_signal(episode, turn_correct, n: int):
         else:
             phis.append(None)
     return codes, speedups, phis
+
+
+def _apply_mrs(config, traj_rewards, traj_correct, traj_speedups, traj_infra):
+    """MRS over one rolled group: mark rejected trajectories as INFRA drops.
+
+    Returns ``(traj_infra, report)``. Rejection is expressed by setting every turn
+    of a rejected trajectory in ``traj_infra``, which is the mechanism
+    :func:`build_kevin_samples` already uses to keep a turn out of the emitted
+    samples -- so a rejected trajectory contributes no policy-gradient term and no
+    advantage, exactly like an infrastructure failure, without a second parallel
+    drop path to keep in sync.
+
+    Returns the ORIGINAL ``traj_infra`` unchanged when rejection sampling is off or
+    when :func:`kore.policy.rejection.multi_turn_rejection_sample` declines. It
+    declines whenever filtering would leave too few trajectories or collapse the
+    group's reward variance, because that variance is the only thing a
+    group-relative estimator learns from -- see that module.
+    """
+    if not bool(getattr(config, "rejection_sampling", False)):
+        return traj_infra, None
+    from kore.policy import rejection as _rej
+
+    report = _rej.multi_turn_rejection_sample(
+        traj_rewards, traj_correct, traj_speedups=traj_speedups,
+        min_quality=float(getattr(config, "mrs_min_quality", 0.0) or 0.0),
+        aggregate=str(getattr(config, "rejection_aggregate", _rej.GEOMETRIC)),
+        require_improvement=bool(getattr(config, "mrs_require_improvement", False)),
+        max_plausible_speedup=float(
+            getattr(config, "max_plausible_speedup", 12.0) or 12.0))
+    keep = set(report.keep_indices)
+    out: list[list[bool]] = []
+    for ti, flags in enumerate(traj_infra):
+        if ti in keep:
+            out.append(list(flags))
+        else:
+            out.append([True] * len(flags))
+    return out, report
 
 
 def _agentic_turn_infra(episode, n: int) -> list[bool]:

@@ -416,6 +416,47 @@ class GRPOConfig(DistributedMixin):
     kevin_best_kernel_scoring: bool = True  # trajectory value = best correct kernel
     cot_masking: bool = True                # drop prior-turn thinking from context
 
+    # --- Profiling-based rewards + rejection sampling (kore.reward.coverage,
+    # --- kore.policy.rejection) ------------------------------------------------
+    # Coverage is the fraction of profiled GPU time the candidate's OWN kernels
+    # account for, combined with the measured speedup by Amdahl's law rather than
+    # added to it. Dr. Kernel's motivating pair: 0.014% coverage (optimised
+    # something irrelevant) versus 86.15% (real fusion). At 0.014% even an infinite
+    # local speedup is 1.00014x end to end, so a reward that pays for it is paying
+    # for the wrong behaviour. The term is bounded [0, 1] and scaled by this weight,
+    # which must stay BELOW correctness_weight so it can never outrank correctness.
+    # 0.0 disables the whole path (no trace is collected).
+    profiling_reward_weight: float = 0.0
+    # Receipt from a measured run proving KoreEnv.collect_kernel_trace produced a
+    # usable trace on THIS hardware. Required before the weight above can shape a
+    # reward, for the same reason physics_shaping_evidence_path is required: the
+    # collector fails safe, so an armed-but-unvalidated weight would state a reward
+    # the run silently never applies. rocprofv3's kernel-trace export layout is not
+    # confirmed on this ROCm build.
+    profiling_reward_evidence_path: Optional[str] = None
+    # Speedup above which a claim is treated as a gamed measurement rather than a
+    # kernel, applied at reward time and not only at data-selection time. Defaults
+    # to kore.data.agentic_filter.FilterPolicy's evidence-derived cap so the
+    # RL-time and data-time guards agree instead of drifting apart.
+    max_plausible_speedup: float = 12.0
+    # MRS/PRS. rejection_sampling gates both. MRS aggregates per-turn quality
+    # across turns ("geometric" is Dr. Kernel's reported default, and is dominated
+    # by the WEAKEST turn so one strong turn cannot carry a broken trajectory) and
+    # DECLINES when filtering would leave too few trajectories or collapse the
+    # group's reward variance -- the contrast a group-relative estimator learns
+    # from. PRS rejects a candidate whose kernels never dispatched (coverage 0.0:
+    # the decoy hack) or which covers less than prs_min_coverage of the runtime.
+    rejection_sampling: bool = False
+    rejection_aggregate: str = "geometric"  # "geometric" | "arithmetic" | "min"
+    mrs_min_quality: float = 0.0
+    mrs_require_improvement: bool = False
+    prs_min_coverage: float = 0.1
+    # OFF by default and deliberately: the profiler is not available for every task
+    # on every node, so rejecting every unprofiled candidate would silently narrow
+    # training to the profilable subset while the filter's statistics looked like a
+    # quality improvement.
+    prs_require_profile: bool = False
+
     # --- Retention: KL anchor to the post-SFT multi-capability checkpoint ---
     ref_checkpoint: Optional[str] = None    # defaults to model_id (the SFT ckpt)
     ref_anchor_coef: float = 1e-3           # KL-to-reference coef (chat/code retention)

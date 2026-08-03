@@ -163,3 +163,21 @@ def test_published_bars_are_the_paper_numbers():
     assert PUBLISHED_OPUS_MEAN_SPEEDUP == {
         "torch2hip": 6.89, "hip2hip": 6.69, "triton2triton": 2.13,
     }
+
+
+def test_summary_carries_the_training_overlap_disclosure():
+    """A published number must not be separable from what we trained on.
+
+    Our HIP tasks were authored independently -- no AKA source, references or
+    shapes -- because training on the benchmark would destroy the only
+    checkable "we beat Opus on HIP" claim we have. But 20/20 share an operator
+    with an AKA task, which is unavoidable and worth stating. Putting the
+    disclosure in a separate audit script makes it optional; putting it in the
+    summary makes it travel with the result.
+    """
+    s = summarize([ArenaResult("t1", "hip2hip", True, True, speedup=7.0, score=820)])
+    assert "training_overlap_disclosure" in s
+    d = s["training_overlap_disclosure"]
+    assert "authored independently" in d
+    assert "no AgentKernelArena" in d or "no AKA" in d
+    assert "20/20" in d, "the disclosure must state the actual overlap, not gesture at it"

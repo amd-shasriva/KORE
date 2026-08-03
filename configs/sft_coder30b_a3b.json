@@ -14,15 +14,15 @@
   "bf16": true,
   "gradient_checkpointing": true,
 
-  "_comment_batch": "global batch 128 = 1 x 16 x 8 ranks. per_device is 1, not the 14B's 2: this model is 2.2x the parameters, and MoE activation memory scales with the 8 experts routed per token rather than the 3.3B active figure, which describes compute and not peak memory.",
-  "per_device_train_batch_size": 1,
-  "gradient_accumulation_steps": 16,
+  "_comment_batch": "global batch 128 = 2 x 8 x 8 ranks. per_device was 1 on the theory that MoE activation memory tracks the 8 routed experts rather than the 3.3B active figure; the smoke run measured 120GB of 288GB per GPU, so that was over-cautious by more than half. Raising it to 2 halves the micro-batches per optimizer step (16 -> 8), which is where the 119.87 s/step went: the step is dominated by per-micro-batch overhead, not arithmetic. Left at 2 rather than 4 because the smoke measured a 200-row slice at seq 17408, and the full mixture's p90 sequences are longer.",
+  "per_device_train_batch_size": 2,
+  "gradient_accumulation_steps": 8,
 
   "_comment_max_seq_length": "17408 matches the mixture, which is filtered to it. The model supports 262144, but raising this would not add data and would cost activation memory.",
   "max_seq_length": 17408,
 
-  "_comment_epochs_and_lr": "5e-6 for 2 epochs, the Tulu 3 full-SFT recipe. This starts from an ALREADY instruction-tuned checkpoint, so it warrants being no more aggressive than a recipe designed to instruct-tune a base model; this project has already watched 1e-5 collapse instruction-following once.",
-  "num_train_epochs": 2.0,
+  "_comment_epochs_and_lr": "5e-6 follows the Tulu 3 full-SFT recipe, and this starts from an ALREADY instruction-tuned checkpoint so it warrants being no more aggressive than a recipe meant to instruct-tune a base model; this project has already watched 1e-5 collapse instruction-following once. ONE epoch, not two, and the reason is operational rather than statistical: measured step time is 90-120s, so 2 epochs is ~955 steps = 24-32h, which crosses the 23h walltime and guarantees a requeue. Resuming means reloading from the last checkpoint, and every extra checkpoint is another 976GB rotation peak against ~1011GB free on a SHARED volume. One epoch is ~478 steps = 12-16h, finishes inside a single allocation with no requeue and one mid-run rotation. This is a cold start for RL, which is where the capability actually comes from, so a second epoch is a cheap continuation later if the eval says it is undertrained.",
+  "num_train_epochs": 1.0,
   "learning_rate": 5e-06,
   "lr_scheduler_type": "cosine",
   "warmup_ratio": 0.03,

@@ -51,11 +51,10 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import random
 import re
 import subprocess
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Iterable, Optional
 
 SOURCE_TAG = "hipkittens"
 DEFAULT_ARCH = "gfx950"
@@ -739,11 +738,12 @@ def _resolve_int(expr: str, table: dict[str, str], depth: int = 0) -> Optional[i
     Deliberately conservative: anything containing a token it cannot resolve
     returns None so the caller reports "unknown" instead of a wrong wave count.
     """
-    expr = (expr or "").strip()
+    # Strip the namespace qualifier BEFORE the character check: kittens::
+    # contains colons, which _INT_EXPR_RE rejects, so checking first made every
+    # `NUM_THREADS (kittens::WARP_THREADS * N)` definition unresolvable.
+    expr = re.sub(r"\bkittens\s*::\s*", "", (expr or "").strip())
     if depth > 8 or not expr or not _INT_EXPR_RE.match(expr):
         return None
-    # kittens::WARP_THREADS is the wave width on AMD and is not a #define here.
-    expr = re.sub(r"\bkittens\s*::\s*", "", expr)
     names = set(re.findall(r"[A-Za-z_]\w*", expr))
     env: dict[str, int] = {}
     for n in sorted(names):
@@ -1835,7 +1835,7 @@ def _anatomy_signature(k: KernelRecord) -> tuple:
 
 
 def rows_kernel_anatomy(
-    kernels: list[KernelRecord], prov: dict, seed: int = 0
+    kernels: list[KernelRecord], prov: dict
 ) -> list[dict]:
     """One row per DISTINCT kernel shape: what, which schedule, which techniques, why."""
     rows: list[dict] = []
@@ -1898,7 +1898,23 @@ def rows_kernel_anatomy(
     return rows
 
 
+# Operations whose kernels are bandwidth-bound: neither overlap schedule applies,
+# whatever their wave count happens to be. Without this, resolving layernorm's
+# NUM_WORKERS to 4 waves made it collect the compute-scheduling explanation, which
+# is factually true about the wave count and misleading about the kernel.
+_MEMORY_BOUND_OPS = frozenset({"layernorm", "rotary", "softmax",
+                               "attention_backward_prep"})
+
+
 def _schedule_rationale(k: KernelRecord) -> str:
+    if k.op in _MEMORY_BOUND_OPS:
+        return (
+            f"This is a bandwidth-bound kernel, so neither ping-pong nor interleave "
+            f"applies regardless of the {k.num_waves or 1} wave(s) it launches: there is "
+            f"no sustained MFMA stream for memory latency to hide behind. What limits it "
+            f"is bytes moved, so the levers are access width, coalescing and occupancy, "
+            f"and adding barriers to overlap phases would cost without buying anything."
+        )
     if k.schedule == "8-wave ping-pong":
         return (
             "The work in this loop is symmetric across waves, so splitting the 8 waves "
@@ -2360,11 +2376,16 @@ def build_rows(
     max_row_chars: int = MAX_ROW_CHARS,
     near_dup_threshold: float = NEAR_DUP_THRESHOLD,
 ) -> tuple[list[dict], dict]:
-    """Build every HipKittens SFT row. Deterministic given ``seed``.
+    """Build every HipKittens SFT row.
 
     Returns ``(rows, stats)``. Rows are ``[system, user, assistant]`` chat rows
     tagged ``_source="hipkittens"`` with full MIT provenance, ready to be handed
     to decontamination and the mixture assembler.
+
+    Output is FULLY deterministic for a given checkout: nothing here samples, so
+    every question framing and every emphasis is selected from a real property of
+    the thing being described. ``seed`` is accepted for interface parity with the
+    other generators in this package and does not affect the result.
     """
     prov = provenance(root)
     layouts = parse_swizzles(root)
@@ -2378,7 +2399,7 @@ def build_rows(
         "conflict_exercise": lambda: rows_conflict_exercise(layouts, models, prov),
         "schedule_selection": lambda: rows_schedule_selection(kernels, prov),
         "pattern_apply": lambda: rows_pattern_apply(kernels, prov),
-        "kernel_anatomy": lambda: rows_kernel_anatomy(kernels, prov, seed=seed),
+        "kernel_anatomy": lambda: rows_kernel_anatomy(kernels, prov),
         "intrinsic_role": lambda: rows_intrinsic_role(kernels, prov),
         "measured_baseline": lambda: rows_measured_baseline(measurements, prov),
         "naive_vs_hk": lambda: rows_naive_vs_hk(kernels, layouts, prov),

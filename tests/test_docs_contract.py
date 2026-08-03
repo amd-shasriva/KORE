@@ -122,6 +122,14 @@ ABSENT_PATHS: dict[str, str] = {
         "cluster-only; the filtered trajectory slice reassemble.sh concatenates "
         "onto multicap.jsonl to rebuild multicap_v2.jsonl offline",
     # ---- outputs the documented command itself creates --------------------- #
+    "data/b05factory/sft/hipkittens.jsonl":
+        "written by scripts/build_hipkittens_sft.py, the command "
+        "docs/HIPKITTENS_INGEST.md documents; data/b05factory is gitignored so it "
+        "is never in a fresh checkout",
+    "data/b05factory/sft/hipkittens_report.json":
+        "the gate report scripts/build_hipkittens_sft.py writes alongside the "
+        "slice; contamination, dedup and token counts live there rather than being "
+        "pinned in prose",
     "configs/sft_14b_full.resolved.json":
         "written by the resolve step in docs/SFT_READINESS.md's own launch command",
     "data/full14b/coevolve_wins.jsonl":

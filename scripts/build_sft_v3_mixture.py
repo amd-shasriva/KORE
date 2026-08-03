@@ -64,6 +64,13 @@ def main() -> int:
         "data/b05factory/sft/multicap_full.jsonl",
         "data/b05factory/sft/multicap_kernel.jsonl",
     ])
+    ap.add_argument("--hipkittens", default="data/b05factory/sft/hipkittens.jsonl",
+                    help="HipKittens knowledge slice from "
+                         "scripts/build_hipkittens_sft.py (skipped if absent)")
+    ap.add_argument("--hipkittens-repeat", type=int, default=1,
+                    help="times to repeat the HipKittens slice. It is a few dozen "
+                         "very dense rows against a ~61k-row base, so at 1x it "
+                         "cannot move behaviour; upsampling is the intended use")
     ap.add_argument("--out", default="data/b05factory/sft/multicap_v3.jsonl")
     ap.add_argument("--min-gain", type=float, default=0.05)
     ap.add_argument("--max-speedup", type=float, default=50.0)
@@ -135,6 +142,31 @@ def main() -> int:
         print(f"\nrecover: {rel}")
         for rec in _rows(pathlib.Path(rel)):
             admit(rec, "recover")
+
+    # HipKittens: CDNA4 kernel knowledge (MIT, arXiv:2511.08083). Admitted through
+    # the same gate as everything else, then optionally repeated -- the repeat has
+    # to happen AFTER admission because `admit` deduplicates on exact content, so
+    # feeding the same row in twice would silently drop the second copy and the
+    # requested weight would not apply.
+    hk_path = pathlib.Path(args.hipkittens)
+    if args.hipkittens and hk_path.exists():
+        print(f"\nhipkittens: {hk_path}")
+        first = len(out_rows)
+        for rec in _rows(hk_path):
+            admit(rec, "hipkittens")
+        admitted = out_rows[first:]
+        extra = max(0, int(args.hipkittens_repeat) - 1)
+        for _ in range(extra):
+            out_rows.extend(admitted)
+        stats["hipkittens:repeated_copies"] = len(admitted) * extra
+        if admitted:
+            lic = {str((r.get("_provenance") or {}).get("license")) for r in admitted}
+            print(f"  admitted {len(admitted):,} rows, repeat x{args.hipkittens_repeat} "
+                  f"-> {len(admitted) * (extra + 1):,} in mixture; licence(s): "
+                  f"{sorted(lic)}")
+    elif args.hipkittens:
+        print(f"\nhipkittens: {hk_path} absent; run "
+              f"scripts/build_hipkittens_sft.py to build it (slice SKIPPED)")
 
     print("\n==== gate results ====")
     for k in sorted(stats):

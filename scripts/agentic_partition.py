@@ -112,6 +112,14 @@ def main() -> int:
     parser.add_argument("--no-decontam-screen", action="store_true",
                         help="plan tasks whose seed overlaps a held-out task; their "
                              "trajectories will be rejected at filter time")
+    # On by default: the registry alone is ~1,289 trainable tasks, of which the
+    # seed screen rejects ~398, leaving under 900. At 6 episodes each that is a
+    # campaign spent re-sampling the same few hundred programs, which is
+    # redundancy rather than data. The external pool adds ~13.5k screened,
+    # deduplicated tasks and is the whole reason it was built.
+    parser.add_argument("--no-pool", dest="include_pool", action="store_false",
+                        default=True,
+                        help="plan only registry tasks, ignoring data/task_pool")
     args = parser.parse_args()
 
     from kore.tasks.registry import train_tasks
@@ -122,6 +130,22 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tasks = list(train_tasks())
+    n_registry = len(tasks)
+    if args.include_pool:
+        try:
+            from kore.tasks.external import load_pool
+
+            # Registry ids win on collision: those tasks carry the authoritative
+            # train/held-out split, and letting a pool entry shadow one could
+            # quietly move a held-out task into training.
+            seen = {t.task_id for t in tasks}
+            added = [t for t in load_pool() if t.task_id not in seen]
+            tasks.extend(added)
+            print(f"task pool: {n_registry} registry + {len(added)} external "
+                  f"= {len(tasks)} planned")
+        except Exception as exc:  # noqa: BLE001 - pool is additive, never required
+            print(f"task pool: unavailable ({type(exc).__name__}: {exc}); "
+                  f"planning {n_registry} registry tasks only")
     flagged: list[dict] = []
     if not args.no_decontam_screen:
         tasks, flagged = screen_heldout_seeds(tasks)

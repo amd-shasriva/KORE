@@ -56,6 +56,20 @@
       "lifecycle": "active"
     },
     {
+      "path": "scripts/agentic_partition.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "writes an immutable per-wave shard plan; never touches trajectory data"
+    },
+    {
+      "path": "scripts/agentic_progress.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "read-only progress report from campaign telemetry"
+    },
+    {
       "path": "scripts/audit_decontamination.py",
       "classification": "diagnostic",
       "lifecycle": "active",
@@ -203,6 +217,13 @@
       "role": "move held-out/eval-leaked win/repair/groups shards to _quarantine (dry-run default, --apply to move)"
     },
     {
+      "path": "scripts/run_agentic_shard.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "one node's agentic shard; append-only, resumable, stops at the disk floor"
+    },
+    {
       "path": "scripts/run_campaign.py",
       "classification": "active",
       "lifecycle": "active",
@@ -278,6 +299,13 @@
       "lifecycle": "active",
       "deletes_artifacts": false,
       "note": "one-node throughput measurement job; writes only under runs/"
+    },
+    {
+      "path": "scripts/spur_agentic_saturate.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "requeue-safe node job for the multi-turn agentic campaign"
     },
     {
       "path": "scripts/spur_audit_1node.sbatch",
@@ -419,6 +447,13 @@
       "lifecycle": "active",
       "production": true,
       "role": "one full-node frontier-stage (reverify|evolve) array element"
+    },
+    {
+      "path": "scripts/spur_submit_agentic.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "partitions and submits the agentic campaign one shard per node"
     },
     {
       "path": "scripts/spur_submit_datagen.sh",

@@ -19,7 +19,7 @@ The block below is a transcription of the non-comment fields in
 {
   "model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
   "model_revision": "b2cff646eb4bb1d68355c01b18ae02e7cf42d120",
-  "dataset_path": "data/b05factory/sft/multicap_v2.jsonl",
+  "dataset_path": "data/b05factory/sft/multicap_v3.jsonl",
   "output_dir": "/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b",
   "use_lora": false,
   "distributed": true,

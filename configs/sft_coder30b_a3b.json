@@ -4,7 +4,7 @@
   "_comment_model_revision": "Hub commit b2cff646, resolved 2026-08-03 and verified against the downloaded snapshot: 16 shards, 18,867 tensors, all BF16, 30,532,122,624 parameters, 61,064,245,248 bytes. Without this key model_spec.resolve_model_identity refuses the load outright in production mode (UnpinnedModelError) and, in development, silently trains whatever the shared HF cache happens to hold -- on a cache several people write to, that is not a reproducible run.",
   "model_revision": "b2cff646eb4bb1d68355c01b18ae02e7cf42d120",
   "_comment_no_midtrain": "There is no Base variant of this model, nor of Qwen3-32B or Qwen3.6-35B-A3B. Continued pretraining requires one (running it on an instruct model destroys instruction-following -- docs/EVAL_RESULTS.md), and the chat-vector residual requires a base/instruct PAIR. So the cpt recipe cannot reach production at all, and this trains instruct -> SFT -> RL, which is what Dr. Kernel and Kernel-Smith do anyway.",
-  "dataset_path": "data/b05factory/sft/multicap_v2.jsonl",
+  "dataset_path": "data/b05factory/sft/multicap_v3.jsonl",
   "output_dir": "/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b",
   "use_lora": false,
   "distributed": true,
@@ -31,5 +31,6 @@
   "dataloader_num_workers": 4,
   "dataloader_pin_memory": false,
   "dataloader_prefetch_factor": 2,
-  "_comment_output_dir": "On /shared_nfs, not /home. A 30B checkpoint is ~488GB and the Trainer writes the new one before deleting the old, so even save_total_limit=1 peaks near 976GB during rotation. /home is a 10TB volume shared with the whole cluster and sat at 310GB free when this was set -- our own footprint is only ~154GB, so the pressure is other users and not something we can reclaim. /shared_nfs has 1,908GB free. Training on /home would have died mid-rotation hours in, having burned the allocation."
+  "_comment_output_dir": "On /shared_nfs, not /home. A 30B checkpoint is ~488GB and the Trainer writes the new one before deleting the old, so even save_total_limit=1 peaks near 976GB during rotation. /home is a 10TB volume shared with the whole cluster and sat at 310GB free when this was set -- our own footprint is only ~154GB, so the pressure is other users and not something we can reclaim. /shared_nfs has 1,908GB free. Training on /home would have died mid-rotation hours in, having burned the allocation.",
+  "_comment_dataset_path": "v3: 69,851 rows / ~255M tokens. Adds 4,279 AMD-NATIVE step-centric rows -- single revisions distilled from 11,227 multi-turn trajectories generated on MI355X through KoreEnv against AITER/hipBLASLt production baselines, keeping only correctness-preserving high-gain ones (1,499 fixes, 2,812 speedups). That 22.6% survival rate is the Kernel-Smith filter working as intended: training a local improver means discarding the revisions that were not improvements. Plus 4,493 recovered rows and the 61,079-row v2 base. All three sources passed one decontamination gate with ZERO held-out hits."
 }

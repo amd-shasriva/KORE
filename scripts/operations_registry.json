@@ -233,6 +233,12 @@
       "replacement": "scheduler GRPO job with explicit GPU allocation"
     },
     {
+      "path": "scripts/run_kernelbench_amd.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "materialize the real KernelBench Level 1/2 problems into runnable KORE task dirs, generate one kernel per problem from a model, and measure them through KoreEnv to emit the field-standard fast_p report vs torch-eager"
+    },
+    {
       "path": "scripts/run_sft_gate.py",
       "classification": "deprecated",
       "lifecycle": "deprecated",
@@ -324,6 +330,12 @@
       "lifecycle": "active",
       "production": true,
       "role": "single-node 8-rank stage-3 multi-turn GRPO launcher (ZeRO-2, in-process rollout replica; spans requeues)"
+    },
+    {
+      "path": "scripts/spur_kernelbench_1node.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "one-node gfx950 KernelBench-AMD run: materialize, hand-written control kernels, model generation, and the verified/cold-cache measured fast_p report"
     },
     {
       "path": "scripts/spur_midtrain_1node.sbatch",

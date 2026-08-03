@@ -181,6 +181,37 @@ Generation is idempotent and its current outputs are checked in. Registry discov
 
 ---
 
+## HIP C++ tasks (`backend: hip`)
+
+Triton has a measured codegen ceiling on AMD: HipKittens (MLSys 2026, arXiv 2511.08083) reports it 1.3–3.0x behind C++ tile primitives on BF16 GEMM, and both HIP bars in AgentKernelArena (`hip2hip` 6.69x, `torch2hip` 6.89x) are C++ targets. `kore/tasks/hip_ops.py` defines the operators and their seeds; `generate_hip.py` materializes `hip_<op>_<dtype>/` dirs.
+
+A HIP task is structurally a normal task — same `task.yaml` schema, same Python `reference.py` oracle, same `driver.py` shim into `_genops.driver_main`, so it inherits the full paired publication timing protocol and the whole anti-hack battery. Only three things differ:
+
+| | Triton task | HIP task |
+|---|---|---|
+| `backend` | `triton` | `hip` |
+| `seed_kernel_name` | `seed_triton.py` | `seed_hip.hip` |
+| candidate staged as | `kernel.py` | `kernel.hip` |
+
+The candidate ABI is AgentKernelArena's, because it is already validated on this hardware: a `.hip` file that binds `forward` via `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)` and takes/returns `torch::Tensor`. Compilation goes through `kore/env/hip_toolchain.py`, which pins `PYTORCH_ROCM_ARCH` from the task's `gpu_target` (15.4s vs 114.6s per compile), puts `ninja` on `PATH`, and content-addresses the extension name so two workers cannot share a build directory.
+
+```bash
+python -m kore.tasks.generate_hip --list                     # dry-run
+PYTHONPATH=. python scripts/verify_hip_seeds.py --gpu 0 --adversarial
+PYTHONPATH=. python scripts/verify_hip_tasks_e2e.py --gpu 0   # through the real env
+PYTHONPATH=. python scripts/audit_hip_tasks.py                # dedup + decontam
+```
+
+Three constraints that were measured, not assumed, and that will bite anyone adding to this family:
+
+* **Every declared shape is benched and CV-gated**, so `minimal` is not a free smoke lane. Lanes are sized so the vendor baseline runs 75–90 µs; smaller lanes measured 3–5% paired-ratio CV against the 3% publication gate. A lane where candidate *and* baseline both sit at kernel-launch latency reports a flat 1.000x for any kernel — it looks like a passing task and teaches nothing.
+* **An op whose seed is far slower than its baseline may not be timeable at all.** `gemm` is defined but `timing_admissible=False` and is not generated: it verifies at 85–130 dB, but its ~30 µs hipBLASLt baseline is measured right after milliseconds of candidate work and the baseline's own CV lands at 3.4–5.6%. See its `timing_note` for the measurement and what would fix it.
+* **Representation constraints are enforced over all lanes.** MXFP4 needs `N % 32 == 0`; `dim_multiples` on the op spec makes an illegal lane a generation-time error rather than a datagen-time crash on a validation shape.
+
+Low precision (`fp8_e4m3fn`, `mxfp4`) is where MI355X's lead is largest — 10.1 PFLOPs MXFP4/MXFP6 against 2.5 BF16. There is deliberately **no MXFP6 task**: `torch.float6_e2m3fn`/`float6_e3m2fn` do not exist in this stack, and `torch.float4_e2m1fn_x2` exists but cannot be cast, so MXFP4 uses packed uint8 nibbles plus E8M0 exponents like `gemm_mxfp4`.
+
+---
+
 ## Baselines
 
 **There are two baseline lanes, and a speedup means different things in each.** Measured across all

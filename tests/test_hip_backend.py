@@ -158,6 +158,41 @@ def test_environment_classifier_routes_toolchain_absence_to_infra():
     assert task.backend == "hip"
 
 
+def test_loader_emits_the_marker_when_the_toolchain_is_unusable(monkeypatch, capsys, tmp_path):
+    """The marker is what makes toolchain absence visible to the classifier.
+
+    Raising alone is not enough: the environment reads a driver subprocess's
+    STDOUT, so the loader has to print evidence the parent can match. Without it a
+    node missing hipcc reports as a model failure on every episode.
+    """
+    monkeypatch.setattr(
+        hip, "probe_toolchain",
+        lambda: hip.ToolchainStatus(available=False, missing=("hipcc",),
+                                    detail="hipcc not found on PATH or under ROCM_HOME"))
+    (tmp_path / "kernel.hip").write_text("// unreachable: the toolchain check runs first\n")
+
+    with pytest.raises(hip.HipToolchainError) as excinfo:
+        hip.load_hip_candidate(tmp_path, "forward", gpu_target="gfx950")
+
+    assert hip.TOOLCHAIN_MARKER in str(excinfo.value)
+    assert "hipcc" in str(excinfo.value)
+    printed = capsys.readouterr().out
+    assert hip.TOOLCHAIN_MARKER in printed, "the parent classifier reads stdout"
+    assert hip.TOOLCHAIN_ABSENCE_PATTERN.search(printed)
+
+
+def test_toolchain_check_precedes_reading_the_candidate(monkeypatch, tmp_path):
+    """A broken toolchain must not be reported as a missing/!bad candidate: the
+    two tiers have to stay distinguishable even when both are wrong."""
+    monkeypatch.setattr(
+        hip, "probe_toolchain",
+        lambda: hip.ToolchainStatus(available=False, missing=("ninja", "hipcc")))
+    # No kernel.hip staged at all, and the verdict must still be the toolchain.
+    with pytest.raises(hip.HipToolchainError) as excinfo:
+        hip.load_hip_candidate(tmp_path, "forward")
+    assert "ninja" in str(excinfo.value)
+
+
 def test_environment_classifier_still_blames_a_broken_kernel():
     from kore.env.kore_env import KoreEnv
 

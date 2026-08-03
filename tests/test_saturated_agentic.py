@@ -347,3 +347,146 @@ def test_outage_decision_uses_the_failure_count_this_call_observed(monkeypatch):
     with pytest.raises(RuntimeError, match="teacher unavailable"):
         teacher.generate([])
     assert interleaved.is_set(), "the interleaving under test never happened"
+
+
+# --------------------------------------------------------------------------- #
+# Task resolution: a failed pool load must not become a permanent verdict
+# --------------------------------------------------------------------------- #
+class _PoolTask:
+    def __init__(self, task_id):
+        self.task_id = task_id
+
+
+def _install_pool(monkeypatch, sequence, index_size=None):
+    """Make ``load_pool()`` return each element of ``sequence`` in turn.
+
+    ``sequence`` entries are either a list of task ids or an exception to raise,
+    which is how the two real failure modes (an empty directory still being
+    materialized, and a load that raises) are reproduced.
+    """
+    from kore.tasks import external
+
+    calls = []
+
+    def _load_pool(root=None):
+        calls.append(1)
+        item = sequence[min(len(calls) - 1, len(sequence) - 1)]
+        if isinstance(item, Exception):
+            raise item
+        return [_PoolTask(t) for t in item]
+
+    def _load_pool_specs(root=None):
+        return [object()] * index_size if index_size is not None else []
+
+    monkeypatch.setattr(external, "load_pool", _load_pool)
+    if index_size is not None:
+        monkeypatch.setattr(external, "load_pool_specs", _load_pool_specs)
+    return calls
+
+
+def _registry_knows_nothing(monkeypatch):
+    from kore.tasks import registry
+
+    def _get_task(task_id):
+        raise KeyError(f"unknown task {task_id!r}")
+
+    monkeypatch.setattr(registry, "get_task", _get_task)
+
+
+def test_pool_load_that_returned_nothing_is_retried_not_cached(monkeypatch):
+    """An empty pool is a transient condition, not a verdict about the task.
+
+    The overnight campaign started 26 minutes before ``data/task_pool/tasks/``
+    finished materializing. ``load_pool()`` returned [] (a missing directory is
+    not an exception), the previous revision cached that in a ``finally``, and
+    every pool task the node touched for the rest of the process raised the
+    original ``KeyError`` in 2 ms: 4,352 lost episodes, 28% of everything the
+    campaign attempted, while the throughput counter stayed healthy because
+    failures are fast. All 871 affected ids ran fine later, so the tasks were
+    never the problem.
+    """
+    _registry_knows_nothing(monkeypatch)
+    calls = _install_pool(monkeypatch, [[], ["kbk_thing_fp32"]])
+    monkeypatch.setattr(sat, "POOL_RELOAD_COOLDOWN_SECONDS", 0.0)
+
+    resolve = sat._import_get_task()
+
+    with pytest.raises(KeyError):
+        resolve("kbk_thing_fp32")
+    assert len(calls) == 1
+
+    task = resolve("kbk_thing_fp32")
+    assert task.task_id == "kbk_thing_fp32", "the retry never happened"
+    assert len(calls) == 2
+
+
+def test_pool_load_that_raised_is_retried_not_cached(monkeypatch):
+    """A load that raises leaves the pool retryable, and says so."""
+    _registry_knows_nothing(monkeypatch)
+    calls = _install_pool(
+        monkeypatch, [RuntimeError("NFS stall"), ["kbk_thing_fp32"]]
+    )
+    monkeypatch.setattr(sat, "POOL_RELOAD_COOLDOWN_SECONDS", 0.0)
+
+    resolve = sat._import_get_task()
+    with pytest.raises(KeyError):
+        resolve("kbk_thing_fp32")
+    assert resolve("kbk_thing_fp32").task_id == "kbk_thing_fp32"
+    assert len(calls) == 2
+
+
+def test_pool_shorter_than_its_index_is_treated_as_incomplete(monkeypatch):
+    """A partially materialized pool must not be accepted as the whole pool.
+
+    ``pool.jsonl`` is written before the task directories, so the index is the
+    only available witness that materialization is still in flight. A load that
+    finds fewer tasks than the index declares is exactly the 03:54-vs-04:20 race
+    and has to stay retryable.
+    """
+    _registry_knows_nothing(monkeypatch)
+    calls = _install_pool(
+        monkeypatch, [["kbk_a_fp32"], ["kbk_a_fp32", "kbk_b_fp32"]], index_size=2
+    )
+    monkeypatch.setattr(sat, "POOL_RELOAD_COOLDOWN_SECONDS", 0.0)
+
+    resolve = sat._import_get_task()
+    assert resolve("kbk_a_fp32").task_id == "kbk_a_fp32"
+    assert len(calls) == 1, "the first load already had the id being asked for"
+
+    # b is missing from the short pool, so asking for it must trigger a reload
+    # rather than inheriting the first load's incomplete answer.
+    assert resolve("kbk_b_fp32").task_id == "kbk_b_fp32"
+    assert len(calls) == 2
+
+
+def test_a_complete_pool_load_is_cached(monkeypatch):
+    """The cooldown must not turn a healthy campaign into a reload per episode."""
+    _registry_knows_nothing(monkeypatch)
+    calls = _install_pool(
+        monkeypatch, [["kbk_a_fp32", "kbk_b_fp32"]], index_size=2
+    )
+    monkeypatch.setattr(sat, "POOL_RELOAD_COOLDOWN_SECONDS", 0.0)
+
+    resolve = sat._import_get_task()
+    for _ in range(5):
+        assert resolve("kbk_a_fp32").task_id == "kbk_a_fp32"
+    with pytest.raises(KeyError):
+        resolve("kbk_missing_fp32")
+    assert len(calls) == 1, "a complete pool was reloaded"
+
+
+def test_unknown_id_does_not_reload_on_every_episode(monkeypatch):
+    """A genuinely unknown id costs at most one load per cooldown interval.
+
+    Without the cooldown, a shard plan carrying one stale id would pay a ~60 s
+    ``load_pool()`` on every episode that touched it.
+    """
+    _registry_knows_nothing(monkeypatch)
+    calls = _install_pool(monkeypatch, [[]])
+    monkeypatch.setattr(sat, "POOL_RELOAD_COOLDOWN_SECONDS", 3600.0)
+
+    resolve = sat._import_get_task()
+    for _ in range(10):
+        with pytest.raises(KeyError):
+            resolve("kbk_never_existed_fp32")
+    assert len(calls) == 1

@@ -1,0 +1,52 @@
+task_id: hip_reciprocal_fp32
+operation: hip_reciprocal
+dtype: fp32
+backend: hip
+gpu_target: gfx950
+seed_kernel_name: seed_hip.hip
+snr_threshold: 35.0
+op_family: hip_unary
+baseline_tier: hip
+# reciprocal on a positive domain, in HIP C++ (activation family).
+# Candidate ABI: a .hip file binding `forward` through
+# PYBIND11_MODULE(TORCH_EXTENSION_NAME, m), taking/returning torch::Tensor.
+# Correctness oracle: fp32 torch. Baseline (--impl reference):
+# the fused ROCm elementwise kernel behind torch reciprocal.
+# The seed is correct but deliberately naive, so the headroom HipKittens
+# measures for C++ tile primitives (1.3-3.0x over Triton on BF16 GEMM) is
+# what the model has to find.
+shape_policy:
+  schema_version: 2
+  policy_id: outer_rows
+  status: eligible
+  enabled: true
+  source: generator:hip_reciprocal
+  reason: explicit outer_rows transform with frozen non-target dimensions
+  transforms:
+  - name: outer_rows
+    dims:
+    - M
+    relation: independent
+    multiple: 1
+    minimum: 2048
+    regimes:
+    - small
+    - large
+    - non_power_of_two
+    - row_tail
+    misalign_to: 8
+    misalign_dim: null
+    preserve_singleton: true
+  constraints: []
+  authored_hidden_shapes: []
+  max_elements: 268435456
+shapes:
+  minimal: {M: 8192, N: 8192}
+  primary: {M: 4096, N: 14336}
+  validation:
+    - {M: 16384, N: 4096}
+    - {M: 2048, N: 32768}
+    - {M: 8191, N: 8193}
+targets:
+  snr_db: 35.0
+  comparison_baseline: torch_reciprocal

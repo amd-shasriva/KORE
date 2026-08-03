@@ -355,9 +355,30 @@ def _grouped_map(groups: Mapping[str, tuple[str, ...]]) -> Mapping[str, str]:
 # hand-authored task carries no generator source-family field, so admission to
 # the registry requires an exact, reviewed entry.
 _HIP_OPERATIONS: Mapping[str, tuple[str, ...]] = MappingProxyType({
-    "activation": ("hip_gelu_tanh", "hip_silu", "hip_silu_mul"),
-    "normalization": ("hip_layernorm", "hip_rmsnorm"),
-    "reduction": ("hip_softmax_rows",),
+    "activation": (
+        "hip_gelu_tanh", "hip_silu", "hip_silu_mul",
+        # Pointwise activations and gates, from kore.tasks.hip_ops templates.
+        "hip_abs", "hip_elu", "hip_exp", "hip_gelu_erf", "hip_gelu_mul",
+        "hip_gelu_quick", "hip_hardsigmoid", "hip_hardswish", "hip_hardtanh",
+        "hip_leaky_relu", "hip_log", "hip_mish", "hip_neg", "hip_reciprocal",
+        "hip_reglu", "hip_relu", "hip_relu6", "hip_rsqrt", "hip_selu",
+        "hip_sigmoid", "hip_sigmoid_mul", "hip_sign", "hip_softplus",
+        "hip_softsign", "hip_sqrt", "hip_square", "hip_tanh_act",
+    ),
+    "elementwise": (
+        "hip_add", "hip_div", "hip_maximum", "hip_minimum", "hip_mul", "hip_sub",
+    ),
+    "fusion": (
+        "hip_add_add_relu", "hip_add_gelu", "hip_add_mul", "hip_add_mul_relu",
+        "hip_add_relu", "hip_add_silu", "hip_fma", "hip_fma_gelu",
+        "hip_fma_relu", "hip_mul_relu", "hip_mul_tanh", "hip_sub_relu",
+    ),
+    "normalization": ("hip_layernorm", "hip_rmsnorm", "hip_l2_normalize"),
+    "reduction": (
+        "hip_softmax_rows", "hip_log_softmax_rows", "hip_row_amax_abs",
+        "hip_row_l1", "hip_row_l2", "hip_row_logsumexp", "hip_row_max",
+        "hip_row_mean", "hip_row_min", "hip_row_rms", "hip_row_sum",
+    ),
     "gemm": ("hip_gemm",),
     "quantization": (
         "hip_quant_fp8_pertoken",
@@ -405,6 +426,8 @@ HAND_OPERATION_FAMILIES: Mapping[str, str] = _grouped_map({
         "silu_and_mul",
         *_HIP_OPERATIONS["activation"],
     ),
+    "elementwise": _HIP_OPERATIONS["elementwise"],
+    "fusion": _HIP_OPERATIONS["fusion"],
     "gemm": (
         "gemm",
         "gemm_backward",

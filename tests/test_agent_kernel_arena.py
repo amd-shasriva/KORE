@@ -170,14 +170,40 @@ def test_summary_carries_the_training_overlap_disclosure():
 
     Our HIP tasks were authored independently -- no AKA source, references or
     shapes -- because training on the benchmark would destroy the only
-    checkable "we beat Opus on HIP" claim we have. But 20/20 share an operator
+    checkable "we beat Opus on HIP" claim we have. But some share an operator
     with an AKA task, which is unavoidable and worth stating. Putting the
     disclosure in a separate audit script makes it optional; putting it in the
     summary makes it travel with the result.
     """
+    from kore.eval.agent_kernel_arena import OPERATOR_OVERLAP
+
     s = summarize([ArenaResult("t1", "hip2hip", True, True, speedup=7.0, score=820)])
     assert "training_overlap_disclosure" in s
     d = s["training_overlap_disclosure"]
     assert "authored independently" in d
     assert "no AgentKernelArena" in d or "no AKA" in d
-    assert "20/20" in d, "the disclosure must state the actual overlap, not gesture at it"
+    shared, total = OPERATOR_OVERLAP["shared"], OPERATOR_OVERLAP["hip_tasks"]
+    assert f"{shared}/{total}" in d, (
+        "the disclosure must state the actual overlap, not gesture at it")
+
+
+def test_the_overlap_disclosure_counts_the_tasks_that_actually_exist():
+    """The disclosure has to fail when the HIP family grows, not go quietly stale.
+
+    It said "20/20" while the registry held 188 HIP tasks, because the number
+    lived in prose that nothing checked. Tying the denominator to the live
+    registry makes adding tasks without re-measuring a test failure; the shared
+    counts themselves still come from scripts/audit_hip_tasks.py, which needs
+    the AKA checkout and is too slow to run here.
+    """
+    from kore.eval.agent_kernel_arena import OPERATOR_OVERLAP
+    from kore.tasks.registry import all_tasks
+
+    live = sum(1 for t in all_tasks() if t.backend == "hip")
+    assert OPERATOR_OVERLAP["hip_tasks"] == live, (
+        f"the registry has {live} HIP tasks but the AKA overlap disclosure "
+        f"claims {OPERATOR_OVERLAP['hip_tasks']}; re-run "
+        f"{OPERATOR_OVERLAP['measured_by']} and update OPERATOR_OVERLAP")
+    assert 0 <= OPERATOR_OVERLAP["shared"] <= live
+    for key in ("hip2hip", "torch2hip"):
+        assert 0 <= OPERATOR_OVERLAP[key] <= live

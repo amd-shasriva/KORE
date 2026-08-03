@@ -327,11 +327,15 @@ class Candidate:
     launches: int = 0
     coverage: Optional[float] = None
     error_text: Optional[str] = None
+    #: False when the oracle never ran on this source (budget stop). Kept
+    #: separate from ``correct`` so "we did not measure it" can never be read
+    #: off the run log as "it was wrong".
+    measured: bool = True
 
     @property
     def admissible(self) -> bool:
         """Eligible to be an elite, a parent, or a few-shot exemplar."""
-        return (self.correct and self.hack_reason is None
+        return (self.measured and self.correct and self.hack_reason is None
                 and not self.exceeds_credible and self.stats.n > 0)
 
     @property
@@ -400,7 +404,7 @@ class Archive:
     """
 
     VERDICTS = ("new", "improved", "dominated", "duplicate",
-                "incorrect", "hack", "implausible")
+                "incorrect", "hack", "implausible", "unmeasured")
 
     def __init__(
         self,
@@ -421,16 +425,25 @@ class Archive:
         self.cells: dict[tuple, Candidate] = {}
         self.by_fingerprint: dict[str, Candidate] = {}
         self.rejected: list[Candidate] = []
+        self.unmeasured: list[Candidate] = []
         self.admissions: list[Admission] = []
 
     # -- admission ---------------------------------------------------------- #
     def add(self, cand: Candidate) -> Admission:
         """Insert a measured candidate. The three guards are enforced here.
 
-        Order matters: hack before credibility before correctness before niche
-        competition, so the reason recorded is the earliest one that applies and
-        a hacked kernel is never described as merely "incorrect".
+        Order matters: unmeasured before hack before credibility before
+        correctness before niche competition, so the reason recorded is the
+        earliest one that applies - a hacked kernel is never described as merely
+        "incorrect", and a kernel the budget stopped us evaluating is never
+        described as wrong.
         """
+        if not cand.measured:
+            # Deliberately NOT in ``rejected``: that list is the audit trail of
+            # kernels the guards refused, and a stopped evaluation is not one.
+            self.unmeasured.append(cand)
+            return self._record(Admission("unmeasured", cand,
+                                          detail=cand.error_text or "never evaluated"))
         if cand.hack_reason:
             return self._reject(cand, "hack", cand.hack_reason)
         if cand.exceeds_credible:
@@ -650,6 +663,7 @@ class Archive:
             "coverage": self.coverage(),
             "members": len(self.cells),
             "rejected": len(self.rejected),
+            "unmeasured": len(self.unmeasured),
             "mean_pairwise_distance": round(self.mean_pairwise_distance(), 4),
             "lineage_concentration": round(self.lineage_concentration(), 4),
             "recent_novelty": round(self.recent_novelty(), 4),
@@ -686,6 +700,11 @@ class Trial:
     error_text: Optional[str] = None
     env_calls: int = 0
     coverage: Optional[float] = None
+    #: True when the verifier-call cap stopped this evaluation before the oracle
+    #: ran. A budget stop is NOT a kernel failure, and recording it as one would
+    #: put a number that was never measured into the run's incorrect count - the
+    #: same defect as a fabricated timing, wearing a different hat.
+    budget_exhausted: bool = False
 
     @property
     def speedup_mean(self) -> Optional[float]:
@@ -695,7 +714,8 @@ class Trial:
     def verified(self) -> bool:
         """Measured, correct, and not disqualified by a guard."""
         return bool(self.correct and self.hack_reason is None
-                    and not self.exceeds_credible and self.trimmed)
+                    and not self.exceeds_credible and self.trimmed
+                    and not self.budget_exhausted)
 
 
 def trim_outliers(samples: list, min_for_trim: int = 5) -> list:
@@ -772,7 +792,7 @@ class StableEvaluator:
         if not self.budget.spend(1):
             return Trial(source=source, fingerprint=fp, compiled=False,
                          correct=False, error_text="budget exhausted",
-                         env_calls=0)
+                         env_calls=0, budget_exhausted=True)
         obs, result = self._step(source)
         samples: list = []
         speedup = result.speedup
@@ -873,6 +893,7 @@ def candidate_from_trial(trial: Trial, generation: int, parent: Optional[Candida
         launches=launch_count(trial.source),
         coverage=trial.coverage,
         error_text=trial.error_text,
+        measured=not trial.budget_exhausted,
     )
 
 
@@ -1215,6 +1236,9 @@ def evolve(
         "rejected_hacks": sum(1 for c in archive.rejected if c.hack_reason),
         "rejected_implausible": sum(1 for c in archive.rejected
                                     if c.exceeds_credible and not c.hack_reason),
+        # Reported separately from the rejections so a truncated run is legible
+        # as "we ran out of budget", not as "these kernels were wrong".
+        "unmeasured": len(archive.unmeasured),
     }
     result = EvolveAgentResult(task_id=task_id, archive=archive, scaling=scaling,
                                generations=records, env_calls=evaluator.env_calls,

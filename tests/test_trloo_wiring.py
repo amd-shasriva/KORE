@@ -202,7 +202,67 @@ def test_cross_rank_grpo_path_is_unchanged_by_the_new_arguments():
 
 
 # --------------------------------------------------------------------------- #
-# 5. the capability audit must not let TRLOO+AVSPO look like it works
+# 5. end to end: the TRLOO advantage reaches the actual gradient
+# --------------------------------------------------------------------------- #
+def test_the_gradient_carries_the_trloo_advantage_not_the_pooled_one():
+    """A real backward through ``_accumulate_grpo_grads``, both estimators.
+
+    Everything above tests the advantage NUMBERS. This tests that they survive the
+    loss construction: with a trivial differentiable log-prob whose gradient is 1
+    per sample, the accumulated gradient is the token-weighted mean of the
+    advantages, so the two estimators must produce measurably different gradients
+    on the same group. Without this, a correct estimator wired into a path that
+    ignored it would still pass every other test in this file.
+    """
+    torch = pytest.importorskip("torch")
+
+    weight = torch.nn.Parameter(torch.zeros(1))
+
+    def logp_fn(gen_inputs):
+        # A stand-in for the policy's token-mean log-prob: d(logp)/d(weight) == 1.
+        return weight.sum()
+
+    # Token counts DIFFER on purpose. The loss is a global token-mean, so with
+    # equal counts both estimators' advantages sum to zero over the group and the
+    # gradients would coincide at 0.0 -- a test that proves nothing. Unequal
+    # lengths, which is the real case, make the weighting visible.
+    tokens = [1, 2, 3, 4]
+    samples = [_sample(1.0, (0, 0), tokens=tokens[0]),
+               _sample(2.0, (0, 1), tokens=tokens[1]),
+               _sample(3.0, (1, 0), tokens=tokens[2]),
+               _sample(4.0, (1, 1), tokens=tokens[3])]
+
+    grads = {}
+    for estimator in ("grpo", "trloo"):
+        weight.grad = None
+        _, n_terms = grpo._accumulate_grpo_grads(
+            [samples], logp_fn, ref_anchor_coef=0.0, variance_floor=0.0,
+            advantage_estimator=estimator, backward=True)
+        assert n_terms == 4
+        grads[estimator] = float(weight.grad)
+
+    def _expected(advantages):
+        # No stored old_logp, so the per-sample term is -A * logp, each scaled by
+        # n_tok / total_tokens (the DAPO global token-mean).
+        total = sum(tokens)
+        return -sum(a * n / total for a, n in zip(advantages, tokens))
+
+    trloo_advs = grpo.group_sample_advantages(samples, advantage_estimator="trloo")
+    pooled = ac.avspo_advantages([1.0, 2.0, 3.0, 4.0], 0.0, 2, grpo._EPS)
+
+    assert trloo_advs == pytest.approx([-2.0, -2.0, 2.0, 2.0])
+    assert grads["trloo"] == pytest.approx(_expected(trloo_advs), abs=1e-6)
+    assert grads["grpo"] == pytest.approx(_expected(pooled), abs=1e-6)
+
+    # The load-bearing assertion: two different objectives, two different gradients
+    # from the identical group. A correct estimator wired into a path that ignored
+    # it would pass every other test in this file but fail this one.
+    assert grads["trloo"] != pytest.approx(grads["grpo"], abs=1e-3)
+    assert grads["trloo"] == pytest.approx(-0.8, abs=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# 6. the capability audit must not let TRLOO+AVSPO look like it works
 # --------------------------------------------------------------------------- #
 def test_audit_reports_the_variance_floor_as_inert_under_trloo(tmp_path):
     """Requesting the AVSPO floor with TRLOO requests something that never runs."""

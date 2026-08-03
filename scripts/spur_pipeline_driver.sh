@@ -331,6 +331,18 @@ disk_free_gb() { df -BG --output=avail "$REPO" 2>/dev/null | tail -1 | tr -dc '0
 
 step_sft() {
   checkpoint_complete "$MIDTRAIN_OUT" || { log "sft: refusing to start, midtrain is not complete"; return 1; }
+  # Hold while the training mixture is still being built. Two reasons, and the
+  # second is the one that bites: an 11h SFT on superseded data wastes the
+  # allocation, but worse, Path A and Path B only answer whether midtrain earns
+  # its keep if both arms train on IDENTICAL data. Path B starts hours after
+  # Path A, so letting Path A run on v2 while v3 lands would silently invalidate
+  # the comparison rather than fail it.
+  if [ -f "$REPO/runs/DATA_NOT_FINAL" ]; then
+    log "sft: HOLDING -- runs/DATA_NOT_FINAL: $(head -1 "$REPO/runs/DATA_NOT_FINAL" 2>/dev/null)"
+    log "sft: remove that file to release both SFT arms onto the final mixture."
+    note sft "held_data_not_final"
+    return 2
+  fi
   # Prefer the chat-vector model: it already follows instructions, so the SFT
   # budget buys kernel skill instead of re-learning chat from scratch. Fall back
   # to raw midtrain if the residual stage did not produce a verified model --

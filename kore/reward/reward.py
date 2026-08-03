@@ -382,7 +382,7 @@ _SILENT_FALLBACK = re.compile(
     r"except\s*[\w. ,()]*:\s*(?:\n\s*)*(?:return\b|out\s*=)", re.MULTILINE)
 
 
-def scan_for_hacks(source: str) -> Optional[str]:
+def scan_for_hacks(source: str, language: str = "python") -> Optional[str]:
     """Return a reason string if the source looks like a reward hack, else None.
 
     Three cooperating passes, cheapest first:
@@ -396,13 +396,22 @@ def scan_for_hacks(source: str) -> Optional[str]:
 
     Comments and docstrings are stripped first so legitimate references (e.g. a
     comment "matches aiter's layout") do not trip the scanner.
+
+    ``language`` selects the comment syntax to strip and nothing else -- every
+    pattern above still runs, on every language.  ``"cpp"`` is required for HIP
+    C++ candidates: measured over the 89 real HIP kernels in AgentKernelArena, 7
+    were rejected purely because a ``//`` or ``/* */`` comment mentioned a vendor
+    library that the code never called.  C++ comment stripping is deliberately
+    NOT applied to Python, where ``//`` is floor division: removing it would
+    delete real code and could hide a delegation on the right of the operator.
     """
-    code = _strip_comments_and_docstrings(source)
+    code = _strip_comments_and_docstrings(source, language)
     for pat, reason in _HACK_PATTERNS:
         if re.search(pat, code):
             return reason
     # The AST pass parses the ORIGINAL source: stripping a function whose body is
-    # only a docstring leaves an empty block that will not parse.
+    # only a docstring leaves an empty block that will not parse. It fails open on
+    # unparseable input, so C++ simply produces no structural verdict.
     structural = _structural_delegation_reason(source)
     if structural:
         return structural
@@ -414,11 +423,20 @@ def scan_for_hacks(source: str) -> Optional[str]:
     return None
 
 
-def _strip_comments_and_docstrings(src: str) -> str:
-    """Remove triple-quoted strings and ``#`` comments while preserving code
-    spacing (so patterns like ``torch.matmul`` stay intact for scanning)."""
+def _strip_comments_and_docstrings(src: str, language: str = "python") -> str:
+    """Remove comments/docstrings while preserving code spacing (so patterns like
+    ``torch.matmul`` stay intact for scanning)."""
     src = re.sub(r'"""[\s\S]*?"""', " ", src)
     src = re.sub(r"'''[\s\S]*?'''", " ", src)
+    if str(language or "").strip().lower() == "cpp":
+        # Order matters: block comments first, so a `//` inside `/* ... */` cannot
+        # eat the line that closes the block.
+        src = re.sub(r"/\*[\s\S]*?\*/", " ", src)
+        src = re.sub(r"//[^\n]*", "", src)
+        # `#` is a PREPROCESSOR directive in C++, never a comment. Stripping it
+        # would delete `#include <hipblaslt/hipblaslt.h>` and hide exactly the
+        # vendor-library delegation the scan exists to catch.
+        return src
     src = re.sub(r"#.*", "", src)
     return src
 

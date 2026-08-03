@@ -73,6 +73,21 @@ MAX_PLAUSIBLE_SPEEDUP = FilterPolicy.max_speedup
 #: Below this share of GPU time, a speedup claim is about a sliver of the
 #: workload. Not a hard reject on its own -- some tasks legitimately are a small
 #: kernel in a larger trace -- but it is what :mod:`kore.policy.rejection` tests.
+#:
+#: This is the threshold coverage DESERVES once it is measured over a delimited
+#: benched region, and it is deliberately still 0.10. What is not safe is
+#: applying it to the coverage we can measure today: that number is the
+#: candidate's share of a trace which still contains fixed harness work, so it
+#: moves with the candidate's own speed rather than with the workload. On gfx950
+#: ten CORRECT seed kernels landed between 0.036 and 0.587 while a deliberately
+#: 46x-slowed kernel reached 0.739 -- at 0.10 that rejects correct gen_relu_fp32
+#: and softmax_bf16 and keeps the slow one. See
+#: docs/evidence/coverage_denominator.md.
+#:
+#: So the guard lives at the operational default instead:
+#: ``GRPOConfig.prs_min_coverage`` is 0.0. Nothing in kore/ calls
+#: :func:`kore.policy.rejection.profiling_rejection_sample` yet, and whatever
+#: wires it up must pass that config value rather than take this default.
 LAZY_COVERAGE_THRESHOLD = 0.10
 
 

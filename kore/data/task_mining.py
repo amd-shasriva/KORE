@@ -31,6 +31,7 @@ expensive execution probe, and every gate is independently sufficient to drop.
 
 from __future__ import annotations
 
+import ast
 import os
 import signal
 from collections import Counter
@@ -320,6 +321,8 @@ def probe_module(
         namespace["get_init_inputs"]() if callable(namespace.get("get_init_inputs"))
         else None
     )
+    if not _json_round_trips([args, kwargs]):
+        raise ExternalTaskError("constructor arguments are not plain JSON data")
     with time_limit(timeout):
         model = cls(*args, **kwargs)
     if not isinstance(model, torch.nn.Module):
@@ -515,6 +518,42 @@ def benchmark_references(problems: Iterable[Mapping[str, Any]]) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # Dedup
 # --------------------------------------------------------------------------- #
+class _SubmoduleRenamer(ast.NodeTransformer):
+    """Canonicalize ``self.<attr>`` to ``self.a0``, ``self.a1``, ... by first use."""
+
+    def __init__(self) -> None:
+        self._map: dict[str, str] = {}
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.value, ast.Name) and node.value.id == "self":
+            node.attr = self._map.setdefault(node.attr, f"a{len(self._map)}")
+        return node
+
+
+def canonical_module_source(source: str) -> str:
+    """Rewrite a module so submodule attribute names stop being distinguishing.
+
+    ``kore.data.dedup`` deliberately preserves attribute names, because for a
+    Triton kernel ``tl.dot`` and ``tl.load`` are different operations and must
+    never collapse.  For an ``nn.Module`` the same rule misfires: ``self.fc`` and
+    ``self.dense`` are the same computation under a different author's naming,
+    and leaving them distinct would report copies of one module as many distinct
+    tasks.  Only attributes hung off ``self`` are renamed, so the property that
+    matters for kernels is untouched.
+    """
+    try:
+        tree = ast.parse(source or "")
+    except SyntaxError:
+        return source or ""
+    tree = _SubmoduleRenamer().visit(tree)
+    ast.fix_missing_locations(tree)
+    try:
+        return ast.unparse(tree)
+    except Exception:  # noqa: BLE001 - unparse is best effort
+        return source or ""
+
+
 class Deduplicator:
     """Structural and semantic-graph dedup, seeded with the existing registry.
 
@@ -522,7 +561,9 @@ class Deduplicator:
     repositories with a renamed variable or a reflowed comment.  Both
     fingerprints come from ``kore.data.dedup`` -- the alpha-renamed AST catches
     type-1/type-2 clones, and the semantic-graph hash additionally collapses
-    modules that differ only by a tuned constant.
+    modules that differ only by a tuned constant -- applied to the
+    submodule-canonicalized source so an author's attribute naming does not read
+    as a new task.
     """
 
     def __init__(self, seed_sources: Iterable[str] = ()) -> None:
@@ -534,20 +575,22 @@ class Deduplicator:
         self.graph_seen: dict[str, str] = {}
         self.n_registry_fingerprints = 0
         for source in seed_sources:
-            key = self._structural(source)
+            canonical = canonical_module_source(source)
+            key = self._structural(canonical)
             if key:
                 self.structural_seen.setdefault(key, "registry")
                 self.n_registry_fingerprints += 1
-            graph = self._graph(source)
+            graph = self._graph(canonical)
             if graph:
                 self.graph_seen.setdefault(graph, "registry")
 
     def check(self, source: str, task_id: str) -> Optional[tuple[str, dict]]:
         """Return ``(reason, evidence)`` when ``source`` duplicates a known one."""
-        key = self._structural(source)
+        canonical = canonical_module_source(source)
+        key = self._structural(canonical)
         if key in self.structural_seen:
             return "dedup:structural", {"duplicate_of": self.structural_seen[key]}
-        graph = self._graph(source)
+        graph = self._graph(canonical)
         if graph and graph in self.graph_seen:
             return "dedup:semantic_graph", {"duplicate_of": self.graph_seen[graph]}
         if key:
@@ -652,6 +695,7 @@ def screen_candidate(
             "shape_too_small" if "optimization-target floor" in text
             else "nondeterministic_oracle" if "not deterministic" in text
             else "no_runnable_scale" if "no runnable scale" in text
+            else "unserializable_init_args" if "plain JSON data" in text
             else "execution_failed"
         )
         return Outcome(candidate, False, bucket, text)
@@ -717,6 +761,7 @@ __all__ = [
     "admit",
     "benchmark_references",
     "build_spec",
+    "canonical_module_source",
     "describe_tensor",
     "probe_module",
     "registry_task_sources",

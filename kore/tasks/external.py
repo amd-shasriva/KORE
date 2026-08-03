@@ -84,8 +84,11 @@ MIN_PRIMARY_ELEMENTS = 1 << 16
 
 #: What the primary shape aims for.  Large enough to be bandwidth- rather than
 #: launch-bound, small enough that the CPU-side ingest probe stays cheap across
-#: tens of thousands of modules.
-TARGET_PRIMARY_ELEMENTS = 1 << 22
+#: tens of thousands of modules.  The element count bounds memory but not
+#: arithmetic -- a 5x5 convolution over a given tensor is orders of magnitude
+#: more work than a pointwise op over the same one -- so the probe additionally
+#: bounds each candidate by wall clock.
+TARGET_PRIMARY_ELEMENTS = 1 << 20
 
 #: Upper bound on elements in any single generated input, so a scaled shape
 #: cannot allocate an unreasonable tensor on the eval node.

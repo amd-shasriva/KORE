@@ -60,7 +60,12 @@ from kore.tasks.external import (
 
 #: Wall-clock budget for one probed forward pass on CPU.  A module that cannot
 #: complete a forward inside this is not a task, it is a hang risk in datagen.
-FORWARD_TIMEOUT_SECONDS = 20
+FORWARD_TIMEOUT_SECONDS = 8
+
+#: How many scales the probe may try before giving up.  Walking the whole ladder
+#: costs a full forward per rung, and a module that fails its analytic target and
+#: two large step-downs is not going to succeed at a third.
+MAX_SCALE_ATTEMPTS = 3
 
 #: Bit-exact repeat required of the oracle.  A module whose output changes
 #: between two identical calls cannot grade a kernel at any tolerance.
@@ -185,6 +190,25 @@ def _normalize_init(value: Any) -> tuple[list, dict]:
             return list(value[0]), {}
         return list(value), {}
     return [value], {}
+
+
+def _json_round_trips(value: Any) -> bool:
+    """Whether ``value`` survives the JSON round trip the pool index requires.
+
+    Some mined modules take a tensor or a live object as a constructor argument.
+    Such a task could not be persisted -- the pool index is JSONL -- and the
+    argument cannot even cross a process boundary intact, because torch reduces
+    a tensor through shared memory that the screening worker's address-space
+    limit refuses. Both failures have the same fix: the constructor arguments
+    must be plain data.
+    """
+    import json
+
+    try:
+        json.loads(json.dumps(value))
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def describe_tensor(tensor) -> InputSpec:
@@ -354,10 +378,18 @@ def probe_module(
             "optimization-target floor"
         )
 
+    # Try the analytic target, then two sharp step-downs.  Stepping one rung at a
+    # time would cost a full CPU forward per rung across tens of thousands of
+    # modules for no extra information: a module that cannot take its target
+    # shape has a structural reason, not a marginal one.
+    ordered = sorted(reachable, reverse=True)
+    attempts = [
+        scale for scale in (ordered[0], ordered[0] // 8, ordered[0] // 64)
+        if scale >= 1 and _elements(specs, scale) >= MIN_PRIMARY_ELEMENTS
+    ][:MAX_SCALE_ATTEMPTS]
+
     primary = 0
-    for scale in sorted(reachable, reverse=True):
-        if _elements(specs, scale) < MIN_PRIMARY_ELEMENTS:
-            break
+    for scale in attempts:
         try:
             out = forward(scale)
         except ProbeTimeout:
@@ -677,6 +709,7 @@ __all__ = [
     "Decontaminator",
     "Deduplicator",
     "FORWARD_TIMEOUT_SECONDS",
+    "MAX_SCALE_ATTEMPTS",
     "MiningReport",
     "Outcome",
     "ProbeResult",

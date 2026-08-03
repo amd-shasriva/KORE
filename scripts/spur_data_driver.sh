@@ -67,9 +67,13 @@ clear_held_shards() {
 }
 
 episodes_so_far() {
-  # Count trajectory records actually on disk, which is the only number that
-  # matters -- job logs report attempts, not what survived filtering.
-  find "$MT_DIR" -name '*.jsonl' -type f 2>/dev/null \
+  # Count trajectory records on disk, EXCLUDING *.telemetry.jsonl. Those hold
+  # one record per attempt including failures, so globbing all .jsonl counted
+  # errors as data: during a run where the resolver rejected every pool task,
+  # this reported 6,126 episodes when 440 trajectories existed and a single
+  # telemetry file held 260MB of KeyErrors. A progress counter that rises during
+  # total failure is worse than no counter.
+  find "$MT_DIR" -name '*.jsonl' -type f ! -name '*.telemetry.jsonl' 2>/dev/null \
     | xargs cat 2>/dev/null | wc -l
 }
 

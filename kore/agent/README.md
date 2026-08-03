@@ -55,7 +55,13 @@ Tool-use shaping (`tool_use_reward`) rewards correct schemas, keep/revert discip
 
 ## Verified-transform tools
 
-Beyond the base six, the harness can advertise the **ε-typed transformation calculus** as first-class tools, so the policy proposes **in-contract** optimization moves instead of free-form edits. This is opt-in and enabled in the flagship configuration (`agentic_transform_tools: true` → `_rollout_agentic` builds the harness via `agent_tool_schemas(transforms=True)`); it is off by default, so agentic datagen / SFT reconstruction stay byte-identical to the base set.
+Beyond the base six, the harness can advertise the **ε-typed transformation
+calculus** as first-class tools, so the policy proposes **in-contract**
+optimization moves instead of free-form edits. This is opt-in and enabled by
+the legacy 14B configuration (`agentic_transform_tools: true` →
+`_rollout_agentic` builds the harness via `agent_tool_schemas(transforms=True)`).
+The 30B SFT path does not enable it by implication; agentic datagen / SFT
+reconstruction retain the base set unless their launch explicitly opts in.
 
 | Tool | Effect |
 | --- | --- |

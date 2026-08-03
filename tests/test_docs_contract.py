@@ -115,6 +115,9 @@ ABSENT_PATHS: dict[str, str] = {
         "cluster-only (SPUR: 864,715,542 B / 61,122 rows); the mixture SFT "
         "trains on -- base mix plus 4,629 multi-turn refinement trajectories; "
         "materialize with data/release/reassemble.sh",
+    "data/b05factory/sft/multicap_v3.jsonl":
+        "cluster-only output of scripts/build_sft_v3_mixture.py; it is the "
+        "review-gated production SFT mixture and is not materialized in a fresh checkout",
     "data/b05factory/sft/kernel_multiturn_refine.jsonl":
         "cluster-only; the filtered trajectory slice reassemble.sh concatenates "
         "onto multicap.jsonl to rebuild multicap_v2.jsonl offline",
@@ -247,8 +250,8 @@ def test_absent_path_allowlist_has_no_dead_entries():
 # --------------------------------------------------------------------------- #
 #: (doc, fenced-block language, config the block claims to describe, dataclass).
 DOCUMENTED_CONFIG_BLOCKS = (
-    ("configs/README.md", "jsonc", "configs/grpo_14b_full.json", "GRPOConfig"),
-    ("docs/DISTRIBUTED.md", "json", "configs/sft_14b_full.json", "SFTConfig"),
+    ("docs/DISTRIBUTED.md", "json", "configs/sft_coder30b_a3b.json", "SFTConfig"),
+    ("docs/GRPO_READINESS.md", "jsonc", "configs/grpo_14b_full.json", "GRPOConfig"),
 )
 
 
@@ -529,12 +532,7 @@ def test_dataset_status_states_the_cluster_verified_counts():
 
 
 def test_sft_readiness_states_its_own_test_count():
-    """``docs/SFT_READINESS.md`` claimed "35 pass" against 36 collected.
-
-    The count comes from a real collection in a child process rather than from
-    counting ``def test_`` lines, because parametrization means those two numbers
-    are not the same and the doc quotes what a reader would see.
-    """
+    """Keep the live SFT readiness regression inventory visible in its guide."""
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q",
          "-p", "no:cacheprovider",

@@ -1,188 +1,50 @@
-# `kore/eval` — evaluation, gates & generalization
+# `kore/eval` — kernel, retention, and external evaluation
 
-KORE's target is conjunctive: **strong kernel numbers _while_ matching-or-beating the base model on every general benchmark, _and_ generalizing to held-out operator families.** This package measures all three, adds a maximum-scrutiny anti-hack re-evaluation of champion kernels, and provides a literature-comparable frontier suite: a recognized-benchmark adapter (`kernelbench_amd.py`), a robust-KernelBench correctness battery (`robust_eval.py`), paired significance statistics (`paired_stats.py`), and a head-to-head-vs-frontier-model harness (`head_to_head.py` / `vs_opus.py` / `opus_policy.py`).
+KORE reports a kernel result only after the candidate passes the same
+correctness gate used in training. `fast_p` uses the complete task denominator,
+so failed and unattempted tasks cannot disappear from a headline number.
 
----
+## Production evaluation sequence
 
-## Files
+1. Evaluate the SFT checkpoint against the exact instruct checkpoint it started
+   from. This isolates SFT instead of crediting the vendor model.
+2. Run AgentKernelArena on gfx950 with
+   `scripts/run_agent_kernel_arena.py` and
+   `scripts/spur_aka_1node.sbatch`. The runner uses copied workspaces because
+   benchmark harnesses write artifacts; editing the checkout would change later
+   tasks.
+3. Run `scripts/run_kernelbench_amd.py` for KernelBench-AMD and report the
+   torch-eager baseline separately from KORE's vendor lane.
+4. Use `vs_opus.py` / `head_to_head.py` only for matched prompts, task sets,
+   decode budgets, and execution scoring. A missing teacher credential produces
+   a skipped frontier arm, not a fabricated comparison.
+5. Run multi-turn RL evaluation and test-time scaling over the same verified
+   task contract.
 
-| File | Purpose |
-| --- | --- |
-| `fastp.py` | The KernelBench `fast_p` metric (+ pass@k, fast_p@k, multi-seed CIs) |
-| `bakeoff.py` | Matched-measurement-budget bake-off of policies (seed vs. trained) |
-| `retention.py` | Six-benchmark general-capability suite |
-| `gates.py` | PASS/FAIL stage gates (`retention_gate`, `StageGate`) |
-| `generalization.py` | Zero-shot cross-family transfer harness |
-| `champion.py` | Champion kernel re-eval under harder-than-training scrutiny |
-| `policies.py` | Bake-off policies: `seed_policy` (frozen seed) + `model_policy` (trained checkpoint) |
-| `korebench.py` | Standardized worst-shape-win-rate benchmark report |
-| `report.py` | Markdown/JSON rendering for eval results |
-| `kernelbench_amd.py` | Recognized-benchmark adapter: KernelBench ⇄ KORE, `fast_p` at `p ∈ {1, 1.5, 2}`, wider held-out protocol |
-| `robust_eval.py` | Robust-KernelBench anti-hack battery: adversarial regimes, fp64 differential oracle, metamorphic relations, halt-on-first |
-| `paired_stats.py` | Paired bootstrap CI + sign/Wilcoxon tests for KORE-vs-baseline/frontier comparisons |
-| `opus_policy.py` | Adapts the frontier teacher into a `PolicyFn` scored through the identical bake-off path |
-| `head_to_head.py` | KORE-vs-frontier head-to-head with paired significance on per-task speedup deltas |
-| `vs_opus.py` | KORE-vs-frontier head-to-head reporting multi-seed fast_p + win-rate with CIs |
-| `e2e_sglang_vllm.py` | End-to-end serving gate (throughput + accuracy on vLLM / SGLang) |
-| `checkpoint_ab.py` | Checkpoint-vs-base A/B on the held-out generalization scope at a matched budget (`docs/EVAL_RESULTS.md`) |
-| `heldout_lm.py` | Paired held-out LM loss (bits/token) on held-out kernel source — the high-power half of a continued-pretraining A/B |
+## AgentKernelArena
 
----
+`agent_kernel_arena.py` discovers tasks whose `config.yaml` is active and
+requires `gfx950`, then follows its declared compile, correctness, and
+performance commands in that order. Its score is unchanged: 0 for compile
+failure, 20 for compile-only, and `120 + 100 * speedup` for a correct result.
 
-## fast_p and the bake-off
+The 412-task suite has 402 tasks runnable on gfx950 under the discovery filter.
+Its published Opus speed bars are 6.89x (`torch2hip`), 6.69x (`hip2hip`), and
+2.13x (`triton2triton`). The runner places those values next to measured means;
+it never treats them as KORE measurements.
 
-```
-fast_p = (1/n) · #{ tasks that are correct AND baseline/actual > p }
-```
+## Legacy checkpoint A/B
 
-`n` is the **full** split size (uncorrected denominator) — failed or unattempted tasks contribute 0, penalizing wasted budget. `bakeoff.matched_budget_bakeoff` compares policies at an **equal bench budget** per task and ranks by `fast_p[1.0]`. Two policies matter: `seed_policy` (the frozen starter) and `model_policy(checkpoint)` (the trained model). The bake-off scores both at the same budget; reporting only the seed, or comparing at unequal budgets, misstates the result. The speedup that feeds `fast_p` is timing-integrity gated (excessive-ratio artifacts capped, high-variance timings damped to ≤1×), so the headline metric cannot be farmed with a glitch or a noisy bench.
+`checkpoint_ab.py` and `heldout_lm.py` are retained to make the 14B midtrain
+failure reproducible. They are useful precisely because they showed the
+instruction-following collapse described in
+[`docs/EVAL_RESULTS.md`](../../docs/EVAL_RESULTS.md). They are not the
+production evaluation route, because production has no CPT stage.
 
-```mermaid
-flowchart LR
-  SEED[seed_policy] --> EV[evaluate_policy budget=N]
-  MODEL[model_policy checkpoint] --> EV
-  TASKS[task split] --> EV
-  EV --> FP["fast_p curve (p=0,0.5,1,1.5,2)"]
-  FP --> CMP[matched_budget_bakeoff · rank by fast_1]
-  CMP --> RPT[report → JSON + markdown]
-```
+## Generalization and retention
 
-`evaluate_policy` runs each task under a matched budget in `serial` (one refinement trajectory, feedback accumulates) or `parallel` (independent best-of-N) mode, and can report a second `fast_p` curve versus a torch-eager baseline (KernelBench-comparable) alongside the production vendor curve. `pass_at_k` / `fast_p_at_k` give unbiased best-of-N estimates.
-
----
-
-## Retention gate
-
-```mermaid
-flowchart TD
-  BASE[base model] --> BS[run_retention_suite → base scores]
-  CAND[candidate ckpt] --> CS[run_retention_suite → candidate scores]
-  BS --> RG{retention_gate ε}
-  CS --> RG
-  RG -->|no bench drops > ε| PASS[PASS → promote]
-  RG -->|any bench drops > ε| FAIL[FAIL → hard-stop campaign]
-```
-
-`run_retention_suite` scores six benches — **MMLU, HumanEval, LiveCodeBench, IFEval, BFCL, MT-Bench** — each normalized to `[0,1]`. `KORE_EVAL_FULL=1` pulls the real HuggingFace splits (capped by `KORE_EVAL_N`, default 300/bench), with an offline fallback to bundled smoke subsets; the `sources` field records which was used, since a PASS on smoke is not comparable to a PASS on full HF. The campaign calls `retention_gate` after midtrain/sft/dpo/grpo, and a FAIL raises and stops the run. `StageGate` additionally requires the targeted kernel metrics to strictly improve for promotion. Every scorer takes a single `model_generate(prompt, **kw) -> str` callable, so a stub exercises the whole pipeline on CPU and a real HF/vLLM model plugs in unchanged; executable-code benches run in a sandboxed subprocess with a wall-clock timeout.
-
-> MT-Bench is the highest-variance gate key (LLM-as-judge noise); it needs a strong injected judge and enough items, or `ε` will trip on judge noise. The campaign default `ε=0.02` is chosen with this in mind.
-
----
-
-## Generalization (held-out families)
-
-`generalization.py` classifies tasks into 8 families (`attention, moe, gemm, norm, positional, quant, reduction, activation`, first-match-wins rules), builds a leakage-checked split by **entire families**, and evaluates the physics residual reward on held-out families from a P0 measures JSON — offline, no training. It gates aggregation on the reward's own correctness verdict (`rr.correct`), not just the raw measure flag.
-
-> **Two family taxonomies, by design.** The 8-family `classify` here is the richer analysis / leave-one-family-out grouping. The authoritative product split is `kore.tasks.registry` (`operator_family` + `HELDOUT_FAMILIES`): the model **trains** core attention (flash prefill/decode/varlen/fp8) and reserves the structurally distinct **MLA** (latent attention) and **paged-KV decode** families (plus any foreign-arch task) as the never-trained set. `korebench.py`'s per-family view uses the registry taxonomy; the two taxonomies are kept separate.
-
----
-
-## Checkpoint A/B — "did the training buy anything?"
-
-`checkpoint_ab.py` answers the question a training stage is judged by: is the trained checkpoint better than the **exact weights it started from**, on tasks it never saw, at a **matched** measurement budget? It produced KORE's first evaluation of a trained checkpoint ([`docs/EVAL_RESULTS.md`](../../docs/EVAL_RESULTS.md)).
-
-Generation is decoupled from measurement in three resumable phases, which at `budget == 1` is exact (a single-shot policy cannot condition on a measurement it never sees) and means the expensive GPU bench can be re-run without re-generating, both arms can be benched back-to-back on one idle device, and the completions are archived as evidence:
-
-```bash
-# phase A, once per arm, ONE model load: generate + held-out LM loss + retention
-python -m kore.eval.checkpoint_ab run-arm --arm base --outdir runs/eval_ab \
-  --backend hf-batch --model Qwen/Qwen3-14B --revision <sha> --dtype bfloat16
-python -m kore.eval.checkpoint_ab run-arm --arm midtrain --outdir runs/eval_ab \
-  --backend hf-batch --model runs/midtrain_14b_frontier --dtype bfloat16
-
-# phase B, both arms on the SAME idle device, through the real KoreEnv
-python -m kore.eval.checkpoint_ab measure runs/eval_ab/generations_<arm>.jsonl \
-  --out runs/eval_ab/measures_<arm>.json --budget 1 --mode parallel
-
-# phase C, pure: paired comparison + markdown
-python -m kore.eval.checkpoint_ab compare --candidate runs/eval_ab/measures_midtrain.json \
-  --reference runs/eval_ab/measures_base.json --out runs/eval_ab/report_kernel_ab
-```
-
-`scripts/spur_eval_ab_1node.sbatch` runs all three on one node; `scripts/spur_eval_ab_cpu.sbatch` runs the model-side phases on a CPU allocation when GPU submissions are being held.
-
-Three properties do the work:
-
-- **one scope** — `generalization_tasks()`, the held-out reservation minus the tasks whose optimized source leaked into the midtrain corpus. Naming a contaminated or a training id raises, so a subset cannot quietly widen a zero-shot claim;
-- **one prompt** — `first_turn_messages` is what `model_policy` sends on its first turn, digested per record so an arm-to-arm prompt drift is *detected* (`assert_prompts_matched`) rather than assumed away;
-- **paired statistics** — both arms see the same tasks, so binary outcomes get an exact sign test on the per-task deltas (which on paired binary data *is* McNemar's exact test, with the discordant-pair count reported) and speedups get a geometric-mean ratio with a bootstrap CI.
-
-The funnel is reported as four separate stages — emitted `FULL_KERNEL` → compiled → correct → correct-**and**-publication-timed — because collapsing them hides why a small number is small. In particular a kernel the verifier ACCEPTS but whose timing was demoted to screening grade has `rr.speedup is None`, so `bakeoff.evaluate_policy`'s per-task `correct` (which means "correct AND scoreable", as `fast_p` requires) reads `False` for a verifier pass; `correct_gate` and `timed` keep the two separable.
-
-### `heldout_lm.py` — the high-power half
-
-A mid-train stage is continued **pretraining**, so the measurement that speaks to its objective is next-token loss on held-out in-domain text. Single-shot generation yields one bit per held-out task; teacher-forced loss over the same kernels yields tens of thousands of paired per-token measurements, which is the difference between "no effect" and "an effect too small to see in generation". Documents are scored per kind and never pooled — held-out Triton seed source (target domain), the torch reference/oracle (adjacent), and general-domain text (a forgetting probe, explicitly **not** decontaminated). Two arms whose tokenization of a document differs are refused as unpaired.
-
-```bash
-python -m kore.eval.heldout_lm --candidate runs/eval_ab/lm_scores_midtrain.json \
-  --reference runs/eval_ab/lm_scores_base.json --out runs/eval_ab/report_heldout_lm
-```
-
-`tests/test_checkpoint_ab.py` and `tests/test_heldout_lm.py` drive both modules on CPU against stub arms and a stub env; `tests/test_gpu_checkpoint_ab.py` (`-m gpu`) replays a task's own verified seed kernel through the real `KoreEnv` and skips with a reason when no accelerator, checkpoint or endpoint is configured.
-
----
-
-## Champion re-eval (anti-hack)
-
-`champion.py` re-benchmarks the best-per-task kernels under **harder** conditions than training — `KORE_VERIFIED_CORRECTNESS=1`, `KORE_COMPILE_BASELINE=1`, `KORE_BENCH_COLD=1`, `KORE_CORRECTNESS_TRIALS=10`, and augmented held-out shapes, with the replay cache disabled. A kernel is certified only if it is correct on unseen shapes, static-hack-free, low-variance, and its measured speedup has not collapsed below `0.7×` of the claimed value — catching kernels that overfit training shapes or the timing setup. The verdict logic (`champion_verdict`) is pure and CPU-unit-tested; `run_champion_reeval` drives the real `KoreEnv` on hardware and writes a certification report.
-
----
-
-## End-to-end serving gate
-
-`e2e_sglang_vllm.py` is the last gate a kernel passes: a win in the isolated verifier only counts if it survives inside a production inference server with no accuracy regression. `e2e_gate_endpoints` serves the stock kernel and the candidate kernel behind two OpenAI-compatible endpoints, replays an identical `Workload` against each, and accepts only if **tokens/s improved AND accuracy did not regress**.
-
-The module never imports vLLM or SGLang. It speaks HTTP to `/v1/chat/completions`, so the engine lives in its own container or venv and the training stack never inherits an engine's `torch` pin — `VLLM_AVAILABLE` / `SGLANG_AVAILABLE` are diagnostics that read `False` on the training box by design. That separation is **permanent on the current node**, and [`docs/E2E_SERVING_GATE.md`](../../docs/E2E_SERVING_GATE.md) has the verified install/serve procedure, the measured gfx950 numbers, and the exact reason the prebuilt vLLM-ROCm wheels cannot be installed here.
-
-```bash
-python -m kore.eval.e2e_sglang_vllm --engine sglang --model <NAME> \
-  --base-url http://127.0.0.1:30000 --candidate-url http://127.0.0.1:30001 \
-  --requests 32 --json runs/e2e_gate/<run>.json
-```
-
-`tests/test_e2e_serving_gate.py` drives the whole client path over real HTTP against a stdlib stub endpoint (no GPU, no engine, no outbound network); `tests/test_gpu_e2e_serving_gate.py` (`-m gpu`) repeats it against a live server and skips with a reason when `KORE_E2E_BASE_URL` is unset.
-
----
-
-## Publishable frontier suite
-
-Four capabilities make a KORE result comparable to the field, hardened against correctness hacks, and statistically defensible. All are import-safe (torch/numpy imported lazily) and unit-tested in `kore/eval/tests/test_eval_frontier.py`. The campaign eval stage (`scripts/run_campaign.py._stage_eval`) runs three fail-safe tracks — each wrapped so a failure logs and skips rather than breaking eval:
-
-- **paired significance (KORE vs seed)** — `paired_speedup_comparison` on the per-task speedups both policies solved → `eval/paired_seed_vs_kore.json`;
-- **KernelBench-AMD `fast_p`** — `run_kernelbench_amd` on bundled offline specs by default, or a real checkout via `--kernelbench-root` → `eval/kernelbench_amd.json`;
-- **head-to-head vs the frontier model** — `head_to_head_vs_opus` → `eval/head_to_head_vs_opus.json` (skips cleanly with no API key).
-
-`robust_eval.py` stays exposed for maximum-scrutiny anti-hack audits and is import-checked in the campaign preflight.
-
-### `kernelbench_amd.py` — recognized-benchmark adapter
-
-Bridges KORE and the field-standard **KernelBench** in both directions, measured on the KORE target AMD arch (**gfx950**/CDNA4 by default, gfx942/CDNA3 accepted; every task is backend-tagged):
-
-- **Forward** (`spec_to_task`): a KernelBench-style problem (a PyTorch `Model.forward` + input generator + named shapes, Level 1 single-ops / Level 2 fusions) becomes a genuine KORE `Task`, graded through KORE's own verified, timing-integrity-gated matched-budget bake-off. The PyTorch reference becomes the correctness oracle; the baseline is **torch-eager** (KernelBench's baseline), labeled as such.
-- **Reverse** (`to_kernelbench_report`): renders a KORE `evaluate_policy` result as the field-standard **`fast_p` at `p ∈ {1.0, 1.5, 2.0}`** (fraction of the whole split that is correct AND >p× faster than the baseline), with a per-**level** (1 vs 2) breakdown, correct rate, and geomean speedup. `fast_1` is the headline.
-- **Bundled fixtures** (`bundled_specs`) span the three canonical classes (elementwise L1, GEMM L1, pointwise + GEMM-epilogue L2) so the whole path is CPU-testable offline; `load_real_kernelbench` loads the real Level 1/2 problem files from a checkout.
-- **Wider held-out protocol** (`propose_heldout_protocol`): the registry reserves only a couple of families (MLA, paged-KV), so this proposes a **dozens-of-tasks** split stratified over three axes — operator **family × shape-regime × dtype** — reserving *whole* families with a strict `leakage_check` / `assert_no_leakage` (no task in both splits, no family straddling the boundary). It only computes a proposal; it never mutates the registry.
-
-### `robust_eval.py` — robust-KernelBench anti-hack battery
-
-Hardens the eval-time correctness verdict against kernels that pass a naive `allclose` on a few random inputs. Each check is a pure function of a candidate callable + a torch reference + a deterministic input factory (CPU/torch-testable with fake kernels):
-
-- **Adversarial regimes** (`check_adversarial_regimes`): enumerated hard fills — zeros / ones / neg-ones / large / neg-large / small / sign-alternating / NaN-Inf — with **non-finite-structure-aware** comparison (a correct kernel must reproduce the reference's NaN/Inf positions and inf signs exactly).
-- **fp64 differential oracle** (`check_differential_oracle`): recompute the reference in fp64 (the high-precision truth) and reject a candidate that is materially **less accurate than its own dtype warrants** — catching a precision downgrade that `allclose` waves through.
-- **Metamorphic relations**: `permutation_invariance` (reductions/softmax), `homogeneity` `f(ax)=a·f(x)` (linear/GEMM), and `additive_response` (fusions) — each applied only when the *reference* itself satisfies it, then required of the candidate (flags constant/memset and mis-fused kernels). Plus reseeded random inits and non-contiguous/strided inputs.
-- **Halt-on-first**: `robust_correctness(...)` runs the applicable battery in order and **halts on the first mismatch**, returning a `RobustReport` naming the failing check. `inputs_factory_from_spec` bridges it directly onto a `kernelbench_amd` spec.
-
-### `paired_stats.py` — paired significance
-
-Because KORE and the other side (the seed baseline or the frontier teacher) are scored on the **same** held-out tasks under a matched budget, the comparison is **paired** — far more powerful than unpaired, since it cancels task-to-task difficulty variance. Pure numpy/python (no scipy, no torch):
-
-- **Effect size + 95% CI**: `paired_bootstrap` gives a percentile bootstrap CI (and a recentred-bootstrap two-sided p-value) on the mean per-task delta; `paired_speedup_comparison` works in the log domain so the effect is a **geometric-mean speedup ratio** with an exponentiated CI ("X× faster, 95% CI …").
-- **Non-parametric p-values**: an exact two-sided **sign test** (binomial, robust to outliers) and the **Wilcoxon signed-rank** test (normal approx with tie + continuity correction). `paired_comparison` bundles all three, with the headline test (Wilcoxon by default) deciding significance at `alpha`.
-
-### Head-to-head vs a frontier model
-
-`opus_policy.py` adapts the frontier teacher (`kore.data.teacher.make_teacher`, whose `claude` backend defaults to `claude-opus-4.8` via AMD's internal LLM gateway) into a `PolicyFn` built by the **same** `model_policy` path as the KORE side, so both share the identical prompt contract and response parser — the only difference is the token source. `head_to_head.head_to_head_vs_opus` scores both sides through the identical `KoreEnv` verified oracle + cold-cache timing + matched budget at a matched decode temperature, then runs the paired battery (bootstrap CI + Wilcoxon + sign test) on the KORE-minus-frontier per-task speedup deltas, plus a geometric-mean speedup ratio on the both-correct subset and a win/loss/tie tally. `vs_opus.head_to_head` is the multi-seed variant reporting per-side `fast_p` and win-rate with confidence intervals over seeds.
-
-Both harnesses degrade gracefully: with no `anthropic` SDK / `AMD_LLM_API_KEY`, or a gateway outage mid-run, the frontier side is skipped with a loud warning and the KORE-only numbers are still returned. The harness makes the comparison correctly paired and fair; the reported verdict follows from the measured per-task speedups.
-
-See also: [`kore/policy`](../policy/README.md), [`kore/reward`](../reward/README.md), [`kore/analysis`](../analysis/README.md), [`docs/KORE_BENCH_BLUEPRINT.md`](../../docs/KORE_BENCH_BLUEPRINT.md).
+The registry keeps whole-family holdouts out of training. Retention tests score
+the model before and after a stage, but an offline smoke result is not comparable
+to a full benchmark run; the source is recorded with the score. Champion
+re-evaluation widens correctness and timing scrutiny rather than accepting a
+training-time number unchanged.

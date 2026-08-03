@@ -7,7 +7,13 @@ KORE scores every candidate kernel with a strictly lexicographic reward: correct
 
 Below the correct tier the two are byte-for-byte identical: the physics reward delegates every hack / compile / correctness gate verbatim to `compute_reward`, so a faster wrong kernel can never outscore a correct one under either mode.
 
-**What the flagship optimizes.** The full 14B campaign (`configs/grpo_14b_full.json`) runs `reward_mode="speedup"` as the terminal reward and folds the physics signal in as a **potential-based shaping (PBS)** term (`physics_shaping_weight=0.15`, `credit_incorrect_turns=true`). The base objective is vendor-relative speedup; the shaping potential is roofline attainment. The online potential is the PMC-free `η = T_min / T_measured`; the counter-grounded named residual `ρ` is used when rocprofv3 counters are supplied (see [White-box potential and PBS shaping](#white-box-potential-and-pbs-shaping)).
+**What production RL optimizes.** The terminal objective is correctness-gated,
+vendor-relative speedup. The 14B `grpo_14b_full.json` is a legacy experiment,
+not the product configuration. Its empirical roofline shaping is disabled
+(`physics_shaping_weight=0.0`) because no family passed the P0 evidence gate.
+The online potential, when a future evidence-backed recipe enables it, is the
+PMC-free `η = T_min / T_measured`; `ρ` uses counters when supplied (see
+[White-box potential and PBS shaping](#white-box-potential-and-pbs-shaping)).
 
 ---
 

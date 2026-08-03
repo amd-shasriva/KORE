@@ -19,6 +19,14 @@ PY
 
 The registry also defines the **authoritative train / held-out split** by operator family and architecture, so generalization can never be leaked.
 
+The registry is not the full datagen universe. `external.py` and
+`scripts/build_task_pool.py` construct a separate, static task pool with the
+same ABI, without mutating `registry.all_tasks()` or its taxonomy digest. The
+current pool has 14,859 plannable tasks and 14,461 eligible tasks after
+held-out screening; 13,570 are external, and 398 registry seeds are excluded as
+seed-contaminated. Keeping the pool separate prevents a data-scale expansion
+from silently changing the fixed evaluation split.
+
 ---
 
 ## Files

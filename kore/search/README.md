@@ -2,7 +2,14 @@
 
 AlphaKernel treats the verified environment ([`kore/env`](../env/README.md)) as a **perfect but expensive simulator**: every leaf is *exactly* labeled correct/incorrect by the oracle and, when correct, *measured* by the timing harness. Over that oracle it runs an AlphaZero-style **best-first search** whose "moves" are kernel *transformations* (the ε-typed calculus in [`kore/transform`](../transform/README.md)) and whose "value" is the **pessimistic (LCB) measured speedup**. Orchestration is pure CPU; all GPU work is injected through `env`, so the whole engine is exercisable with scripted fakes.
 
-In the flagship 14B configuration search runs as a **throttled, off-policy search-then-distill hook** after the on-policy GRPO gradient (`use_search: true`, `search_budget: 32`, `search_every: 50` in `configs/grpo_14b_full.json`): it produces distillation targets and never contributes on-policy credit (see [Wiring into GRPO](#wiring-into-grpo)).
+The checked-in 14B configuration demonstrates a **throttled, off-policy
+search-then-distill hook** after the GRPO gradient (`use_search: true`,
+`search_budget: 32`, `search_every: 50` in `configs/grpo_14b_full.json`). That
+configuration is legacy, not the 30B production recipe. The search remains an
+optional test-time-scaling component: it must be enabled only by a future
+30B RL configuration with an evidence-backed roofline bound. It produces
+distillation targets and never contributes on-policy credit (see [Wiring into
+GRPO](#wiring-into-grpo)).
 
 ---
 
@@ -12,9 +19,96 @@ In the flagship 14B configuration search runs as a **throttled, off-policy searc
 | --- | --- |
 | `alphakernel.py` | The search engine: `Node`/DAG, PUCT best-first selection, **MAX** backup, transposition table, anytime incumbent, **admissible roofline branch-and-bound** (`make_roofline_ub_fn` / `RooflineCeiling`), and the top-level `search()` |
 | `bandit.py` | Measurement allocation: `Budget` (hard verifier-call cap), `MeasureStats` (streaming mean/var + pessimistic **LCB**), `successive_halving` (Hyperband/SHA rung schedule) |
-| `propose.py` | The production `ProposePolicy`: `TransformProposePolicy` turns [`kore/transform`](../transform/README.md) into the move generator; `search_from_kernel` is the one-call wiring used by GRPO |
+| `evolve_agent.py` | The **evolve-agent** loop: a population of executable candidates, an `Archive` niched by optimisation **strategy** (not by speedup), `AgentHarness`-proposed mutations, `StableEvaluator` (repeat + trim + LCB), and `BestAcrossSteps` best-of-history selection. Guards reward hacking, lazy optimisation and population collapse at admission |
+| `propose.py` | `TransformProposePolicy` turns [`kore/transform`](../transform/README.md) into the move generator; `search_from_kernel` is the GRPO wiring point |
 | `__init__.py` | Public API (`search`, `AlphaKernelConfig`, `Edit`, `ProposeContext`, `Budget`, `MeasureStats`, `successive_halving`, `make_roofline_ub_fn`, …) |
-| `tests/` | `test_alphakernel.py` (fingerprint/transposition, budget/LCB/SHA, MAX-backup, roofline pruning, LCB variance discipline, monotone incumbent, budget respected, repairable-incorrect nodes), `test_propose.py` (transform move generator + fail-safe on an untransformable source), `test_propose_discover.py` (self-extending action space), `test_search_fixes.py` (branch-and-bound, deeper search, incumbent argmax, value hook) |
+| `tests/` | `test_alphakernel.py` (fingerprint/transposition, budget/LCB/SHA, MAX-backup, roofline pruning, LCB variance discipline, monotone incumbent, budget respected, repairable-incorrect nodes), `test_propose.py` (transform move generator + fail-safe on an untransformable source), `test_propose_discover.py` (self-extending action space), `test_search_fixes.py` (branch-and-bound, deeper search, incumbent argmax, value hook). The evolve-agent's own failure-mode suite is `tests/test_evolve_agent.py` |
+
+---
+
+## The evolve-agent (`evolve_agent.py`)
+
+AlphaKernel and the evolve-agent are complementary, not alternatives.
+AlphaKernel searches **one DAG of typed edits** under a value model and commits
+to a single incumbent. The evolve-agent keeps **several designs alive** under a
+live model proposer, because the failure it targets is a different one:
+Kernel-Smith (arXiv 2603.28342 §1) report that a multi-turn refinement loop "can
+anchor later proposals to early decisions and limit exploration diversity", and
+[`kore/agent`](../agent/README.md)'s `AgentHarness` is exactly such a loop. The
+harness is a good *local improver*; this module makes it the mutation operator of
+a search that survives a bad early commitment.
+
+### The diversity metric, and why it is not top-k by speedup
+
+The archive keys cells on a `StrategySignature`: five integer coordinates for the
+decisions a performance engineer actually makes — how much computation is left in
+eager torch (`fusion`), the tile area (`tiling`), `num_warps`, `num_stages`, and
+which compute path the inner loop takes (`compute` ∈ elementwise / reduction /
+MMA / atomic). Niche distance is L1 over those coordinates.
+
+This exists because the archive this repository already had
+(`kore.data.evolve.MapElitesArchive`) keys cells on
+`(op_family, speedup_bin, correct)`, and **within a single task `op_family` is
+constant**, so the key degenerates to a speedup bin. Measured on a converged
+population of six strategically distinct kernels all at ≥3.0x
+(`tests/test_evolve_agent.py::test_speedup_binned_archive_collapses_where_strategy_archive_does_not`):
+
+| Archive | Occupied cells | Kernels kept |
+| --- | --- | --- |
+| `(op_family, speedup_bin, correct)` | **1** | **1** |
+| `StrategySignature` | **6** | **6** (mean pairwise niche distance 2.67) |
+
+AST/edit distance was rejected: it calls two kernels far apart when they differ
+by a hundred nodes of index arithmetic but make every schedule decision the same
+way, and close together when one swaps `tl.dot` for a manual FMA loop and lands
+on a different roofline. It is also pairwise, so it forces O(n²) novelty scoring
+or a tuned threshold. The strategy signature is discrete, so niching is O(1) and
+coverage is a number you can report. Its cost is that it is syntactic: two
+kernels computing different things with identical knobs share a niche and compete
+on measured fitness — acceptable when every member is already an oracle-verified
+implementation of one task.
+
+Exemplar selection is farthest-point after the champion, so the prompt shows
+"top-performing **and** diverse" rather than four re-tunings of one design: on the
+same fixture, top-3-by-speedup has mean niche spread 1.33 while the exemplar set
+has **5.33**.
+
+### Stable evaluation
+
+Admission is by pessimistic **LCB over repeated measurements**, never by the
+screening number a proposer turn produced. Kernel-Smith §3.3: profiling noise
+makes an evolutionary search "preserve suboptimal kernels or eliminate genuinely
+promising ones, and such mistakes compound across generations". The scripted
+demonstration in the test suite: a kernel that measures 3.00x once and ~0.5x
+afterwards beats a rock-steady 1.50x kernel by 2x **on one sample**, and loses
+0.47 to 1.50 on the LCB after stabilisation. Extra measurements are allocated by
+`bandit.successive_halving` on the same LCB the archive admits on.
+
+### Sequential test-time scaling
+
+`BestAcrossSteps` reports the best step of the whole run, not the last one. Dr.
+Kernel (arXiv 2602.05885) get KernelBench L2 Fast@1.2 from 31.6 → **47.8** at a
+fixed 14B model purely by that change. `offer()` refuses unverified or
+disqualified steps, so the curve is monotone and can only be lifted by a measured
+kernel.
+
+### Guards
+
+| Failure mode | Evidence | Guard |
+| --- | --- | --- |
+| Reward hacking | a claimed **1541x** kernel arrived in third-party data; real fused wins here are 1-10x | env-flagged hacks and any ratio above `credible_speedup_max` (10.0, from `cfg.excessive_speedup_flag`) are recorded with their measured value and barred from elite / champion / exemplar / parent |
+| Lazy optimisation | Dr. Kernel: a kernel covering **0.014%** of CUDA time where fusion covers **86.15%** | a same-niche revision must beat its incumbent by more than `MIN_GAIN` (imported from `kore.data.step_centric`, so the step filter and the archive cannot drift); `kernel_time_coverage` returns `None` without profiler data rather than substituting the static proxy |
+| Population collapse | a population that collapses onto one lineage stops exploring | `lineage_concentration` + `recent_novelty`; when both trip, parent selection is forced off the incumbent lineage. Eviction drops from the **densest** region, never the champion — evicting the globally worst member would re-derive top-k as soon as the archive fills |
+
+### Running it
+
+```bash
+sbatch scripts/spur_evolve_agent_1node.sbatch "" vllm Qwen/Qwen3-Coder-30B-A3B-Instruct 8 400 0
+```
+
+The loop has been verified on CPU against scripted fakes only; it has not yet
+been run on a gfx950 node, which is why both entrypoints carry
+`"production": false` in `scripts/operations_registry.json`.
 
 ---
 
@@ -80,10 +174,10 @@ res = search_from_kernel(
 
 ## Wiring into GRPO
 
-`kore.policy.grpo._maybe_search_then_distill` is the only production entry point, sound and cheap by construction:
+`kore.policy.grpo._maybe_search_then_distill` is the integration entry point:
 
 - **Post-gradient, off-policy.** It runs *after* the on-policy update is built and banks any faster verified kernel as an **off-policy distillation target** (for later expert-iteration / RFT). The search result is never attributed to the on-policy gradient, so there is no credit-assignment coupling.
-- **Throttled and bounded.** It fires once every `search_every` (50) steps, on the **single best correct group only**, with `budget=search_budget` (32 in the flagship config) benches — so the extra verifier cost is bounded (`≈ steps/50 × 32`, i.e. ~1,280 benches over a 2,000-step run), not multiplied across every rollout. It runs **rank 0 only** (rank 0 owns the distill sink; other ranks wait at the next all-gather, well under the collective timeout).
+- **Throttled and bounded.** In the legacy 14B example it fires once every `search_every` (50) steps, on the **single best correct group only**, with `budget=search_budget` (32) benches — so the extra verifier cost is bounded (`≈ steps/50 × 32`, i.e. ~1,280 benches over a 2,000-step run), not multiplied across every rollout. It runs **rank 0 only** (rank 0 owns the distill sink; other ranks wait at the next all-gather, well under the collective timeout).
 - **Fail-safe.** `use_search` off, no distill sink, or any exception is a silent no-op. The env verifies every result, so a search can never bank an incorrect kernel.
 
 ```mermaid

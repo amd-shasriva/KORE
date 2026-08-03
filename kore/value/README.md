@@ -2,7 +2,10 @@
 
 Benchmarking a kernel on real silicon is the expensive step. This package is a **cheap 3-head cost model** that ranks candidate kernels *before* they hit the GPU, so GRPO can bench only the top-k of the N candidates generated per turn instead of measuring all of them. It is a learned cost model in the standard autotuning lineage (Ansor / Tenset), trained from the run's *own* verified ranked groups; when there is not yet enough data it falls back to a hand-coded schedule heuristic, and both paths are fail-safe.
 
-> **No trained model is shipped, and the flagship GRPO recipe has both consumers off.** See [Neither consumer is live in the flagship config](#neither-consumer-is-live-in-the-flagship-config) before assuming this package affects a run.
+> **No trained model is shipped.** Both consumers are disabled in the checked-in
+> legacy 14B GRPO recipe; no 30B RL recipe enables them. Treat this package as
+> an optional, fail-safe research component rather than part of the production
+> SFT launch.
 
 ---
 
@@ -56,16 +59,22 @@ def train_value_from_groups(groups_dir, out_path, *, cap=None, use_sklearn=None)
 ```
 
 - **Why the ranked groups, not the replay cache.** The replay JSONL stores only `(task_id → Observation)` with **no source**, so it cannot learn to differentiate sibling candidates. A ranked group carries each candidate's **source** (hence the schedule features: block sizes, warps, stages, `tl.dot`, fp32-accum), its measured wall/speedup (a rank-based fallback when timing is absent), and the group structure — exactly the within-group ranking signal the top-k bench selector and the search prior consume. Every candidate in a ranked group is already verified-correct, so `compiled`/`snr_pass` are True and the differentiating outcome is the measured speedup.
-- **Auto-trained pre-GRPO.** `run_campaign.py` trains the model from this run's `groups/` when `value_prefilter` is on and no `value_model_path` was supplied, installs it globally via `grpo._activate_value_ranker`, and reports the held-out group Spearman. (This is the path that would populate the missing artifact — but it is gated on `value_prefilter`, which the flagship config now sets to `false`, so it does not currently run.) It is pure/CPU (no GPU, no torch) and safe to run while datagen is still appending shards (append-only; it snapshots what exists). It is fail-safe: any shortfall (too little data, a malformed shard) leaves `value_model_path` unset and the ranker degrades to the source heuristic.
+- **Auto-trained pre-GRPO.** `run_campaign.py` trains the model from this run's `groups/` when `value_prefilter` is on and no `value_model_path` was supplied, installs it globally via `grpo._activate_value_ranker`, and reports the held-out group Spearman. The checked-in legacy configuration sets `value_prefilter: false`, so this path does not currently run. It is pure/CPU (no GPU, no torch) and safe to run while datagen is still appending shards (append-only; it snapshots what exists). It is fail-safe: any shortfall (too little data, a malformed shard) leaves `value_model_path` unset and the ranker degrades to the source heuristic.
 
-## Neither consumer is live in the flagship config
+## Neither consumer is enabled in the checked-in recipe
 
-There are two consumers of a trained model — the bench-prefilter reranker and the [AlphaKernel](../search/README.md) PUCT search prior, both via `kore.value.rerank.score_candidates` — and `configs/grpo_14b_full.json` currently disables **both** (`value_prefilter: false`, `search_value_prior: false`). Two independent reasons, either alone decisive:
+There are two consumers of a trained model — the bench-prefilter reranker and the [AlphaKernel](../search/README.md) PUCT search prior, both via `kore.value.rerank.score_candidates` — and the legacy `configs/grpo_14b_full.json` disables **both** (`value_prefilter: false`, `search_value_prior: false`). No 30B RL configuration currently changes that. Two independent reasons, either alone decisive:
 
 - **No artifact.** `value_model_path` is null, and the previous `runs/value/value_model.pkl` was deleted because it had been fit under a 28-feature layout while `kore.value.features.N_FEATURES` is now 47. `rerank._model_is_serviceable` rejects exactly that mismatch, and `load_default_model(None)` returns `None`, so `grpo._activate_value_ranker` installs nothing.
 - **No prefilter consumer under `agentic: true`.** Only the serial `_rollout` calls `_prefilter_bench_indices`; `_rollout_agentic` drives the tool harness and never generates `num_candidates_per_turn` candidates to filter. `kore.policy.capabilities.validate_grpo_config` encodes this as the hard error *"agentic `value_prefilter` has no on-policy consumer"*. So turning it on did not merely degrade the ranker to the heuristic — the whole generate-N-bench-top-k step was absent, and the recipe's implied measurement economics never existed.
 
-The search prior is the easier of the two to restore, because its consumer (the off-policy search-then-distill hook) *is* live: train an artifact with `kore.value.train_value` or `replay_train.train_value_from_groups` against the current featurizer, set `value_model_path`, and flip `search_value_prior` back with it. Restoring `value_prefilter` additionally needs either a serial run (`agentic: false`) or a prefilter consumer added to the agentic harness.
+The search prior is the easier component to restore because the off-policy
+search-then-distill hook has an implementation: train an artifact with
+`kore.value.train_value` or `replay_train.train_value_from_groups` against the
+current featurizer, set `value_model_path`, and enable `search_value_prior` in
+a reviewed RL recipe. Restoring `value_prefilter` additionally needs either a
+serial run (`agentic: false`) or a prefilter consumer added to the agentic
+harness.
 
 Both paths remain fail-safe in the meantime: with no serviceable model, `score_candidates` falls back to the source heuristic, which is still a sane best-first order.
 

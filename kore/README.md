@@ -23,7 +23,7 @@ flowchart TB
   openended["openended/<br/>co-evolution curriculum + task minter"]
   search["search/<br/>AlphaKernel test-time search"]
   transform["transform/<br/>verified rewrite calculus"]
-  policy["policy/<br/>midtrain→sft→dpo→grpo→soup"]
+  policy["policy/<br/>instruct→SFT→multi-turn RL"]
   value["value/<br/>trained prefilter + search prior"]
   eval["eval/<br/>bake-off + retention + generalization"]
 
@@ -64,7 +64,7 @@ Arrows show the primary "consumed-by" direction. `analysis` and `reward` share t
 | [`data`](data/README.md) | Teacher backends + datagen (repair/groups/wins/agentic) + leakage-aware dataset assembly | [→](data/README.md) |
 | [`agent`](agent/README.md) | `AgentHarness` multi-turn Hermes tool-use loop (build/test/bench/pmc/keep/revert) | [→](agent/README.md) |
 | [`openended`](openended/README.md) | Co-evolution task-frontier proposer + archive + verifiable task minter (`minter.py` + `materialize.py`) served by the `CoevolutionController` | [→](openended/README.md) |
-| [`search`](search/README.md) | AlphaKernel value-guided test-time search over kernel transformations (verifier as simulator + roofline admissible bound), driven by the production `ProposePolicy` as a throttled search-then-distill hook | [→](search/README.md) |
+| [`search`](search/README.md) | AlphaKernel value-guided test-time search over kernel transformations (verifier as simulator + roofline admissible bound); optional search-then-distill wiring, not enabled by the 30B SFT recipe | [→](search/README.md) |
 | [`transform`](transform/README.md) | Verified ε-typed rewrite calculus — a safe RL action space (exact `≡` / approx `≈_ε` with an error budget), exposed to the agent as `list_transforms` / `apply_transform` tools | [→](transform/README.md) |
 | [`policy`](policy/README.md) | The training stages + configs, FSDP wiring, and prompt/response contract | [→](policy/README.md) |
 | [`value`](value/README.md) | Cheap 3-head surrogate (P(compile), P(SNR), E[log speedup]) for GRPO bench prefiltering, trained from the run's own ranked groups (`replay_train.py`), feeding the prefilter + search prior | [→](value/README.md) |

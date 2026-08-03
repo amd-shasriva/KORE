@@ -1,4 +1,10 @@
-# Midtrain source provenance and decontamination
+# Legacy midtrain source provenance and decontamination
+
+> **Historical contract.** This document describes the 14B continued-pretraining
+> corpus, retained so its provenance remains auditable. Production does not build
+> or consume this corpus: the 30B target is instruct-only, has no Base sibling,
+> and the 14B instruct-CPT experiment destroyed instruction-following. The live
+> data contract is [`DATASET_SPEC.md`](DATASET_SPEC.md).
 
 `kore.data.midtrain_corpus.build_midtrain_corpus` has two explicit modes.
 Production is the default and fails closed. Development must be selected with

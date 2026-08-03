@@ -1,4 +1,16 @@
-# Stage-0 mid-train, evaluated against its own base
+# Legacy 14B midtrain experiment: why production starts from instruct
+
+> **Status — historical evidence, not a launch recipe.** This report records the
+> cancelled 14B experiment. Its output was deleted after epoch 1.29 and no
+> production stage consumes it. Production uses
+> `Qwen/Qwen3-Coder-30B-A3B-Instruct → SFT → multi-turn RL`.
+>
+> The durable decision is the failure mode: continued pretraining on an
+> instruct model improved raw-code loss while destroying instruction-following
+> and executable kernel generation. CPT must begin from a Base model, but no
+> selected 30B-class Qwen ships a Base variant; the residual/chat-vector transfer
+> also requires a Base/Instruct pair. That makes both mechanisms 14B-only
+> experiments, not fallbacks for the production target.
 
 **Verdict: the mid-train checkpoint is a large, unambiguous win on the objective it
 was trained on, and a catastrophic regression at generating kernels. It learned the
@@ -26,10 +38,9 @@ unable to *write* Triton at all — 29 of its 33 parseable responses are not val
 Python, against 0 of 32 for the base. Sections 1 and 3 are not in tension; together
 they say the run taught the model the domain and broke its output surface.
 
-**Consequence: Stage-1 SFT and Stage-2 GRPO both sample from this checkpoint.** SFT
-supervises on gold assistant turns and may well repair the surface, but nothing here
-supports launching GRPO (which needs the policy to emit valid kernels to get any
-reward signal at all) from these weights.
+**Historical consequence:** the experiment did not support launching SFT or GRPO
+from these weights. The current production recipe does not attempt to repair the
+checkpoint; it starts from the vendor instruct model instead.
 
 - **Measured on:** `master` @ `aeada9b3`, working tree (nothing committed)
 - **Hardware:** one AMD Instinct MI355X (`gfx950:sramecc+:xnack-`, 288 GiB), Slurm
@@ -55,9 +66,9 @@ reward signal at all) from these weights.
 | Budget | 1 bench per task, `mode = parallel` — matched |
 
 Both arms are loaded at bf16 deliberately. The mid-train output is fp32 on disk
-because FSDP `FULL_STATE_DICT` gathers the bf16-mixed-precision fp32 master copy
-(`docs/SFT_READINESS.md` F1), while the Hub base is bf16; loading one at fp32 and
-the other at bf16 would confound precision with training. Template thinking is
+because FSDP `FULL_STATE_DICT` gathers the bf16-mixed-precision fp32 master copy,
+while the Hub base is bf16; loading one at fp32 and the other at bf16 would
+confound precision with training. Template thinking is
 disabled for the same class of reason documented in `docs/E2E_SERVING_GATE.md`: with
 Qwen3's thinking on, a bounded token budget is spent inside `<think>` and the answer
 never arrives, which reads as a capability difference and is a budget artifact.
@@ -554,8 +565,10 @@ Whole suite after this work: **7,972 passed, 4 skipped, 58 deselected** in 142 s
   `performance_ineligible`, so `fast_p` rests on 12 tasks' timing out of 34. Whatever
   is demoting those drivers is worth fixing before any speed claim is made on this
   scope; it is not investigated here.
-- **Whether the general-domain regression matters downstream.** Stage-1 SFT is
-  explicitly held and was not launched; no `runs/sft_14b_frontier` was written.
+- **Whether the general-domain regression would have mattered downstream.**
+  That question is retired with the 14B CPT branch. The production recipe starts
+  from an instruct checkpoint and evaluates its own SFT output against that
+  exact starting model.
 
 ## Artifacts
 

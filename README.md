@@ -1,449 +1,137 @@
 # KORE
 
-**Kernel-Optimization Reinforcement Learning for AMD GPUs.**
+KORE trains a kernel-optimization agent for AMD MI355X (`gfx950` / CDNA4).
+Every candidate is compiled, checked against its task oracle, and only then
+timed. A fast wrong kernel receives no speed credit.
 
-KORE trains a language model to write fast, verified ROCm/Triton GPU kernels for AMD Instinct MI350-class silicon (gfx950 / CDNA4). Every kernel the model proposes is compiled, checked for numerical equivalence against an fp32 oracle across every declared and augmented shape, and timed cold-cache with a paired, variance-gated protocol against the task's declared baseline. Correctness is a hard gate: no speed credit is awarded until it passes.
+The production backbone is
+`Qwen/Qwen3-Coder-30B-A3B-Instruct`: 30.5B parameters total, 3.3B active per
+token, 48 layers, 128 experts, and 8 selected experts per token. It is chosen
+for code and tool use, and its active MoE compute is about ten times lower than
+a comparable 32B dense model while retaining comparable memory requirements.
+The pinned, full-parameter SFT recipe is
+[`configs/sft_coder30b_a3b.json`](configs/sft_coder30b_a3b.json).
 
-**Read the baseline lane before reading any speedup number.** The task registry has two lanes. 106 of 1,334 tasks are anchored to a production vendor kernel (63 declare AITER and 4 declare hipBLASLt in `task.yaml`; at runtime `_genops._vendor_baseline` additionally resolves 33 `gemm_fusion` tasks to hipBLASLt and the 6 `gen_{silu,gelu}_mul_*` gated activations to AITER). The remaining 92%, including all 1,052 generated breadth tasks, are anchored to torch — `torch.compile`-fused when `KORE_COMPILE_BASELINE` is set, eager otherwise. A speedup is only a claim about the state of practice when it comes from the vendor lane; `WinRecord.baseline_type` records which lane produced it.
-
-The hardware's Speed-of-Light roofline is used two ways, and they should not be conflated. As an **integrity ceiling** it rejects physically impossible timings, which is sound because it needs only a conservative lower bound on achievable time. As a **shaping potential** it densifies per-turn credit; potential-based shaping preserves the ordering of returns whether or not the potential is predictive, so this is safe as variance reduction. It is *not* currently a validated predictor of speedup — see [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md), which reports the honest `INTEGRITY_ONLY` verdict.
-
----
-
-## Table of contents
-
-- [Design principles](#design-principles)
-- [Method](#method)
-- [System architecture](#system-architecture)
-- [The training pipeline](#the-training-pipeline)
-- [Quick start](#quick-start)
-- [Installation](#installation)
-- [Release prerequisites](#release-prerequisites)
-- [Secrets (`.env.local`)](#secrets-envlocal)
-- [Running the full 14B campaign](#running-the-full-14b-campaign)
-- [Resume & recovery](#resume--recovery)
-- [Repository layout](#repository-layout)
-- [Environment variables](#environment-variables)
-- [Testing](#testing)
-- [Documentation index](#documentation-index)
-- [Troubleshooting](#troubleshooting)
-
----
-
-## Design principles
-
-Kernel-generation systems typically reward relative speedup against a reference and verify correctness with a handful of random inputs. Both signals are exploitable: relative speedup depends on the baseline and can be inflated with timing artifacts, and random-input checks admit kernels that are wrong only on edge regimes (zeros, denormals, activation kinks, all-equal rows). KORE is built on three grounding signals that close these gaps.
-
-- **Correctness is gated, not sampled.** The production oracle runs at least five reseeded random trials per shape against an fp32 reference, an optional enumerated adversarial-fill battery (`KORE_VERIFIED_CORRECTNESS=1`), a determinism recheck, and a post-timing re-verification on the *same cached module* under a randomized timed window — so a kernel that is correct only when it thinks it is being checked is caught. Output arity, dtype, shape, and the NaN/±Inf masks must all match exactly. The fourth prong — **metamorphic** algebraic self-consistency from [`kore/verify`](kore/verify/README.md) — also runs in production, as a candidate-only subprocess `KoreEnv` launches under the same `KORE_VERIFIED_CORRECTNESS=1` gate; it is fail-closed and deliberately restricted to the 168 generated tasks whose operator contract implies a proven relation.
-- **Speed is measured against the task's declared baseline, cold-cache and paired.** Timing is L2-flushed, uses randomized warmup and iteration counts per repeat, alternates candidate/baseline order AB/BA to cancel drift, and admits a measurement only when the candidate CV, baseline CV, paired-ratio CV, and paired CI half-width all clear threshold. Whether that baseline is a vendor kernel or torch depends on the lane — see above.
-- **Progress is bounded by physics.** Every operator has a roofline lower bound set by compute peak and memory bandwidth. KORE rejects timings that beat it, and uses attainment as a shaping potential to densify credit across the wide "correct-but-slow" region. The predictive-validity claim that previously appeared here did not survive the repository's own v2 controls and has been withdrawn.
-
-KORE targets gfx950 / MI350X / CDNA4 end to end — the roofline peaks, PMC counter sets, vendor baselines, and compiler paths are all specific to CDNA4 — and holds out structurally distinct operator families to measure genuine cross-family generalization rather than in-distribution recall.
-
----
-
-## Method
-
-### Roofline lower bound
-
-Every operator has a physical floor set by the more binding of its compute and memory costs (`kore/analysis/rooflines.py`):
-
-```
-T_min = max( W_flops / P_peak ,  Q_bytes / B_peak )
-η     = T_min / T_measured        ∈ (0, 1]     (Speed-of-Light attainment)
-```
-
-`η` is the fraction of the hardware limit a kernel attains. It is bounded, dimensionless, and comparable across operators, which makes it a natural potential for shaping.
-
-### Residual decomposition
-
-The removable runtime above the floor decomposes into *named* hardware inefficiencies read from rocprofv3 performance counters (`kore/reward/physics.py`, `kore/reward/whitebox.py`):
-
-```
-T_measured = T_min + R                          R = removable residual
-named residual   N = (stall_frac + occupancy_deficit) · T_measured
-ρ = T_min / (T_min + N)                          counter-grounded attainment (rocprofv3 PMC)
-η = T_min / T_measured                           online potential;  η ≤ ρ ≤ 1
-```
-
-`ρ` is the counter-grounded refinement of attainment and `η` is the PMC-free potential used online.
-
-> **Validity caveat.** An earlier revision reported that the named terms reconstruct the runtime residual with R² ≈ 0.98. That figure is reproducible but is a shared-denominator artifact: both sides scale with `T_candidate`, a `T_candidate`-only predictor scores 0.997, and on the preregistered normalized target evaluated over held-out task clusters the named model scores −0.458. The current adjudicator returns `INTEGRITY_ONLY` with all three checks failing, and authorizes empirical shaping for **no** operator family. See [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md). Empirical per-family shaping requires both an evidence artifact and its fingerprint and is inert without them, so no shipped model is affected.
-
-### Reward ladder
-
-The reward is strictly lexicographic, so a faster wrong kernel can never outscore a correct one (`kore/reward/`):
-
-```
-hack  <  compile_fail  <  incorrect  <  correct
-
-correct tier      : correctness + vendor-relative speedup + format
-cross-turn credit : + potential-based shaping  F = γ·Φ′ − Φ,  Φ = η
-incorrect turns   : bounded shaped progress toward the roofline (always < correctness)
-```
-
-The high-contrast vendor-relative speedup keeps intra-group advantages sharp where a pure attainment reward would be flat, while the shaping potential adds a dense per-turn signal toward the roofline. The correctness gate plus the bounded action space — not the shaping term — are what make the reward hack-resistant; a roofline Speed-of-Light ceiling additionally rejects physically impossible (super-roofline) timings.
-
-### Correctness oracle
-
-The **production** oracle lives in the task driver (`kore/tasks/_genops.py`) and runs per candidate: at least five reseeded random trials per shape against an fp32 reference, an enumerated adversarial-fill battery when `KORE_VERIFIED_CORRECTNESS=1`, a determinism recheck, and a post-timing re-verification on the same cached module. Structural equality (arity, dtype, shape) and independent NaN/+Inf/−Inf mask agreement are required, so a kernel cannot substitute one non-finite value for another.
-
-The fourth prong — **metamorphic** algebraic self-consistency — plus the explicit `(1-p)^m` false-accept bound live in [`kore/verify`](kore/verify/README.md) and are wired into production: `KoreEnv._metamorphic_prong` runs the relations in a candidate-only subprocess for every *correct* candidate, under the same `KORE_VERIFIED_CORRECTNESS=1` gate as the adversarial battery, and publishes a per-prong `OracleReport`. It is fail-closed twice over: a prong that produces no verdict marks the evaluation `infra_error` rather than passing, and `metamorphic_plan_for_task` only plans task families whose semantics are fixed by the `_genops` generator spec — 168 of the 1,334 registered tasks. Every other task gets a three-prong oracle and the report says so.
-
-### Credit assignment
-
-Multi-turn credit uses potential-based shaping (`F = γ·Φ′ − Φ`, Ng–Harada–Russell) with `Φ = η`, densifying per-turn progress toward the roofline while preserving the ordering of returns. Incorrect turns retain a bounded shaped-progress reward rather than a hard zero, so the policy still receives gradient on partial progress, always ranked below any correct kernel. The potential is wired identically through the single-process and distributed paths, so both assign the same credit.
-
-### Generalization
-
-Core attention (flash prefill / decode / sliding-window / varlen / fp8) is trained so the product model is strong at attention, while two structurally distinct variants — MLA (latent attention) and paged-KV decode — are reserved entirely and evaluated zero-shot (`kore/eval/generalization.py`). Reservation is by *family* (`kore/tasks/registry.py`), so any generated or minted variant of a held-out family stays out of training, and the evaluation measures true cross-family transfer.
-
----
-
-## System architecture
-
-```mermaid
-flowchart TB
-  subgraph reg["Task registry (kore/tasks)"]
-    T["kernel tasks<br/>reference oracle + vendor baseline + shapes"]
-  end
-  subgraph env["Verified environment (kore/env)"]
-    KE["KoreEnv: compile → correctness → cold-cache bench → PMC"]
-    RC["ReplayCache (JSONL)"]
-  end
-  subgraph sci["Physics & reward (kore/analysis, kore/reward)"]
-    RF["rooflines: T_min, η"]
-    PH["physics: η potential (PBS shaping); ρ counter-grounded"]
-    RW["lexicographic reward ladder"]
-  end
-  subgraph verify["Correctness oracle (kore/verify, kore/verifier)"]
-    OR["adversarial + metamorphic + determinism"]
-    PMC["rocprofv3 PMC counters"]
-  end
-  subgraph data["Data factory (kore/data, kore/agent, kore/openended)"]
-    TE["teachers (Claude gateway / vLLM / HF)"]
-    DG["datagen: repair · groups · wins · agentic"]
-    CO["co-evolution frontier curriculum"]
-  end
-  subgraph train["Policy training (kore/policy, kore/value)"]
-    ST["midtrain → SFT → DPO → GRPO → soup"]
-    VM["value model (trained on ranked groups):<br/>prefilter + search prior"]
-  end
-  subgraph eval["Evaluation (kore/eval)"]
-    BO["matched-budget bake-off · fast_p"]
-    RG["retention gate"]
-    GN["held-out cross-family generalization"]
-  end
-  T --> KE --> RF --> PH --> RW
-  KE --> OR
-  KE --> PMC --> PH
-  RC <--> KE
-  TE --> DG --> ST
-  CO --> ST
-  VM --> ST
-  RW --> ST
-  ST --> BO
-  ST --> RG
-  ST --> GN
-```
-
-Each box is a Python subpackage under `kore/` with its own README:
-
-| Subpackage | Role | README |
-| --- | --- | --- |
-| `kore/tasks` | Kernel task registry, operators, shapes, train/held-out split, op-class generators | [→](kore/tasks/README.md) |
-| `kore/env` | `KoreEnv` verified compile/correctness/bench + replay cache | [→](kore/env/README.md) |
-| `kore/analysis` | Roofline `T_min`, physics validation harness, transfer analysis | [→](kore/analysis/README.md) |
-| `kore/reward` | Lexicographic ladder + physics residual reward + roofline shaping potential | [→](kore/reward/README.md) |
-| `kore/verify` | Adversarial + metamorphic + determinism correctness oracle | [→](kore/verify/README.md) |
-| `kore/verifier` | rocprofv3 PMC counter sets + CSV/compiler parsers | [→](kore/verifier/README.md) |
-| `kore/data` | Teachers + datagen (repair/groups/wins/agentic) + dataset assembly | [→](kore/data/README.md) |
-| `kore/agent` | Multi-turn tool-use agent harness (build/test/bench/profile) | [→](kore/agent/README.md) |
-| `kore/openended` | Co-evolution task-frontier curriculum + verifiable task minter/materializer | [→](kore/openended/README.md) |
-| `kore/search` | AlphaKernel value-guided test-time search over the transform space | [→](kore/search/README.md) |
-| `kore/transform` | ε-typed, budget-constrained rewrite action space with downstream verification | [→](kore/transform/README.md) |
-| `kore/policy` | midtrain / SFT / DPO / GRPO / soup training stages | [→](kore/policy/README.md) |
-| `kore/value` | Surrogate value model for bench prefiltering + search prior | [→](kore/value/README.md) |
-| `kore/eval` | Bake-off, fast_p, retention gate, generalization, champion re-eval | [→](kore/eval/README.md) |
-
----
-
-## The training pipeline
-
-A single command (`scripts/run_campaign.py`) orchestrates the campaign. The default run is nine stages; two more are opt-in — `reverify` (re-grade existing data under the current oracle before training) and `evolve` (co-evolution task-frontier expansion). The full ordered set (`ALL_STAGES`) is `reverify, datagen, evolve, agentic, build, midtrain, sft, dpo, grpo, soup, eval`. The campaign is **manifest-resumable**: any completed stage whose on-disk artifact is present is skipped on restart, and datagen resumes at shard granularity.
+## The production path
 
 ```mermaid
 flowchart LR
-  DG["datagen<br/>(teacher, resumable shards)"] --> AG["agentic<br/>(tool-use trajectories)"]
-  AG --> BU["build<br/>(assemble SFT/DPO)"]
-  MT["midtrain<br/>(ROCm/Triton CPT)"] --> SFT["sft<br/>(repair-weighted, 3ep)"]
-  BU --> SFT
-  SFT --> DPO["dpo<br/>(iterative on-policy + DAgger, IPO)"]
-  DPO --> GRPO["grpo<br/>(agentic; speedup reward + η-PBS shaping + co-evolution)"]
-  GRPO --> SP["soup<br/>(WiSE-FT α-sweep)"]
-  SP --> EV["eval<br/>(bake-off + retention + generalization)"]
-  MT -. "ckpt = SFT base" .-> SFT
-  SFT -. "KL anchor" .-> GRPO
+  P[Task pool] --> D[Agentic datagen]
+  D --> S[Step-centric decomposition]
+  S --> M[v3 mixture]
+  M --> F[30B MoE SFT]
+  F --> E[AKA + KernelBench-AMD + vs_opus]
+  E --> R[Multi-turn RL]
+  R --> T[Test-time scaling]
 ```
 
-| Stage | What it does | Key module |
-| --- | --- | --- |
-| `reverify` *(opt-in)* | Re-grade existing repair / win / group shards under the current oracle (compiled + vendor baseline, cold-cache timing, adversarial correctness) so earlier data earns current-standard numbers without regeneration | `kore/data/reverify.py` |
-| `datagen` | Teacher generates verified repair / ranked-group / win kernels (parallel, shard-resumable) | `kore/data` |
-| `evolve` *(opt-in)* | Evolutionary datagen: a D-MAB bandit + MAP-Elites islands + value-model prefilter mine extra verified win / group records per task | `kore/data/evolve.py` |
-| `agentic` | Multi-turn tool-use trajectories (build / test / bench / profile) | `kore/agent` |
-| `build` | Assemble the multi-capability SFT mix + DPO pairs (with hard negatives), leakage-split | `kore/data` |
-| `midtrain` | Continued pretraining on the ROCm/HIP/Triton corpus → SFT base | `kore/policy/midtrain.py` |
-| `sft` | Repair-weighted multi-capability SFT (full-parameter FSDP) | `kore/policy/sft.py` |
-| `dpo` | Iterative on-policy DPO + DAgger, IPO loss, refreshed reference | `kore/policy/dpo.py` |
-| `grpo` | Multi-turn agentic GRPO: vendor-relative speedup reward + roofline PBS shaping + incorrect-turn credit, value-model prefilter, StarPO-S and anti-collapse stack, co-evolution + off-policy search-then-distill, task minting, and ε-typed transform tools | `kore/policy/grpo.py` |
-| `soup` | WiSE-FT interpolation α-sweep gated on retention | `kore/policy/soup.py` |
-| `eval` | Matched-budget bake-off + fast_p + retention + held-out generalization | `kore/eval` |
+1. `scripts/build_task_pool.py` mines external PyTorch modules without changing
+   the content-addressed registry. The pool is screened against held-out KORE
+   tasks and KernelBench, deduplicated, and materialized with the same task ABI.
+   The current inventory is 14,859 plannable tasks and 14,461 eligible tasks:
+   13,570 are external and 398 registry seeds are excluded by the held-out
+   screen.
+2. `scripts/spur_data_driver.sh` waits for the pool before it saturates
+   datagen; task diversity, not raw episode count, limits non-redundant
+   trajectories. The QoS cap is six concurrent nodes. Measured datagen is
+   462–469 kept episodes per node-hour at 100% keep rate.
+3. `kore/data/step_centric.py` turns a trajectory into independent revisions.
+   It keeps only a correctness-preserving ≥5% speed gain or the revision that
+   first fixes a broken kernel. This avoids supervising search flailing as if it
+   were an optimization policy.
+4. `scripts/build_sft_v3_mixture.py` joins v2, recovered rows, and decomposed
+   AMD trajectories. Every source passes the same length, exact-content dedup,
+   task-id, and held-out-family gates before it can enter
+   `data/b05factory/sft/multicap_v3.jsonl`.
+5. SFT starts from the vendor instruct checkpoint. There is no production
+   continued-pretraining, chat-vector merge, or DPO stage.
+6. Multi-turn RL consumes execution feedback. Kernel quality is directly
+   verifiable by compile, correctness, and timing; preference pairs discard that
+   information. The multi-turn path also avoids applying a plain GRPO estimator
+   to a setting where its policy gradient is biased.
 
-The GRPO stage runs true agentic tool-use RL: the policy drives its own build / test / bench / profile / keep / revert loop through the agent harness, and per-turn measured speedup (best-so-far frontier and delta-vs-best) is fed back into the trajectory as context while the reward remains the verified compute reward. Verified vendor-beating kernels discovered during RL are distilled back into a rejection-fine-tuning set, forming a self-improving loop. Full CLI, stage dispatch, and the resume mechanism are documented in [`scripts/README.md`](scripts/README.md).
+## Why the older recipe is not production
 
----
+The former 14B path was `base → CPT → chat-vector merge → SFT → DPO → GRPO`.
+It is retained only as experimental history. No eligible 30B-class Qwen has a
+Base variant: Qwen3-32B, Qwen3.6-35B-A3B, and Qwen3-Coder-30B-A3B are all
+instruct-only. CPT requires a Base model; the residual transfer requires a
+same-family Base/Instruct pair.
 
-## Quick start
+This is not only a packaging constraint. The 14B experiment documented in
+[`docs/EVAL_RESULTS.md`](docs/EVAL_RESULTS.md) found that CPT on an instruct
+model improved the raw-code objective while destroying instruction-following and
+kernel generation. `scripts/spur_pipeline_driver.sh` therefore defaults
+`KORE_RECIPE=direct`; `KORE_RECIPE=cpt` is a legacy 14B-only branch.
 
-**Preflight (no GPU)** — imports every stage and prints the resolved plan:
+## Measurement discipline
+
+The registry has 1,334 tasks. 106 are vendor-lane tasks: 63 declare AITER and 4
+declare hipBLASLt; runtime resolution adds 33 `gemm_fusion` hipBLASLt tasks and
+6 gated activations backed by AITER. The remaining 92%, including all 1,052
+generated breadth tasks, are torch-lane tasks. Vendor and torch speedups must
+not be pooled: a torch-lane result does not establish a production-library win.
+
+The production correctness oracle combines reseeded random trials, adversarial
+fills when `KORE_VERIFIED_CORRECTNESS=1`, determinism, and post-timing
+re-verification. Metamorphic checks are fail-closed for the 168 generated tasks
+whose generator contracts prove a relation. Timing alternates candidate and
+baseline under cold-cache, variance-gated measurement.
+
+Roofline bounds remain an integrity ceiling and an optional shaping potential,
+not a demonstrated speed predictor. The residual study was retracted as a
+shared-denominator artifact; [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md) records
+the `INTEGRITY_ONLY` verdict.
+
+## Evaluation
+
+`scripts/run_agent_kernel_arena.py` evaluates AgentKernelArena in copied
+workspaces using its compile → correctness → performance contract and its score.
+The gfx950 filter admits 402 of the benchmark's 412 tasks. Published Claude
+Opus comparison means are 6.89x (`torch2hip`), 6.69x (`hip2hip`), and 2.13x
+(`triton2triton`); these are external bars, not KORE claims.
+
+For KernelBench Triton, Kernel-Smith-235B reports 3.70 average speedup versus
+3.33 for Claude-4.6-opus. Dr. Kernel-14B reports 31.6% single-pass and 47.8%
+with test-time scaling on KernelBench L2, compared with GPT-5 at 28.6% and
+Claude-4.5-Sonnet at 26.7%. KORE reports its own results through
+KernelBench-AMD and paired `vs_opus` evaluation rather than importing those
+numbers as its own.
+
+## Operations
+
+The data driver stops before training and leaves `runs/DATA_NOT_FINAL` in place
+for human review. Do not remove that sentinel automatically.
 
 ```bash
-PYTHONPATH=. python scripts/run_campaign.py --dry-run --use-hf \
-  --tasks rmsnorm_aiter,gemm_bf16
+export SPUR_CONTROLLER_ADDR="http://crs-m2m-cpu-spur-005:6817"
+sbatch scripts/spur_build_task_pool.sbatch
+bash scripts/spur_data_driver.sh
 ```
 
-> `--use-hf` (or an explicit `--campaign-mode development` / `smoke`) is
-> **required**. The default `production` campaign mode is fail-closed on weakened
-> retention sources, so without one of those flags every invocation below —
-> including `--dry-run` — exits 1 with `missing --use-hf` and does nothing.
-
-**Single-GPU LoRA bring-up** — a small end-to-end campaign. This is by
-definition non-promotable, so it names `development` mode rather than borrowing
-production's retention contract:
-
-```bash
-PYTHONPATH=. python scripts/run_campaign.py \
-  --campaign-mode development \
-  --model Qwen/Qwen3-14B --teacher claude \
-  --tasks rmsnorm_aiter,gemm_bf16,flash_attn_decode_bf16 \
-  --stages datagen,agentic,build,sft,dpo,grpo,soup,eval
-```
-
-**Production datagen (SPUR, resumable)** — see
-[`scripts/README.md`](scripts/README.md#production-datagen):
-
-```bash
-python scripts/spur_supervise_datagen.py --repo "$PWD" --python "$VIRTUAL_ENV/bin/python"
-```
-
----
-
-## Installation
-
-KORE targets **Python 3.10 + ROCm 7.x** on gfx950 (AMD Instinct MI350X / CDNA4). The verified, reproducible set is pinned in [`requirements-conductor.txt`](requirements-conductor.txt).
-
-> **Order matters.** Install the ROCm build of torch **first** from the ROCm index. A bare `pip install torch transformers trl` pulls a **CUDA** wheel that silently disables the GPU (`torch.cuda.is_available() → False`).
-
-```bash
-python3.10 -m venv ~/kore-venv && source ~/kore-venv/bin/activate
-
-# 1) ROCm torch FIRST, from the ROCm index
-pip install torch==2.10.0+rocm7.0 pytorch-triton-rocm==3.5.1 \
-    --index-url https://download.pytorch.org/whl/rocm7.0
-
-# 2) everything else WITH torch pinned so nothing upgrades it to a CUDA wheel
-printf 'torch==2.10.0+rocm7.0\n' > /tmp/torch.txt
-pip install -c /tmp/torch.txt -r requirements-conductor.txt \
-    --extra-index-url https://download.pytorch.org/whl/rocm7.0
-
-# 3) editable campaign install (optional; pulls extras)
-pip install -e ".[train,teacher,value,dev]"
-```
-
-Version caps (`transformers<5`, `trl<1`) keep the training APIs this code targets and avoid a torch upgrade to CUDA; do not `pip install -U`. `pyproject.toml` extras: `train` (torch/transformers/trl/peft/datasets/accelerate), `value` (xgboost/scikit-learn/numpy), `teacher` (anthropic/openai), `test` (the reproducible CPU test stack), and `dev` (pytest/build tooling). In a CPU-only virtual environment, install the test stack with `pip install -e ".[test]"`; on ROCm, install the ROCm torch wheel first as shown above.
-
----
+For the explicit production SFT invocation and the checkpoint storage
+constraint, see [`docs/DISTRIBUTED.md`](docs/DISTRIBUTED.md). A 30B checkpoint
+is about 488 GB; `save_total_limit` must remain 1 because rotation already peaks
+near 976 GB on the shared volume.
 
 ## Release prerequisites
 
-**The owner has selected the license, and it forbids external release.**
-[`LICENSE`](LICENSE) declares this repository proprietary and AMD-internal
-("NOT FOR EXTERNAL RELEASE"), [`THIRD_PARTY.md`](THIRD_PARTY.md) carries the
-attribution, and `pyproject.toml` pins the matching metadata
-(`license = { text = "LicenseRef-AMD-Proprietary-Internal" }`,
-`license-files = ["LICENSE", "THIRD_PARTY.md"]`, and the
-`Private :: Do Not Upload` classifier). Do not publish a wheel, sdist,
-container, dataset, or source release under any terms without a new decision
-from an authorized owner — this is not an unresolved gap you may fill in.
-
-The release-marked contracts check that the files stay present, structured, and
-in step with the corpus source catalog:
-
-```bash
-python -m pytest -o "addopts=-q --strict-markers --import-mode=importlib" -m release tests
-```
-
-That covers licensing plus `THIRD_PARTY.md` structure and catalog coverage
-(`test_packaging_contract.py`), the regenerated breadth task tree
-(`test_generated_breadth_contract.py`), the full-corpus SFT row count, and the
-reward-stats contract. Use `python -m pytest -m release --collect-only -q` for the
-live inventory rather than trusting a count in prose. A release is blocked until
-the complete report is clean.
-
----
-
-## Secrets (`.env.local`)
-
-The Claude teacher runs through AMD's internal LLM gateway. Put credentials in `.env.local` at the repo root (gitignored, loaded by `kore.data.teacher.load_env_local()`):
-
-```bash
-AMD_LLM_API_KEY=<your-gateway-subscription-key>
-AMD_NTID=<your-ntid>
-# optional overrides:
-# AMD_LLM_GATEWAY_URL=https://llm-api.amd.com/Anthropic
-# KORE_TEACHER_MODEL=claude-opus-4.8
-```
-
-Without a key, the launcher skips `datagen`/`agentic` (which need the teacher) and trains on the data already on disk.
-
----
-
-## Production operations
-
-The active production datagen path is the SPUR supervisor, submitter, and array
-worker. Training should be submitted through the site's scheduler with an
-explicit allocation; `scripts/launch_distributed.sh` remains the active
-single-stage FSDP launcher inside that allocation.
-
-```bash
-python scripts/spur_supervise_datagen.py --repo "$PWD" --python "$VIRTUAL_ENV/bin/python"
-bash scripts/launch_distributed.sh sft configs/sft_14b_full.json --dry-run
-```
-
-The old b05/SSH/dynamic-GPU/tmux/direct-14B wrappers are quarantined
-development compatibility tools. They refuse production execution unless
-`KORE_ALLOW_DEPRECATED_DEV=1` is explicitly set. Their classification and
-replacement are recorded in
-[`scripts/operations_registry.json`](scripts/operations_registry.json).
-
----
-
-## Resume & recovery
-
-The campaign writes `data/<root>/campaign_manifest.json` recording `done_stages` and real checkpoint paths. On restart, a stage is skipped only if it is in `done_stages` **and** its on-disk artifact exists (`_artifact_ok`). Datagen additionally resumes at **shard** granularity (`shard_done` skips any non-empty `{kind}/{task}.jsonl`).
-
-This makes the run robust to ephemeral nodes. The scheduler should relaunch from
-the manifest and immutable shard state; wrapper-level completion additionally
-requires strict artifact verification.
-
-```bash
-# Inspect wiring without side effects (--use-hf is required; see Quick start):
-PYTHONPATH=. python scripts/run_campaign.py --dry-run --use-hf
-# Force a specific stage only inside an allocated development job:
-PYTHONPATH=. python scripts/run_campaign.py --use-hf --force --stages sft ...
-```
-
----
-
-## Repository layout
-
-```
-KORE/
-├── kore/                       # the package (see per-subpackage READMEs)
-│   ├── tasks/   env/   analysis/  reward/   verify/  verifier/
-│   ├── data/    agent/ openended/ search/   transform/
-│   ├── policy/  value/ eval/
-│   ├── config.py               # central CONFIG dataclass (reward/bench knobs + env overrides)
-│   ├── obs.py                  # structured JSONL logging + heartbeats
-│   └── cli.py                  # `kore` CLI (tasks / eval / ...)
-├── scripts/                    # run_campaign.py + conductor/tmux launchers + smokes
-├── configs/                    # accelerate FSDP config + per-stage full-FT JSON
-├── tests/                      # pytest suite (CPU-safe unit tests)
-├── docs/                       # deep dives (see the documentation index below)
-├── data/                       # datagen shards + campaign manifest (gitignored churn)
-├── runs/                       # checkpoints + logs (gitignored)
-├── pyproject.toml              # package + optional extras
-└── requirements-conductor.txt  # pinned, verified ROCm runtime
-```
-
----
-
-## Environment variables
-
-Consolidated catalog (see subpackage READMEs for specifics):
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `AMD_LLM_API_KEY` | – | Claude gateway subscription key (in `.env.local`) |
-| `KORE_REWARD_MODE` | `speedup` | `residual` selects the physics roofline reward |
-| `KORE_VERIFIED_CORRECTNESS` | off | enable the enumerated adversarial correctness battery |
-| `KORE_COMPILE_BASELINE` | off | grade vs. the compiler-fused baseline (anti speedup-inflation) |
-| `KORE_BENCH_COLD` | `1` | cold-cache (L2-flushed) timing |
-| `KORE_PROFILE_REWARD_WEIGHT` | `0` | enable the rocprofv3 PMC dense reward bonus |
-| `KORE_EVAL_FULL` / `KORE_EVAL_N` | – / `300` | pull real HF retention splits, capped per bench |
-| `KORE_GENERAL_REPLAY_HF` | off | use real HF datasets for anti-forgetting replay |
-| `KORE_PEAK_BF16` / `KORE_PEAK_FP8` / `KORE_PEAK_HBM_BW` | – | **dead: setting these changes nothing.** Kept named in `kore.analysis.rooflines.LEGACY_PEAK_ENV_VARS` only so `resolve_peaks` can emit a `RuntimeWarning` when they are exported. Supply peaks as a fingerprinted `kore.runtime-calibration.v1` document instead (`KORE_PHYSICS_CALIBRATION`, pinned with `KORE_PHYSICS_MODEL_FINGERPRINT`) |
-| `KORE_DATAGEN_WORKERS` | `64` (conductor) | teacher-bound datagen concurrency |
-| `HIP_VISIBLE_DEVICES` | – | GPU pinning (ROCm: use HIP only, not ROCR) |
-
-> The GRPO credit / search / mint / transform levers (`credit_incorrect_turns`, `physics_shaping_weight`, `use_search`, `search_budget`, `search_every`, `coevolve_mint`, `coevolve_mint_batch`, `agentic_transform_tools`) are JSON config fields in [`configs/grpo_14b_full.json`](configs/README.md), not environment variables.
-
----
+[`LICENSE`](LICENSE) declares the repository AMD-internal and not for external
+release. [`THIRD_PARTY.md`](THIRD_PARTY.md) contains the required attribution.
+Do not publish source, weights, a dataset, or a build artifact without a new
+authorized release decision.
 
 ## Testing
 
 ```bash
-# install once in a CPU-only test environment
-pip install -e ".[test]"
-
-# default CPU suite: top-level + every package-local test module
-python -m pytest
-
-# useful splits (the CI runs these independently)
-python -m pytest tests
-python -m pytest kore
-
-# inspect the live collection instead of relying on a checked-in count
-python -m pytest --collect-only -q
-
-# opt-in groups when their resources are provisioned
-python -m pytest -m gpu       # real verifier on an MI350-class gfx950 device
-python -m pytest -m release   # licensing, seed-scan, generator determinism
+PYTHONPATH=. /home/shasriva/kore-venv/bin/python -m pytest tests/ -q \
+  -p no:warnings -k "not gpu"
 ```
 
-The default marker expression excludes only GPU and release-only contracts. Release checks are deliberately separate because missing legal metadata and any generated seed-scanner finding must block publication. See [`tests/README.md`](tests/README.md).
+## Documentation
 
-> `model`, `network` and `dependency` markers were declared for years and applied to **zero** tests, so the deselection was a no-op that read as coverage. They are removed, and `tests/test_marker_contract.py` now fails the default suite if any declared marker selects nothing — a decorative marker cannot come back silently.
-
----
-
-## Documentation index
-
-| Doc | Contents |
-| --- | --- |
-| [`docs/DISTRIBUTED.md`](docs/DISTRIBUTED.md) | FSDP sizing, one-command full-FT launch, manual sharded launch |
-| [`docs/DATASET_SPEC.md`](docs/DATASET_SPEC.md) | Corpus design + datagen record schemas |
-| [`docs/KORE_BENCH_BLUEPRINT.md`](docs/KORE_BENCH_BLUEPRINT.md) | Task taxonomy + benchmark release plan |
-| [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md) | Roofline validation (verdict `INTEGRITY_ONLY`), physics reward, cross-family transfer |
-| [`docs/SFT_READINESS.md`](docs/SFT_READINESS.md) | Stage-1 SFT launch readiness: measured lifecycle, blockers, launch command |
-| [`docs/E2E_SERVING_GATE.md`](docs/E2E_SERVING_GATE.md) | Provisioning a real vLLM/SGLang backend and running the serving gate |
-| [`docs/SOURCE_PROVENANCE.md`](docs/SOURCE_PROVENANCE.md) | Stage-0 corpus source contract + `source_metadata.schema.json` |
-| [`docs/FRONTIER_CLAIM_PROTOCOL.md`](docs/FRONTIER_CLAIM_PROTOCOL.md) | Preregistered adjudication for a frontier claim |
-| [`docs/GRPO_MIN_TRUSTWORTHY.md`](docs/GRPO_MIN_TRUSTWORTHY.md) | The fail-closed 32B GRPO canary profile contract |
-| [`DATASET_STATUS.md`](DATASET_STATUS.md) | What is built, where, and its measured row/token counts |
-
----
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-| --- | --- | --- |
-| NCCL "Duplicate GPU detected" | stale `HIP_VISIBLE_DEVICES` pins all FSDP ranks to one GPU | launchers `unset` device masks; don't export GPU pins before `--full-ft` |
-| `torch.cuda.is_available() == False` | a CUDA torch wheel got installed, or ROCR+HIP double-remap | reinstall ROCm torch (see [Installation](#installation)); use HIP-only pinning |
-| datagen stalls / empty shards | missing `AMD_LLM_API_KEY` | add it to `.env.local` |
-| every candidate `compiled=False` under load | `RLIMIT_NPROC` (per-UID) too low → OpenBLAS/numpy can't start threads in the driver | `_preexec` raises soft→hard + `_env` caps BLAS threads (see `kore/env`) |
-| GRPO η looks ~1.7× too optimistic | roofline using datasheet peaks (η is `1/1.68` to `1/1.77` of its calibrated value) | emit a calibration document with `python -m kore.analysis.calibrate_peaks` and pass it via `KORE_PHYSICS_CALIBRATION` / `calibration=`. Exporting `KORE_PEAK_*` does **nothing**; `scripts/run_conductor_14b.sh` still exports them and that has no effect |
-| retention gate "NOT enforced" | serving backend (vLLM/torch) unavailable | provision serving; the gate warns loudly rather than silently passing |
-| stage skipped unexpectedly on resume | in `done_stages` and artifact present | `--force --stages <stage>`, or delete the artifact/shard |
-| SFT uses base instead of midtrain | `midtrain_ckpt` null (stage incomplete) | check the manifest; re-run midtrain |
+- [`docs/README.md`](docs/README.md) — evidence and decisions
+- [`docs/DISTRIBUTED.md`](docs/DISTRIBUTED.md) — 30B FSDP launch
+- [`docs/DATASET_SPEC.md`](docs/DATASET_SPEC.md) — dataset contract
+- [`kore/data/README.md`](kore/data/README.md) — data factory
+- [`kore/eval/README.md`](kore/eval/README.md) — evaluation harnesses

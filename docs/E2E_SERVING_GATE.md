@@ -6,10 +6,13 @@ with no accuracy regression** (KORE.pdf §4.7). This document is the operator's 
 real OpenAI-compatible server running on this hardware, how to point the gate at it, and what it
 measured when we did.
 
-Until this was written the gate had never been reached. Neither `vllm` nor `sglang` was installed
-anywhere on the node, so `VLLM_AVAILABLE` and `SGLANG_AVAILABLE` were both `False` and
-`e2e_throughput` / `e2e_accuracy` raised `E2ENotProvisioned`. The gate now runs, and
-`runs/e2e_gate/` holds the first artifacts it has ever produced.
+The evaluator supports a provisioned HTTP backend but does not ship one.
+`VLLM_AVAILABLE` and `SGLANG_AVAILABLE` describe imports in the training
+environment; they are not proof that a separate serving backend exists.
+`runs/e2e_gate/` is cluster run output, not a checkout artifact. Treat the
+procedure and any recorded throughput or accuracy numbers below as a
+run-specific measurement that must be repeated against the candidate
+checkpoint, not as a standing product result.
 
 ---
 
@@ -22,8 +25,9 @@ The gate module never imports vLLM or SGLang. It speaks HTTP to an OpenAI-compat
 `/v1/chat/completions` endpoint using `requests`, falling back to stdlib `urllib`. Consequently:
 
 - the inference engine and its pinned `torch` live in **their own container or venv**;
-- `/home/shasriva/kore-venv` — `torch 2.10.0+rocm7.0` + `triton 3.6.0` + `aiter`, the stack the
-  14B SFT/DPO/GRPO stages run on — never has to satisfy an engine's dependency solver. vLLM pins
+- `/home/shasriva/kore-venv` — `torch 2.10.0+rocm7.0` + `triton 3.6.0` + `aiter`, the stack used
+  for KORE training, including the 30B SFT launch — never has to satisfy an engine's dependency
+  solver. The 14B SFT/DPO/GRPO chain is historical. vLLM pins
   torch to an exact build (`torch==2.11.0+gitd0c8b1f` for vLLM 0.26.0); installing it into the
   training venv would replace the working ROCm stack;
 - `VLLM_AVAILABLE` / `SGLANG_AVAILABLE` are **diagnostics, not preconditions**. Both read `False`

@@ -6,7 +6,7 @@ include requirements-conductor.txt
 include conftest.py
 include .gitleaks.toml
 
-recursive-include kore *.py *.yaml *.json *.jsonl *.md
+recursive-include kore *.py *.yaml *.json *.jsonl *.md *.hip *.h
 recursive-include tests *.py *.md
 recursive-include scripts *.py *.sh *.sbatch *.md
 recursive-include configs *.json *.yaml *.yml *.md

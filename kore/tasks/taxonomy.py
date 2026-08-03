@@ -346,6 +346,26 @@ def _grouped_map(groups: Mapping[str, tuple[str, ...]]) -> Mapping[str, str]:
     return MappingProxyType(out)
 
 
+# HIP C++ operations (``backend: hip``).  They carry their own operation IDs
+# rather than reusing the Triton ones: the math is identical, but the language a
+# kernel is written in is precisely the axis these tasks exist to cover, and a
+# LOFO or coverage report that could not tell `gemm` in Triton from `gemm` in HIP
+# would hide the gap they close.  Authored in :mod:`kore.tasks.hip_ops` and
+# materialised by :mod:`kore.tasks.generate_hip`; listed here because a
+# hand-authored task carries no generator source-family field, so admission to
+# the registry requires an exact, reviewed entry.
+_HIP_OPERATIONS: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "activation": ("hip_gelu_tanh", "hip_silu", "hip_silu_mul"),
+    "normalization": ("hip_layernorm", "hip_rmsnorm"),
+    "reduction": ("hip_softmax_rows",),
+    "gemm": ("hip_gemm",),
+    "quantization": (
+        "hip_quant_fp8_pertoken",
+        "hip_quant_mxfp4_pack",
+        "hip_dequant_mxfp4",
+    ),
+})
+
 # Hand-authored task metadata has no generator source-family field, so its exact
 # operation IDs are curated here.  This is intentionally exhaustive and exact.
 HAND_OPERATION_FAMILIES: Mapping[str, str] = _grouped_map({
@@ -377,11 +397,13 @@ HAND_OPERATION_FAMILIES: Mapping[str, str] = _grouped_map({
         "layernorm_backward",
         "rmsnorm",
         "rmsnorm_backward",
+        *_HIP_OPERATIONS["normalization"],
     ),
     "activation": (
         "fused_silu_mul_quant_fp8",
         "gelu_tanh",
         "silu_and_mul",
+        *_HIP_OPERATIONS["activation"],
     ),
     "gemm": (
         "gemm",
@@ -397,6 +419,7 @@ HAND_OPERATION_FAMILIES: Mapping[str, str] = _grouped_map({
         "gemm_w4a16",
         "gemm_w4a16_g128",
         "gemm_w4a8_fp8",
+        *_HIP_OPERATIONS["gemm"],
     ),
     "moe": (
         "fused_moe_silu",
@@ -410,9 +433,9 @@ HAND_OPERATION_FAMILIES: Mapping[str, str] = _grouped_map({
         "moe_topk_softmax_norenorm",
         "topk_softmax",
     ),
-    "quantization": ("quant_fp8_pertoken",),
+    "quantization": ("quant_fp8_pertoken", *_HIP_OPERATIONS["quantization"]),
     "positional": ("rope",),
-    "reduction": ("softmax", "softmax_backward"),
+    "reduction": ("softmax", "softmax_backward", *_HIP_OPERATIONS["reduction"]),
 })
 
 

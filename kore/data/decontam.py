@@ -443,9 +443,18 @@ def _reference_from_task_file(path: Path, task_id: str) -> Optional[ReferenceDoc
     )
 
 
+#: Source suffixes indexed as held-out roots.  ``*.py`` alone was a hole once HIP
+#: tasks existed: a held-out HIP task's kernel lives in a ``.hip`` file, so its
+#: text was invisible to every leakage check below and could have been copied into
+#: the training corpus without tripping the exact, AST, graph or containment gates.
+HELDOUT_SOURCE_SUFFIXES: tuple[str, ...] = (
+    ".py", ".hip", ".cpp", ".cu", ".h", ".hpp", ".cuh",
+)
+
+
 @lru_cache(maxsize=1)
 def heldout_source_references() -> tuple[ReferenceDocument, ...]:
-    """Verified Python roots from every held-out KORE task lineage."""
+    """Verified source roots from every held-out KORE task lineage."""
     out: list[ReferenceDocument] = []
     try:
         from kore.tasks.registry import TASKS_DIR
@@ -454,7 +463,9 @@ def heldout_source_references() -> tuple[ReferenceDocument, ...]:
             task_dir = Path(TASKS_DIR) / task_id
             if not task_dir.is_dir() or "_drafts" in task_dir.parts:
                 continue
-            for path in sorted(task_dir.glob("*.py")):
+            for path in sorted(task_dir.iterdir()):
+                if not path.is_file() or path.suffix not in HELDOUT_SOURCE_SUFFIXES:
+                    continue
                 ref = _reference_from_task_file(path, task_id)
                 if ref is not None:
                     out.append(ref)
@@ -1012,6 +1023,7 @@ __all__ = [
     "FROZEN_BENCHMARK_ARTIFACT_TYPE",
     "FROZEN_BENCHMARK_SCHEMA_VERSION",
     "DEFAULT_BENCHMARKS",
+    "HELDOUT_SOURCE_SUFFIXES",
     "HoldoutPolicy",
     "ReferenceDocument",
     "FrozenBenchmarkArtifact",

@@ -431,7 +431,7 @@ def test_source_generators_emit_serializable_explicit_policies():
 
 def test_whole_registry_has_explicit_status_and_hidden_family_coverage():
     report = audit_registry_shapes()
-    assert report.task_count == 1334
+    assert report.task_count == 1354
     assert report.ok, report.failures[:10]
     assert report.explicit_status_tasks == report.task_count
     assert report.claim_eligible_tasks == report.task_count

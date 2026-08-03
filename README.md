@@ -66,7 +66,8 @@ kernel generation. `scripts/spur_pipeline_driver.sh` therefore defaults
 
 ## Measurement discipline
 
-The registry has 1,334 tasks. 106 are vendor-lane tasks: 63 declare AITER and 4
+The registry has 1,354 tasks (1,334 Triton plus a 20-task HIP C++ family). 106
+are vendor-lane tasks: 63 declare AITER and 4
 declare hipBLASLt; runtime resolution adds 33 `gemm_fusion` hipBLASLt tasks and
 6 gated activations backed by AITER. The remaining 92%, including all 1,052
 generated breadth tasks, are torch-lane tasks. Vendor and torch speedups must

@@ -58,6 +58,12 @@ def episode_to_record(
         "phases": sorted({p.get("phase") for p in phase_trace if p.get("phase")}),
         "turn_rewards": list(getattr(episode, "turn_rewards", []) or []),
         "turn_correct": list(getattr(episode, "turn_correct", []) or []),
+        # Step-centric supervision needs the MEASURED per-turn speedup, not just
+        # the scalar reward: Kernel-Smith's recipe keeps a revision only when it
+        # preserves correctness AND actually got faster, and reward blends other
+        # terms so a reward rise does not prove a speedup. Dropping this on the
+        # way to disk made every stored trajectory un-decomposable into steps.
+        "turn_speedups": list(getattr(episode, "turn_speedups", []) or []),
         "tool_use_reward": tool_use_reward(episode),
     }
     if extra_provenance:

@@ -167,6 +167,21 @@ def main() -> int:
 
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write the filtered trajectories on their own as well as merged. The
+    # release ships this slice so data/release/reassemble.sh can rebuild the
+    # merged mixture OFFLINE by concatenation. Without it the SFT config would
+    # name a path only a networked HuggingFace download can produce, which is
+    # the exact failure tests/test_sft_launch_readiness.py exists to prevent --
+    # SFT once died at launch after a 14B load on every rank because its
+    # configured corpus was not something the repo produced.
+    slice_path = out.parent / "kernel_multiturn_refine.jsonl"
+    with slice_path.open("w") as w:
+        for rec in kept:
+            w.write(json.dumps(rec) + "\n")
+    print(f"\nwrote {len(kept):,} trajectories to {slice_path} "
+          f"({slice_path.stat().st_size/1e6:.0f} MB)")
+
     n = 0
     with out.open("w") as w:
         with base.open() as f:
@@ -177,7 +192,7 @@ def main() -> int:
         for rec in kept:
             w.write(json.dumps(rec) + "\n")
             n += 1
-    print(f"\nwrote {n:,} rows to {out} ({out.stat().st_size/1e6:.0f} MB)")
+    print(f"wrote {n:,} rows to {out} ({out.stat().st_size/1e6:.0f} MB)")
     return 0
 
 

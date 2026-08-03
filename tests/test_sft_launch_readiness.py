@@ -44,6 +44,11 @@ REPAIR_ROWS = 15_083            # _provenance.kind == "repair"
 ROWS_AFTER_UPSAMPLE = 71_576    # repair_loss_weight 2.0 duplicates each repair row
 ROWS_OVER_16384 = 3_299         # dropped by _filter_overlong at max_seq_length 16384
 ROWS_TRAINED = 68_277           # ROWS_AFTER_UPSAMPLE - ROWS_OVER_16384
+# v2 adds 4,629 multi-turn refinement trajectories, already filtered to
+# max_seq_length by scripts/build_sft_v2_mixture.py, so none are lost to the
+# overlong pass. This is the planning figure the step budget is sized from; the
+# authoritative filter still runs at load time against the real tokenizer.
+ROWS_TRAINED_V2 = ROWS_TRAINED + 4_629
 
 
 def _sft_config() -> dict:
@@ -165,8 +170,13 @@ def test_documented_row_count_is_consistent_across_the_repo():
 def test_shipped_config_dataset_path_is_what_reassemble_produces():
     reassemble = (REPO / "data" / "release" / "reassemble.sh").read_text()
     assert "../b05factory/sft/multicap.jsonl" in reassemble
+    # v2 is what SFT trains on, and reassemble.sh must build it OFFLINE by
+    # concatenating the shipped base mix with the shipped trajectory slice --
+    # not by reaching for HuggingFace, which a fresh checkout cannot rely on.
+    assert "multicap_v2.jsonl" in reassemble
+    assert "kernel_multiturn_refine.jsonl.gz.part" in reassemble
     configured = Path(_sft_config()["dataset_path"])
-    assert configured == Path("data/b05factory/sft/multicap.jsonl"), (
+    assert configured == Path("data/b05factory/sft/multicap_v2.jsonl"), (
         f"config dataset_path {configured} is not the path reassemble.sh writes"
     )
 
@@ -183,7 +193,7 @@ def test_no_stage_config_names_a_corpus_nothing_produces():
 
     # (stage config, corpus key, the destination reassemble.sh writes)
     expected = {
-        "configs/sft_14b_full.json": ("dataset_path", "b05factory/sft/multicap.jsonl"),
+        "configs/sft_14b_full.json": ("dataset_path", "b05factory/sft/multicap_v2.jsonl"),
         "configs/dpo_14b_full.json": ("dataset_path", "b05factory/dpo/pairs.jsonl"),
         # midtrain names its corpus differently, and shipped a path to a
         # 1,360-row development stub while calling itself "14b_full".
@@ -668,17 +678,20 @@ def _sft_step_plan(rows_trained: int, config: dict, world_size: int) -> dict:
 
 def test_full_run_step_count_is_what_the_readiness_plan_assumes():
     """A config edit that changes the run length must change this number too."""
-    plan = _sft_step_plan(ROWS_TRAINED, _sft_config(), world_size=8)
+    plan = _sft_step_plan(ROWS_TRAINED_V2, _sft_config(), world_size=8)
     assert plan["effective_batch"] == 128
-    assert plan["steps_per_epoch"] == 533
-    assert plan["total_steps"] == 1599
+    assert plan["steps_per_epoch"] == 569
+    # Two epochs, not three: SFT now starts from the chat-vector model, which is
+    # already instruction-tuned, and this project has already watched 1e-5 for
+    # three epochs collapse instruction-following once.
+    assert plan["total_steps"] == 1138
 
     save_steps = 200  # SFTConfig default; the shipped launch JSON does not override
     from kore.policy.configs import SFTConfig
 
     assert SFTConfig().save_steps == save_steps
-    # 7 periodic saves plus the Trainer's end-of-training checkpoint, each 221 GB.
-    assert plan["total_steps"] // save_steps == 7
+    # 5 periodic saves plus the Trainer's end-of-training checkpoint, each 221 GB.
+    assert plan["total_steps"] // save_steps == 5
 
 
 def test_overlong_filter_only_engages_under_completion_only_loss():

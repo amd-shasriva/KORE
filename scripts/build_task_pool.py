@@ -75,6 +75,13 @@ def parse_args(argv=None):
     parser.add_argument("--dry-run", action="store_true",
                         help="screen and report, write nothing")
     parser.add_argument("--json-out", default="")
+    parser.add_argument("--rescreen-index", action="store_true",
+                        help="re-apply the screening gates to an EXISTING pool.jsonl "
+                             "and drop what no longer passes, instead of ingesting "
+                             "upstream corpora (no network, no re-download)")
+    parser.add_argument("--prune-tasks", action="store_true",
+                        help="with --rescreen-index, also delete the materialized "
+                             "task dirs of dropped specs")
     return parser.parse_args(argv)
 
 
@@ -274,6 +281,160 @@ def screen_all(candidates, dtype: str, workers: int, timeout: int):
 
 
 # --------------------------------------------------------------------------- #
+# Re-screening an index that is already on disk
+# --------------------------------------------------------------------------- #
+def _rescreen_one(payload):
+    """Verdict for one already-indexed spec. Runs in a screening worker."""
+    index, raw = payload
+    from kore.data.task_mining import hidden_state_reason
+    from kore.tasks.external import (
+        ExternalTaskSpec,
+        exec_module_source,
+    )
+
+    try:
+        spec = ExternalTaskSpec.from_dict(raw)
+        namespace = exec_module_source(spec.module_source)
+        reason = hidden_state_reason(
+            namespace, spec.entry_class, spec.init_args, spec.init_kwargs,
+            spec.input_specs, spec.dtype, _SCREEN_TIMEOUT,
+        )
+    except BaseException as exc:  # noqa: BLE001 - a worker must never die silently
+        return index, "rescreen_failed", f"{type(exc).__name__}: {exc}"
+    if reason is not None:
+        return index, "hidden_state_oracle", reason
+    return index, "", ""
+
+
+def rescreen_index(root, workers: int, timeout: int, prune: bool, dry_run: bool):
+    """Re-apply the pure gates to an existing ``pool.jsonl``.
+
+    A full ingest needs the upstream corpora and hours of screening. When a gate
+    is ADDED, the pool already on disk has to be brought under it without either
+    of those, otherwise the practical choice is between re-downloading 18k modules
+    and shipping a pool the new gate would have refused. This path reads the
+    index, re-derives each verdict from the spec itself (the spec carries the
+    module source and the constructor arguments, so nothing upstream is needed),
+    and rewrites the index with only what still passes.
+    """
+    import concurrent.futures as futures
+
+    from kore.tasks import external
+
+    index_path = root / external.POOL_INDEX_NAME
+    if not index_path.is_file():
+        log(f"no index at {index_path}")
+        return None
+
+    raws = []
+    with index_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                raws.append(json.loads(line))
+    log(f"re-screening {len(raws)} indexed specs from {index_path}")
+
+    verdicts: dict[int, tuple[str, str]] = {}
+    pending = list(enumerate(raws))
+    while pending:
+        completed = 0
+        try:
+            with futures.ProcessPoolExecutor(
+                max_workers=max(1, workers), initializer=_init_worker,
+                initargs=("fp32", timeout),
+            ) as pool:
+                for index, reason, detail in pool.map(
+                    _rescreen_one, pending, chunksize=8
+                ):
+                    verdicts[index] = (reason, detail)
+                    completed += 1
+                    if len(verdicts) % 2000 == 0:
+                        log(f"  re-screened {len(verdicts)}/{len(raws)}")
+        except futures.process.BrokenProcessPool:
+            log(f"  worker pool died after {completed} of {len(pending)}; rebuilding")
+        pending = [(i, r) for i, r in pending if i not in verdicts]
+        if pending and completed == 0:
+            index, _ = pending[0]
+            verdicts[index] = ("rescreen_crashed", "took the worker down below Python")
+            pending = pending[1:]
+
+    kept = [raw for i, raw in enumerate(raws) if not verdicts[i][0]]
+    drops = {}
+    for reason, _ in verdicts.values():
+        if reason:
+            drops[reason] = drops.get(reason, 0) + 1
+
+    print()
+    print(f"indexed         : {len(raws):,}")
+    print(f"still admissible: {len(kept):,}")
+    print(f"dropped         : {len(raws) - len(kept):,}")
+    for reason, count in sorted(drops.items(), key=lambda kv: -kv[1]):
+        print(f"    {count:>7,}  {reason}")
+    families = {}
+    for raw in kept:
+        families[raw.get("family", "?")] = families.get(raw.get("family", "?"), 0) + 1
+    print(f"families kept   : {dict(sorted(families.items()))}")
+
+    result = {
+        "mode": "rescreen_index",
+        "indexed": len(raws),
+        "kept": len(kept),
+        "dropped": len(raws) - len(kept),
+        "drops_by_reason": dict(sorted(drops.items())),
+        "families_kept": dict(sorted(families.items())),
+        "examples": [
+            {"task_id": raws[i]["task_id"], "reason": v[0], "detail": v[1][:300]}
+            for i, v in sorted(verdicts.items()) if v[0]
+        ][:20],
+    }
+    if dry_run:
+        log("dry run: index unchanged")
+        return result
+
+    # Keep the pre-filter index next to the new one: the drop is large and
+    # irreversible from the filtered file alone, and the campaign's provenance
+    # should be able to name exactly what was removed.
+    backup = index_path.with_suffix(".jsonl.prefilter")
+    if not backup.exists():
+        index_path.replace(backup)
+    else:
+        log(f"prefilter backup already exists at {backup.name}; not overwriting")
+    with index_path.open("w", encoding="utf-8") as handle:
+        for raw in kept:
+            handle.write(json.dumps(raw, sort_keys=True) + "\n")
+    log(f"wrote {len(kept)} specs to {index_path} (was {len(raws)})")
+
+    if prune:
+        import shutil
+
+        tasks_dir = external.pool_tasks_dir(root)
+        keep_ids = {raw["task_id"] for raw in kept}
+        removed = 0
+        if tasks_dir.is_dir():
+            for child in sorted(tasks_dir.iterdir()):
+                if child.is_dir() and child.name not in keep_ids:
+                    shutil.rmtree(child, ignore_errors=True)
+                    removed += 1
+        log(f"pruned {removed} materialized task dirs")
+        result["pruned_task_dirs"] = removed
+
+    manifest_path = root / external.POOL_MANIFEST_NAME
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.setdefault("rescreens", []).append({
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "gate": "kore.data.task_mining.hidden_state_reason",
+            **{k: result[k] for k in
+               ("indexed", "kept", "dropped", "drops_by_reason")},
+        })
+        manifest["pool_tasks"] = len(kept)
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n",
+                                 encoding="utf-8")
+        log(f"recorded the re-screen in {manifest_path.name}")
+    return result
+
+
+# --------------------------------------------------------------------------- #
 def main(argv=None) -> int:
     args = parse_args(argv)
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -292,6 +453,18 @@ def main(argv=None) -> int:
     root = external.pool_root(args.out or None)
     workers = args.workers or (os.cpu_count() or 8)
     started = time.time()
+
+    if args.rescreen_index:
+        result = rescreen_index(
+            root, workers, args.timeout, args.prune_tasks, args.dry_run
+        )
+        if result is None:
+            return 2
+        if args.json_out:
+            pathlib.Path(args.json_out).write_text(
+                json.dumps(result, indent=2) + "\n", encoding="utf-8"
+            )
+        return 0 if result["kept"] else 1
 
     registry_total = len(all_tasks())
     registry_train = len(train_tasks())

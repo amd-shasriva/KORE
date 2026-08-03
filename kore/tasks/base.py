@@ -78,6 +78,38 @@ class Task:
         value = self.raw.get("op_family")
         return str(value) if value is not None else None
 
+    @property
+    def task_kind(self) -> str:
+        """``optimize`` (a seed kernel to improve) or ``spec_synthesis``.
+
+        Declared, not inferred.  The distinction is not recoverable from the seed
+        alone: an external-pool seed aliases eager torch and so also has to be
+        replaced rather than edited, but it still ships a working implementation,
+        whereas a spec task ships only a signature.  A prompt builder that
+        guessed from the seed's contents would conflate the two.
+        """
+        value = self.raw.get("task_kind")
+        return str(value).strip() if isinstance(value, str) and value.strip() else "optimize"
+
+    @property
+    def is_spec_synthesis(self) -> bool:
+        return self.task_kind == "spec_synthesis"
+
+    @property
+    def spec_path(self) -> Optional[Path]:
+        name = self.raw.get("spec_file")
+        if not isinstance(name, str) or not name.strip():
+            return None
+        return self.dir / name.strip()
+
+    @property
+    def spec_source(self) -> str:
+        """The prose contract, or ``""`` for a task that does not carry one."""
+        path = self.spec_path
+        if path is None or not path.is_file():
+            return ""
+        return path.read_text(encoding="utf-8")
+
     @classmethod
     def from_dir(cls, d: Path) -> "Task":
         d = Path(d)
@@ -170,6 +202,22 @@ class Task:
         for artifact in ("driver.py", "reference.py", seed_kernel_name):
             if not (d / artifact).is_file():
                 raise ValueError(f"{yaml_path}: missing required artifact {artifact}")
+
+        # A spec-synthesis task's ENTIRE specification is the prose file: the seed
+        # is only a signature stub. If the file is missing the task is not merely
+        # incomplete, it is unanswerable, and it would fail every rollout while
+        # reporting as a model error. Refuse it at load instead.
+        task_kind = meta.get("task_kind")
+        if isinstance(task_kind, str) and task_kind.strip() == "spec_synthesis":
+            spec_file = meta.get("spec_file")
+            if not isinstance(spec_file, str) or not spec_file.strip():
+                raise ValueError(
+                    f"{yaml_path}: task_kind spec_synthesis requires spec_file"
+                )
+            if not (d / spec_file.strip()).is_file():
+                raise ValueError(
+                    f"{yaml_path}: declared spec_file {spec_file!r} does not exist"
+                )
 
         provenance = meta.get("provenance")
         provenance_root = meta.get("provenance_root") or meta.get("lineage_root")

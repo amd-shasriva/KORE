@@ -399,11 +399,14 @@ def test_grpo_config_comment_keys_name_a_real_knob():
 # remaining 1,248 (92%) are torch-anchored. The total includes the 20-task HIP C++
 # family, all of which are torch-baselined (their production baseline is the eager
 # torch path they have to beat).
-EXPECTED_TOTAL_TASKS = 1_354
+EXPECTED_TOTAL_TASKS = 1_522
 EXPECTED_GENB_TASKS = 1_052
 EXPECTED_AITER_DECLARED = 63
 EXPECTED_HIPBLASLT_DECLARED = 4
-EXPECTED_TORCH_DECLARED = 1_279
+# 1,279 + the 188-task HIP C++ family, every one of which declares a torch or
+# torch_compile bar: no HIP task is graded against a vendor kernel, because the
+# vendor GEMM is the one baseline whose own CV cannot clear the publication gate.
+EXPECTED_TORCH_DECLARED = 1_447
 EXPECTED_GEMM_FUSION_UPGRADED = 33
 EXPECTED_GATED_ACT_UPGRADED = 6
 EXPECTED_VENDOR_LANE = 106
@@ -477,9 +480,11 @@ def test_task_registry_composition_is_what_the_docs_claim():
     vendor = (counts["aiter"] + counts["hipblaslt"]
               + counts["gemm_fusion_upgraded"] + counts["gated_act_upgraded"])
     assert vendor == EXPECTED_VENDOR_LANE
-    # The "remaining ~92%" figure in README.md / DATASET_SPEC.md.
+    # The "remaining ~93%" figure in README.md / DATASET_SPEC.md. The vendor lane
+    # is a fixed 106 tasks, so growing the HIP family dilutes the share; the prose
+    # has to move with it.
     breadth_share = (counts["total"] - vendor) / counts["total"]
-    assert 0.915 <= breadth_share <= 0.925, breadth_share
+    assert 0.925 <= breadth_share <= 0.935, breadth_share
 
 
 @pytest.mark.parametrize("doc_rel", ["README.md", "docs/DATASET_SPEC.md"])

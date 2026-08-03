@@ -589,6 +589,13 @@
       "lifecycle": "active"
     },
     {
+      "path": "scripts/seed_provenance_partition.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "read-only census that partitions trainable tasks by what each seed actually is (an existing device kernel vs plain eager torch), parsed from the seed's AST rather than from metadata"
+    },
+    {
       "path": "scripts/probe_hip_gemm_timing.py",
       "classification": "diagnostic",
       "lifecycle": "active",

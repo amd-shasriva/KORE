@@ -14,7 +14,7 @@ the 30B target has no Base sibling for either CPT or a residual merge.
 
 ## Task pool before trajectories
 
-The static registry contains 1,354 tasks, of which 1,309 are trainable. It
+The static registry contains 1,522 tasks, of which 1,477 are trainable. It
 cannot grow in place: the taxonomy digest guards split manifests, so adding a
 directory would invalidate a campaign already in flight.
 
@@ -73,12 +73,19 @@ Correctness is gated before speed. The task driver uses the FP32 oracle across
 declared shapes, plus adversarial and determinism checks when enabled. Timings
 are cold-cache, paired, and variance-gated.
 
-There are two baseline lanes. Of 1,354 registry tasks, 106 use a production
+There are two baseline lanes. Of 1,522 registry tasks, 106 use a production
 vendor baseline: 63 declare AITER, 4 declare hipBLASLt, runtime resolution adds
 33 `gemm_fusion` hipBLASLt tasks and 6 gated activations using AITER. The
-remaining 92%, including all 1,052 generated breadth tasks, use torch. A
-torch-lane speedup is useful for training but is not evidence of beating a
-production library.
+remaining 93%, including all 1,052 generated breadth tasks and all 188 HIP C++
+tasks, use torch. A torch-lane speedup is useful for training but is not
+evidence of beating a production library.
+
+No HIP task declares a vendor baseline, and that is a measurement result rather
+than an omission: the one HIP operator whose production bar is a vendor kernel
+is GEMM against hipBLASLt, and hipBLASLt's own coefficient of variation does not
+clear the 3% publication gate at any shape tried. See
+`scripts/probe_hip_gemm_timing.py` and the `hip_gemm` entry in
+`kore/tasks/hip_ops.py`.
 
 ## What is deliberately absent
 

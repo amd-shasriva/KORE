@@ -185,9 +185,22 @@ def build_agent_user_prompt(task, seed_src: str = "", kb_context: str = "") -> s
     """The opening user turn: the task + the seed kernel + optional KB few-shots."""
     op = getattr(task, "operation", None) or getattr(task, "task_id", "kernel")
     dtype = getattr(task, "dtype", "fp32")
+    arch = arch_desc(getattr(task, "gpu_target", None))
+    if getattr(task, "is_spec_synthesis", False):
+        # Lead with the contract, and do NOT show the stub as a "seed kernel to
+        # optimize": there is nothing in it to improve, and framing an empty
+        # signature as a starting point is how a synthesis task gets answered
+        # with a one-line edit.
+        return (
+            f"Write a `{op}` Triton kernel ({dtype}) for {arch} from the "
+            f"specification below. There is no starting implementation.\n"
+            "Use your tools to build, test, and bench candidates. Reach a correct "
+            "kernel first, then maximize the speedup vs the production baseline."
+            f"\n\n{getattr(task, 'spec_source', '')}{kb_context}"
+        )
     seed_block = f"\n\n## Seed kernel (optimize this)\n```python\n{seed_src}\n```" if seed_src else ""
     return (
-        f"Optimize the `{op}` Triton kernel ({dtype}) for {arch_desc(getattr(task, 'gpu_target', None))}.\n"
+        f"Optimize the `{op}` Triton kernel ({dtype}) for {arch}.\n"
         "Use your tools to build, test, and bench candidates. Keep improvements "
         "and revert regressions. Reach a correct kernel first, then maximize the "
         f"speedup vs the production baseline.{seed_block}{kb_context}"

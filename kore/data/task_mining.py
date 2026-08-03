@@ -36,7 +36,7 @@ import os
 import signal
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -71,6 +71,22 @@ MAX_SCALE_ATTEMPTS = 3
 #: Bit-exact repeat required of the oracle.  A module whose output changes
 #: between two identical calls cannot grade a kernel at any tolerance.
 DETERMINISM_TRIALS = 2
+
+#: Weight-init seeds used to decide whether the oracle is a function of its
+#: DECLARED INPUTS.  The task ships ``input_specs`` (the forward arguments) and
+#: nothing else, so a candidate kernel receives only those tensors; if
+#: re-constructing the module under a different seed changes the answer for
+#: identical inputs, the module's parameters are a hidden variable no kernel can
+#: read and the task is unanswerable.  Two seeds are enough: the property is
+#: "does the output depend on the init RNG at all", not an estimate of how much.
+HIDDEN_STATE_SEEDS = (1234, 60817)
+
+#: Relative tolerance for that comparison.  Deliberately loose: the question is
+#: whether the output MOVED with the weights, not whether it moved by a
+#: numerically interesting amount, and a loose threshold errs toward admitting a
+#: task rather than dropping a good one.
+HIDDEN_STATE_RTOL = 1e-3
+HIDDEN_STATE_ATOL = 1e-5
 
 
 class ProbeTimeout(RuntimeError):
@@ -277,6 +293,31 @@ def _same(a, b) -> bool:
     )
 
 
+def _close(a, b) -> bool:
+    """Approximate equality over a tensor or a tuple of tensors."""
+    import torch
+
+    xs = a if isinstance(a, (tuple, list)) else (a,)
+    ys = b if isinstance(b, (tuple, list)) else (b,)
+    if len(xs) != len(ys):
+        return False
+    for x, y in zip(xs, ys):
+        if not (torch.is_tensor(x) and torch.is_tensor(y)):
+            return False
+        if x.shape != y.shape:
+            return False
+        if not x.is_floating_point():
+            if not torch.equal(x, y):
+                return False
+            continue
+        if not torch.allclose(
+            x.float(), y.float(), rtol=HIDDEN_STATE_RTOL, atol=HIDDEN_STATE_ATOL,
+            equal_nan=True,
+        ):
+            return False
+    return True
+
+
 def _elements(specs: Sequence[InputSpec], scale: int) -> int:
     total = 0
     for spec in specs:
@@ -285,6 +326,68 @@ def _elements(specs: Sequence[InputSpec], scale: int) -> int:
             count *= int(dim)
         total += count
     return total
+
+
+def hidden_state_reason(
+    namespace: Mapping[str, Any],
+    entry_class: str,
+    args: Sequence[Any],
+    kwargs: Mapping[str, Any],
+    specs: Sequence[InputSpec],
+    dtype: str,
+    timeout: int = FORWARD_TIMEOUT_SECONDS,
+) -> Optional[str]:
+    """Why this module's oracle is not a function of its declared inputs, else None.
+
+    A pool task ships ``input_specs`` -- the forward arguments -- and the driver
+    hands exactly those tensors to the candidate kernel.  A mined ``nn.Module``,
+    however, usually owns parameters: ``nn.Conv2d`` and ``nn.Linear`` weights are
+    created inside ``__init__`` from the torch RNG and are NEVER passed to the
+    kernel.  The oracle's answer therefore depends on a variable the candidate
+    cannot read, and no honest kernel can match it at any tolerance.  The only
+    channel to those weights is re-executing the torch module, which is precisely
+    what :func:`kore.reward.reward.scan_for_hacks` rejects as delegation, so the
+    task is unanswerable rather than merely hard.
+
+    This is measured, not pattern-matched.  Re-constructing under a second seed
+    and comparing outputs catches hand-written ``nn.Parameter``s, randomly
+    initialized buffers and third-party layers that no list of layer names would
+    contain -- and, just as importantly, ADMITS a module that happens to own
+    parameters its forward never reads.  A static scan for parameter-owning layer
+    names over the shipped 13,570-task pool flagged 9,860 tasks, but 809 of those
+    did reach a correct kernel in the overnight campaign; the behavioural check
+    keeps exactly that kind of task.
+    """
+    import torch
+
+    cls = namespace.get(entry_class)
+    if cls is None:
+        return f"no class {entry_class!r} in module"
+
+    outputs = []
+    for seed in HIDDEN_STATE_SEEDS:
+        with time_limit(timeout):
+            torch.manual_seed(seed)
+            model = cls(*args, **dict(kwargs))
+        if not isinstance(model, torch.nn.Module):
+            return "entry class is not an nn.Module"
+        model.eval()
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        inputs = build_inputs(specs, 1, device="cpu", seed=0, dtype=dtype)
+        with time_limit(timeout), torch.no_grad():
+            outputs.append(model(*inputs))
+
+    if _close(outputs[0], outputs[1]):
+        return None
+    n_params = sum(p.numel() for p in model.parameters())
+    return (
+        "oracle depends on hidden module state: re-initializing the module under "
+        f"a different weight seed changes the output for identical inputs "
+        f"({n_params} parameter elements are not among the "
+        f"{len(specs)} declared inputs), so no kernel that receives only the "
+        "declared inputs can reproduce it"
+    )
 
 
 @dataclass
@@ -342,10 +445,35 @@ def probe_module(
     if any(not spec.shape for spec in specs):
         raise ExternalTaskError("get_inputs() returned a 0-d tensor")
 
-    def forward(scale: int):
-        inputs = build_inputs(specs, scale, device="cpu", seed=0, dtype=dtype)
+    def forward_with(candidate_specs, scale: int):
+        inputs = build_inputs(candidate_specs, scale, device="cpu", seed=0, dtype=dtype)
         with time_limit(timeout), torch.no_grad():
             return model(*inputs)
+
+    def forward(scale: int):
+        return forward_with(specs, scale)
+
+    # Which inputs scale with the leading dimension is MEASURED, not assumed.
+    # ``describe_tensor`` marks every input scalable, which is right for a module
+    # whose arguments are all activations and wrong for one that also takes a
+    # weight: scaling a conv weight's out-channels breaks the forward at every
+    # scale above 1, and the module was then dropped as "no runnable scale" -- a
+    # good task lost to a bad guess. Two hypotheses cover the real cases: all
+    # inputs share the batch dimension, or only the first does.
+    if len(specs) > 1:
+        try:
+            probe_all = forward_with(specs, 2)
+        except Exception:  # noqa: BLE001 - the hypothesis under test
+            probe_all = None
+        if not _outputs_ok(probe_all):
+            fixed = (specs[0],) + tuple(
+                replace(spec, scalable=False) for spec in specs[1:]
+            )
+            try:
+                if _outputs_ok(forward_with(fixed, 2)):
+                    specs = fixed
+            except Exception:  # noqa: BLE001 - neither hypothesis holds; leave as-is
+                pass
 
     try:
         baseline = forward(1)
@@ -363,6 +491,24 @@ def probe_module(
             raise ExternalTaskError(f"repeat forward failed: {type(exc).__name__}")
         if not _same(baseline, repeat):
             raise ExternalTaskError("oracle is not deterministic under a fixed seed")
+
+    # Determinism above proves the oracle repeats. It does NOT prove the oracle is
+    # a function of the tensors the kernel will receive: a module holding conv or
+    # linear weights repeats perfectly and is still unanswerable, because the
+    # weights are not among ``specs``. That is a separate property and it is the
+    # one that broke the campaign, so it is checked separately.
+    try:
+        hidden = hidden_state_reason(
+            namespace, entry_class, args, kwargs, specs, dtype, timeout
+        )
+    except ProbeTimeout:
+        raise ExternalTaskError("hidden-state check timed out")
+    except Exception as exc:  # noqa: BLE001 - an upstream module may do anything
+        raise ExternalTaskError(
+            f"hidden-state check failed: {type(exc).__name__}: {exc}"
+        )
+    if hidden is not None:
+        raise ExternalTaskError(hidden)
 
     # Pick the scale analytically and then verify it, rather than walking the
     # whole ladder: an 18k-module ingest cannot afford ten CPU forward passes per
@@ -694,6 +840,7 @@ def screen_candidate(
         bucket = (
             "shape_too_small" if "optimization-target floor" in text
             else "nondeterministic_oracle" if "not deterministic" in text
+            else "hidden_state_oracle" if "hidden module state" in text
             else "no_runnable_scale" if "no runnable scale" in text
             else "unserializable_init_args" if "plain JSON data" in text
             else "execution_failed"
@@ -753,6 +900,9 @@ __all__ = [
     "Decontaminator",
     "Deduplicator",
     "FORWARD_TIMEOUT_SECONDS",
+    "HIDDEN_STATE_ATOL",
+    "HIDDEN_STATE_RTOL",
+    "HIDDEN_STATE_SEEDS",
     "MAX_SCALE_ATTEMPTS",
     "MiningReport",
     "Outcome",
@@ -763,6 +913,7 @@ __all__ = [
     "build_spec",
     "canonical_module_source",
     "describe_tensor",
+    "hidden_state_reason",
     "probe_module",
     "registry_task_sources",
     "screen_candidate",

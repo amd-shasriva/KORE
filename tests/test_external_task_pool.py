@@ -33,12 +33,42 @@ from kore.tasks import registry, taxonomy
 torch = pytest.importorskip("torch")
 
 
+#: An ADMISSIBLE candidate: every learnable tensor is a forward argument, so the
+#: oracle is a function of the tensors the driver hands the candidate kernel.
 SIMPLE_MODULE = '''
 import torch
 import torch.nn as nn
 
 
 class TinyMLP(nn.Module):
+    def __init__(self, c):
+        super().__init__()
+        self.c = c
+
+    def forward(self, x, w, g):
+        h = torch.nn.functional.gelu(torch.nn.functional.linear(x, w))
+        return torch.nn.functional.layer_norm(h, (h.shape[-1],), g)
+
+
+def get_inputs():
+    return [torch.rand([4, 32, 64]), torch.rand((64, 64)) - 0.5,
+            torch.rand((64,)) - 0.5]
+
+
+def get_init_inputs():
+    return [[], {'c': 64}]
+'''
+
+#: The SAME computation with the weights held inside the module: unanswerable,
+#: because the kernel is handed ``x`` alone and the answer depends on weights it
+#: never sees. 72.7% of the shipped pool looked like this, and those tasks reached
+#: a correct kernel in 9.3% of episodes against 86.9% for the admissible kind.
+HIDDEN_STATE_MODULE = '''
+import torch
+import torch.nn as nn
+
+
+class HiddenMLP(nn.Module):
     def __init__(self, c):
         super().__init__()
         self.fc = nn.Linear(c, c)
@@ -154,7 +184,8 @@ def test_input_constructor_randomness_is_allowed_but_forward_randomness_is_not()
     assert external.nondeterminism_reason(SIMPLE_MODULE) is None
 
     leaky = SIMPLE_MODULE.replace(
-        "return self.norm(", "return self.norm(torch.rand_like(x) * "
+        "        h = torch.nn.functional.gelu",
+        "        x = x * torch.rand_like(x)\n        h = torch.nn.functional.gelu",
     )
     assert "nondeterministic_call" in (external.nondeterminism_reason(leaky) or "")
     outcome = mining.screen_candidate(_candidate(source=leaky))
@@ -168,8 +199,9 @@ def test_dropout_in_forward_is_caught_by_the_measured_determinism_probe():
     running the module twice rather than by reading it.
     """
     source = SIMPLE_MODULE.replace(
-        "return self.norm(",
-        "return self.norm(x.new_empty(x.shape).uniform_() * ",
+        "        h = torch.nn.functional.gelu",
+        "        x = x * x.new_empty(x.shape).uniform_()\n"
+        "        h = torch.nn.functional.gelu",
     )
     outcome = mining.screen_candidate(_candidate(source=source))
     assert not outcome.accepted
@@ -178,9 +210,9 @@ def test_dropout_in_forward_is_caught_by_the_measured_determinism_probe():
 
 def test_an_unclassifiable_module_is_dropped_rather_than_given_a_raw_family():
     source = SIMPLE_MODULE.replace(
-        "return self.norm(torch.nn.functional.gelu(self.fc(x)))", "return x"
-    ).replace("self.fc = nn.Linear(c, c)", "pass").replace(
-        "self.norm = nn.LayerNorm(c)", "pass"
+        "        h = torch.nn.functional.gelu(torch.nn.functional.linear(x, w))\n"
+        "        return torch.nn.functional.layer_norm(h, (h.shape[-1],), g)",
+        "        return x",
     )
     assert external.classify_module(source, "Mystery") is None
     outcome = mining.screen_candidate(_candidate(source=source, name="Mystery"))
@@ -189,7 +221,8 @@ def test_an_unclassifiable_module_is_dropped_rather_than_given_a_raw_family():
 
 def test_reserved_families_are_refused_on_source_evidence_not_just_names():
     reserved = SIMPLE_MODULE.replace("TinyMLP", "Block").replace(
-        "def forward(self, x):", "def forward(self, x):\n        paged_attn = 1"
+        "def forward(self, x, w, g):",
+        "def forward(self, x, w, g):\n        paged_attn = 1",
     )
     assert external.reserved_family_marker(reserved) == "paged_attn"
     assert external.classify_module(reserved, "Block") is None
@@ -205,14 +238,98 @@ def test_constructor_arguments_must_be_plain_json_data():
     assert not outcome.accepted and outcome.reason == "unserializable_init_args"
 
 
+#: A toy-shaped module whose leading dimension CANNOT be grown: the forward pins
+#: it with a fixed reshape, so no scale on the ladder reaches the element floor.
+UNSCALABLE_TINY_MODULE = '''
+import torch
+import torch.nn as nn
+
+
+class TinyPinned(nn.Module):
+    def __init__(self, c):
+        super().__init__()
+        self.c = c
+
+    def forward(self, x, w):
+        return torch.nn.functional.linear(x.reshape(2, 2), w)
+
+
+def get_inputs():
+    return [torch.rand([2, 2]), torch.rand((2, 2)) - 0.5]
+
+
+def get_init_inputs():
+    return [[], {'c': 2}]
+'''
+
+
 def test_a_toy_shape_is_refused_as_an_optimization_target():
-    """KernelBook's default input is 256 elements; a speedup there is launch overhead."""
-    tiny = SIMPLE_MODULE.replace(
-        "torch.rand([4, 32, 64])", "torch.rand([2, 2])"
-    ).replace("{'c': 64}", "{'c': 2}").replace("nn.LayerNorm(c)", "nn.LayerNorm(c)")
-    outcome = mining.screen_candidate(_candidate(source=tiny))
+    """KernelBook's default input is 256 elements; a speedup there is launch overhead.
+
+    What is refused is a module that cannot be GROWN to the floor. The leading
+    dimension is scaled when the module allows it -- a batch-scaled conv over a
+    fixed weight is a real kernel target, and refusing it would throw away the
+    families the product cares about -- so the gate has to be about reachability,
+    not about the shape the source repository happened to write down.
+    """
+    outcome = mining.screen_candidate(
+        _candidate(source=UNSCALABLE_TINY_MODULE, name="TinyPinned",
+                   entry="TinyPinned")
+    )
     assert not outcome.accepted
     assert outcome.reason in {"shape_too_small", "no_runnable_scale"}
+
+
+# --------------------------------------------------------------------------- #
+# The oracle must be a function of the inputs the kernel is handed
+# --------------------------------------------------------------------------- #
+def test_an_oracle_that_depends_on_hidden_weights_is_refused():
+    """A module holding its own weights is unanswerable, not merely hard.
+
+    The driver hands the candidate exactly the tensors ``get_inputs()`` returns.
+    An ``nn.Linear`` built in ``__init__`` draws its weight from the torch RNG and
+    is never among them, so the answer depends on a tensor the kernel cannot read;
+    the only channel to it is re-executing the torch module, which
+    ``scan_for_hacks`` rejects as delegation. Measured on the overnight campaign:
+    tasks of this shape were 72.7% of the shipped pool and reached a correct
+    kernel in 9.3% of episodes, against 86.9% for the answerable kind.
+    """
+    outcome = mining.screen_candidate(
+        _candidate(source=HIDDEN_STATE_MODULE, name="HiddenMLP", entry="HiddenMLP")
+    )
+    assert not outcome.accepted
+    assert outcome.reason == "hidden_state_oracle", outcome.detail
+    assert "hidden module state" in outcome.detail
+
+
+def test_the_gate_is_behavioural_so_unused_parameters_do_not_disqualify():
+    """A module may own parameters its forward never reads; that is still a task.
+
+    This is why the gate re-runs the module under a second weight seed instead of
+    scanning for parameter-owning layer names. A static scan over the shipped pool
+    flagged 9,860 tasks, but 809 of those did reach a correct kernel -- the
+    behavioural check keeps exactly those.
+    """
+    source = SIMPLE_MODULE.replace(
+        "        self.c = c",
+        "        self.c = c\n        self.unused = nn.Linear(c, c)",
+    )
+    outcome = mining.screen_candidate(_candidate(source=source))
+    assert outcome.accepted, f"{outcome.reason}: {outcome.detail}"
+
+
+def test_input_scalability_is_measured_not_assumed(accepted_spec):
+    """A weight input must not have its leading dimension scaled.
+
+    ``describe_tensor`` marks every input scalable, which is right for activations
+    and wrong for a weight: scaling a conv weight's out-channels breaks the
+    forward at every scale above 1, and the module was then dropped as "no
+    runnable scale" -- a good task lost to a guess.
+    """
+    assert accepted_spec.input_specs[0].scalable, "the activation should scale"
+    assert not any(spec.scalable for spec in accepted_spec.input_specs[1:]), \
+        "the weights must stay at their declared shape"
+    assert accepted_spec.primary_scale > 1
 
 
 def test_the_accepted_primary_shape_clears_the_optimization_floor(accepted_spec):
@@ -322,12 +439,11 @@ def test_submodule_attribute_names_are_not_a_distinguishing_feature():
     unchanged, it would report one module copied under two authors' naming as two
     distinct tasks, so only attributes hung off ``self`` are canonicalized.
     """
-    renamed = SIMPLE_MODULE.replace("self.fc", "self.dense").replace(
+    renamed = HIDDEN_STATE_MODULE.replace("self.fc", "self.dense").replace(
         "self.norm", "self.ln"
     )
-    assert mining.canonical_module_source(SIMPLE_MODULE) == \
+    assert mining.canonical_module_source(HIDDEN_STATE_MODULE) == \
         mining.canonical_module_source(renamed)
-
     from kore.data.dedup import structural_fingerprint
 
     kernel = "import triton.language as tl\ndef k(a, b):\n    return tl.dot(a, b)\n"
@@ -339,11 +455,12 @@ def test_submodule_attribute_names_are_not_a_distinguishing_feature():
 @pytest.mark.parametrize("label,transform", [
     ("different activation", lambda s: s.replace("gelu", "relu")),
     ("added statement",
-     lambda s: s.replace("def forward(self, x):",
-                         "def forward(self, x):\n        x = x * 2")),
+     lambda s: s.replace("def forward(self, x, w, g):",
+                         "def forward(self, x, w, g):\n        x = x * 2")),
     ("different composition",
-     lambda s: s.replace("self.norm(torch.nn.functional.gelu(self.fc(x)))",
-                         "self.norm(torch.softmax(self.fc(x), dim=-1)) + x")),
+     lambda s: s.replace(
+         "        h = torch.nn.functional.gelu(torch.nn.functional.linear(x, w))",
+         "        h = torch.softmax(torch.nn.functional.linear(x, w), dim=-1)")),
 ])
 def test_dedup_keeps_a_structurally_different_module(label, transform):
     dedup = mining.Deduplicator()

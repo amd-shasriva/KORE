@@ -1,10 +1,8 @@
 {
   "_comment_model_id": "PRODUCTION RL TARGET, matching configs/sft_coder30b_a3b.json so the two stages train the same backbone. Qwen3-Coder-30B-A3B-Instruct: 30.5B total / 3.3B active MoE (Qwen3MoeForCausalLM, 48 layers, 128 experts, 8 per token). The launcher REWRITES this to the SFT output via FROM_STAGE, exactly as configs/grpo_14b_full.json's Qwen/Qwen3-14B is rewritten to the DPO output; the value at rest names the backbone the lineage descends from so the config is readable on its own.",
   "model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-
   "_comment_model_revision": "The same hub commit configs/sft_coder30b_a3b.json pins, verified there against the downloaded snapshot (16 shards, 18,867 tensors, all BF16, 30,532,122,624 parameters). Carried here so that a run launched WITHOUT a FROM_STAGE rewrite -- a bring-up smoke against the raw backbone -- is still pinned rather than taking whatever the shared HF cache happens to hold.",
   "model_revision": "b2cff646eb4bb1d68355c01b18ae02e7cf42d120",
-
   "output_dir": "runs/grpo_coder30b_a3b_trloo",
   "use_lora": false,
   "distributed": true,
@@ -13,14 +11,11 @@
   "zero_stage": 3,
   "cpu_offload": false,
   "synced_gpus": true,
-
   "_comment_advantage_estimator": "The reason this config exists. GRPO centres every sample on a group mean that contains that sample, and build_kevin_samples pools m trajectories x n turns into one group, so the baseline for turn t of trajectory i also contains the LATER turns of trajectory i -- which are downstream of the action being credited. Measured by exact enumeration in tests/test_trloo_advantages.py: pooled centring returns exactly (M-1)/M of the true gradient, the std term's error GROWS with the group instead of shrinking, and on asymmetric multi-turn MDPs the expected gradient can point the WRONG WAY (worst case found: true +0.171, GRPO -0.007, GRPO+std -0.098, TRLOO +0.171). TRLOO centres each sample on the mean of the OTHER trajectories at the SAME turn, which is independent of the credited action and therefore unbiased.",
   "advantage_estimator": "trloo",
-
   "_comment_variance_floor": "0.0, and it MUST be 0.0 here. TRLOO never calls avspo_advantages, so the AVSPO variance floor and its virtual samples would be an inert request -- kore.policy.capabilities.audit_requested_capabilities reports exactly that, and scripts/spur_grpo_1node.sbatch runs the audit with KORE_GRPO_INERT_FEATURES=error. It is also the right value on the merits: the floor injects virtual samples into the NORMALISATION statistics, and every self-inclusive statistic is what biases the estimator in the first place. TRLOO is deliberately unnormalised; gradient scale is handled by max_grad_norm.",
   "variance_floor": 0.0,
   "avspo_virtual_k": 2,
-
   "_comment_num_trajectories": "Dr. Kernel's reported defaults: ROLLOUT_N=16 trajectories per group, MAX_TURN=3 turns per trajectory. num_turns mirrors max_tool_turns because agentic=true routes every rollout through AgentHarness, whose horizon is max_tool_turns; leaving them different would state a horizon the run does not use. tasks_per_step is 4 rather than the 14B recipe's 8: each step rolls 16 trajectories x 3 turns per task and every turn compiles and benches on the same node, and this backbone's per-rank memory is far larger, so the step cost is dominated by rollout rather than by the update.",
   "num_trajectories": 16,
   "num_turns": 3,
@@ -28,25 +23,20 @@
   "tasks_per_step": 4,
   "agentic": true,
   "agentic_transform_tools": true,
-
   "_comment_learning_rate": "1e-6, Dr. Kernel's reported default, and half the 14B recipe's 2e-6. Lower is the right direction for two independent reasons: this is a 30.5B MoE where only 3.3B parameters are active per token, so each expert sees a fraction of the batch and a given LR moves it further per update than it would a dense model; and RL follows an SFT stage that has not been evaluated yet, so the first RL run should be the conservative one.",
   "learning_rate": 1e-06,
   "lr_scheduler_type": "constant",
   "warmup_ratio": 0.0,
   "max_grad_norm": 0.5,
   "ppo_epochs": 1,
-
   "_comment_dual_clip_c": "3.0. The clipped surrogate is bounded above for a positive advantage but NOT below for a negative one: as the ratio grows, r*A falls without limit and one sample can own the whole gradient (tests/test_grpo_stability.py measures -1e6 at ratio 1e6). The floor caps the worst single-sample loss at c*|A|. With ppo_epochs=1 the ratio is ~1 by construction so this should never bind; it costs nothing when it does not, and this run cannot be babysat across the many allocations a 2000-step RL job spans.",
   "dual_clip_c": 3.0,
-
   "_comment_mismatch_correction": "false. The correction is real -- the sharded loop generates on a plain full-weight per-rank replica and trains through the FSDP wrapper, so the same weights are evaluated on different code paths -- but with ppo_epochs=1 the measured weight sits within about a percent of 1.0, and enabling a correction the run does not need would state a capability that changes nothing. The DIAGNOSTIC is what matters here and is unconditional: _grpo_step_mismatch_stat reports the mean and max weight, and a mean that drifts or a max pinned at the cap is a bug report about rollout/training divergence.",
   "mismatch_correction": false,
   "mismatch_weight_cap": 2.0,
-
   "_comment_clip_ratio_low": "Inherited from the 14B recipe and for the same reason: KORE's importance ratio is length-normalised (token-MEAN logprob, i.e. the GSPO sequence ratio), so DAPO's 0.2/0.28 token-level bounds never bind -- a legitimate sequence ratio sits within ~1% of 1.0. These are sequence-scale bounds, and with ppo_epochs=1 they are defense-in-depth rather than an active lever.",
   "clip_ratio_low": 0.03,
   "clip_ratio_high": 0.04,
-
   "_comment_rejection_sampling": "MRS is live: _apply_mrs runs in both the single-process and the sharded group assembly, and expresses a rejection through the same traj_infra mechanism build_kevin_samples already uses to drop a turn, so a rejected trajectory contributes no policy-gradient term and no advantage without a second parallel drop path. geometric aggregation is Dr. Kernel's reported default and is the right aggregator on the merits: the geometric mean is dominated by the WEAKEST turn and collapses to zero if any turn is zero, so one strong turn cannot carry a trajectory that was broken for the rest of the episode (on [0.9, 0.9, 0.9, 0.0] the arithmetic mean still reads 0.675). mrs_min_quality stays 0.0 so the only rejections are the structural ones -- never correct, or a gamed measurement -- rather than a hand-picked cutoff on a reward scale this lineage has not measured. PRS's coverage rejections need a kernel trace, which is not armed here (see profiling_reward_weight), so prs_require_profile MUST be false: requiring a profile that is never collected would reject every candidate, and the audit reports exactly that combination.",
   "rejection_sampling": true,
   "rejection_aggregate": "geometric",
@@ -54,36 +44,29 @@
   "mrs_require_improvement": false,
   "prs_min_coverage": 0.1,
   "prs_require_profile": false,
-
   "_comment_profiling_reward_weight": "0.0, and this is the one deliberately UNARMED lever in this recipe. The machinery is complete: KoreEnv.collect_kernel_trace runs the candidate under rocprofv3 --kernel-trace, kore.reward.coverage turns the dispatches into a coverage share and combines it with the measured speedup by Amdahl's law, and _coverage_bonus adds a bounded term plus turn feedback. What does NOT exist is evidence that the collector works on this hardware: rocprofv3's kernel-trace export filename and column names are not confirmed on this ROCm build, and the collector fails safe, so an armed weight without a receipt would state a reward that silently contributes 0.0 on every turn. That is exactly the defect class kore.policy.capabilities exists to catch, so _profiling_reward_weight() returns 0.0 unless profiling_reward_evidence_path is set and the audit reports an armed-but-unvalidated weight as inert. Arming it takes one measured job that observes a non-None coverage; the intended value is 0.15, which is strictly below correctness_weight so shaping can never outrank correctness.",
   "profiling_reward_weight": 0.0,
   "profiling_reward_evidence_path": null,
   "max_plausible_speedup": 12.0,
-
   "_comment_max_plausible_speedup": "The cap above which a claimed speedup is treated as a gamed measurement rather than a kernel, applied at REWARD time and not only at data-selection time. 12.0 is the value kore.data.agentic_filter.FilterPolicy already derives from the observed distribution (2x the measured p99, floored) rather than a third hand-picked number, so the RL-time guard and the data-time guard agree. The 1541.94x that reached an early SFT mixture from third-party data is the failure this exists for; real fused wins against a production AITER/hipBLASLt baseline land in the low single digits.",
-
   "_comment_kevin_best_kernel_scoring": "Unchanged from the 14B recipe: trajectory value is the best CORRECT kernel, gamma propagates later success back to the turns that set it up, and credit_incorrect_turns keeps the shaped sub-threshold signal on incorrect turns instead of a hard zero so the gradient is not flat across the not-yet-correct band. Note this is deliberately NOT the same signal MRS uses to judge trajectories: rejection zeroes an incorrect turn hard, which is what makes the geometric aggregate collapse, while the training reward keeps its shaped credit. Conflating the two would undo the densification.",
   "correctness_weight": 0.3,
   "gamma": 0.4,
   "kevin_best_kernel_scoring": true,
   "credit_incorrect_turns": true,
   "cot_masking": true,
-
   "_comment_max_prompt_length": "17408 matches the SFT mixture this policy was trained on (configs/sft_coder30b_a3b.json), so the RL prompt/response budget does not exceed the length distribution the policy has ever seen. The backbone supports 262144; raising it here would only add activation memory and truncation risk. overlong_mask drops responses within 512 tokens of the cap, whose per-token logprobs are a truncated and therefore biased gradient.",
   "max_prompt_length": 17408,
   "max_response_length": 17408,
   "overlong_mask": true,
   "overlong_buffer_len": 512,
-
   "temperature": 0.9,
   "top_p": 1.0,
-
   "_comment_starpo_s": "Kept on. StarPO-S drops collapsed groups and DAPO dynamic sampling REFILLS to keep the effective batch stable instead of shrinking the update. These are the group-level complement to MRS: StarPO-S judges whether a group carries contrast at all, MRS judges trajectories within a group and DECLINES when filtering would remove that contrast.",
   "starpo_s": true,
   "starpo_min_std": 0.001,
   "starpo_keep_frac": 0.75,
   "dynamic_sampling": true,
-
   "_comment_rc_grpo": "Each of these is off because THIS topology cannot deliver it, and kore.policy.capabilities.validate_grpo_config rejects the combination outright rather than letting it look active. rc_grpo: reward-control tokens reach only the serial _rollout, and this recipe is agentic. sc_grpo: the SC-GRPO block exists only in the single-process loop, and this recipe is distributed. value_prefilter: only the serial _rollout calls _prefilter_bench_indices, and there is no trained value artifact for this lineage anyway -- so num_candidates_per_turn and value_prefilter_k are pinned to 1, which is the real per-turn bench economy rather than the 8/4 dataclass defaults.",
   "rc_grpo": false,
   "sc_grpo": false,
@@ -92,7 +75,6 @@
   "num_candidates_per_turn": 1,
   "value_prefilter_k": 1,
   "search_value_prior": false,
-
   "_comment_physics_shaping_weight": "0.0, on the same evidence as the 14B recipe. _physics_shaping_weight() returns 0.0 unless BOTH physics_shaping_evidence_path and physics_shaping_evidence_fingerprint are set, and docs/P0_RESULTS.md records three independent studies all deciding INTEGRITY_ONLY with 'authorized families: none'. No evidence document that passes the gate can be written from the data that exists, and writing one anyway would fabricate the artifact the gate exists to demand. physics_live_counters is therefore false too: counter collection is nested INSIDE the shaping gate, so requesting it here would ask for per-turn rocprofv3 profiling that never runs.",
   "physics_shaping_weight": 0.0,
   "physics_live_counters": false,
@@ -100,7 +82,6 @@
   "reward_phase": "all",
   "roofline_gate": true,
   "roofline_tol": 0.25,
-
   "_comment_use_search": "use_search, coevolve and their children are OFF for this config, unlike configs/grpo_14b_full.json which turns them on. Not a downgrade -- a scoping decision. Every one of them mines an archive built by the 14B lineage (data/b05factory), and this is a different backbone whose SFT stage has not run, so there is no measured baseline for this policy against which a curriculum or a distillation sink means anything. Turning them on would make the first RL run on a new model simultaneously the first run of five unvalidated levers, and any result would be unattributable. They are re-enabled once this recipe has a clean TRLOO baseline to compare against, which is also when coevolve_distill_path gets a root that belongs to this lineage.",
   "use_search": false,
   "coevolve": false,
@@ -110,26 +91,22 @@
   "adversarial_coevolve": false,
   "transform_discover": false,
   "gtpo_codesim": false,
-
   "_comment_ref_checkpoint": "The post-SFT checkpoint, per the field's contract in kore/policy/configs.py, and NOT the checkpoint GRPO trains from. For this lineage those are the same directory -- there is no DPO stage between SFT and RL on this backbone -- so ref_checkpoint intentionally equals the launcher's FROM_STAGE default. That is a real difference from the 14B recipe, where anchoring to the DPO output would have measured drift from a preference-tuned model instead of from the broad post-SFT policy. Here the post-SFT policy IS the run's starting point, so the k3 anchor measures drift from the run's own start, which is what retention means when RL follows SFT directly. It has not been trained yet, so the audit will report it as an ARTIFACT finding until runs/sft_coder30b_a3b exists.",
   "ref_checkpoint": "runs/sft_coder30b_a3b",
-  "ref_anchor_coef": 1e-3,
-
+  "ref_anchor_coef": 0.0,
   "_comment_save_total_limit": "save_total_limit is 1 and NOT more, on the same arithmetic as the SFT config: Adam keeps ~16 bytes/param, so a 30.5B checkpoint is ~488GB against the 14B's ~221GB, and a rotation transiently holds two for a ~976GB peak on a SHARED volume. save_steps 50 rather than the 14B's 100 because a step here is far more expensive, so 50 steps is already hours of work to lose; the rotation window is the moment the disk is closest to full, which is the cost of choosing the smaller interval. total_steps 1000 is a horizon, not a prediction -- no 23h allocation finishes it, and the launcher's requeue plus _discover_grpo_resume carry it across allocations.",
   "total_steps": 1000,
   "save_steps": 50,
   "save_total_limit": 1,
   "logging_steps": 1,
-
   "_comment_fsdp": "fsdp_transformer_layer_cls is set explicitly, exactly as configs/sft_coder30b_a3b.json does. Two things make this load-bearing. TRANSFORMER_BASED_WRAP with a class name matching nothing wraps NOTHING, so FSDP degrades to one flat parameter for the whole model and either OOMs or loses every overlap -- and it does so silently. And configs/accelerate_fsdp_grpo.yaml still hardcodes the DENSE Qwen3DecoderLayer: build_fsdp_plugin's explicitly-constructed plugin does override that env value (verified), and detect_transformer_layer_cls already maps an A3B id to Qwen3MoeDecoderLayer, but relying on two fallbacks to correct a wrong literal is not a contract. cpu_offload stays false: SHARD_GRAD_OP keeps params resident per rank, which is exactly what lets the co-located rollout generate locally, and offloading them would defeat that.",
   "fsdp": "full_shard auto_wrap",
   "fsdp_transformer_layer_cls": "Qwen3MoeDecoderLayer",
   "fsdp_cpu_offload": false,
   "bf16": true,
   "gradient_checkpointing": true,
-
-  "_comment_cpu_offload": "NOT a claim that this fits. The sharded GRPO loop holds, per rank, a full-weight rollout REPLICA and a frozen KL-anchor REPLICA in addition to the sharded training params, gradients and optimizer state. At 30.5B bf16 each replica is ~61GB, so ~122GB per rank before any training state or activation. That is the single largest open risk in this recipe and it is a MEASUREMENT, not an argument: KORE_RESOURCE_PREFLIGHT=report in scripts/spur_grpo_1node.sbatch reports rather than gates, precisely because no measured peak profile exists for this workload. Anyone launching this must read the first step's gpu_mem_snapshot before assuming the remaining 999 will run, and be ready to set ref_anchor_coef=0.0 (dropping the frozen replica) or cpu_offload=true (at the cost of the local rollout) if it does not.",
-
+  "_comment_cpu_offload": "Memory, resolved but still unmeasured. The sharded GRPO loop holds a full-weight rollout REPLICA per rank, ~61GB at 30.5B bf16, plus sharded training params, gradients and optimizer state. It previously ALSO held a frozen KL-anchor replica for another ~61GB -- ~122GB per rank before any training state -- which ref_anchor_coef=0.0 now removes. That halves the static footprint and is the single change that makes this recipe plausible on one node. It is still not a claim that it fits: no measured peak profile exists, KORE_RESOURCE_PREFLIGHT=report in scripts/spur_grpo_1node.sbatch reports rather than gates, and anyone launching this must read the first step's gpu_mem_snapshot before assuming the remaining 999 will run. If it still does not fit, cpu_offload=true is the next lever, at the cost of the local rollout.",
   "_comment_strict_feature_validation": "false, for the same structural reason as the 14B recipe: capabilities._UNSUPPORTED_STRICT_FEATURES refuses several research levers outright, so strict mode is a different lane rather than a stronger version of this one. What replaces it is not nothing -- audit_requested_capabilities runs unconditionally at train_grpo startup, the launcher promotes its findings to a hard failure via KORE_GRPO_INERT_FEATURES=error, and tests/test_grpo_30b_moe_config.py fails CI if this config ever requests a capability that is provably inert from its own text.",
-  "strict_feature_validation": false
+  "strict_feature_validation": false,
+  "_comment_ref_anchor_coef": "0.0, not 0.001. Any value above zero makes grpo.py load a frozen reference replica for the KL anchor -- 61GB per rank at 30.5B bf16, on top of the rollout replica, so ~122GB per rank before a single byte of training state. At 0.001 that memory bought a term contributing ~0.1% of the loss gradient: the full price of a reference policy for essentially no regularisation. Dropping KL entirely is standard in reasoning RL rather than a shortcut -- DAPO removes it explicitly to avoid the reference network, and the argument is that KL exists to keep an RLHF policy near its initial model, which is the opposite of what we want from a model that must acquire a capability it does not have. Stability comes from TRLOO's dual-clip ratio clipping and truncated importance sampling instead, which are the modern replacements. Set this above zero only with the memory measured first."
 }

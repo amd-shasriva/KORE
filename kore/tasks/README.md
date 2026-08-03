@@ -87,7 +87,7 @@ WHOLE_FAMILY_HOLDOUTS      = frozenset({"mla", "paged_attention"})
 NEAR_GENERALIZATION_TASK_IDS = {...}                       # 43 stratified probes
 ```
 
-Live split: **1,309 train / 45 eval** of 1,354 registered tasks — 43 `near_probe` plus the
+Live split: **1,477 train / 45 eval** of 1,522 registered tasks — 43 `near_probe` plus the
 2 `whole_family` members. `taxonomy_version = 1.0.0`.
 
 `split_decision` evaluates six conditions **in precedence order**; the first match wins:
@@ -123,7 +123,7 @@ containing every live task's `(operation, dtype, architecture, product_family, a
 split, reason, provenance_root)`. Adding, removing, or reclassifying any single task changes the
 digest, and `validate_split_manifest` raises `StaleSplitManifestError` on any drift.
 
-> **Conditions 4–6 are currently unreachable in practice.** All 1,354 tasks are `gfx950` and every
+> **Conditions 4–6 are currently unreachable in practice.** All 1,522 tasks are `gfx950` and every
 > live dtype is in `TRAIN_DTYPES`, and the registry raises on an unclassifiable operation before the
 > branch is reached. `provenance_root` likewise defaults to `task_id` for every task, so condition 2
 > is correct-by-vacuity rather than exercised. They are retained as fail-closed guards.
@@ -215,7 +215,7 @@ Low precision (`fp8_e4m3fn`, `mxfp4`) is where MI355X's lead is largest — 10.1
 ## Baselines
 
 **There are two baseline lanes, and a speedup means different things in each.** Measured across all
-1,354 `task.yaml` files: **1,279 declare a `torch_*` baseline**, 63 declare AITER, 4 declare
+1,522 `task.yaml` files: **1,447 declare a `torch_*` baseline**, 63 declare AITER, 4 declare
 hipBLASLt, and 8 declare something else. At runtime `_genops._vendor_baseline` additionally upgrades
 55 more when `KORE_USE_VENDOR_BASELINE=1` (the default): 33 `gemm_fusion` tasks to hipBLASLt (via
 `torch.matmul` / `torch._scaled_mm`), 6 gated activations to AITER, and 16 breadth MoE and

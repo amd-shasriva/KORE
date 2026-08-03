@@ -564,6 +564,11 @@ def main(argv=None) -> int:  # pragma: no cover - CLI wiring (GPU/gateway path)
     p.add_argument("--teacher-model", default=None,
                    help="override the teacher model id (default: claude-opus-4.8)")
     p.add_argument("--backend", default="hf", help="serving backend for --kore-ckpt")
+    p.add_argument("--kore-revision", default=None,
+                   help="immutable 40/64-hex commit for --kore-ckpt. Required for a "
+                        "Hub model id: kore.policy.serve.load_generate refuses a "
+                        "floating ref, and without this flag there was no way to "
+                        "supply one, so the CLI could only ever serve a local dir")
     p.add_argument("--tasks", default=None,
                    help="comma-separated task ids (default: the registry held-out split)")
     p.add_argument("--budget", type=int, default=5, help="max benches per task (matched)")
@@ -596,7 +601,8 @@ def main(argv=None) -> int:  # pragma: no cover - CLI wiring (GPU/gateway path)
     # KORE served model (lazy torch/vLLM import lives in load_generate).
     from kore.env.kore_env import KoreEnv
     from kore.policy.serve import load_generate
-    kore_gen = load_generate(args.kore_ckpt, backend=args.backend)
+    kore_gen = load_generate(args.kore_ckpt, backend=args.backend,
+                             revision=args.kore_revision)
 
     res = head_to_head(
         tasks, kore_gen, teacher, budget=args.budget, seeds=seeds,

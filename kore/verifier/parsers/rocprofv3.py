@@ -8,8 +8,16 @@ Besides the hardware ``counters`` dict, rocprofv3 emits per-dispatch kernel
 resource metadata (VGPR/SGPR/AccumVGPR usage, LDS block size, scratch size).
 These are NOT hardware counters but they are exactly what occupancy /
 register-pressure reasoning needs, so we parse them into typed fields on
-:class:`KernelPMC` instead of discarding them. Timestamps are still dropped (a
-kernel's wall time comes from the verifier's own timing, not the profiler).
+:class:`KernelPMC` instead of discarding them.
+
+Timestamps stay out of :func:`parse_rocprofv3_csv` (a kernel's wall time comes
+from the verifier's own timing, not the profiler) and that is deliberate: the
+counter path must not start sourcing latency from a profiler run whose overhead
+it does not control. :func:`parse_kernel_dispatches` is a SEPARATE reader for the
+kernel-trace export, where the timestamps are the payload rather than a
+temptation. It answers one question the counter path cannot: what SHARE of the
+region's GPU time a given kernel accounts for. See
+:mod:`kore.reward.coverage`.
 """
 
 from __future__ import annotations
@@ -250,3 +258,63 @@ def parse_rocprofv3_csv(csv_path: str | Path) -> list[KernelPMC]:
             _apply_resources(pmc, row)
             results.append(pmc)
     return results
+
+
+@dataclass(frozen=True)
+class KernelDispatch:
+    """One kernel launch: what ran, and for how long."""
+
+    kernel_name: str
+    duration_ns: int
+
+
+_START_COLS = ("Start_Timestamp", "start_timestamp", "Kernel_Start_Timestamp")
+_END_COLS = ("End_Timestamp", "end_timestamp", "Kernel_End_Timestamp")
+_DURATION_COLS = ("Duration", "duration", "Duration_ns", "DurationNs")
+
+
+def _first(row: dict, names) -> Optional[str]:
+    for name in names:
+        value = row.get(name)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def parse_kernel_dispatches(csv_path: str | Path) -> list[KernelDispatch]:
+    """Per-dispatch kernel durations from a rocprofv3 kernel-trace CSV.
+
+    Prefers an explicit duration column and otherwise differences the start/end
+    timestamps. Rows without a kernel name, without any usable timing, or with a
+    NEGATIVE duration are skipped: a negative interval means the export is
+    corrupt or the columns were misread, and silently taking ``abs()`` of it
+    would turn a broken trace into a plausible-looking measurement.
+
+    Returns one entry per dispatch, in file order, so a caller can aggregate by
+    kernel or count launches. An unreadable/absent file raises, exactly like
+    :func:`parse_rocprofv3_csv`; an empty or fully-unusable file yields ``[]``,
+    which callers must treat as "no measurement" rather than "zero time".
+    """
+    path = Path(csv_path)
+    if not path.exists():
+        raise FileNotFoundError(f"kernel trace CSV not found: {path}")
+
+    with open(path) as f:
+        rows = list(csv.DictReader(f))
+
+    out: list[KernelDispatch] = []
+    for row in rows:
+        name = _kernel_name(row)
+        if not name:
+            continue
+        duration = _to_int(_first(row, _DURATION_COLS))
+        if duration is None:
+            start = _to_int(_first(row, _START_COLS))
+            end = _to_int(_first(row, _END_COLS))
+            if start is None or end is None:
+                continue
+            duration = end - start
+        if duration < 0:
+            continue
+        out.append(KernelDispatch(kernel_name=name, duration_ns=int(duration)))
+    return out

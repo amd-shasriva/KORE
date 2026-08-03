@@ -614,19 +614,35 @@ def _import_get_task():
 
     pool: dict = {}
     pool_loaded = [False]
+    # load_pool() takes ~60s for 13.5k tasks. A flag set before the load meant
+    # every other worker saw "loaded" and raced past into an empty dict: with 32
+    # workers the first ~870 episodes all failed with the original KeyError,
+    # then succeeded once the load finished. Fast failures, so the throughput
+    # counter read 28,000 episodes/hour while producing nothing. The lock makes
+    # concurrent callers wait for the load instead of skipping it.
+    pool_lock = threading.Lock()
 
     def resolve(task_id: str):
         try:
             return _registry_get_task(task_id)
         except KeyError:
-            if not pool_loaded[0]:
-                pool_loaded[0] = True
-                try:
-                    from kore.tasks.external import load_pool
+            with pool_lock:
+                if not pool_loaded[0]:
+                    try:
+                        from kore.tasks.external import load_pool
 
-                    pool.update({t.task_id: t for t in load_pool()})
-                except Exception:  # noqa: BLE001 - fall through to the KeyError
-                    pass
+                        pool.update({t.task_id: t for t in load_pool()})
+                        log.event("task_pool_loaded", n=len(pool))
+                    except Exception as exc:  # noqa: BLE001 - report, then re-raise
+                        # Reporting matters: silently swallowing this is how a
+                        # pool that never loaded looked like an ordinary
+                        # unknown-task KeyError on every single episode.
+                        log.event("task_pool_load_failed",
+                                  error=f"{type(exc).__name__}: {exc}")
+                    finally:
+                        # Set only AFTER the attempt, so no one skips a load
+                        # that has not happened yet.
+                        pool_loaded[0] = True
             task = pool.get(task_id)
             if task is None:
                 raise

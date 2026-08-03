@@ -74,6 +74,7 @@ fi
     --gpu-ids 0,1,2,3,4,5,6,7 \
     --out-dir "$OUT" \
     --report "$OUT/report.json" \
+    --cold-compile-cache "$LOCAL_ROOT/point-cache" \
     --point-timeout-seconds 2700
 STATUS=$?
 

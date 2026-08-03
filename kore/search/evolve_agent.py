@@ -67,8 +67,11 @@ Four things have to be true for that to work, and each maps to a section below.
      (``MIN_GAIN``, imported from :mod:`kore.data.step_centric` so the two stages
      cannot drift apart) and does not count as progress.
    * *population collapse* - measured, not assumed:
-     :meth:`Archive.lineage_concentration` and :meth:`Archive.recent_novelty`.
-     When both trip, parent selection is forced off the incumbent lineage.
+     :meth:`Archive.recent_progress` trips when a full window of admissions
+     neither opened a niche nor beat one, and parent selection is then forced off
+     the incumbent. :meth:`Archive.lineage_concentration` and
+     :meth:`Archive.recent_novelty` are reported alongside as diagnostics;
+     :meth:`Archive.collapsed` explains why neither can gate the trip.
 
 Everything here is pure CPU orchestration: the only GPU contact is through the
 injected ``env`` and the injected proposer, so the whole loop runs against a
@@ -622,34 +625,59 @@ class Archive:
             counts[key] = counts.get(key, 0) + 1
         return max(counts.values()) / len(pool)
 
+    def _scored_admissions(self) -> list:
+        """Admissions that reflect a real competition (a guard rejection does not)."""
+        return [a for a in self.admissions
+                if a.verdict in ("new", "improved", "dominated", "duplicate")]
+
     def recent_novelty(self, window: Optional[int] = None) -> float:
         """Share of the last ``window`` admissions that opened a NEW niche.
 
-        Complements lineage concentration: a run can keep exploring lineages
-        while re-landing in explored territory, and vice versa. Zero here means
-        the proposer is re-tuning, which is when forced exploration pays.
+        A diagnostic, not the trip: a run can be genuinely improving inside
+        niches it already owns, which is progress even at zero novelty.
         """
         window = self.novelty_window if window is None else max(1, int(window))
-        scored = [a for a in self.admissions
-                  if a.verdict in ("new", "improved", "dominated", "duplicate")]
+        scored = self._scored_admissions()
         if not scored:
             return 0.0
         recent = scored[-window:]
         return sum(1 for a in recent if a.verdict == "new") / len(recent)
 
-    def collapsed(self, lineage_threshold: float = 0.85,
-                  min_members: int = 3) -> bool:
-        """True when the population has stopped being a population.
+    def recent_progress(self, window: Optional[int] = None) -> float:
+        """Share of the last ``window`` admissions that opened OR beat a niche.
 
-        Both conditions must hold: enough members to judge, one lineage owning
-        nearly all of them, and no new territory in the recent window. Any one of
-        those alone is normal early-run behaviour.
+        Returns 1.0 before ``window`` admissions exist: the fail-safe direction
+        is to assume progress, so a young run is never forced to explore on
+        evidence it has not gathered yet.
         """
-        pool = self.elites()
-        if len(pool) < max(2, int(min_members)):
+        window = self.novelty_window if window is None else max(1, int(window))
+        scored = self._scored_admissions()
+        if len(scored) < window:
+            return 1.0
+        recent = scored[-window:]
+        return sum(1 for a in recent
+                   if a.verdict in ("new", "improved")) / len(recent)
+
+    def collapsed(self, window: Optional[int] = None,
+                  min_members: int = 2) -> bool:
+        """True when a full window of admissions neither opened nor beat a niche.
+
+        Stagnation is the decidable signal. :meth:`lineage_concentration` is
+        reported alongside it but deliberately does NOT gate it: a collapsed
+        archive is SMALL - that is what collapse means - so a share over its
+        members has too few samples to decide anything. In this module's own
+        regression fixture a textbook collapse (coverage 2, novelty 0 for seven
+        consecutive generations, 21 straight ``dominated`` insertions and zero
+        admissions) sits at concentration 0.50, purely because the seed occupies
+        one of the two cells. An earlier revision required
+        ``lineage_concentration >= 0.85`` and so never fired on exactly the run
+        it was written for; ``test_the_collapse_trip_actually_fires_in_a_run``
+        is that fixture, kept as an end-to-end test because the archive-level
+        unit tests could not have caught it.
+        """
+        if len(self.elites()) < max(1, int(min_members)):
             return False
-        return (self.lineage_concentration() >= float(lineage_threshold)
-                and self.recent_novelty() <= 0.0)
+        return self.recent_progress(window) <= 0.0
 
     def verdict_counts(self) -> dict:
         counts = {v: 0 for v in self.VERDICTS}
@@ -667,6 +695,7 @@ class Archive:
             "mean_pairwise_distance": round(self.mean_pairwise_distance(), 4),
             "lineage_concentration": round(self.lineage_concentration(), 4),
             "recent_novelty": round(self.recent_novelty(), 4),
+            "recent_progress": round(self.recent_progress(), 4),
             "best_speedup_lcb": champ.speedup_lcb if champ else None,
             "best_speedup_mean": champ.speedup_mean if champ else None,
             "verdicts": self.verdict_counts(),
@@ -877,7 +906,14 @@ def candidate_from_trial(trial: Trial, generation: int, parent: Optional[Candida
         stats.add(sample)
     fp = trial.fingerprint
     if lineage is None:
-        lineage = (parent.lineage if parent is not None and parent.lineage else fp)
+        # A lineage is a FIRST-GENERATION branch, not "descends from the seed".
+        # Every candidate descends from the seed, so inheriting through it would
+        # peg lineage_concentration at 1.0 forever and silently reduce the
+        # collapse trip to its novelty half.
+        if parent is None or parent.generation == 0:
+            lineage = fp
+        else:
+            lineage = parent.lineage or fp
     return Candidate(
         source=trial.source,
         fingerprint=fp,
@@ -1085,7 +1121,8 @@ class EvolveAgentConfig:
     min_gain: float = MIN_GAIN
     max_measures: int = 6
     min_for_trim: int = 5
-    lineage_threshold: float = 0.85
+    #: Admissions with no new or improved niche before exploration is forced.
+    collapse_window: int = 8
     seed: int = 0
     reward_cfg: Any = CONFIG
 
@@ -1214,7 +1251,7 @@ def evolve(
                           remaining=budget.remaining)
                 break
 
-            force = archive.collapsed(cfg.lineage_threshold)
+            force = archive.collapsed(cfg.collapse_window)
             parent = archive.sample_parent(rng, p_elite=cfg.p_elite,
                                            force_explore=force)
             exemplars = archive.exemplars(cfg.exemplars)

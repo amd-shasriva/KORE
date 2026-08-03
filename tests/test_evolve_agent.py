@@ -563,34 +563,43 @@ def test_a_lazy_rewrite_does_not_displace_a_fused_kernel_of_similar_speed():
 # --------------------------------------------------------------------------- #
 # 5. Failure mode: population collapse
 # --------------------------------------------------------------------------- #
-def test_collapse_needs_both_one_lineage_and_no_new_territory():
-    """Either signal alone is normal early-run behaviour.
+def test_collapse_is_stagnation_not_a_young_run():
+    """A run that is still opening or beating niches is not collapsed.
 
-    A young run has one lineage because there has only been one branch; a run
-    that is refining productively re-lands in known niches. Only both together
-    mean the population has stopped being a population.
+    The fail-safe direction matters: before a full window of admissions exists
+    there is no evidence either way, and forcing exploration on absent evidence
+    would throw away the productive early generations.
     """
     archive = Archive(capacity=16)
-    root = candidate(kernel("r"), [1.0] * 3, lineage="L1")
-    archive.add(root)
+    archive.add(candidate(kernel("r"), [1.0] * 3, lineage="L1"))
+    assert archive.recent_progress() == pytest.approx(1.0)   # no evidence yet
     assert not archive.collapsed()
 
-    for i in range(6):
+    for i in range(8):
         archive.add(candidate(kernel(f"c{i}", warps=[2, 4, 8, 16][i % 4],
                                      stages=[1, 2, 3, 4][i % 4]),
                               [1.0 + i * 0.3] * 3, lineage="L1"))
-    assert archive.lineage_concentration() == pytest.approx(1.0)
-    # Still opening niches -> not collapsed yet.
     assert archive.recent_novelty() > 0.0
+    assert archive.recent_progress() > 0.0
     assert not archive.collapsed()
 
-    # Now nothing new: repeated dominated insertions in occupied niches.
+    # Now nothing lands: repeated dominated insertions in occupied niches.
     for i in range(archive.novelty_window + 2):
         archive.add(candidate(kernel("c0", warps=2, stages=1,
-                                     comment=f"retune {i}"),
+                                     tweak=f"pad_{i} = {i}"),
                               [0.4] * 3, lineage="L1"))
-    assert archive.recent_novelty() == 0.0
+    assert archive.recent_progress() == 0.0
     assert archive.collapsed()
+
+    # An improvement inside an occupied niche is progress even at zero novelty,
+    # so it clears the trip without opening any new territory.
+    for i in range(archive.novelty_window):
+        archive.add(candidate(kernel("c0", warps=2, stages=1,
+                                     tweak=f"real_{i} = {i}"),
+                              [5.0 + i] * 3, lineage="L1"))
+    assert archive.recent_novelty() == 0.0
+    assert archive.recent_progress() > 0.0
+    assert not archive.collapsed()
 
 
 def test_lineage_concentration_sees_what_coverage_cannot():
@@ -910,6 +919,53 @@ def test_evolve_is_deterministic_for_a_seed():
            [c.fingerprint for c in b.archive.elites()]
     assert a.scaling.curve == b.scaling.curve
     assert a.env_calls == b.env_calls
+
+
+def test_a_lineage_is_a_branch_not_descent_from_the_seed():
+    """Every candidate descends from the seed, so that cannot be the lineage.
+
+    Inheriting through the seed pegs ``lineage_concentration`` at 1.0 for every
+    run and silently reduces the collapse trip to its novelty half - a guard that
+    reports a number it can never fail.
+    """
+    seed = candidate_from_trial(trial_for(kernel("seed"), [1.0] * 3), 0, None)
+    first = [candidate_from_trial(trial_for(kernel(f"b{i}", warps=[2, 4][i]),
+                                            [2.0] * 3), 1, seed)
+             for i in range(2)]
+    assert first[0].lineage != first[1].lineage, "gen-1 branches were merged"
+    assert first[0].lineage != seed.lineage
+
+    child = candidate_from_trial(trial_for(kernel("c", warps=2, stages=1),
+                                           [2.5] * 3), 2, first[0])
+    assert child.lineage == first[0].lineage, "a descendant left its branch"
+
+    archive = Archive(capacity=8)
+    for cand in (seed, *first, child):
+        archive.add(cand)
+    assert archive.lineage_concentration() < 1.0
+
+
+def test_the_collapse_trip_actually_fires_in_a_run():
+    """Archive-level unit tests do not prove the loop ever reaches the branch.
+
+    A proposer that only ever re-tunes one design inside one lineage is exactly
+    the anchored single trajectory this module exists to break, so a run against
+    it has to end up forcing exploration.
+    """
+    # Every proposal is a distinct source in the SAME strategy niche.
+    script = {g: [marked(kernel("same", tweak=f"pad_{g}_{i} = {i}"), f"s{g}{i}")
+                  for i in range(2)] for g in range(1, 12)}
+    env = ScriptedEnv({}, default=("ok", 1.2))
+    task = FakeTask()
+    task.seed_source = marked(kernel("seed", mode="reduce"), "seed")
+    result = evolve(task, ScriptedProposer(script), env,
+                    EvolveAgentConfig(generations=11, max_env_calls=400, seed=0))
+
+    assert any(record.forced_explore for record in result.generations), (
+        "the run never detected collapse; "
+        f"lineage={result.archive.lineage_concentration()} "
+        f"novelty={result.archive.recent_novelty()} "
+        f"coverage={result.archive.coverage()}")
 
 
 def test_evolve_feeds_the_archive_back_into_the_proposer():

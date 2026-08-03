@@ -144,6 +144,123 @@ def cmd_selftest(args) -> int:
     return 0
 
 
+def _threaded_batch(generate, concurrency: int):
+    """Turn a one-at-a-time ``generate`` into ``generate_batch`` over a thread pool.
+
+    A network-backed teacher spends its time waiting, and AMD's gateway allows
+    4000 requests/minute, so issuing 200 prompts serially would make the arm take
+    hours for no reason. Results are returned in request order, and a failure is
+    returned as an empty completion so :func:`generate_arm` records it per task
+    instead of losing the batch.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def generate_batch(messages_batch, max_tokens: int = 8192,
+                       temperature: float = 0.0) -> list:
+        def one(messages):
+            try:
+                return generate(messages, max_tokens=max_tokens, temperature=temperature)
+            except TypeError:
+                return generate(messages)
+            except Exception as exc:  # noqa: BLE001 - one bad call must not lose the batch
+                _log(f"[teacher] call failed: {type(exc).__name__}: {str(exc)[:200]}")
+                return ""
+        with ThreadPoolExecutor(max_workers=max(1, int(concurrency))) as pool:
+            return list(pool.map(one, list(messages_batch)))
+
+    return generate_batch
+
+
+def cmd_generate_opus(args) -> int:
+    """Generate the frontier-teacher arm through :mod:`kore.eval.vs_opus`.
+
+    The teacher is built by :func:`kore.eval.vs_opus.make_opus_teacher`, so the
+    Opus side of this benchmark and the Opus side of the head-to-head are the
+    same client against the same gateway. The prompt is built by
+    :func:`kore.eval.checkpoint_ab.first_turn_messages`, which is
+    ``build_transcript(task_prompt(task))`` - byte-identical to what
+    :func:`kore.eval.policies.model_policy` sends on its first turn, and
+    therefore identical to what the model arm was given.
+    """
+    from kore.eval.checkpoint_ab import generate_arm, write_generations
+    from kore.eval.kernelbench_tasks import load_tasks
+    from kore.eval.vs_opus import make_opus_teacher
+
+    levels = [int(v) for v in str(args.levels).split(",") if v.strip()] if args.levels else None
+    tasks = load_tasks(args.tasks_dir, levels=levels)
+    if args.limit:
+        tasks = tasks[:int(args.limit)]
+    if not tasks:
+        _log("[opus] no tasks resolved")
+        return 2
+
+    teacher = make_opus_teacher(args.teacher, model=args.teacher_model,
+                                temperature=float(args.temperature))
+    if teacher is None:
+        _log("[opus] teacher/gateway unavailable; arm SKIPPED (no artifact written)")
+        return 3
+    _log(f"[opus] {len(tasks)} tasks, model={getattr(teacher, 'model', args.teacher_model)} "
+         f"concurrency={args.concurrency}")
+
+    def generate(messages, **_kw):
+        return teacher.generate(messages)
+
+    records = generate_arm(
+        tasks, arm=args.arm, generate_batch=_threaded_batch(generate, args.concurrency),
+        batch_size=int(args.concurrency), max_tokens=int(args.max_tokens),
+        temperature=float(args.temperature), log=_log)
+    path = write_generations(
+        args.out, records, arm=args.arm,
+        model=getattr(teacher, "model", args.teacher_model or args.teacher),
+        teacher_kind=args.teacher, max_tokens=int(args.max_tokens),
+        temperature=float(args.temperature),
+        contract_ok=sum(1 for r in records if r.contract_ok))
+    _log(f"[opus] {len(records)} completions "
+         f"({sum(1 for r in records if r.contract_ok)} honored the contract) -> {path}")
+    return 0
+
+
+def cmd_headtohead(args) -> int:
+    """Paired win-rate between two measured arms, via :mod:`kore.eval.vs_opus`.
+
+    Uses :func:`kore.eval.vs_opus.head_to_head_winrate` unchanged, so a task is
+    won only on a CORRECT kernel and only on the timing-integrity-gated speedup
+    that ``fast_p`` itself ranks on. Also re-checks that both arms were prompted
+    with byte-identical transcripts, which is the precondition that makes the
+    comparison about the models rather than about the harness.
+    """
+    from kore.eval.checkpoint_ab import assert_prompts_matched, read_generations
+    from kore.eval.vs_opus import head_to_head_winrate
+
+    left_meta, left_rows = read_generations(args.a_generations)
+    right_meta, right_rows = read_generations(args.b_generations)
+    # Raises if the two arms did not see byte-identical prompts, which would make
+    # any comparison a statement about the harness rather than the models.
+    prompts = assert_prompts_matched({left_meta.get("arm") or "a": left_rows,
+                                      right_meta.get("arm") or "b": right_rows})
+    shared = set.intersection(*(set(v) for v in prompts.values()))
+
+    left = json.loads(Path(args.a_measures).read_text())["eval"]
+    right = json.loads(Path(args.b_measures).read_text())["eval"]
+    winrate = head_to_head_winrate(left["per_task"], right["per_task"],
+                                   margin=float(args.margin))
+    payload = {
+        "a": {"arm": left.get("arm"), "model": left_meta.get("model")},
+        "b": {"arm": right.get("arm"), "model": right_meta.get("model")},
+        "baseline": "torch_eager",
+        "prompt_parity": {"verified": True, "n_tasks_compared": len(shared)},
+        "winrate": winrate,
+    }
+    out = Path(args.out).with_suffix(".json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2, default=str))
+    counts = winrate["counts"]
+    _log(f"[h2h] {payload['a']['arm']} vs {payload['b']['arm']} over n={winrate['n']}: "
+         f"a={counts['kore']} b={counts['opus']} tie={counts['tie']} "
+         f"neither={counts['neither']} -> {out}")
+    return 0
+
+
 def cmd_generate(args) -> int:
     from kore.eval.checkpoint_ab import generate_arm, load_hf_batch_generate, write_generations
     from kore.eval.kernelbench_tasks import load_tasks
@@ -313,6 +430,28 @@ def main(argv=None) -> int:
     g.add_argument("--batch-size", type=int, default=8)
     g.add_argument("--temperature", type=float, default=0.0)
     g.set_defaults(func=cmd_generate)
+
+    o = sub.add_parser("generate-opus", help="frontier-teacher arm through the AMD gateway")
+    o.add_argument("--tasks-dir", required=True)
+    o.add_argument("--out", required=True)
+    o.add_argument("--arm", default="opus")
+    o.add_argument("--teacher", default="claude")
+    o.add_argument("--teacher-model", default=None)
+    o.add_argument("--levels", default=None)
+    o.add_argument("--limit", type=int, default=None)
+    o.add_argument("--max-tokens", type=int, default=8192)
+    o.add_argument("--temperature", type=float, default=0.0)
+    o.add_argument("--concurrency", type=int, default=16)
+    o.set_defaults(func=cmd_generate_opus)
+
+    h = sub.add_parser("headtohead", help="paired win-rate between two measured arms")
+    h.add_argument("--a-generations", required=True)
+    h.add_argument("--a-measures", required=True)
+    h.add_argument("--b-generations", required=True)
+    h.add_argument("--b-measures", required=True)
+    h.add_argument("--out", required=True)
+    h.add_argument("--margin", type=float, default=1.0)
+    h.set_defaults(func=cmd_headtohead)
 
     v = sub.add_parser("measure", help="verify + cold-cache bench + fast_p report")
     v.add_argument("--tasks-dir", required=True)

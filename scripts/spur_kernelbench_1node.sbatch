@@ -68,6 +68,20 @@ export HF_HUB_OFFLINE=1
 export KORE_BENCH_COLD=1 KORE_VERIFIED_CORRECTNESS=1
 unset ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
 
+# PRIVATE MIOpen databases. KoreEnv points the driver subprocess's HOME at
+# TMPDIR, so MIOpen puts its user/find databases in a world-shared /tmp path.
+# On a node where another user created that file first it is not writable by us,
+# MIOpen raises miopenStatusInternalError, and EVERY convolution problem
+# disappears from the benchmark - torch's own conv baseline cannot run, so the
+# loss is silent and biased (it takes out precisely the hard problems). Observed
+# on crsuse2-m2m-011: 8+ Level-1 conv problems skipped this way.
+export MIOPEN_USER_DB_PATH="$OUT/miopen"
+export MIOPEN_CUSTOM_CACHE_DIR="$OUT/miopen"
+# Same failure mode for the shared Triton/inductor cache, which also defaults
+# into a world-shared /tmp directory.
+export KORE_COMPILE_CACHE_DIR="$OUT/compile_cache"
+mkdir -p "$MIOPEN_USER_DB_PATH" "$KORE_COMPILE_CACHE_DIR"
+
 echo "[kb] HEAD=$(git rev-parse --short HEAD) host=$(hostname) out=$OUT"
 echo "[kb] model=$MODEL@$REVISION arm=$ARM levels=$LEVELS"
 
@@ -111,6 +125,36 @@ if [[ -f "$OUT/generations_$ARM.jsonl" ]]; then
   run env HIP_VISIBLE_DEVICES=0 $PY scripts/run_kernelbench_amd.py measure \
       --tasks-dir "$TASKS_DIR" --generations "$OUT/generations_$ARM.jsonl" \
       --out "$OUT/report_$ARM" --budget "$BUDGET" --mode parallel --no-replay
+fi
+
+# ------------------------------------------------------------------ phase 4 --
+# The frontier comparator, through the same prompt contract, parser, verifier,
+# budget and timing-integrity gate, measured on the SAME idle device right after
+# the model arm. Skipped without failing the job when the gateway is down.
+if [[ "${KORE_KB_OPUS:-1}" == "1" ]]; then
+  $PY scripts/run_kernelbench_amd.py generate-opus \
+      --tasks-dir "$TASKS_DIR" --out "$OUT/generations_opus.jsonl" \
+      --levels "$LEVELS" --max-tokens "${KORE_KB_OPUS_MAX_TOKENS:-8192}" \
+      --temperature 0.0 --concurrency "${KORE_KB_OPUS_CONCURRENCY:-16}"
+  opus_rc=$?
+  if [[ "$opus_rc" == "3" ]]; then
+    echo "[kb] Opus arm skipped: gateway unavailable"
+  elif [[ "$opus_rc" != "0" ]]; then
+    echo "[kb] FAILED: generate-opus (rc=$opus_rc)"; rc=1
+  fi
+  if [[ -f "$OUT/generations_opus.jsonl" ]]; then
+    run env HIP_VISIBLE_DEVICES=0 $PY scripts/run_kernelbench_amd.py measure \
+        --tasks-dir "$TASKS_DIR" --generations "$OUT/generations_opus.jsonl" \
+        --out "$OUT/report_opus" --budget "$BUDGET" --mode parallel --no-replay
+    if [[ -f "$OUT/report_opus.json" && -f "$OUT/report_$ARM.json" ]]; then
+      run $PY scripts/run_kernelbench_amd.py headtohead \
+          --a-generations "$OUT/generations_$ARM.jsonl" \
+          --a-measures "$OUT/report_$ARM.json" \
+          --b-generations "$OUT/generations_opus.jsonl" \
+          --b-measures "$OUT/report_opus.json" \
+          --out "$OUT/headtohead_${ARM}_vs_opus"
+    fi
+  fi
 fi
 
 echo; echo "[kb] artifacts:"; ls -la "$OUT"

@@ -21,9 +21,18 @@ Two rates are reported per point and they answer different questions:
   steady_state    workers / mean-episode-seconds. What a long run converges to
                   once the tail stops mattering. This is the sizing number.
 
-Each sweep point gets a DISJOINT slice of tasks. Sharing tasks would let a later
-point read the earlier point's replay cache and look faster for a reason that has
-nothing to do with its worker count.
+Two controls keep the comparison between points honest, because both defaults
+would make whichever point ran last look fastest:
+
+* Each point gets a DISJOINT slice of tasks, so no point reads another's replay
+  cache instead of running the evaluation.
+* Each point gets its own Triton/inductor compile cache, so no point inherits
+  warm compiles paid for by the point before it.
+
+Both make every point pay cold-compile cost, so the absolute numbers are a floor:
+a long production run amortizes those compiles across tasks and does better. The
+comparison between points - which is what picks the worker count - is what these
+controls protect.
 
 Writes a JSON report and nothing else; it never touches the dataset.
 """
@@ -122,6 +131,9 @@ def main() -> int:
     parser.add_argument("--min-free-gb", type=float, default=60.0)
     parser.add_argument("--point-timeout-seconds", type=float, default=3600.0)
     parser.add_argument("--keep-only-useful", action="store_true")
+    parser.add_argument("--cold-compile-cache", default="",
+                        help="root for per-point compile caches; empty keeps the "
+                             "inherited (shared, warm) cache")
     args = parser.parse_args()
 
     from kore.data.saturated_agentic import run_node_shard
@@ -162,6 +174,7 @@ def main() -> int:
         "rounds": args.rounds,
         "keep_only_useful": bool(args.keep_only_useful),
         "runs_dir": os.environ.get("KORE_RUNS_DIR"),
+        "cold_compile_cache": bool(args.cold_compile_cache),
         "points": [],
     }
 
@@ -175,6 +188,17 @@ def main() -> int:
         telemetry = out_dir / f"w{workers:03d}.telemetry.jsonl"
         print(f"\n=== worker sweep point: workers={workers} tasks={len(slice_ids)} "
               f"episodes={len(slice_ids) * args.episodes_per_task} ===", flush=True)
+
+        # KoreEnv reads this per evaluation subprocess, so pointing it somewhere
+        # new gives this point a cold compile cache. Without it the last point in
+        # the sweep would win on inherited compiles rather than on worker count.
+        if args.cold_compile_cache:
+            cache_root = Path(args.cold_compile_cache) / f"w{workers:03d}"
+            (cache_root / "triton").mkdir(parents=True, exist_ok=True)
+            (cache_root / "inductor").mkdir(parents=True, exist_ok=True)
+            os.environ["KORE_COMPILE_CACHE_DIR"] = str(cache_root)
+            os.environ.pop("TRITON_CACHE_DIR", None)
+            os.environ.pop("TORCHINDUCTOR_CACHE_DIR", None)
 
         start = time.monotonic()
         result = run_node_shard(

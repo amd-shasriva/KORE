@@ -231,6 +231,13 @@
       "role": "move held-out/eval-leaked win/repair/groups shards to _quarantine (dry-run default, --apply to move)"
     },
     {
+      "path": "scripts/run_agent_kernel_arena.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "runs AgentKernelArena tasks in copied workspaces and scores with AKA's formula; never edits the benchmark tree"
+    },
+    {
       "path": "scripts/run_agentic_shard.py",
       "classification": "active",
       "lifecycle": "active",
@@ -320,6 +327,13 @@
       "lifecycle": "active",
       "deletes_artifacts": false,
       "note": "requeue-safe node job for the multi-turn agentic campaign"
+    },
+    {
+      "path": "scripts/spur_aka_1node.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "GPU-node launcher for the AgentKernelArena runner"
     },
     {
       "path": "scripts/spur_audit_1node.sbatch",

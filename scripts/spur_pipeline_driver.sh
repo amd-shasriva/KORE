@@ -42,6 +42,12 @@ MIDTRAIN_CFG="$REPO/data/b05factory/launch/midtrain_base_8gpu.json"
 # should be a single segment that runs to completion.
 SEGMENT_WALLTIME="${KORE_SEGMENT_WALLTIME:-23:00:00}"
 
+# The model SFT is compared against. In direct mode this must be the very
+# checkpoint SFT started from, or the A/B measures the vendor's model quality
+# instead of our training. Defaults to the production target.
+SFT_REFERENCE_MODEL="${KORE_SFT_REFERENCE:-Qwen/Qwen3-Coder-30B-A3B-Instruct}"
+SFT_REFERENCE_REV="${KORE_SFT_REFERENCE_REV:--}"
+
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
 note() {  # note <key> <value> -- append a fact to the state file
@@ -330,7 +336,12 @@ SFT_PEAK_GB="${KORE_SFT_PEAK_GB:-700}"
 disk_free_gb() { df -BG --output=avail "$REPO" 2>/dev/null | tail -1 | tr -dc '0-9'; }
 
 step_sft() {
-  checkpoint_complete "$MIDTRAIN_OUT" || { log "sft: refusing to start, midtrain is not complete"; return 1; }
+  # Only the cpt recipe has a midtrain to wait on. In direct mode the base is
+  # the vendor's instruct checkpoint named by the config, which the launcher's
+  # resolver validates, so there is nothing local to verify here.
+  if [ "${KORE_RECIPE:-direct}" = "cpt" ]; then
+    checkpoint_complete "$MIDTRAIN_OUT" || { log "sft: refusing to start, midtrain is not complete"; return 1; }
+  fi
   # Hold while the training mixture is still being built. Two reasons, and the
   # second is the one that bites: an 11h SFT on superseded data wastes the
   # allocation, but worse, Path A and Path B only answer whether midtrain earns
@@ -343,21 +354,27 @@ step_sft() {
     note sft "held_data_not_final"
     return 2
   fi
-  # Prefer the chat-vector model: it already follows instructions, so the SFT
-  # budget buys kernel skill instead of re-learning chat from scratch. Fall back
-  # to raw midtrain if the residual stage did not produce a verified model --
-  # that is the previously planned path and still trains a usable model.
-  local sft_base="$MIDTRAIN_OUT"
-  if checkpoint_complete "$CHATVEC_OUT"; then
-    sft_base="$CHATVEC_OUT"
-    log "sft: starting from the chat-vector model (instruction-following already present)"
+  # In direct mode the base is whatever the config names -- the vendor instruct
+  # checkpoint -- so pass '-' and let the launcher's resolver keep model_id.
+  local sft_base="-"
+  if [ "${KORE_RECIPE:-direct}" = "cpt" ]; then
+    # Prefer the chat-vector model: it already follows instructions, so the SFT
+    # budget buys kernel skill instead of re-learning chat from scratch. Fall
+    # back to raw midtrain if the residual did not verify.
+    sft_base="$MIDTRAIN_OUT"
+    if checkpoint_complete "$CHATVEC_OUT"; then
+      sft_base="$CHATVEC_OUT"
+      log "sft: starting from the chat-vector model (instruction-following already present)"
+    else
+      log "sft: chat-vector model unavailable; starting from raw midtrain"
+    fi
+    # Midtrain is finished and its A/B eval has run, so its optimizer state is
+    # now dead weight. Reclaim it if -- and only if -- space is short.
+    reclaim_optimizer_state "$MIDTRAIN_OUT" "$SFT_PEAK_GB"
   else
-    log "sft: chat-vector model unavailable; starting from raw midtrain"
+    log "sft: starting from the config's model_id (direct recipe, no midtrain)"
   fi
   note sft_base "$sft_base"
-  # Midtrain is finished and its A/B eval has run, so its optimizer state is
-  # now dead weight. Reclaim it if -- and only if -- space is short.
-  reclaim_optimizer_state "$MIDTRAIN_OUT" "$SFT_PEAK_GB"
   local free; free="$(disk_free_gb)"; free="${free:-0}"
   if [ "$free" -lt "$SFT_PEAK_GB" ]; then
     log "sft: HOLDING. ${free}GB free after reclaim, need ~${SFT_PEAK_GB}GB for three 221GB checkpoints."
@@ -376,16 +393,32 @@ step_sft() {
 log "================ pipeline driver start (HEAD $(git rev-parse --short HEAD)) ================"
 note pipeline "running"
 
-step_midtrain    || { log "STOP: midtrain failed"; note pipeline "failed_midtrain"; exit 1; }
-# Reference is the BASE weights midtrain actually started from. Held-out LM
-# loss is the meaningful signal here; kernel generation is not, because
-# neither arm follows instructions yet.
-step_eval "$MIDTRAIN_OUT" midtrain "midtrain_base" \
-          "Qwen/Qwen3-14B-Base" "0b0bd3732e2c374d483664439ea334928b65f304"
+# Two recipes, and which one is available is decided by the model, not by us.
+#
+#   cpt     midtrain -> A/B -> chat vector -> SFT. Requires a BASE checkpoint to
+#           continue-pretrain, because doing it on an instruct model destroys
+#           instruction-following (docs/EVAL_RESULTS.md), and requires a
+#           base/instruct PAIR for the residual transfer.
+#   direct  instruct -> SFT. What Dr. Kernel and Kernel-Smith actually do.
+#
+# The production target is Qwen3-Coder-30B-A3B-Instruct, and neither it nor any
+# other 30B-class candidate (Qwen3-32B, Qwen3.6-35B-A3B) ships a Base variant.
+# So the cpt recipe cannot reach production at all: it is a 14B-only experiment.
+# direct is the default for that reason, not as a fallback.
+KORE_RECIPE="${KORE_RECIPE:-direct}"
+log "recipe: $KORE_RECIPE"
 
-# Transplant Qwen's post-training onto our midtrained weights. Non-fatal: if it
-# does not verify, step_sft falls back to training from raw midtrain.
-step_residual || log "residual: unavailable; SFT will start from raw midtrain"
+if [ "$KORE_RECIPE" = "cpt" ]; then
+  step_midtrain  || { log "STOP: midtrain failed"; note pipeline "failed_midtrain"; exit 1; }
+  # Reference is the BASE weights midtrain actually started from. Held-out LM
+  # loss is the meaningful signal here; kernel generation is not, because
+  # neither arm follows instructions yet.
+  step_eval "$MIDTRAIN_OUT" midtrain "midtrain_base" \
+            "Qwen/Qwen3-14B-Base" "0b0bd3732e2c374d483664439ea334928b65f304"
+  # Transplant Qwen's post-training onto our midtrained weights. Non-fatal: if
+  # it does not verify, step_sft falls back to training from raw midtrain.
+  step_residual || log "residual: unavailable; SFT will start from raw midtrain"
+fi
 
 step_sft; _sft_rc=$?
 if [ "$_sft_rc" = "2" ]; then
@@ -394,11 +427,11 @@ if [ "$_sft_rc" = "2" ]; then
 elif [ "$_sft_rc" != "0" ]; then
   log "STOP: sft failed"; note pipeline "failed_sft"; exit 1
 fi
-# The headline comparison: our instruction-tuned model against the vendor's
-# instruction-tuned model, both of which follow instructions, so the kernel
-# funnel is finally a fair question.
-step_eval "$SFT_OUT" sft "sft" \
-          "Qwen/Qwen3-14B" "40c069824f4251a91eefaf281ebe4c544efd3e18"
+# The headline comparison: our tuned model against the untuned vendor model it
+# started from. Both follow instructions, so the kernel funnel is finally a fair
+# question, and using the exact starting checkpoint as reference isolates what
+# SFT contributed rather than conflating it with the base model's own strength.
+step_eval "$SFT_OUT" sft "sft" "$SFT_REFERENCE_MODEL" "$SFT_REFERENCE_REV"
 
 # Third arm, and the one that keeps us honest. The chat-vector model is our
 # domain delta on top of Qwen's instruct weights with NO SFT at all, so it

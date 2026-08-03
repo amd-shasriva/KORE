@@ -98,6 +98,13 @@
       "note": "writes the v2 SFT mixture; never mutates the base mixture it reads"
     },
     {
+      "path": "scripts/build_task_pool.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "expands the trainable task pool from KernelBook/synthetic sources; writes a new pool, never mutates the registry it reads"
+    },
+    {
       "path": "scripts/complete_base.py",
       "classification": "active",
       "lifecycle": "active",

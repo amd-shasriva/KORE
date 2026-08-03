@@ -1,0 +1,40 @@
+{
+  "_comment_model": "PRODUCTION TARGET. Qwen3-Coder-30B-A3B-Instruct: 30.5B total / 3.3B active MoE (Qwen3MoeForCausalLM, 48 layers, 128 experts, 8 per token), Apache 2.0, 262k context. Chosen over Qwen3-32B dense and Qwen3.6-35B-A3B because it is code-specialized with a purpose-built function-call format, and our harness is tool-driven and the RL stage is multi-turn tool use. The 3.3B active footprint is what makes it deployable on device: ~10x less compute per token than a 32B dense at comparable memory.",
+  "model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+
+  "_comment_no_midtrain": "There is no Base variant of this model, nor of Qwen3-32B or Qwen3.6-35B-A3B. Continued pretraining requires one (running it on an instruct model destroys instruction-following -- docs/EVAL_RESULTS.md), and the chat-vector residual requires a base/instruct PAIR. So the cpt recipe cannot reach production at all, and this trains instruct -> SFT -> RL, which is what Dr. Kernel and Kernel-Smith do anyway.",
+
+  "dataset_path": "data/b05factory/sft/multicap_v2.jsonl",
+  "output_dir": "runs/sft_coder30b_a3b",
+  "use_lora": false,
+  "distributed": true,
+  "bf16": true,
+  "gradient_checkpointing": true,
+
+  "_comment_batch": "global batch 128 = 1 x 16 x 8 ranks. per_device is 1, not the 14B's 2: this model is 2.2x the parameters, and MoE activation memory scales with the 8 experts routed per token rather than the 3.3B active figure, which describes compute and not peak memory.",
+  "per_device_train_batch_size": 1,
+  "gradient_accumulation_steps": 16,
+
+  "_comment_max_seq_length": "17408 matches the mixture, which is filtered to it. The model supports 262144, but raising this would not add data and would cost activation memory.",
+  "max_seq_length": 17408,
+
+  "_comment_epochs_and_lr": "5e-6 for 2 epochs, the Tulu 3 full-SFT recipe. This starts from an ALREADY instruction-tuned checkpoint, so it warrants being no more aggressive than a recipe designed to instruct-tune a base model; this project has already watched 1e-5 collapse instruction-following once.",
+  "num_train_epochs": 2.0,
+  "learning_rate": 5e-06,
+  "lr_scheduler_type": "cosine",
+  "warmup_ratio": 0.03,
+  "repair_loss_weight": 2.0,
+
+  "_comment_save": "save_total_limit MUST be 1 here. Adam keeps ~16 bytes/param (fp32 weights, grads, m, v), so a 30.5B checkpoint is ~488GB against the 14B's 221GB. At limit=1 a rotation transiently holds two, peaking near 976GB; the volume has ~1090GB free and is SHARED with other users. At limit=2 the peak would be ~1464GB, which does not fit. save_steps is raised to 400 to halve the number of rotation windows, since each one is when the disk is closest to full.",
+  "save_steps": 400,
+  "save_total_limit": 1,
+
+  "_comment_fsdp": "fsdp_transformer_layer_cls is set explicitly for MoE. With auto_wrap and a null class the policy can wrap at the wrong granularity for Qwen3MoeDecoderLayer, which either shards the 128 experts badly or leaves whole layers unsharded and OOMs.",
+  "fsdp": "full_shard auto_wrap",
+  "fsdp_transformer_layer_cls": "Qwen3MoeDecoderLayer",
+  "fsdp_cpu_offload": false,
+
+  "dataloader_num_workers": 4,
+  "dataloader_pin_memory": false,
+  "dataloader_prefetch_factor": 2
+}

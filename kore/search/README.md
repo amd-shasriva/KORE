@@ -98,7 +98,7 @@ kernel.
 | --- | --- | --- |
 | Reward hacking | a claimed **1541x** kernel arrived in third-party data; real fused wins here are 1-10x | env-flagged hacks and any ratio above `credible_speedup_max` (10.0, from `cfg.excessive_speedup_flag`) are recorded with their measured value and barred from elite / champion / exemplar / parent |
 | Lazy optimisation | Dr. Kernel: a kernel covering **0.014%** of CUDA time where fusion covers **86.15%** | a same-niche revision must beat its incumbent by more than `MIN_GAIN` (imported from `kore.data.step_centric`, so the step filter and the archive cannot drift); `kernel_time_coverage` returns `None` without profiler data rather than substituting the static proxy |
-| Population collapse | a population that collapses onto one lineage stops exploring | `lineage_concentration` + `recent_novelty`; when both trip, parent selection is forced off the incumbent lineage. Eviction drops from the **densest** region, never the champion — evicting the globally worst member would re-derive top-k as soon as the archive fills |
+| Population collapse | a population that collapses onto one lineage stops exploring | `recent_progress`: a full window of admissions that neither opened a niche nor beat one forces parent selection off the incumbent. `lineage_concentration` and `recent_novelty` are reported but do **not** gate — a collapsed archive is *small*, so a share over its members cannot decide anything (the loop's own collapse fixture sits at concentration 0.50 with coverage 2). Eviction drops from the **densest** region, never the champion — evicting the globally worst member would re-derive top-k as soon as the archive fills |
 
 ### Running it
 

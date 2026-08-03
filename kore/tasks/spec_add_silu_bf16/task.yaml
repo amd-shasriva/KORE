@@ -1,0 +1,44 @@
+{
+  "backend": "triton",
+  "baseline_tier": "elementwise",
+  "dtype": "bf16",
+  "gpu_target": "gfx950",
+  "minted": true,
+  "op_family": "fusion",
+  "operation": "add_silu",
+  "provenance_root": "spec_add_silu_bf16",
+  "seed_kernel_name": "seed_triton.py",
+  "shapes": {
+    "minimal": {
+      "M": 64,
+      "N": 512
+    },
+    "primary": {
+      "M": 4096,
+      "N": 8192
+    },
+    "validation": [
+      {
+        "M": 8192,
+        "N": 4096
+      },
+      {
+        "M": 2048,
+        "N": 11008
+      },
+      {
+        "M": 4096,
+        "N": 8191
+      }
+    ]
+  },
+  "snr_threshold": 30.0,
+  "spec_file": "spec.md",
+  "targets": {
+    "comparison_baseline": "torch_add_silu",
+    "snr_db": 30.0
+  },
+  "task_id": "spec_add_silu_bf16",
+  "task_kind": "spec_synthesis",
+  "taxonomy_family": "fusion"
+}

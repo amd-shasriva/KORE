@@ -51,6 +51,15 @@ def main() -> int:
     ap.add_argument("--repo-id", default="hkust-nlp/drkernel-coldstart-8k")
     ap.add_argument("--min-speedup", type=float, default=1.0,
                     help="keep trajectories whose final kernel was at least this much faster")
+    # A first pass kept a trajectory reporting 1541.94x. No fused Triton kernel
+    # is three orders of magnitude faster than its Torch reference; that is the
+    # measurement being gamed -- a decoy kernel that is never called, or real
+    # computation skipped -- which is the exact reward hacking Dr. Kernel was
+    # written to defeat. Training on those teaches the model to cheat, so cap
+    # well above genuine fusion wins (typically 1-10x) and far below absurdity.
+    ap.add_argument("--max-speedup", type=float, default=50.0)
+    ap.add_argument("--max-seq-tokens", type=int, default=17408,
+                    help="model's max_seq_length; longer trajectories get truncated mid-refinement")
     ap.add_argument("--max-add-tokens", type=float, default=90e6,
                     help="cap on tokens added, to keep SFT inside one allocation")
     ap.add_argument("--dry-run", action="store_true")
@@ -71,6 +80,7 @@ def main() -> int:
     kept, stats = [], collections.Counter()
     added_chars = 0
     speedups = []
+    lengths = []
     # Highest-speedup first: if the token budget binds, spend it on the
     # trajectories that best demonstrate a real optimization.
     order = sorted(range(len(ds)), key=lambda i: -(ds[i]["final_speedup"] or 0.0))
@@ -85,7 +95,16 @@ def main() -> int:
         if sp < args.min_speedup:
             stats["drop_slow"] += 1
             continue
+        if sp > args.max_speedup:
+            stats["drop_implausible_speedup"] += 1
+            continue
         txt = _text(msgs)
+        est_tokens = len(txt) / CHARS_PER_TOKEN
+        if est_tokens > args.max_seq_tokens:
+            # Truncation would cut the trajectory mid-refinement, teaching the
+            # model to start an optimization and never finish it.
+            stats["drop_too_long"] += 1
+            continue
         if any(t in txt for t in ids):
             stats["drop_contaminated_id"] += 1
             continue
@@ -103,17 +122,31 @@ def main() -> int:
             continue
         added_chars += len(txt)
         speedups.append(sp)
+        lengths.append(est_tokens)
         kept.append(rec)
 
     print("\nfilter results:")
-    for k in ("seen", "drop_empty", "drop_slow", "drop_contaminated_id",
+    for k in ("seen", "drop_empty", "drop_slow", "drop_implausible_speedup",
+              "drop_too_long", "drop_contaminated_id",
               "drop_contaminated_family", "drop_budget"):
         print(f"  {stats[k]:>7,}  {k}")
     print(f"  {len(kept):>7,}  KEPT")
     if speedups:
         speedups.sort()
-        print(f"  speedup kept: min={speedups[0]:.2f} "
-              f"median={speedups[len(speedups)//2]:.2f} max={speedups[-1]:.2f}")
+
+        def pct(p):
+            return speedups[min(len(speedups) - 1, int(p * len(speedups)))]
+
+        print(f"  speedup kept: min={speedups[0]:.2f} p50={pct(0.50):.2f} "
+              f"p90={pct(0.90):.2f} p99={pct(0.99):.2f} max={speedups[-1]:.2f}")
+    if lengths:
+        lengths.sort()
+
+        def lpct(p):
+            return lengths[min(len(lengths) - 1, int(p * len(lengths)))]
+
+        print(f"  est tokens/traj: p50={lpct(0.50):,.0f} p90={lpct(0.90):,.0f} "
+              f"max={lengths[-1]:,.0f} (limit {args.max_seq_tokens:,})")
     print(f"  tokens added (est): {added_chars/CHARS_PER_TOKEN/1e6:.1f}M")
 
     base = pathlib.Path(args.base_mixture)

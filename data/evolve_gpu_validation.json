@@ -1,0 +1,39 @@
+{
+  "task": "gen_add_bf16",
+  "gpu_arch": "gfx950:sramecc+:xnack-",
+  "elapsed_s": 329.8,
+  "generations": [
+    {
+      "generation": 1,
+      "proposals": 4,
+      "screened": 4,
+      "admitted": 3,
+      "best_speedup": 0.9403679839619188,
+      "niches": 4,
+      "forced_explore": false
+    },
+    {
+      "generation": 2,
+      "proposals": 4,
+      "screened": 4,
+      "admitted": 1,
+      "best_speedup": 0.9403679839619188,
+      "niches": 4,
+      "forced_explore": false
+    },
+    {
+      "generation": 3,
+      "proposals": 3,
+      "screened": 0,
+      "admitted": 0,
+      "best_speedup": 0.9403679839619188,
+      "niches": 4,
+      "forced_explore": false
+    }
+  ],
+  "best_speedup": null,
+  "archive_size": 4,
+  "distinct_niches": 1,
+  "env_calls": 26,
+  "failures": []
+}

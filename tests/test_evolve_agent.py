@@ -1083,3 +1083,51 @@ def test_a_proposers_uncounted_traffic_cannot_hide_from_the_budget():
                                       generation_reserve=6, seed=0))
     assert len(result.generations) < 6, "the cap did not stop the run"
     assert result.stats["budget_used"] == result.stats["budget_total"]
+
+
+def test_a_correct_kernel_with_no_timing_is_unmeasured_not_incorrect():
+    """A missing timing sample is a measurement failure, not a wrong kernel.
+
+    ``StableEvaluator``'s sampler used to condemn a trial on
+    ``not result.correct or result.speedup is None``, which folds two unrelated
+    outcomes together. The first is a real finding -- a kernel that verified once
+    and not again is unstable. The second is the node being busy.
+
+    It matters because contention is the normal case in production: every rank
+    benches at once, and on gfx950 a run whose cv_pct rose past ~10% had all
+    eight of its proposals recorded as 'incorrect' while the env had reported
+    compiled=True correct=True for every one of them. The archive then refuses
+    them forever (``admissible`` requires ``correct``), so the search discards
+    good designs because of noise and the run log blames the model.
+
+    The scripted env below returns correct-but-untimed on every call, which is
+    exactly that situation.
+    """
+    class NoTimingEnv:
+        def __init__(self):
+            self.calls = 0
+
+        def step(self, source, full_validation=True, multi_shape=True):
+            self.calls += 1
+            return observation(speedup=None, correct=True)
+
+    env = NoTimingEnv()
+    evaluator = StableEvaluator(env, FakeTask(), Budget(8))
+    trial = evaluator.screen(marked(kernel("a"), "a"))
+
+    # Screening saw a correct kernel and must not have relabelled it.
+    assert trial.correct is True, (
+        "a correct kernel that produced no timing was marked incorrect; that is "
+        "the conflation this test exists to prevent")
+    assert trial.error_text != "unstable correctness"
+
+    # In the archive it must not be counted as a wrong answer. It is also not an
+    # elite -- with no samples ``stats.n`` is 0, so ``admissible`` is False and it
+    # cannot become a champion, parent or exemplar on the strength of a
+    # measurement that never happened. Held out of the elite pool, not condemned.
+    archive = Archive()
+    cand = candidate_from_trial(trial, 1, None)
+    archive.add(cand)
+    assert archive.verdict_counts()["incorrect"] == 0
+    assert cand.admissible is False
+    assert archive.champion() is None

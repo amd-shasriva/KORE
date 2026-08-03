@@ -343,6 +343,13 @@
       "note": "CPU-only compute-node launcher for build_task_pool.py; needs network for the pinned datasets"
     },
     {
+      "path": "scripts/spur_data_driver.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "drives the data phase (task pool then saturated datagen) and deliberately stops before training"
+    },
+    {
       "path": "scripts/spur_datagen_array.sbatch",
       "classification": "active",
       "lifecycle": "active",

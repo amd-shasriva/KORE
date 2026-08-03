@@ -307,19 +307,33 @@ def evaluate_task(
 
 # Our HIP training tasks were written independently -- no AgentKernelArena
 # source, references or shapes were copied, because training on the benchmark
-# would destroy the only checkable "we beat Opus on HIP" claim we have. But
-# 20/20 of them share an OPERATOR with an AKA task (12 with hip2hip, 18 with
-# torch2hip), which is unavoidable: every kernel corpus contains gelu and
-# layernorm, and excluding the operators AKA happens to test would cripple the
-# model rather than make the comparison cleaner.
+# would destroy the only checkable "we beat Opus on HIP" claim we have. But some
+# of them share an OPERATOR with an AKA task, which is unavoidable: every kernel
+# corpus contains gelu and layernorm, and excluding the operators AKA happens to
+# test would cripple the model rather than make the comparison cleaner.
 #
+# These counts are MEASURED, by scripts/audit_hip_tasks.py against the AKA
+# checkout, and they are held here as data rather than prose so the test below
+# can tie ``hip_tasks`` to the live registry.  That coupling is the point: when
+# the HIP family grew from 20 to 188 tasks the prose said "20/20" and nothing
+# failed, which is exactly how a disclosure goes stale while still being quoted.
+OPERATOR_OVERLAP: dict = {
+    "hip_tasks": 188,       # backend == "hip" tasks in the registry
+    "shared": 86,           # of those, how many share an operator with any AKA task
+    "hip2hip": 78,
+    "torch2hip": 84,
+    "measured_by": "scripts/audit_hip_tasks.py",
+}
+
 # The disclosure rides on the summary rather than living in a script someone
 # has to remember to run, so a number cannot be quoted without it.
 OPERATOR_OVERLAP_DISCLOSURE = (
     "KORE HIP training tasks were authored independently; no AgentKernelArena "
-    "source, reference implementation or shape set was used. 20/20 share an "
-    "operator with an AKA task (12 hip2hip, 18 torch2hip). See "
-    "scripts/audit_hip_tasks.py for the per-task breakdown."
+    "source, reference implementation or shape set was used. "
+    f"{OPERATOR_OVERLAP['shared']}/{OPERATOR_OVERLAP['hip_tasks']} share an "
+    f"operator with an AKA task ({OPERATOR_OVERLAP['hip2hip']} hip2hip, "
+    f"{OPERATOR_OVERLAP['torch2hip']} torch2hip). See "
+    f"{OPERATOR_OVERLAP['measured_by']} for the per-task breakdown."
 )
 
 

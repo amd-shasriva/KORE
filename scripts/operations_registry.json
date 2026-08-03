@@ -589,6 +589,13 @@
       "lifecycle": "active"
     },
     {
+      "path": "scripts/probe_hip_gemm_timing.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "measure WHY hip_gemm is not timing-admissible: times the hipBLASLt baseline solo and interleaved with the seed at each candidate shape, and judges both with the environment's own unmodified 3% publication admission gate"
+    },
+    {
       "path": "scripts/verify_hip_seeds.py",
       "classification": "diagnostic",
       "lifecycle": "active",

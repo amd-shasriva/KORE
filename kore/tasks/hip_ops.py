@@ -498,6 +498,317 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 """
 
 # --------------------------------------------------------------------------- #
+# Generic pointwise seeds (binary, ternary)
+#
+# The unary/gated pair above covers one- and two-operand ACTIVATIONS.  These cover
+# the rest of the pointwise surface: plain binary arithmetic, whose torch baseline
+# is a single fused ROCm kernel, and the 2-3 operand CHAINS, whose torch baseline
+# is several kernels and therefore several HBM round-trips.  A chain is graded
+# against torch.compile rather than eager torch -- see ``baseline_compile``.
+# --------------------------------------------------------------------------- #
+_BINARY_SEED = _PREAMBLE + """
+namespace {
+
+template <typename scalar_t>
+__global__ void kore_binary_kernel(const scalar_t* __restrict__ a,
+                                   const scalar_t* __restrict__ b,
+                                   scalar_t* __restrict__ out, int64_t n) {
+  int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < n; i += stride) {
+    const float x = static_cast<float>(a[i]);
+    const float y = static_cast<float>(b[i]);
+    out[i] = static_cast<scalar_t>(%(EXPR)s);
+  }
+}
+
+}  // namespace
+
+torch::Tensor forward(torch::Tensor a, torch::Tensor b) {
+  KORE_CHECK_INPUT(a);
+  KORE_CHECK_INPUT(b);
+  TORCH_CHECK(a.sizes() == b.sizes(), "operands must have equal shape");
+  TORCH_CHECK(a.scalar_type() == b.scalar_type(), "operand dtype mismatch");
+  torch::Tensor out = torch::empty_like(a);
+  int64_t n = a.numel();
+  if (n == 0) return out;
+  const int threads = 256;
+  int blocks = static_cast<int>(kore_ceil_div(n, threads));
+  if (blocks > 8192) blocks = 8192;
+  if (blocks < 1) blocks = 1;
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::kHalf, at::kBFloat16, a.scalar_type(), "kore_binary", ([&] {
+        hipLaunchKernelGGL((kore_binary_kernel<scalar_t>), dim3(blocks),
+                           dim3(threads), 0, kore_stream(),
+                           a.data_ptr<scalar_t>(), b.data_ptr<scalar_t>(),
+                           out.data_ptr<scalar_t>(), n);
+      }));
+  return out;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("forward", &forward, "KORE HIP binary pointwise seed");
+}
+"""
+
+_TERNARY_SEED = _PREAMBLE + """
+namespace {
+
+template <typename scalar_t>
+__global__ void kore_ternary_kernel(const scalar_t* __restrict__ a,
+                                    const scalar_t* __restrict__ b,
+                                    const scalar_t* __restrict__ c,
+                                    scalar_t* __restrict__ out, int64_t n) {
+  int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < n; i += stride) {
+    const float x = static_cast<float>(a[i]);
+    const float y = static_cast<float>(b[i]);
+    const float z = static_cast<float>(c[i]);
+    out[i] = static_cast<scalar_t>(%(EXPR)s);
+  }
+}
+
+}  // namespace
+
+torch::Tensor forward(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
+  KORE_CHECK_INPUT(a);
+  KORE_CHECK_INPUT(b);
+  KORE_CHECK_INPUT(c);
+  TORCH_CHECK(a.sizes() == b.sizes() && a.sizes() == c.sizes(),
+              "operands must have equal shape");
+  TORCH_CHECK(a.scalar_type() == b.scalar_type() &&
+              a.scalar_type() == c.scalar_type(), "operand dtype mismatch");
+  torch::Tensor out = torch::empty_like(a);
+  int64_t n = a.numel();
+  if (n == 0) return out;
+  const int threads = 256;
+  int blocks = static_cast<int>(kore_ceil_div(n, threads));
+  if (blocks > 8192) blocks = 8192;
+  if (blocks < 1) blocks = 1;
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::kHalf, at::kBFloat16, a.scalar_type(), "kore_ternary", ([&] {
+        hipLaunchKernelGGL((kore_ternary_kernel<scalar_t>), dim3(blocks),
+                           dim3(threads), 0, kore_stream(),
+                           a.data_ptr<scalar_t>(), b.data_ptr<scalar_t>(),
+                           c.data_ptr<scalar_t>(), out.data_ptr<scalar_t>(), n);
+      }));
+  return out;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("forward", &forward, "KORE HIP ternary pointwise seed");
+}
+"""
+
+# --------------------------------------------------------------------------- #
+# Row reductions that COLLAPSE the row: [M, N] -> [M]
+#
+# Distinct from the softmax/norm seeds above, which read a row and write a row.
+# These write one value per row, so the store is negligible and the kernel is
+# purely a read-bandwidth and reduction-tree problem -- which is exactly the
+# shape of lowering HipKittens reports Triton handling badly on AMD.
+# ``KoreMin`` is declared here rather than in the shared prefix so the six seeds
+# already verified on gfx950 stay byte-identical.
+# --------------------------------------------------------------------------- #
+_ROW_VEC_SEED = _ROW_REDUCE_PREFIX + """
+namespace {
+
+struct KoreMin { __device__ float operator()(float a, float b) const { return a < b ? a : b; } };
+
+template <typename scalar_t>
+__global__ void kore_rowvec_kernel(const scalar_t* __restrict__ x,
+                                   scalar_t* __restrict__ y, int64_t n_cols) {
+  const int64_t row = blockIdx.x;
+  const scalar_t* xr = x + row * n_cols;
+
+  float local = %(INIT)s;
+  for (int64_t c = threadIdx.x; c < n_cols; c += KORE_ROW_THREADS) {
+    const float v = static_cast<float>(xr[c]);
+    local = %(COMBINE)s;
+  }
+  const float total = kore_block_reduce(local, %(REDUCER)s{});
+  if (threadIdx.x == 0) {
+    const float n = static_cast<float>(n_cols);
+    (void)n;
+    y[row] = static_cast<scalar_t>(%(POST)s);
+  }
+}
+
+}  // namespace
+
+torch::Tensor forward(torch::Tensor x) {
+  KORE_CHECK_INPUT(x);
+  TORCH_CHECK(x.dim() == 2, "expected a 2-D [rows, cols] tensor");
+  const int64_t rows = x.size(0), cols = x.size(1);
+  torch::Tensor y = torch::empty({rows}, x.options());
+  if (rows == 0 || cols == 0) return y;
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::kHalf, at::kBFloat16, x.scalar_type(), "kore_rowvec", ([&] {
+        hipLaunchKernelGGL((kore_rowvec_kernel<scalar_t>),
+                           dim3(static_cast<int>(rows)),
+                           dim3(KORE_ROW_THREADS), 0, kore_stream(),
+                           x.data_ptr<scalar_t>(), y.data_ptr<scalar_t>(), cols);
+      }));
+  return y;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("forward", &forward, "KORE HIP row-reduction seed");
+}
+"""
+
+#: ``logsumexp`` needs the max BEFORE it can sum, so it cannot use the
+#: single-pass template above.
+_LOGSUMEXP_SEED = _ROW_REDUCE_PREFIX + """
+namespace {
+
+template <typename scalar_t>
+__global__ void kore_logsumexp_kernel(const scalar_t* __restrict__ x,
+                                      scalar_t* __restrict__ y, int64_t n_cols) {
+  const int64_t row = blockIdx.x;
+  const scalar_t* xr = x + row * n_cols;
+
+  float local_max = -INFINITY;
+  for (int64_t c = threadIdx.x; c < n_cols; c += KORE_ROW_THREADS) {
+    const float v = static_cast<float>(xr[c]);
+    local_max = v > local_max ? v : local_max;
+  }
+  const float row_max = kore_block_reduce(local_max, KoreMax{});
+
+  float local_sum = 0.0f;
+  for (int64_t c = threadIdx.x; c < n_cols; c += KORE_ROW_THREADS) {
+    local_sum += expf(static_cast<float>(xr[c]) - row_max);
+  }
+  const float row_sum = kore_block_reduce(local_sum, KoreAdd{});
+  if (threadIdx.x == 0) y[row] = static_cast<scalar_t>(row_max + logf(row_sum));
+}
+
+}  // namespace
+
+torch::Tensor forward(torch::Tensor x) {
+  KORE_CHECK_INPUT(x);
+  TORCH_CHECK(x.dim() == 2, "expected a 2-D [rows, cols] tensor");
+  const int64_t rows = x.size(0), cols = x.size(1);
+  torch::Tensor y = torch::empty({rows}, x.options());
+  if (rows == 0 || cols == 0) return y;
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::kHalf, at::kBFloat16, x.scalar_type(), "kore_logsumexp", ([&] {
+        hipLaunchKernelGGL((kore_logsumexp_kernel<scalar_t>),
+                           dim3(static_cast<int>(rows)),
+                           dim3(KORE_ROW_THREADS), 0, kore_stream(),
+                           x.data_ptr<scalar_t>(), y.data_ptr<scalar_t>(), cols);
+      }));
+  return y;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("forward", &forward, "KORE HIP row logsumexp seed");
+}
+"""
+
+_LOG_SOFTMAX_SEED = _ROW_REDUCE_PREFIX + """
+namespace {
+
+template <typename scalar_t>
+__global__ void kore_log_softmax_kernel(const scalar_t* __restrict__ x,
+                                        scalar_t* __restrict__ y,
+                                        int64_t n_cols) {
+  const int64_t row = blockIdx.x;
+  const scalar_t* xr = x + row * n_cols;
+  scalar_t* yr = y + row * n_cols;
+
+  float local_max = -INFINITY;
+  for (int64_t c = threadIdx.x; c < n_cols; c += KORE_ROW_THREADS) {
+    const float v = static_cast<float>(xr[c]);
+    local_max = v > local_max ? v : local_max;
+  }
+  const float row_max = kore_block_reduce(local_max, KoreMax{});
+
+  float local_sum = 0.0f;
+  for (int64_t c = threadIdx.x; c < n_cols; c += KORE_ROW_THREADS) {
+    local_sum += expf(static_cast<float>(xr[c]) - row_max);
+  }
+  const float shift = row_max + logf(kore_block_reduce(local_sum, KoreAdd{}));
+
+  for (int64_t c = threadIdx.x; c < n_cols; c += KORE_ROW_THREADS) {
+    yr[c] = static_cast<scalar_t>(static_cast<float>(xr[c]) - shift);
+  }
+}
+
+}  // namespace
+
+torch::Tensor forward(torch::Tensor x) {
+  KORE_CHECK_INPUT(x);
+  TORCH_CHECK(x.dim() == 2, "expected a 2-D [rows, cols] tensor");
+  torch::Tensor y = torch::empty_like(x);
+  const int64_t rows = x.size(0), cols = x.size(1);
+  if (rows == 0 || cols == 0) return y;
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::kHalf, at::kBFloat16, x.scalar_type(), "kore_log_softmax", ([&] {
+        hipLaunchKernelGGL((kore_log_softmax_kernel<scalar_t>),
+                           dim3(static_cast<int>(rows)),
+                           dim3(KORE_ROW_THREADS), 0, kore_stream(),
+                           x.data_ptr<scalar_t>(), y.data_ptr<scalar_t>(), cols);
+      }));
+  return y;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("forward", &forward, "KORE HIP row log-softmax seed");
+}
+"""
+
+_L2_NORMALIZE_SEED = _ROW_REDUCE_PREFIX + """
+namespace {
+
+template <typename scalar_t>
+__global__ void kore_l2_normalize_kernel(const scalar_t* __restrict__ x,
+                                         scalar_t* __restrict__ y,
+                                         int64_t n_cols, float eps) {
+  const int64_t row = blockIdx.x;
+  const scalar_t* xr = x + row * n_cols;
+  scalar_t* yr = y + row * n_cols;
+
+  float local = 0.0f;
+  for (int64_t c = threadIdx.x; c < n_cols; c += KORE_ROW_THREADS) {
+    const float v = static_cast<float>(xr[c]);
+    local += v * v;
+  }
+  const float norm = sqrtf(kore_block_reduce(local, KoreAdd{}));
+  const float denom = norm > eps ? norm : eps;
+
+  for (int64_t c = threadIdx.x; c < n_cols; c += KORE_ROW_THREADS) {
+    yr[c] = static_cast<scalar_t>(static_cast<float>(xr[c]) / denom);
+  }
+}
+
+}  // namespace
+
+torch::Tensor forward(torch::Tensor x, double eps) {
+  KORE_CHECK_INPUT(x);
+  TORCH_CHECK(x.dim() == 2, "expected a 2-D [rows, cols] tensor");
+  torch::Tensor y = torch::empty_like(x);
+  const int64_t rows = x.size(0), cols = x.size(1);
+  if (rows == 0 || cols == 0) return y;
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::kHalf, at::kBFloat16, x.scalar_type(), "kore_l2_normalize", ([&] {
+        hipLaunchKernelGGL((kore_l2_normalize_kernel<scalar_t>),
+                           dim3(static_cast<int>(rows)),
+                           dim3(KORE_ROW_THREADS), 0, kore_stream(),
+                           x.data_ptr<scalar_t>(), y.data_ptr<scalar_t>(), cols,
+                           static_cast<float>(eps));
+      }));
+  return y;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("forward", &forward, "KORE HIP row L2-normalize seed");
+}
+"""
+
+
+# --------------------------------------------------------------------------- #
 # GEMM seed
 # --------------------------------------------------------------------------- #
 _GEMM_SEED = _PREAMBLE + """
@@ -811,7 +1122,15 @@ class HipOpSpec:
         timing_admissible: bool = True,
         timing_note: str = "",
         dim_multiples: Optional[Mapping[str, int]] = None,
+        baseline_compile: bool = False,
     ) -> None:
+        # A multi-op CHAIN must be graded against the compiler-fused kernel, not
+        # against unfused eager torch.  torch.compile already fuses an elementwise
+        # chain into one kernel, so an eager bar would credit the candidate with
+        # the absence of the compiler -- the same inflation kore.tasks._genops
+        # refuses for its Triton fusion families.  Single-op tasks leave this off:
+        # their torch baseline is already one fused vendor kernel.
+        self.baseline_compile = bool(baseline_compile)
         self.timing_admissible = bool(timing_admissible)
         self.timing_note = timing_note
         # Divisibility the op's own representation requires (MXFP4 needs N % 32 == 0).
@@ -929,6 +1248,26 @@ def _layernorm_baseline(x, w, b, eps):
     return F.layer_norm(x, (x.shape[-1],), weight=w, bias=b, eps=eps)
 
 
+# ---- L2 normalization ---------------------------------------------------- #
+#: ``F.normalize``'s own default floor, so the oracle and the production path
+#: clamp at the same place.
+_L2_EPS = 1.0e-12
+
+
+def _l2_normalize_inputs(shape, dtype, device, seed):
+    return (_randn((shape["M"], shape["N"]), dtype, device, seed), _L2_EPS)
+
+
+def _l2_normalize_oracle(x, eps):
+    xf = x.float()
+    denom = xf.norm(p=2, dim=-1, keepdim=True).clamp_min(eps)
+    return (xf / denom).to(x.dtype)
+
+
+def _l2_normalize_baseline(x, eps):
+    return F.normalize(x, p=2.0, dim=-1, eps=eps)
+
+
 # ---- gemm --------------------------------------------------------------- #
 def _gemm_inputs(shape, dtype, device, seed):
     # K**-0.25 per operand puts the output at unit scale (std = sqrt(K)*s**2), so
@@ -1018,9 +1357,344 @@ def _dequant_mxfp4(packed, e8m0, out_dtype):
     return (values * scale).to(torch_dtype)
 
 
-HIP_OPS: Mapping[str, HipOpSpec] = {
-    spec.op_id: spec
-    for spec in (
+# --------------------------------------------------------------------------- #
+# Breadth families: pointwise, chained pointwise, and collapsing row reductions
+#
+# These are built from the templates above rather than hand-written one at a
+# time.  The point is not to inflate a count: an op only earns a task if it has a
+# torch baseline that is a REAL production path, and every one of them is proven
+# end-to-end on gfx950 by scripts/verify_hip_tasks_e2e.py before it is claimed.
+#
+# The baseline bar differs by op class, and the distinction is the honest part:
+#
+# * A SINGLE torch op (``torch.relu``, ``torch.softmax``, ``vector_norm``) already
+#   lowers to one fused ROCm kernel, so eager torch IS the production bar.
+# * A CHAIN (``relu(a + b)``, ``silu(a) * b``, ``x.pow(2).mean(-1).sqrt()``) runs
+#   as several kernels eagerly, and ``torch.compile`` fuses it into one for free.
+#   Grading against the eager chain would credit a candidate with the absence of
+#   the compiler, so those ops set ``baseline_compile`` and are graded against the
+#   fused kernel.  This is the same rule kore.tasks._genops applies to its Triton
+#   fusion families, for the same reason.
+# --------------------------------------------------------------------------- #
+_INF = float("inf")
+
+
+def _randn_pos(shape, dtype: torch.dtype, device, seed: int):
+    """``|randn| + 0.1``: a strictly positive operand for sqrt/log/reciprocal."""
+    g = torch.Generator(device=device).manual_seed(seed)
+    t = torch.randn(shape, generator=g, device=device, dtype=torch.float32)
+    return (t.abs() + 0.1).to(dtype)
+
+
+def _pos_unary_inputs(shape, dtype, device, seed):
+    return (_randn_pos((shape["M"], shape["N"]), dtype, device, seed),)
+
+
+def _pos_b_binary_inputs(shape, dtype, device, seed):
+    """Signed left operand, strictly positive right operand (for divide)."""
+    return (
+        _randn((shape["M"], shape["N"]), dtype, device, seed),
+        _randn_pos((shape["M"], shape["N"]), dtype, device, seed + 991),
+    )
+
+
+def _ternary_inputs(shape, dtype, device, seed):
+    return tuple(
+        _randn((shape["M"], shape["N"]), dtype, device, seed + offset)
+        for offset in (0, 991, 3121)
+    )
+
+
+def _pointwise_spec(
+    op_id: str,
+    *,
+    seed: str,
+    product_family: str,
+    source_family: str,
+    torch_fn: Callable,
+    description: str,
+    baseline_note: str,
+    make_inputs: Callable,
+    snr_db: float = 35.0,
+    baseline_compile: bool = False,
+) -> HipOpSpec:
+    """One pointwise op whose oracle is ``torch_fn`` evaluated in fp32."""
+    prefix = "torch_compile" if baseline_compile else "torch"
+    return HipOpSpec(
+        op_id,
+        product_family=product_family,
+        source_family=source_family,
+        seed=seed,
+        shape_defaults={"M": 4096, "N": 14336},
+        shapes=_ELEMENTWISE_SHAPES,
+        snr_db=snr_db,
+        baseline_kind=f"{prefix}_{op_id}",
+        baseline_note=baseline_note,
+        make_inputs=make_inputs,
+        oracle=lambda *xs, _f=torch_fn: _f(*[t.float() for t in xs]).to(xs[0].dtype),
+        baseline=torch_fn,
+        description=description,
+        baseline_compile=baseline_compile,
+    )
+
+
+#: ``(op_id, fp32 C++ expression in `v`, torch op, description)``.  The torch op is
+#: BOTH the fp32 oracle and the eager baseline, and every one of them is a single
+#: fused ROCm elementwise kernel -- so the bar is the production path, not a chain.
+_UNARY_ACTIVATIONS: tuple[tuple[str, str, Callable, str], ...] = (
+    ("relu", "fmaxf(v, 0.0f)", torch.relu, "ReLU"),
+    ("relu6", "fminf(fmaxf(v, 0.0f), 6.0f)", F.relu6, "ReLU6 (clamped ReLU)"),
+    ("leaky_relu", "v > 0.0f ? v : 0.01f * v", F.leaky_relu,
+     "leaky ReLU (negative slope 0.01)"),
+    ("elu", "v > 0.0f ? v : expm1f(v)", F.elu, "ELU"),
+    ("selu", "1.0507009873554805f * (v > 0.0f ? v : "
+             "1.6732632423543772f * expm1f(v))", F.selu, "SELU"),
+    ("gelu_erf", "0.5f * v * (1.0f + erff(v * 0.7071067811865476f))",
+     F.gelu, "exact erf-based GELU"),
+    ("gelu_quick", "v / (1.0f + expf(-1.702f * v))",
+     lambda x: x * torch.sigmoid(1.702 * x), "quick GELU (sigmoid approximation)"),
+    ("sigmoid", "1.0f / (1.0f + expf(-v))", torch.sigmoid, "logistic sigmoid"),
+    ("tanh_act", "tanhf(v)", torch.tanh, "hyperbolic tangent"),
+    ("hardsigmoid", "fminf(fmaxf(v / 6.0f + 0.5f, 0.0f), 1.0f)", F.hardsigmoid,
+     "hard sigmoid"),
+    ("hardswish", "v * fminf(fmaxf(v + 3.0f, 0.0f), 6.0f) / 6.0f", F.hardswish,
+     "hard swish"),
+    ("hardtanh", "fminf(fmaxf(v, -1.0f), 1.0f)", F.hardtanh, "hard tanh"),
+    ("softplus", "v > 20.0f ? v : log1pf(expf(v))", F.softplus,
+     "softplus (linear above the torch threshold of 20)"),
+    ("softsign", "v / (1.0f + fabsf(v))", F.softsign, "softsign"),
+    ("mish", "v * tanhf(v > 20.0f ? v : log1pf(expf(v)))", F.mish, "Mish"),
+    ("abs", "fabsf(v)", torch.abs, "absolute value"),
+    ("square", "v * v", torch.square, "elementwise square"),
+    ("exp", "expf(v)", torch.exp, "elementwise exponential"),
+    ("neg", "-v", torch.neg, "elementwise negation"),
+    ("sign", "v > 0.0f ? 1.0f : (v < 0.0f ? -1.0f : 0.0f)", torch.sign,
+     "elementwise sign"),
+)
+
+#: Positive-domain unary ops.  Their inputs are ``|randn| + 0.1`` so the operator
+#: is well defined; the adversarial battery still drives them negative, where both
+#: the oracle and the kernel must produce the SAME NaN/Inf structure.
+_UNARY_POSITIVE: tuple[tuple[str, str, Callable, str], ...] = (
+    ("sqrt", "sqrtf(v)", torch.sqrt, "square root"),
+    ("rsqrt", "rsqrtf(v)", torch.rsqrt, "reciprocal square root"),
+    ("reciprocal", "1.0f / v", torch.reciprocal, "reciprocal"),
+    ("log", "logf(v)", torch.log, "natural logarithm"),
+)
+
+#: Binary arithmetic that torch runs as ONE fused elementwise kernel.
+_BINARY_ARITHMETIC: tuple[tuple[str, str, Callable, str], ...] = (
+    ("add", "x + y", torch.add, "elementwise add"),
+    ("sub", "x - y", torch.sub, "elementwise subtract"),
+    ("mul", "x * y", torch.mul, "elementwise multiply"),
+    ("maximum", "fmaxf(x, y)", torch.maximum, "elementwise maximum"),
+    ("minimum", "fminf(x, y)", torch.minimum, "elementwise minimum"),
+)
+
+#: Gated activations ``act(gate) * value``: two eager kernels, one fused kernel
+#: under torch.compile, and one kernel here.
+_GATED_ACTIVATIONS: tuple[tuple[str, str, Callable, str], ...] = (
+    ("gelu_mul", "0.5f * g * (1.0f + tanhf(0.7978845608028654f * "
+                 "(g + 0.044715f * g * g * g)))",
+     lambda a, b: F.gelu(a, approximate="tanh") * b,
+     "GEGLU gated activation (gelu(gate) * value)"),
+    ("reglu", "fmaxf(g, 0.0f)", lambda a, b: torch.relu(a) * b,
+     "ReGLU gated activation (relu(gate) * value)"),
+    ("sigmoid_mul", "1.0f / (1.0f + expf(-g))",
+     lambda a, b: torch.sigmoid(a) * b,
+     "sigmoid-gated activation (sigmoid(gate) * value)"),
+)
+
+#: Two-operand pointwise CHAINS: several eager kernels, one fused kernel.
+_BINARY_CHAINS: tuple[tuple[str, str, Callable, str], ...] = (
+    ("add_relu", "fmaxf(x + y, 0.0f)", lambda a, b: torch.relu(a + b),
+     "fused add + ReLU"),
+    ("add_gelu", "0.5f * (x + y) * (1.0f + tanhf(0.7978845608028654f * "
+                 "((x + y) + 0.044715f * (x + y) * (x + y) * (x + y))))",
+     lambda a, b: F.gelu(a + b, approximate="tanh"), "fused add + tanh-GELU"),
+    ("add_silu", "(x + y) / (1.0f + expf(-(x + y)))",
+     lambda a, b: F.silu(a + b), "fused add + SiLU"),
+    ("sub_relu", "fmaxf(x - y, 0.0f)", lambda a, b: torch.relu(a - b),
+     "fused subtract + ReLU"),
+    ("mul_relu", "fmaxf(x * y, 0.0f)", lambda a, b: torch.relu(a * b),
+     "fused multiply + ReLU"),
+    ("mul_tanh", "tanhf(x * y)", lambda a, b: torch.tanh(a * b),
+     "fused multiply + tanh"),
+)
+
+#: Three-operand pointwise CHAINS.
+_TERNARY_CHAINS: tuple[tuple[str, str, Callable, str], ...] = (
+    ("fma", "x * y + z", lambda a, b, c: a * b + c, "fused multiply-add"),
+    ("fma_relu", "fmaxf(x * y + z, 0.0f)",
+     lambda a, b, c: torch.relu(a * b + c), "fused multiply-add + ReLU"),
+    ("fma_gelu", "0.5f * (x * y + z) * (1.0f + tanhf(0.7978845608028654f * "
+                 "((x * y + z) + 0.044715f * (x * y + z) * (x * y + z) * "
+                 "(x * y + z))))",
+     lambda a, b, c: F.gelu(a * b + c, approximate="tanh"),
+     "fused multiply-add + tanh-GELU"),
+    ("add_add_relu", "fmaxf(x + y + z, 0.0f)",
+     lambda a, b, c: torch.relu(a + b + c), "fused add + add + ReLU"),
+    ("add_mul", "(x + y) * z", lambda a, b, c: (a + b) * c,
+     "fused add + multiply"),
+    ("add_mul_relu", "fmaxf((x + y) * z, 0.0f)",
+     lambda a, b, c: torch.relu((a + b) * c), "fused add + multiply + ReLU"),
+)
+
+
+def _pointwise_specs() -> list[HipOpSpec]:
+    out: list[HipOpSpec] = []
+    for op_id, expr, fn, text in _UNARY_ACTIVATIONS:
+        out.append(_pointwise_spec(
+            op_id, seed=_ELEMENTWISE_SEED % {"EXPR": expr},
+            product_family="activation", source_family="unary", torch_fn=fn,
+            description=f"{text} activation", make_inputs=_unary_inputs,
+            baseline_note=f"the fused ROCm elementwise kernel behind torch {op_id}"))
+    for op_id, expr, fn, text in _UNARY_POSITIVE:
+        out.append(_pointwise_spec(
+            op_id, seed=_ELEMENTWISE_SEED % {"EXPR": expr},
+            product_family="activation", source_family="unary", torch_fn=fn,
+            description=f"{text} on a positive domain",
+            make_inputs=_pos_unary_inputs,
+            baseline_note=f"the fused ROCm elementwise kernel behind torch {op_id}"))
+    for op_id, expr, fn, text in _BINARY_ARITHMETIC:
+        out.append(_pointwise_spec(
+            op_id, seed=_BINARY_SEED % {"EXPR": expr},
+            product_family="elementwise", source_family="binary", torch_fn=fn,
+            description=text, make_inputs=_gated_inputs,
+            baseline_note=f"the fused ROCm elementwise kernel behind torch {op_id}"))
+    out.append(_pointwise_spec(
+        "div", seed=_BINARY_SEED % {"EXPR": "x / y"},
+        product_family="elementwise", source_family="binary", torch_fn=torch.div,
+        description="elementwise divide", make_inputs=_pos_b_binary_inputs,
+        baseline_note="the fused ROCm elementwise kernel behind torch div"))
+    for op_id, expr, fn, text in _GATED_ACTIVATIONS:
+        out.append(_pointwise_spec(
+            op_id, seed=_GATED_SEED % {"EXPR": expr},
+            product_family="activation", source_family="binary", torch_fn=fn,
+            description=text, make_inputs=_gated_inputs, baseline_compile=True,
+            baseline_note="the COMPILER-FUSED torch chain (two eager kernels "
+                          "fused into one by torch.compile)"))
+    for op_id, expr, fn, text in _BINARY_CHAINS:
+        out.append(_pointwise_spec(
+            op_id, seed=_BINARY_SEED % {"EXPR": expr},
+            product_family="fusion", source_family="fusion", torch_fn=fn,
+            description=text, make_inputs=_gated_inputs, baseline_compile=True,
+            baseline_note="the COMPILER-FUSED torch chain, not the unfused eager "
+                          "chain, so the speedup is not the absence of a compiler"))
+    for op_id, expr, fn, text in _TERNARY_CHAINS:
+        out.append(_pointwise_spec(
+            op_id, seed=_TERNARY_SEED % {"EXPR": expr},
+            product_family="fusion", source_family="fusion", torch_fn=fn,
+            description=text, make_inputs=_ternary_inputs, baseline_compile=True,
+            baseline_note="the COMPILER-FUSED torch chain, not the unfused eager "
+                          "chain, so the speedup is not the absence of a compiler"))
+    return out
+
+
+# ---- collapsing row reductions: [M, N] -> [M] ---------------------------- #
+#: ``(op_id, INIT, COMBINE, REDUCER, POST, torch op, compiled-bar, description)``.
+#: ``vector_norm`` is used wherever it expresses the reduction, because it is ONE
+#: torch kernel where ``x.abs().sum(-1)`` would be two and would flatter the seed.
+_ROW_REDUCTIONS: tuple[tuple, ...] = (
+    ("row_sum", "0.0f", "local + v", "KoreAdd", "total",
+     lambda x: x.sum(-1), False, "row sum"),
+    ("row_mean", "0.0f", "local + v", "KoreAdd", "total / n",
+     lambda x: x.mean(-1), False, "row mean"),
+    ("row_max", "-INFINITY", "fmaxf(local, v)", "KoreMax", "total",
+     lambda x: x.amax(-1), False, "row maximum"),
+    ("row_min", "INFINITY", "fminf(local, v)", "KoreMin", "total",
+     lambda x: x.amin(-1), False, "row minimum"),
+    ("row_l1", "0.0f", "local + fabsf(v)", "KoreAdd", "total",
+     lambda x: torch.linalg.vector_norm(x, ord=1, dim=-1), False,
+     "row L1 norm"),
+    ("row_l2", "0.0f", "local + v * v", "KoreAdd", "sqrtf(total)",
+     lambda x: torch.linalg.vector_norm(x, ord=2, dim=-1), False,
+     "row L2 norm"),
+    ("row_amax_abs", "0.0f", "fmaxf(local, fabsf(v))", "KoreMax", "total",
+     lambda x: torch.linalg.vector_norm(x, ord=_INF, dim=-1), False,
+     "row max-absolute (the per-token quantization scale reduction)"),
+    ("row_rms", "0.0f", "local + v * v", "KoreAdd", "sqrtf(total / n)",
+     lambda x: x.pow(2).mean(-1).sqrt(), True, "row root-mean-square"),
+)
+
+
+def _reduction_specs() -> list[HipOpSpec]:
+    out: list[HipOpSpec] = []
+    for op_id, init, combine, reducer, post, fn, compiled, text in _ROW_REDUCTIONS:
+        prefix = "torch_compile" if compiled else "torch"
+        note = ("the COMPILER-FUSED torch chain (several eager kernels fused "
+                "into one)" if compiled else
+                f"the single fused torch reduction behind {op_id}")
+        out.append(HipOpSpec(
+            op_id,
+            product_family="reduction",
+            source_family="reduce",
+            seed=_ROW_VEC_SEED % {"INIT": init, "COMBINE": combine,
+                                  "REDUCER": reducer, "POST": post},
+            shape_defaults={"M": 8192, "N": 8192},
+            shapes=_ROW_REDUCE_SHAPES,
+            snr_db=30.0,
+            baseline_kind=f"{prefix}_{op_id}",
+            baseline_note=note,
+            make_inputs=_unary_inputs,
+            oracle=lambda x, _f=fn: _f(x.float()).to(x.dtype),
+            baseline=fn,
+            description=text,
+            baseline_compile=compiled,
+        ))
+    out.append(HipOpSpec(
+        "row_logsumexp",
+        product_family="reduction",
+        source_family="reduce",
+        seed=_LOGSUMEXP_SEED,
+        shape_defaults={"M": 8192, "N": 8192},
+        shapes=_ROW_REDUCE_SHAPES,
+        snr_db=30.0,
+        baseline_kind="torch_logsumexp",
+        baseline_note="torch.logsumexp(dim=-1), one fused vendor reduction",
+        make_inputs=_unary_inputs,
+        oracle=lambda x: torch.logsumexp(x.float(), dim=-1).to(x.dtype),
+        baseline=lambda x: torch.logsumexp(x, dim=-1),
+        description="numerically-stable row logsumexp",
+    ))
+    out.append(HipOpSpec(
+        "log_softmax_rows",
+        product_family="reduction",
+        source_family="reduce",
+        seed=_LOG_SOFTMAX_SEED,
+        shape_defaults={"M": 8192, "N": 8192},
+        shapes=_ROW_REDUCE_SHAPES,
+        snr_db=30.0,
+        baseline_kind="torch_log_softmax",
+        baseline_note="torch.log_softmax(dim=-1), the vendor fused log-softmax",
+        make_inputs=_unary_inputs,
+        oracle=lambda x: torch.log_softmax(x.float(), dim=-1).to(x.dtype),
+        baseline=lambda x: torch.log_softmax(x, dim=-1),
+        description="numerically-stable row log-softmax",
+    ))
+    out.append(HipOpSpec(
+        "l2_normalize",
+        product_family="normalization",
+        source_family="reduce",
+        seed=_L2_NORMALIZE_SEED,
+        shape_defaults={"M": 8192, "N": 8192},
+        shapes=_ROW_REDUCE_SHAPES,
+        snr_db=30.0,
+        baseline_kind="torch_compile_l2_normalize",
+        baseline_note=("the COMPILER-FUSED F.normalize chain (norm, clamp, "
+                       "divide), not the unfused eager chain"),
+        make_inputs=_l2_normalize_inputs,
+        oracle=_l2_normalize_oracle,
+        baseline=_l2_normalize_baseline,
+        description="row L2 normalization (F.normalize along the last axis)",
+        baseline_compile=True,
+    ))
+    return out
+
+
+def _core_specs() -> tuple[HipOpSpec, ...]:
+    """The hand-written operators: one bespoke seed each, no shared template."""
+    return (
         HipOpSpec(
             "gelu_tanh",
             product_family="activation",
@@ -1062,12 +1736,16 @@ HIP_OPS: Mapping[str, HipOpSpec] = {
             shape_defaults={"M": 4096, "N": 14336},
             shapes=_ELEMENTWISE_SHAPES,
             snr_db=35.0,
-            baseline_kind="torch_silu_mul",
-            baseline_note="F.silu(gate) * value, two fused ROCm elementwise kernels",
+            baseline_kind="torch_compile_silu_mul",
+            baseline_note=("the COMPILER-FUSED F.silu(gate) * value chain, which "
+                           "torch.compile emits as ONE kernel; the earlier eager "
+                           "two-kernel bar credited the seed with the absence of "
+                           "the compiler"),
             make_inputs=_gated_inputs,
             oracle=_silu_mul_oracle,
             baseline=_silu_mul_baseline,
             description="SwiGLU gated activation (silu(gate) * value)",
+            baseline_compile=True,
         ),
         HipOpSpec(
             "softmax_rows",
@@ -1185,7 +1863,24 @@ HIP_OPS: Mapping[str, HipOpSpec] = {
             description=f"MXFP4 dequantization ({MXFP4_NOTE})",
         ),
     )
-}
+
+
+def _all_specs() -> tuple[HipOpSpec, ...]:
+    """Every HIP operator, with a fail-closed check for a duplicated id.
+
+    A duplicate would silently shadow one operator with another's seed and
+    oracle, which is a wrong-answer task rather than a missing one.
+    """
+    specs = (*_core_specs(), *_pointwise_specs(), *_reduction_specs())
+    seen: dict[str, HipOpSpec] = {}
+    for spec in specs:
+        if spec.op_id in seen:
+            raise ValueError(f"duplicate HIP operator id {spec.op_id!r}")
+        seen[spec.op_id] = spec
+    return specs
+
+
+HIP_OPS: Mapping[str, HipOpSpec] = {spec.op_id: spec for spec in _all_specs()}
 
 
 def seed_source(op_id: str) -> str:
@@ -1210,6 +1905,14 @@ def make_reference(op_id: str, dtype_id: str) -> dict:
     def get_inputs(shape: dict, device="cuda", seed: int = 0, dtype=None):
         return spec.make_inputs(shape, dtype or torch_dtype, device, seed)
 
+    baseline_fn = spec.baseline
+    if spec.baseline_compile:
+        # Reuses _genops' cache and its documented degrade-to-eager behaviour, so
+        # a torch.compile failure costs the honest bar but never the episode.
+        from kore.tasks._genops import _fused_baseline  # noqa: PLC0415 - lazy
+
+        baseline_fn = _fused_baseline(spec.baseline, f"hip:{op_id}:{dtype_id}")
+
     return {
         # The candidate ABI: a .hip file binding `forward` through
         # PYBIND11_MODULE(TORCH_EXTENSION_NAME, m).
@@ -1220,7 +1923,7 @@ def make_reference(op_id: str, dtype_id: str) -> dict:
         "parse_shape": _parse_shape_factory(spec.shape_defaults),
         "get_inputs": get_inputs,
         "ref_fn": spec.oracle,
-        "baseline_fn": spec.baseline,
+        "baseline_fn": baseline_fn,
         "dtype_id": dtype_id,
         "op_id": op_id,
     }

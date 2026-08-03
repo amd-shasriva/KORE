@@ -595,6 +595,13 @@ def _set_stop(stop_event, result, lock, reason: str) -> None:
     stop_event.set()
 
 
+#: Minimum seconds between two attempts to load the external pool. ``load_pool()``
+#: costs ~60s for 13.5k tasks, so an uncooled retry on every unknown id would burn
+#: the node; a cooldown makes a transient empty pool self-heal within a minute
+#: while a genuinely unknown id still costs at most one load per interval.
+POOL_RELOAD_COOLDOWN_SECONDS = 60.0
+
+
 def _import_get_task():
     """Resolve a task id against the registry first, then the external pool.
 
@@ -607,42 +614,91 @@ def _import_get_task():
 
     Registry first, so its entries keep precedence: they carry the authoritative
     train/held-out split, and a pool id shadowing one could pull a held-out task
-    into training. The pool is loaded lazily and cached, so a registry-only
-    campaign never pays to read it.
+    into training. The pool is loaded lazily, so a registry-only campaign never
+    pays to read it.
+
+    A LOAD IS CACHED ONLY WHEN IT SUCCEEDED. The previous revision set its
+    "loaded" flag in a ``finally``, so a load that raised -- or, worse, one that
+    returned nothing because ``data/task_pool/tasks/`` was still being
+    materialized -- was remembered as authoritative for the life of the process.
+    That is how the overnight campaign lost 4,352 episodes (28% of everything it
+    attempted): the shard started at 03:54, the pool finished materializing at
+    04:20, and every pool task the node touched in between raised the original
+    ``KeyError`` in 2 ms. All 871 affected task ids ran fine later in the same
+    campaign, which is the proof that the tasks were never the problem -- the
+    cached negative was. An empty or short pool is now a RETRYABLE condition,
+    rate-limited by :data:`POOL_RELOAD_COOLDOWN_SECONDS` and reported every time,
+    and a pool smaller than its own index is named as incomplete rather than
+    silently accepted.
     """
     from kore.tasks.registry import get_task as _registry_get_task
 
     pool: dict = {}
-    pool_loaded = [False]
-    # load_pool() takes ~60s for 13.5k tasks. A flag set before the load meant
-    # every other worker saw "loaded" and raced past into an empty dict: with 32
-    # workers the first ~870 episodes all failed with the original KeyError,
-    # then succeeded once the load finished. Fast failures, so the throughput
-    # counter read 28,000 episodes/hour while producing nothing. The lock makes
-    # concurrent callers wait for the load instead of skipping it.
+    # ``complete`` is the only state that stops further loads. Anything else --
+    # raised, empty, or fewer tasks than the index declares -- leaves the door
+    # open, because all three are conditions a later attempt can fix.
+    state = {"complete": False, "last_attempt": float("-inf"), "attempts": 0}
+    # Concurrent callers must WAIT for an in-flight load rather than skip past
+    # it: with 32 workers, a flag set before the load let everyone else race into
+    # an empty dict, so the first ~870 episodes failed with the original KeyError
+    # and then succeeded once the load finished. Fast failures, so the throughput
+    # counter read 28,000 episodes/hour while producing nothing.
     pool_lock = threading.Lock()
+
+    def _expected_pool_size() -> Optional[int]:
+        """How many tasks the pool INDEX declares, if it can be read.
+
+        The index (``pool.jsonl``) is written before the task directories are
+        materialized, so comparing against it is what distinguishes "the pool is
+        fully on disk" from "the pool is still being written".
+        """
+        try:
+            from kore.tasks.external import load_pool_specs
+
+            return len(load_pool_specs())
+        except Exception:  # noqa: BLE001 - no index is not an error, just no bound
+            return None
+
+    def _load_pool_once() -> None:
+        from kore.tasks.external import load_pool
+
+        state["last_attempt"] = time.monotonic()
+        state["attempts"] += 1
+        try:
+            loaded = {t.task_id: t for t in load_pool()}
+        except Exception as exc:  # noqa: BLE001 - report and leave it retryable
+            # Reporting matters: silently swallowing this is how a pool that
+            # never loaded looked like an ordinary unknown-task KeyError on
+            # every single episode.
+            log.warn("task_pool_load_failed", attempt=state["attempts"],
+                     error=f"{type(exc).__name__}: {exc}")
+            return
+        pool.update(loaded)
+        expected = _expected_pool_size()
+        if not pool:
+            log.warn("task_pool_empty", attempt=state["attempts"],
+                     expected=expected,
+                     reason="no materialized task dirs; will retry")
+            return
+        if expected is not None and len(pool) < expected:
+            log.warn("task_pool_incomplete", attempt=state["attempts"],
+                     loaded=len(pool), expected=expected,
+                     reason="index declares more tasks than are materialized; "
+                            "will retry")
+            return
+        state["complete"] = True
+        log.event("task_pool_loaded", n=len(pool), expected=expected,
+                  attempts=state["attempts"])
 
     def resolve(task_id: str):
         try:
             return _registry_get_task(task_id)
         except KeyError:
             with pool_lock:
-                if not pool_loaded[0]:
-                    try:
-                        from kore.tasks.external import load_pool
-
-                        pool.update({t.task_id: t for t in load_pool()})
-                        log.event("task_pool_loaded", n=len(pool))
-                    except Exception as exc:  # noqa: BLE001 - report, then re-raise
-                        # Reporting matters: silently swallowing this is how a
-                        # pool that never loaded looked like an ordinary
-                        # unknown-task KeyError on every single episode.
-                        log.event("task_pool_load_failed",
-                                  error=f"{type(exc).__name__}: {exc}")
-                    finally:
-                        # Set only AFTER the attempt, so no one skips a load
-                        # that has not happened yet.
-                        pool_loaded[0] = True
+                stale = (time.monotonic() - state["last_attempt"]
+                         >= POOL_RELOAD_COOLDOWN_SECONDS)
+                if task_id not in pool and not state["complete"] and stale:
+                    _load_pool_once()
             task = pool.get(task_id)
             if task is None:
                 raise

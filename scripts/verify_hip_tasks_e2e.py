@@ -32,6 +32,13 @@ def _main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--tasks", default="", help="comma-separated task ids")
     parser.add_argument("--backend", default="hip", help="filter the registry by backend")
     parser.add_argument("--gpu", default=None, help="physical GPU index")
+    parser.add_argument(
+        "--shard", default="",
+        help="'i/n': evaluate shard i of n. Sharding is by OPERATION, never by "
+             "task: a seed's build directory is content-addressed, and the "
+             "dtype variants of one operation share a seed byte-for-byte, so "
+             "splitting them across processes would put two builders in one "
+             "directory.")
     parser.add_argument("--json", default="", help="write the report here")
     parser.add_argument("--no-bench", action="store_true",
                         help="correctness only (skip the timed protocol)")
@@ -55,6 +62,16 @@ def _main(argv: Optional[list[str]] = None) -> int:
     else:
         tasks = [t for t in all_tasks() if t.backend == args.backend]
     tasks.sort(key=lambda t: t.task_id)
+    if args.shard:
+        index, _, count = args.shard.partition("/")
+        index, count = int(index), int(count)
+        if not 0 <= index < count:
+            print(f"bad --shard {args.shard!r}: need 0 <= i < n")
+            return 1
+        operations = sorted({t.operation for t in tasks})
+        mine = {op for i, op in enumerate(operations) if i % count == index}
+        tasks = [t for t in tasks if t.operation in mine]
+        print(f"shard {index}/{count}: {len(mine)} operation(s), {len(tasks)} task(s)")
     if not tasks:
         print(f"no tasks with backend={args.backend!r}")
         return 1

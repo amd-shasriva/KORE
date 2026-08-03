@@ -17,24 +17,27 @@ from kore.tasks import registry, taxonomy
 from kore.tasks.base import Task
 
 
-# Includes the 20-task HIP C++ family (kore/tasks/generate_hip.py): +9 activation
-# (gelu_tanh/silu/silu_mul x 3 dtypes), +6 normalization (layernorm/rmsnorm x 3),
-# +3 reduction (softmax_rows x 3), +2 quantization (per-token fp8, MXFP4 dequant).
+# Includes the 188-task HIP C++ family (kore/tasks/generate_hip.py), every one of
+# which is proven end-to-end on gfx950 before it is claimed -- see
+# data/hip_task_verification.json. Its 188 tasks sit in six families: activation
+# 90, fusion 36, reduction 33, elementwise 18, normalization 9, quantization 2.
+# ``gemm`` contributes nothing: hip_gemm is defined and verified but is not
+# timing-admissible on this host, so the generator does not materialize it.
 EXPECTED_PRODUCT_COUNTS = {
-    "activation": 94,
+    "activation": 175,
     "attention": 147,
     "convolution": 120,
     "data_movement": 2,
-    "elementwise": 24,
-    "fusion": 103,
+    "elementwise": 42,
+    "fusion": 139,
     "gemm": 95,
     "mla": 1,
     "moe": 89,
-    "normalization": 108,
+    "normalization": 111,
     "paged_attention": 1,
     "positional": 7,
     "quantization": 35,
-    "reduction": 166,
+    "reduction": 196,
     "sampling": 84,
     "sequence": 94,
     "sparse": 16,
@@ -48,7 +51,7 @@ EXPECTED_PRODUCT_COUNTS = {
 # split manifest frozen before the HIP tasks existed does not describe this
 # registry and must be re-frozen rather than reused.
 EXPECTED_TAXONOMY_DIGEST = (
-    "dcb8653ff64f7aed3cd33fd9d837793cf30245e004aa94b80718318ccd744034"
+    "92e5acc60631afae19ef209cdd167a937fe196f698f0e87d7f478f171dbeebf5"
 )
 CONTAMINATED_HELDOUT_TASKS = frozenset({
     "genb_cv_conv2d_1x1_s2_fp16",
@@ -67,8 +70,8 @@ CONTAMINATED_HELDOUT_TASKS = frozenset({
 
 def test_whole_registry_has_complete_stable_classification():
     tasks = registry.all_tasks()
-    # 1,334 Triton + 20 HIP C++ (kore/tasks/generate_hip.py).
-    assert len(tasks) == 1_354
+    # 1,334 Triton + 188 HIP C++ (kore/tasks/generate_hip.py).
+    assert len(tasks) == 1_522
     counts = Counter(registry.operator_family(task) for task in tasks)
     assert dict(sorted(counts.items())) == EXPECTED_PRODUCT_COUNTS
     assert set(counts) == set(taxonomy.PRODUCT_FAMILIES)
@@ -138,7 +141,10 @@ def test_attention_precedence_and_task_level_near_probes():
 
 def test_split_manifest_is_immutable_complete_and_lineage_disjoint():
     manifest = registry.build_split_manifest()
-    assert len(manifest.train_ids) == 1_309
+    # The HIP family is 188 trainable tasks (168 more than the 20 it started as);
+    # the held-out reservation is untouched by them, because every HIP task is a
+    # new identity with its own provenance root.
+    assert len(manifest.train_ids) == 1_477
     assert len(manifest.eval_ids) == 45
     # Contaminated tasks stay in the held-out reservation and leave only the
     # zero-shot claim: 45 held out, 34 of them still scoreable.

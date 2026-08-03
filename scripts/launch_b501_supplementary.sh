@@ -10,6 +10,14 @@
 # One shard per GPU, and only GPUs with the card genuinely free -- the other four
 # on this host hold idle root-owned sglang/vLLM servers that still occupy 83-90%
 # of VRAM, and run_agentic_shard's --min-free-gb refuses them anyway.
+#
+# Deliberately NOT --keep-only-useful. That flag keeps the SFT-quality subset and
+# discards every episode that never reached correctness, which is the wrong trade
+# for exactly this task set. These are the hardest tasks we have, so a failure
+# here is the most informative record we can produce: SFT on a teacher's
+# successes can at best reach that teacher, and the tasks the teacher CANNOT
+# solve are the only ones where RL has room to exceed it. Dropping them would
+# throw away the RL curriculum to save disk.
 set -uo pipefail
 
 REPO="${KORE_REPO:-/home/shasriva/Kore-RL/KORE}"
@@ -35,7 +43,6 @@ for g in $GPUS; do
     --max-turns 8 \
     --gpu-ids "$g" \
     --teacher claude \
-    --keep-only-useful \
     > "/tmp/supp_shard$i.log" 2>&1 < /dev/null &
   disown
   echo "launched shard $i on gpu $g (workers=$WORKERS episodes=$EPISODES)"

@@ -1,0 +1,82 @@
+{
+  "task": "gen_add_bf16",
+  "gpu_arch": "gfx950:sramecc+:xnack-",
+  "elapsed_s": 283.8,
+  "generations": [
+    {
+      "generation": 1,
+      "proposals": 3,
+      "screened": 3,
+      "admitted": 2,
+      "best_speedup": 0.9453476630602243,
+      "niches": 3,
+      "forced_explore": false
+    },
+    {
+      "generation": 2,
+      "proposals": 4,
+      "screened": 4,
+      "admitted": 3,
+      "best_speedup": 0.9453476630602243,
+      "niches": 4,
+      "forced_explore": false
+    },
+    {
+      "generation": 3,
+      "proposals": 4,
+      "screened": 0,
+      "admitted": 0,
+      "best_speedup": 0.9453476630602243,
+      "niches": 4,
+      "forced_explore": false
+    },
+    {
+      "generation": 4,
+      "proposals": 3,
+      "screened": 0,
+      "admitted": 0,
+      "best_speedup": 0.9453476630602243,
+      "niches": 4,
+      "forced_explore": false
+    }
+  ],
+  "best_speedup_lcb": 0.9453476630602243,
+  "best_speedup_mean": 0.9462927993144918,
+  "archive_size": 4,
+  "distinct_niches": 4,
+  "admissible_members": 4,
+  "measured_members": 4,
+  "members": [
+    {
+      "admissible": true,
+      "n": 2,
+      "lcb": 0.7178159315311816,
+      "mean": 0.7186364140097652,
+      "correct": true
+    },
+    {
+      "admissible": true,
+      "n": 2,
+      "lcb": 0.915606304853112,
+      "mean": 0.9195312379151246,
+      "correct": true
+    },
+    {
+      "admissible": true,
+      "n": 2,
+      "lcb": 0.9453476630602243,
+      "mean": 0.9462927993144918,
+      "correct": true
+    },
+    {
+      "admissible": true,
+      "n": 2,
+      "lcb": 0.9232976456000301,
+      "mean": 0.9236419329719092,
+      "correct": true
+    }
+  ],
+  "detuned_control": 0.5557,
+  "env_calls": 24,
+  "failures": []
+}

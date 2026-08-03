@@ -865,12 +865,22 @@ class StableEvaluator:
                 trial.env_calls += 1
                 if obs.flagged_hack and trial.hack_reason is None:
                     trial.hack_reason = obs.hack_reason or "flagged_hack"
-                if not result.correct or result.speedup is None:
+                if not result.correct:
                     # A kernel that verified once and not again is unstable, not
                     # fast; record it and stop measuring rather than average it
                     # with the run that passed.
                     trial.correct = False
                     trial.error_text = obs.error_text or "unstable correctness"
+                    return None
+                if result.speedup is None:
+                    # Correct, but this sample produced no timing. That is a
+                    # MEASUREMENT failure, not a wrong kernel, and condemning the
+                    # trial for it throws away a good design because the node was
+                    # busy. Observed on gfx950 under contention: eight kernels the
+                    # env reported compiled=True correct=True were all recorded as
+                    # 'incorrect' once cv_pct rose past ~10%, which is also why the
+                    # verdict histogram's 'unmeasured' bucket never fired. Skip the
+                    # sample and let the evaluator decide on the ones it did get.
                     return None
                 value = float(result.speedup)
                 if value > self.credible_max:

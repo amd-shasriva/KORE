@@ -1031,6 +1031,15 @@ def _row(
     }
 
 
+def _upper1(text: str) -> str:
+    """Capitalise the first character only.
+
+    str.capitalize() lowercases the remainder, which turned "undocumented in the
+    CDNA ISA" into "cdna isa" in every row that opened with a paper claim.
+    """
+    return text[:1].upper() + text[1:]
+
+
 def _plural(n: int, one: str, many: str) -> str:
     return f"{n} {one}" if n == 1 else f"{n} {many}"
 
@@ -1169,7 +1178,7 @@ def rows_lds_hardware_model(
             f"{len(by_name['ds_read_b128'].phases)} of "
             f"{by_name['ds_read_b128'].lanes_per_phase}; the layout must be re-derived, "
             "not merely reused.\n\n"
-            f"{PAPER_CLAIMS['swizzle_undocumented'][0].capitalize()} "
+            f"{_upper1(PAPER_CLAIMS['swizzle_undocumented'][0])} "
             f"({PAPER_CLAIMS['swizzle_undocumented'][1]}), which is why these numbers "
             "come from a measurement harness rather than a manual.\n\n"
             f"_Measured by the HipKittens authors under "
@@ -1322,7 +1331,7 @@ def rows_swizzle(
             "bf16 tile needs **two** XOR terms because one XOR toggles one address bit "
             "pattern and this tile has more than one colliding stride to break.\n\n"
             "**So the operational rule is: derive per layout, never transplant.** "
-            f"{PAPER_CLAIMS['swizzle_undocumented'][0].capitalize()} "
+            f"{_upper1(PAPER_CLAIMS['swizzle_undocumented'][0])} "
             f"({PAPER_CLAIMS['swizzle_undocumented'][1]}), so the only reliable procedure "
             "is to enumerate which lanes share a conflict phase for the access width you "
             "are using, compute their banks under a candidate permutation, and check the "
@@ -1645,10 +1654,10 @@ def rows_schedule_selection(
         "is expensive: on the order of 200 lines, because you are hand-scheduling the "
         "instruction mix. So reach for ping-pong first and only pay for interleave when "
         "the imbalance is real.\n\n"
-        f"{PAPER_CLAIMS['ping_pong_sufficient'][0].capitalize()} "
+        f"{_upper1(PAPER_CLAIMS['ping_pong_sufficient'][0])} "
         f"({PAPER_CLAIMS['ping_pong_sufficient'][1]}).\n\n"
         "## Why not wave specialization\n\n"
-        f"Because on CDNA it loses. {PAPER_CLAIMS['wave_spec_underperforms'][0].capitalize()} "
+        f"Because on CDNA it loses. {_upper1(PAPER_CLAIMS['wave_spec_underperforms'][0])} "
         f"({PAPER_CLAIMS['wave_spec_underperforms'][1]}).\n\n"
         "The structural reasons are worth knowing, because they are properties of the "
         "chip and not of the code:\n\n"
@@ -2175,7 +2184,7 @@ def _baseline_lesson(workload: str, ms: list[Measurement]) -> str:
         "The generalizable rule: measure against the *strongest* available baseline for "
         "your shape, not against eager PyTorch. A 5x over eager can still be a loss "
         "against AITER, and only one of those numbers tells you whether the kernel is "
-        f"good. {PAPER_CLAIMS['uncovered_workloads'][0].capitalize()} "
+        f"good. {_upper1(PAPER_CLAIMS['uncovered_workloads'][0])} "
         f"({PAPER_CLAIMS['uncovered_workloads'][1]}) -- the headroom is concentrated in "
         "the shapes and fusions the vendor kernels do not cover, which is also where "
         f"{PAPER_CLAIMS['bwd_gap'][0]} ({PAPER_CLAIMS['bwd_gap'][1]})."
@@ -2285,7 +2294,7 @@ def rows_naive_vs_hk(
         "results.\n\n"
         "### What NOT to do\n\n"
         "Do not reach for NVIDIA-style wave specialization with dedicated producer waves. "
-        f"{PAPER_CLAIMS['wave_spec_underperforms'][0].capitalize()} "
+        f"{_upper1(PAPER_CLAIMS['wave_spec_underperforms'][0])} "
         f"({PAPER_CLAIMS['wave_spec_underperforms'][1]}): a CDNA producer wave issues "
         "ordinary vector-memory instructions rather than driving a copy engine, so it "
         "competes for the same issue slots while still consuming a SIMD slot and its share "

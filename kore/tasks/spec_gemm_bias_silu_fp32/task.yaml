@@ -1,0 +1,49 @@
+{
+  "backend": "triton",
+  "baseline_tier": "gemm_fusion",
+  "dtype": "fp32",
+  "gpu_target": "gfx950",
+  "minted": true,
+  "op_family": "gemm_fusion",
+  "operation": "gemm_bias_silu",
+  "provenance_root": "spec_gemm_bias_silu_fp32",
+  "seed_kernel_name": "seed_triton.py",
+  "shapes": {
+    "minimal": {
+      "K": 256,
+      "M": 64,
+      "N": 256
+    },
+    "primary": {
+      "K": 4096,
+      "M": 512,
+      "N": 4096
+    },
+    "validation": [
+      {
+        "K": 2048,
+        "M": 1024,
+        "N": 2048
+      },
+      {
+        "K": 4096,
+        "M": 256,
+        "N": 14336
+      },
+      {
+        "K": 4095,
+        "M": 512,
+        "N": 4096
+      }
+    ]
+  },
+  "snr_threshold": 40.0,
+  "spec_file": "spec.md",
+  "targets": {
+    "comparison_baseline": "torch_gemm_bias_silu",
+    "snr_db": 40.0
+  },
+  "task_id": "spec_gemm_bias_silu_fp32",
+  "task_kind": "spec_synthesis",
+  "taxonomy_family": "gemm"
+}

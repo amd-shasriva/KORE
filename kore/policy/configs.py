@@ -271,6 +271,22 @@ class GRPOConfig(DistributedMixin):
     clip_ratio_low: float = 0.03           # GSPO sequence-ratio lower bound (was 0.2, inert)
     clip_ratio_high: float = 0.04          # asymmetric clip-higher, sequence scale
     adv_eps: float = 1e-6                  # group-normalization epsilon
+    # Dual-clip PPO (Ye et al. 2020). The clipped surrogate is bounded ABOVE for a
+    # positive advantage but not bounded BELOW for a negative one: as the ratio
+    # grows, r*A -> -inf and one sample can own the whole gradient. dual_clip_c > 1
+    # floors the surrogate at c*A where A < 0. 0.0 (or <= 1.0) disables it and
+    # reproduces clip_higher_ratio exactly. Cheap insurance whose only cost is that
+    # a very off-policy negative sample stops contributing more than c*A.
+    dual_clip_c: float = 3.0
+    # Rollout/training mismatch correction (truncated importance sampling). The
+    # sharded loop generates on a plain full-weight replica and trains through the
+    # FSDP wrapper, so the two evaluate the same weights on different code paths.
+    # With ppo_epochs=1 the measured weight sits within about a percent of 1.0, so
+    # this is defense-in-depth AND a diagnostic: a weight far from 1.0 is a bug
+    # report about rollout/training divergence, not something to correct away. Off
+    # by default so the shipped recipe does not claim a correction it does not need.
+    mismatch_correction: bool = False
+    mismatch_weight_cap: float = 2.0       # truncation bound on pi_train/pi_rollout
     ppo_epochs: int = 1                    # on-policy (was 2): sequence-ratio clip can't
                                            # safely protect a 2nd off-policy epoch uncalibrated
     # DAPO Overlong Filtering: a response within overlong_buffer_len tokens of the

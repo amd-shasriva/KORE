@@ -102,11 +102,70 @@ def build_assistant_masked_template(template: str) -> str:
         1,
     )
     if t == before or "{% generation %}" not in t or "{% endgeneration %}" not in t:
+        t = _inject_qwen3_coder_markers(template)
+    if t is None or "{% generation %}" not in t or "{% endgeneration %}" not in t:
         raise ValueError(
             "build_assistant_masked_template: could not inject generation markers - "
-            "the chat template does not match the expected Qwen3 assistant branch. "
-            "Set assistant_only_loss=False or supply a generation-tagged template."
+            "the chat template does not match the expected Qwen3 or Qwen3-Coder "
+            "assistant branch. Set assistant_only_loss=False or supply a "
+            "generation-tagged template."
         )
+    return t
+
+
+def _inject_qwen3_coder_markers(template: str):
+    """Generation markers for the Qwen3-Coder template, which is a different shape.
+
+    Qwen3-Coder emits assistant turns from TWO sites, and the second is shared:
+
+        {%- if message.role == "assistant" and message.tool_calls ... %}   <- tool calls
+        {%- elif message.role == "user" or message.role == "system"
+                 or message.role == "assistant" %}                        <- everything else
+
+    Wrapping that shared branch would mark user and system tokens as generated
+    and train the model on its own prompts, so the branch is split first: a
+    dedicated assistant arm is inserted ahead of it, emitting byte-identical
+    text, and only that arm is wrapped. As in the Qwen3 path the
+    ``<|im_start|>assistant\\n`` header stays OUTSIDE the span -- it is a prompt
+    the model is given, not something it produced.
+
+    Render-preserving by construction, and ``_verify_assistant_masking`` proves
+    it: every branch emits exactly the characters it emitted before.
+    Returns ``None`` if the anchors are absent, so the caller can fail loudly.
+    """
+    tool_open = (
+        '        {{- \'<|im_start|>\' + message.role }}\n'
+        '        {%- if message.content is defined'
+    )
+    shared_branch = (
+        '        {{- \'<|im_end|>\\n\' }}\n'
+        '    {%- elif message.role == "user" or message.role == "system"'
+        ' or message.role == "assistant" %}\n'
+        '        {{- \'<|im_start|>\' + message.role + \'\\n\' + message.content'
+        ' + \'<|im_end|>\' + \'\\n\' }}'
+    )
+    if tool_open not in template or shared_branch not in template:
+        return None
+
+    t = template.replace(
+        tool_open,
+        '        {{- \'<|im_start|>\' + message.role }}{% generation %}\n'
+        '        {%- if message.content is defined',
+        1,
+    )
+    t = t.replace(
+        shared_branch,
+        # close the tool-call span, then split assistant out of the shared arm
+        '        {{- \'<|im_end|>\\n\' }}{% endgeneration %}\n'
+        '    {%- elif message.role == "assistant" %}\n'
+        '        {{- \'<|im_start|>\' + message.role + \'\\n\' }}'
+        '{% generation %}{{- message.content + \'<|im_end|>\' + \'\\n\' }}'
+        '{% endgeneration %}\n'
+        '    {%- elif message.role == "user" or message.role == "system" %}\n'
+        '        {{- \'<|im_start|>\' + message.role + \'\\n\' + message.content'
+        ' + \'<|im_end|>\' + \'\\n\' }}',
+        1,
+    )
     return t
 
 

@@ -66,7 +66,7 @@ def parse_args(argv=None):
                         help="task dtype; the oracle is fp32 regardless")
     parser.add_argument("--workers", type=int, default=0,
                         help="screening processes (0 = os.cpu_count())")
-    parser.add_argument("--timeout", type=int, default=20,
+    parser.add_argument("--timeout", type=int, default=8,
                         help="per-forward wall-clock budget, seconds")
     parser.add_argument("--materialize", action="store_true",
                         help="also write the task dirs, not just the index")
@@ -172,47 +172,99 @@ def load_benchmark_references(allow_missing: bool):
 # Screening
 # --------------------------------------------------------------------------- #
 _SCREEN_DTYPE = "fp32"
-_SCREEN_TIMEOUT = 20
+_SCREEN_TIMEOUT = 8
+
+#: Address-space ceiling for a screening worker. Mined modules allocate whatever
+#: their author wrote, and an unbounded allocation gets the worker killed by the
+#: OOM reaper -- which Python cannot catch, so it takes the whole pool down. A
+#: hard rlimit turns that same allocation into a MemoryError the worker reports
+#: as an ordinary drop.
+WORKER_ADDRESS_SPACE_BYTES = 8 * 1024 ** 3
 
 
 def _init_worker(dtype: str, timeout: int) -> None:
     global _SCREEN_DTYPE, _SCREEN_TIMEOUT
     _SCREEN_DTYPE, _SCREEN_TIMEOUT = dtype, timeout
+    import warnings
+
+    warnings.filterwarnings("ignore")
     import torch
 
+    # One thread per worker: the pool is already saturating the node, and nested
+    # threading turns a 64-way pool into heavy oversubscription.
     torch.set_num_threads(1)
+    try:
+        import resource
+
+        resource.setrlimit(
+            resource.RLIMIT_AS,
+            (WORKER_ADDRESS_SPACE_BYTES, WORKER_ADDRESS_SPACE_BYTES),
+        )
+    except Exception:  # noqa: BLE001 - platform without rlimit; timeouts still apply
+        pass
 
 
-def _screen_one(candidate):
+def _screen_one(item):
     from kore.data.task_mining import Outcome, screen_candidate
 
+    index, candidate = item
     try:
-        return screen_candidate(candidate, _SCREEN_DTYPE, _SCREEN_TIMEOUT)
+        return index, screen_candidate(candidate, _SCREEN_DTYPE, _SCREEN_TIMEOUT)
     except BaseException as exc:  # noqa: BLE001 - a worker must never die silently
-        return Outcome(candidate, False, "execution_failed",
-                       f"{type(exc).__name__}: {exc}")
+        return index, Outcome(candidate, False, "execution_failed",
+                              f"{type(exc).__name__}: {exc}")
 
 
 def screen_all(candidates, dtype: str, workers: int, timeout: int):
-    """Run the pure gates across a process pool, preserving input order."""
-    from kore.data.task_mining import screen_candidate
+    """Run the pure gates across a process pool, preserving input order.
+
+    Resilient to a worker dying outright. A mined module can still take a worker
+    down below Python (a native crash in a torch kernel), which breaks the whole
+    executor and fails every in-flight future. Rather than losing the run, each
+    round keeps whatever completed, rebuilds the pool for the remainder, and --
+    when a round completes nothing at all -- blames the head candidate and
+    records it as a crash, which guarantees progress.
+    """
+    from kore.data.task_mining import Outcome, screen_candidate
 
     if workers <= 1:
         return [screen_candidate(c, dtype, timeout) for c in candidates]
 
     import concurrent.futures as futures
 
-    results = []
-    done = 0
-    with futures.ProcessPoolExecutor(
-        max_workers=workers, initializer=_init_worker, initargs=(dtype, timeout)
-    ) as pool:
-        for outcome in pool.map(_screen_one, candidates, chunksize=16):
-            results.append(outcome)
-            done += 1
-            if done % 2000 == 0:
-                log(f"  screened {done}/{len(candidates)}")
-    return results
+    results: dict[int, object] = {}
+    pending = list(enumerate(candidates))
+    total = len(pending)
+    crashes = 0
+
+    while pending:
+        completed = 0
+        try:
+            with futures.ProcessPoolExecutor(
+                max_workers=workers, initializer=_init_worker,
+                initargs=(dtype, timeout),
+            ) as pool:
+                for index, outcome in pool.map(_screen_one, pending, chunksize=8):
+                    results[index] = outcome
+                    completed += 1
+                    if len(results) % 2000 == 0:
+                        log(f"  screened {len(results)}/{total}")
+        except futures.process.BrokenProcessPool:
+            log(f"  worker pool died after {completed} of {len(pending)}; rebuilding")
+        except KeyboardInterrupt:
+            raise
+        pending = [(i, c) for i, c in pending if i not in results]
+        if pending and completed == 0:
+            index, candidate = pending[0]
+            results[index] = Outcome(
+                candidate, False, "execution_crashed",
+                "took the screening worker down below Python",
+            )
+            crashes += 1
+            pending = pending[1:]
+    if crashes:
+        log(f"  {crashes} candidate(s) crashed a worker and were dropped")
+    return [results[i] for i in range(total)]
 
 
 # --------------------------------------------------------------------------- #

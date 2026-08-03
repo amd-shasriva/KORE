@@ -27,6 +27,7 @@ cd "$REPO" || exit 1
 STATE="$REPO/runs/pipeline_state.json"
 LOG="$REPO/runs/pipeline_driver.log"
 MIDTRAIN_OUT="$REPO/runs/midtrain_14b_base"
+CHATVEC_OUT="$REPO/runs/midtrain_14b_chatvec"
 SFT_OUT="$REPO/runs/sft_14b_frontier"
 MIDTRAIN_CFG="$REPO/data/b05factory/launch/midtrain_base_8gpu.json"
 # One reservation, not many. The 3h default here was a workaround for a
@@ -220,6 +221,52 @@ step_eval() {
 }
 
 # ---------------------------------------------------------------- stage 1 ----
+# ------------------------------------------------- stage 0.5: chat vector ----
+# Midtrain holds the Triton domain knowledge but cannot follow an instruction,
+# because continued pretraining had to run on the BASE model -- running it on
+# the instruct model destroyed instruction-following outright.
+#
+# Rather than spend the SFT budget teaching chat back from scratch (Tulu 3
+# needed 939k samples to reach that from a Llama base; we have 56k), transplant
+# the vendor's own post-training as a delta:
+#
+#   theta_chatvec = theta_midtrain + (theta_instruct - theta_base)
+#
+# This is the general-SFT stage of AceMath's general-then-domain recipe, which
+# spent ~3.9M samples on it; here it costs a tensor subtraction.
+#
+# Verification runs FIRST and has to pass, because a sign or dtype error still
+# produces a model that loads and generates plausibly -- nothing downstream
+# would catch it. Failure here is NOT fatal to the pipeline: SFT falls back to
+# midtrain, which is the previously planned path.
+step_residual() {
+  if checkpoint_complete "$CHATVEC_OUT"; then
+    log "residual: already built and verified"; return 0
+  fi
+  checkpoint_complete "$MIDTRAIN_OUT" || { log "residual: midtrain not complete, skipping"; return 1; }
+  local job
+
+  log "residual: verifying the arithmetic against the real 14B checkpoints"
+  job="$(submit_until_accepted residual-verify "$REPO/scripts/spur_residual_1node.sbatch" verify)" || return 1
+  note residual_verify_job "$job"
+  wait_for_job "$job" residual-verify
+  if ! grep -q "VERDICT: PASS" "$REPO/runs/residual-$job.out" 2>/dev/null; then
+    log "residual: verification did NOT pass -- see runs/residual-$job.out"
+    note residual "verify_failed"; return 1
+  fi
+  log "residual: verified -- base + delta reproduces instruct exactly"
+
+  log "residual: building $CHATVEC_OUT"
+  job="$(submit_until_accepted residual-build "$REPO/scripts/spur_residual_1node.sbatch" \
+         build "$MIDTRAIN_OUT" "$CHATVEC_OUT")" || return 1
+  note residual_build_job "$job"
+  wait_for_job "$job" residual-build
+  if checkpoint_complete "$CHATVEC_OUT"; then
+    log "residual: COMPLETE and verified"; note residual "complete"; return 0
+  fi
+  log "residual: build produced no verifiable checkpoint"; note residual "build_failed"; return 1
+}
+
 # Reclaim a finished stage's optimizer state, and ONLY that.
 #
 # A checkpoint-N directory holds Adam moments, RNG and scheduler state. It
@@ -284,6 +331,18 @@ disk_free_gb() { df -BG --output=avail "$REPO" 2>/dev/null | tail -1 | tr -dc '0
 
 step_sft() {
   checkpoint_complete "$MIDTRAIN_OUT" || { log "sft: refusing to start, midtrain is not complete"; return 1; }
+  # Prefer the chat-vector model: it already follows instructions, so the SFT
+  # budget buys kernel skill instead of re-learning chat from scratch. Fall back
+  # to raw midtrain if the residual stage did not produce a verified model --
+  # that is the previously planned path and still trains a usable model.
+  local sft_base="$MIDTRAIN_OUT"
+  if checkpoint_complete "$CHATVEC_OUT"; then
+    sft_base="$CHATVEC_OUT"
+    log "sft: starting from the chat-vector model (instruction-following already present)"
+  else
+    log "sft: chat-vector model unavailable; starting from raw midtrain"
+  fi
+  note sft_base "$sft_base"
   # Midtrain is finished and its A/B eval has run, so its optimizer state is
   # now dead weight. Reclaim it if -- and only if -- space is short.
   reclaim_optimizer_state "$MIDTRAIN_OUT" "$SFT_PEAK_GB"
@@ -299,7 +358,7 @@ step_sft() {
     return 2
   fi
   run_training_stage sft kore-sft "$SFT_OUT" "$SEGMENT_WALLTIME" \
-    "$REPO/scripts/spur_sft_1node.sbatch" "$REPO/configs/sft_14b_full.json" "$MIDTRAIN_OUT" "$SFT_OUT"
+    "$REPO/scripts/spur_sft_1node.sbatch" "$REPO/configs/sft_14b_full.json" "$sft_base" "$SFT_OUT"
 }
 
 log "================ pipeline driver start (HEAD $(git rev-parse --short HEAD)) ================"
@@ -311,6 +370,11 @@ step_midtrain    || { log "STOP: midtrain failed"; note pipeline "failed_midtrai
 # neither arm follows instructions yet.
 step_eval "$MIDTRAIN_OUT" midtrain "midtrain_base" \
           "Qwen/Qwen3-14B-Base" "0b0bd3732e2c374d483664439ea334928b65f304"
+
+# Transplant Qwen's post-training onto our midtrained weights. Non-fatal: if it
+# does not verify, step_sft falls back to training from raw midtrain.
+step_residual || log "residual: unavailable; SFT will start from raw midtrain"
+
 step_sft; _sft_rc=$?
 if [ "$_sft_rc" = "2" ]; then
   log "================ pipeline HELD before SFT (disk); midtrain + its eval are complete ================"
@@ -323,6 +387,16 @@ fi
 # funnel is finally a fair question.
 step_eval "$SFT_OUT" sft "sft" \
           "Qwen/Qwen3-14B" "40c069824f4251a91eefaf281ebe4c544efd3e18"
+
+# Third arm, and the one that keeps us honest. The chat-vector model is our
+# domain delta on top of Qwen's instruct weights with NO SFT at all, so it
+# isolates what the SFT stage actually bought. If SFT cannot beat it, the
+# mixture is too narrow rather than the recipe being wrong -- a conclusion the
+# two-arm comparison could not have reached.
+if checkpoint_complete "$CHATVEC_OUT"; then
+  step_eval "$CHATVEC_OUT" chatvec "chatvec" \
+            "Qwen/Qwen3-14B" "40c069824f4251a91eefaf281ebe4c544efd3e18"
+fi
 
 log "================ pipeline COMPLETE through SFT; stopping before DPO ================"
 note pipeline "complete_through_sft"

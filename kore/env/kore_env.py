@@ -1831,6 +1831,94 @@ class KoreEnv:
             self._active_source, self._active_task = previous_source, previous_task
             shutil.rmtree(workdir, ignore_errors=True)
 
+    def collect_kernel_trace(self, source: str,
+                             shape: Optional["Shape"] = None) -> Optional[list]:
+        """PUBLIC: per-dispatch kernel durations for a candidate (coverage signal).
+
+        Stages an isolated workdir exactly like :meth:`collect_counters`, runs the
+        candidate under ``rocprofv3 --kernel-trace``, and returns the parsed
+        :class:`~kore.verifier.parsers.rocprofv3.KernelDispatch` list, or ``None``
+        if the profiler is unavailable or produced nothing usable.
+
+        This answers a question the PMC path cannot: what SHARE of the region's GPU
+        time the candidate's own kernels account for. See
+        :mod:`kore.reward.coverage` -- a kernel accounting for 0.014% of GPU time
+        has an end-to-end ceiling of 1.00014x no matter how fast it is, and a
+        kernel accounting for 0.0% never ran at all.
+
+        Deliberately additive and fail-safe. It touches no correctness or timing
+        path: :meth:`evaluate` and :meth:`step` do not call it, a candidate's
+        verdict does not depend on it, and every failure mode returns ``None``
+        rather than a partial trace that would understate coverage.
+
+        UNVALIDATED ON HARDWARE. The invocation mirrors the PMC path that IS
+        hardware-proven, but rocprofv3's kernel-trace export filename and column
+        names have not been confirmed on this ROCm build, so the parser accepts
+        several naming variants and the whole method fails closed. Anything reading
+        it must treat ``None`` as "no measurement" -- never as zero coverage --
+        which is why ``profiling_reward_weight`` additionally requires a measured
+        evidence receipt before it can shape a reward.
+        """
+        import glob as _glob
+        import tempfile as _tmp
+        # The WHOLE body is guarded, including the sandbox/shape resolution that
+        # ``collect_counters`` performs before its own try. This method's promise is
+        # that it never raises into a rollout, and "never" should not depend on the
+        # env being fully constructed.
+        try:
+            from kore.verifier.parsers.rocprofv3 import parse_kernel_dispatches
+
+            if self._sandbox_enabled and (
+                    len(source.encode("utf-8"))
+                    > self.isolation_policy.budget.max_source_bytes):
+                self._last_execution_status = ExecutionStatus.POLICY_VIOLATION
+                return None
+            sh = shape or self.task.shape("primary") or self.task.shape("minimal") or (
+                self.task.shapes[0] if self.task.shapes else Shape("default", {}))
+        except Exception:  # noqa: BLE001
+            return None
+        workdir = Path(tempfile.mkdtemp(prefix=f"ktrace_{self.task.task_id}_"))
+        previous_source, previous_task = self._active_source, self._active_task
+        self._active_source, self._active_task = source, self.task
+        try:
+            for p in list(self.task.dir.glob("*.py")):
+                dst = workdir / p.name
+                shutil.copy(p, dst)
+                os.chmod(dst, 0o444)
+            (workdir / "kernel.py").write_text(source)
+            os.chmod(workdir / "kernel.py", 0o444)
+            driver = workdir / "driver.py"
+            env = (self._env(private_root=workdir / ".sandbox")
+                   if self._sandbox_enabled else self._env())
+            outdir = _tmp.mkdtemp(prefix="ktrace_", dir=str(workdir))
+            # --bench-mode + --impl candidate for the same reason the PMC path needs
+            # them: drivers honor --impl only in bench mode, so without it the trace
+            # would describe the correctness run instead of the benched candidate.
+            cmd = ["rocprofv3", "--kernel-trace", "-d", outdir,
+                   "--output-format", "csv", "--", sys.executable, str(driver),
+                   "--bench-mode", "--impl", "candidate", "--warmup", "2",
+                   "--iters", "3", *sh.as_args()]
+            rc, out, timed = self._exec(cmd, workdir, env, self.bench_timeout)
+            if timed or rc != 0:
+                return None
+            csvs = _glob.glob(os.path.join(outdir, "**", "*kernel_trace.csv"),
+                              recursive=True) or [
+                c for c in _glob.glob(os.path.join(outdir, "**", "*.csv"),
+                                      recursive=True)
+                if "agent_info" not in os.path.basename(c)]
+            dispatches: list = []
+            for c in csvs:
+                try:
+                    dispatches.extend(parse_kernel_dispatches(c))
+                except Exception:  # noqa: BLE001 - a bad export is no measurement
+                    pass
+            return dispatches or None
+        except Exception:  # noqa: BLE001
+            return None
+        finally:
+            self._active_source, self._active_task = previous_source, previous_task
+            shutil.rmtree(workdir, ignore_errors=True)
+
     def _collect_profile(self, driver: Path, sh: Shape, workdir: Path,
                          env: dict) -> Optional[float]:
         """rocprofv3 PMC on candidate + reference -> baseline-relative efficiency.

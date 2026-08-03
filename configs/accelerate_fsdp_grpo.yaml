@@ -55,7 +55,14 @@ fsdp_config:
   fsdp_sharding_strategy: SHARD_GRAD_OP             # ZeRO-2 (deprecated key, but authoritative for FSDP1)
   fsdp_reshard_after_forward: SHARD_GRAD_OP        # ZeRO-2: params stay replicated between forwards -> local generation, no per-decode all_gather deadlock
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
-  fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer  # 14B/32B Qwen3; use LlamaDecoderLayer for the 70B
+  # NOT authoritative: grpo.build_fsdp_plugin constructs the plugin explicitly and
+  # overrides this exported value, deriving the class from the config's
+  # fsdp_transformer_layer_cls or from detect_transformer_layer_cls(model_id). The
+  # literal is the 14B/32B DENSE Qwen3 block and is WRONG for the 30B MoE backbone
+  # (Qwen3MoeDecoderLayer); it stays only as the accelerate-CLI fallback. Getting
+  # it wrong is silent -- TRANSFORMER_BASED_WRAP with a class matching nothing wraps
+  # NOTHING and FSDP degrades to one flat parameter for the whole model.
+  fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer
   fsdp_backward_prefetch: BACKWARD_PRE
   fsdp_forward_prefetch: false
   fsdp_state_dict_type: FULL_STATE_DICT           # consolidate a plain HF ckpt so soup/eval load it via from_pretrained

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from kore.obs import configure, get_logger, gpu_mem_snapshot
+from kore.policy import trloo as _trloo
 
 _EPS = 1e-6
 
@@ -67,6 +68,93 @@ def clip_higher_ratio(ratio, advantage, lo: float = 0.2, hi: float = 0.28):
         return torch.minimum(ratio * advantage, clipped * advantage)
     clipped = min(max(ratio, 1.0 - lo), 1.0 + hi)
     return min(ratio * advantage, clipped * advantage)
+
+
+def dual_clip_ratio(ratio, advantage, lo: float = 0.2, hi: float = 0.28,
+                    c: float = 3.0):
+    """Dual-clip PPO: bound the surrogate when the advantage is NEGATIVE.
+
+    The standard clipped surrogate ``min(r*A, clip(r, 1-lo, 1+hi)*A)`` is bounded
+    above for ``A > 0`` -- the clip caps it at ``(1+hi)*A``. For ``A < 0`` it is
+    NOT bounded below: as ``r`` grows, ``r*A`` goes to minus infinity and ``min``
+    selects it, so the loss ``-surrogate`` grows without limit and one sample can
+    own the whole gradient. Dual-clip (Ye et al. 2020, "Mastering Complex Control
+    in MOBA Games") adds the floor ``c*A``, ``c > 1``:
+
+        A >= 0:  min(r*A, clip(r, 1-lo, 1+hi)*A)          # unchanged
+        A <  0:  max(min(r*A, clip(r, 1-lo, 1+hi)*A), c*A) # floored
+
+    ``c <= 1`` (or 0/None) disables the floor and returns
+    :func:`clip_higher_ratio` byte-for-byte, so this is a strict extension.
+
+    The floor may only be applied where ``A < 0``. Applying ``max(., c*A)``
+    unconditionally would REPLACE the surrogate whenever ``A > 0``, because then
+    ``c*A > (1+hi)*A``, silently turning the objective into an unclipped
+    ``c*A``. The sign test is therefore not an optimisation.
+
+    Works on plain floats (pure, unit-testable) and, in the training path, on a
+    differentiable 0-dim torch ``ratio`` -- the advantage is always a Python float
+    there, so the branch is decided outside the graph and the clamped region keeps
+    a well-defined zero gradient.
+    """
+    surrogate = clip_higher_ratio(ratio, advantage, lo, hi)
+    if not c or c <= 1.0:
+        return surrogate
+    if advantage >= 0.0:
+        return surrogate
+    floor = c * advantage                     # negative, so it is a lower bound
+    if hasattr(surrogate, "clamp"):
+        return surrogate.clamp(min=float(floor))
+    return max(surrogate, floor)
+
+
+def mismatch_weight(train_logp, rollout_logp, cap: float = 2.0) -> float:
+    """Truncated importance weight ``min(pi_train/pi_rollout, cap)``.
+
+    Corrects for the ROLLOUT policy not being exactly the policy being trained.
+    In this loop that gap is numerical rather than algorithmic: the sharded run
+    generates on a plain full-weight per-rank replica and trains through the FSDP
+    wrapper, so the two evaluate the same weights on different code paths. The
+    samples come from the replica, the gradient is wanted for the trainer, and the
+    ratio between them is the correction.
+
+    Truncation is a deliberate bias-for-variance trade: an untruncated weight has
+    unbounded variance, so a single sample whose rollout probability was tiny can
+    dominate a step. Capping bounds that at the cost of under-weighting the tail.
+    Only the upper tail is capped -- a small weight merely discounts one sample,
+    which is harmless.
+
+    Returns 1.0 (exactly no correction) when either log-prob is missing or
+    non-finite, rather than a fabricated weight. Because KORE's log-probs are
+    token-MEAN (the GSPO sequence ratio, not a summed-sequence ratio), a healthy
+    weight sits within about a percent of 1.0, so a cap near 2.0 is loose
+    defense-in-depth and a MEASURED weight far from 1.0 is a bug report about
+    rollout/training divergence rather than something to correct away.
+    """
+    train = _finite_float(train_logp)
+    rollout = _finite_float(rollout_logp)
+    if train is None or rollout is None:
+        return 1.0
+    try:
+        weight = math.exp(train - rollout)
+    except OverflowError:
+        weight = float("inf")
+    if not math.isfinite(weight) or weight < 0.0:
+        return float(cap) if cap and cap > 0.0 else 1.0
+    if cap and cap > 0.0:
+        return min(weight, float(cap))
+    return weight
+
+
+def _finite_float(value) -> Optional[float]:
+    """A usable float, or None. Tensors are accepted via ``float()``."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
 
 
 def is_overlong(n_tokens: int, max_response_length: int, buffer_len: int) -> bool:
@@ -462,6 +550,92 @@ def _physics_shaping_weight(config) -> float:
     if not getattr(config, "physics_shaping_evidence_fingerprint", None):
         return 0.0
     return weight
+
+
+def _profiling_reward_weight(config) -> float:
+    """Effective coverage-reward weight (0.0 => the whole path is inert).
+
+    Nonzero ONLY with a ``profiling_reward_evidence_path`` receipt, and the reason
+    is the same one ``_physics_shaping_weight`` exists for. ``collect_kernel_trace``
+    fails safe: no profiler, an unexpected export layout, a task whose driver does
+    not honour ``--impl`` -- all return ``None``. A weight armed without evidence
+    that the collector has ever produced a usable trace on this hardware would
+    therefore state a reward the run silently never applies, which is the exact
+    class of defect ``kore.policy.capabilities`` was written to catch. The receipt
+    is a measurement, not a formality: it is written by a run that observed a
+    non-None coverage.
+
+    Also refuses a weight at or above ``correctness_weight``: the coverage term is
+    shaping on top of a verified correctness verdict, and a shaping term that can
+    outrank correctness inverts the reward's lexicographic order.
+    """
+    try:
+        weight = float(getattr(config, "profiling_reward_weight", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(weight) or weight <= 0.0:
+        return 0.0
+    if not getattr(config, "profiling_reward_evidence_path", None):
+        return 0.0
+    try:
+        correctness = float(getattr(config, "correctness_weight", 0.3) or 0.3)
+    except (TypeError, ValueError):
+        correctness = 0.3
+    if weight >= correctness:
+        return 0.0
+    return weight
+
+
+def _coverage_bonus(env, task, code, obs, config):
+    """Coverage-aware profiling bonus for a CORRECT candidate + turn feedback.
+
+    Returns ``(term, feedback_text)``; ``(0.0, "")`` when inert or unmeasurable.
+
+    Flow: ``env.collect_kernel_trace(code)`` -> per-dispatch durations ->
+    :func:`kore.reward.coverage.kernel_coverage` against the ``@triton.jit`` names
+    in the candidate's OWN source -> :func:`kore.reward.coverage.profiling_reward`,
+    which combines the measured speedup and the measured coverage by Amdahl's law.
+
+    Fail-safe in the one direction that matters: any missing input yields ``0.0``
+    and never a guessed number, and the correctness verdict and the speedup reward
+    are untouched no matter what the profiler does. A candidate whose kernels never
+    dispatched (coverage exactly 0.0, the decoy hack) legitimately scores 0.0 here,
+    which is a measurement rather than a gap -- but it cannot go NEGATIVE, because
+    punishment belongs to the correctness tiers, not to a shaping term.
+    """
+    weight = _profiling_reward_weight(config)
+    if weight <= 0.0 or not getattr(obs, "validation_passed", False):
+        return 0.0, ""
+    if str(getattr(config, "reward_phase", "")).lower() == "correctness":
+        return 0.0, ""
+    try:
+        from kore.reward.coverage import (
+            candidate_kernel_names, coverage_feedback, kernel_coverage,
+            profiling_reward,
+        )
+
+        collect = getattr(env, "collect_kernel_trace", None)
+        if not callable(collect):
+            return 0.0, ""
+        dispatches = collect(code)
+        if not dispatches:
+            return 0.0, ""
+        report = kernel_coverage(dispatches, candidate_kernel_names(code))
+        if report is None:
+            return 0.0, ""
+        speedup = getattr(obs, "speedup", None)
+        reward = profiling_reward(
+            speedup, report.coverage, correct=True,
+            max_plausible_speedup=float(
+                getattr(config, "max_plausible_speedup", 12.0) or 12.0))
+        feedback = coverage_feedback(report, speedup)
+        if reward is None:
+            # Measurable coverage but no admissible reward (no timing, or a claimed
+            # speedup above the cap). Say so in the feedback; pay nothing.
+            return 0.0, ("\n" + feedback) if feedback else ""
+        return weight * reward.reward, ("\n" + feedback) if feedback else ""
+    except Exception:  # noqa: BLE001 - shaping is best-effort; never break a rollout
+        return 0.0, ""
 
 
 def _make_rollout_env(task, config=None, gpu=None, serial=True):
@@ -945,10 +1119,72 @@ def _sample_field(sample, idx, default=None):
     return sample[idx] if len(sample) > idx else default
 
 
+def group_sample_advantages(samples, *, variance_floor: float = 0.0,
+                            avspo_virtual_k: int = 2, adv_eps: float = _EPS,
+                            advantage_estimator: str = _trloo.GRPO):
+    """Advantages for one group's per-turn samples, under the selected estimator.
+
+    ``"grpo"`` keeps the incumbent :func:`anticollapse.avspo_advantages`: pool the
+    group's samples, centre on their mean, divide by their std, with the AVSPO
+    variance floor.
+
+    ``"trloo"`` uses :func:`kore.policy.trloo.turn_loo_advantages` instead --
+    each sample centred on the mean of the OTHER trajectories at the SAME turn,
+    which is independent of the credited action and therefore unbiased (see that
+    module for the measured size of the bias it removes). It needs each sample's
+    ``(trajectory_id, turn_id)`` key, which the rollout appends as the sample's
+    seventh field. If ANY sample lacks a usable key -- a hand-built test tuple, a
+    checkpoint rolled before the key existed -- we do NOT silently fall back to
+    the pooled estimator: that would train a different estimator than the config
+    asked for, quietly, which is the class of defect this repo's capability audit
+    exists to prevent. The caller gets ``None`` and is expected to raise.
+
+    Deliberately excludes the AVSPO floor under TRLOO: the floor injects virtual
+    samples into the normalisation statistics, and every self-inclusive statistic
+    is exactly what biases the estimator.
+    """
+    from kore.policy import anticollapse as ac
+
+    returns = [s[0] for s in samples]
+    if advantage_estimator == _trloo.TRLOO:
+        keys = _trloo.sample_turn_keys(samples)
+        if keys is None:
+            return None
+        return _trloo.turn_loo_advantages(returns, keys)
+    return ac.avspo_advantages(returns, variance_floor, avspo_virtual_k, adv_eps)
+
+
+class AdvantageKeyError(RuntimeError):
+    """TRLOO was requested but the samples carry no ``(trajectory, turn)`` key.
+
+    Raised rather than degraded: a run that asked for an unbiased estimator and
+    silently got the biased one is the exact failure the estimator was added to
+    remove, and it would be invisible in the loss curve.
+    """
+
+
+def _group_advantages_or_raise(samples, *, variance_floor: float,
+                               avspo_virtual_k: int, adv_eps: float,
+                               advantage_estimator: str):
+    advs = group_sample_advantages(
+        samples, variance_floor=variance_floor,
+        avspo_virtual_k=avspo_virtual_k, adv_eps=adv_eps,
+        advantage_estimator=advantage_estimator)
+    if advs is None:
+        raise AdvantageKeyError(
+            "advantage_estimator='trloo' needs each sample's "
+            "(trajectory_id, turn_id) key in field 6; this group has samples "
+            "without one, so the turn-level leave-one-out baseline cannot be "
+            "formed. Use advantage_estimator='grpo' or re-roll the group.")
+    return advs
+
+
 def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
                            clip_ratio_low: float = 0.2, clip_ratio_high: float = 0.28,
                            variance_floor: float = 0.0, avspo_virtual_k: int = 2,
-                           adv_eps: float = _EPS, backward: bool = True):
+                           adv_eps: float = _EPS, backward: bool = True,
+                           advantage_estimator: str = _trloo.GRPO,
+                           dual_clip_c: float = 0.0):
     """Micro-batched GRPO loss: one ``backward()`` per sample, grads accumulated.
 
     ``kept_groups`` is a list of groups (the StarPO-S-kept task groups); each
@@ -969,9 +1205,12 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
         token-mean averaged over samples, the loss is
         ``sum_samples(n_tokens * per_sample_term) / sum_samples(n_tokens)`` - one
         global token-mean across the whole kept batch (DAPO length-debias).
-      * **AVSPO variance floor** (item 4a): group advantages come from
-        :func:`anticollapse.avspo_advantages` (virtual-sample injection when the
-        group std < ``variance_floor``).
+      * **AVSPO variance floor** (item 4a): under ``advantage_estimator="grpo"``
+        group advantages come from :func:`anticollapse.avspo_advantages`
+        (virtual-sample injection when the group std < ``variance_floor``).
+        ``advantage_estimator="trloo"`` replaces both with the unbiased
+        turn-level leave-one-out baseline and applies no normalisation
+        (:func:`group_sample_advantages`).
       * **SC-GRPO** (item 4b): a per-sample multiplicative ``sc_weight`` (from
         per-token KL(teacher||student)) scales the PG term.
       * k3 KL anchor ``ref_anchor_coef * (exp(d)-d-1)``, ``d = ref-logp`` (item 5
@@ -987,15 +1226,15 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
     """
     import torch
 
-    from kore.policy import anticollapse as ac
-
-    # Pass 1: per-group advantages (AVSPO floor) + global token normalizer.
+    # Pass 1: per-group advantages (AVSPO floor, or TRLOO) + token normalizer.
     group_advs: list[list[float]] = []
     n_terms = 0
     total_tokens = 0
     for samples in kept_groups:
-        returns = [s[0] for s in samples]
-        advs = ac.avspo_advantages(returns, variance_floor, avspo_virtual_k, adv_eps)
+        advs = _group_advantages_or_raise(
+            samples, variance_floor=variance_floor,
+            avspo_virtual_k=avspo_virtual_k, adv_eps=adv_eps,
+            advantage_estimator=advantage_estimator)
         group_advs.append(advs)
         for s in samples:
             if s[1]:  # non-empty gen_inputs -> a learnable sample
@@ -1018,7 +1257,8 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
             old_lp = _sample_field(sample, 3)
             if old_lp is not None:
                 ratio = torch.exp(lp - old_lp)  # turn-level geometric-mean (Turn-PPO)
-                pg = -clip_higher_ratio(ratio, adv, clip_ratio_low, clip_ratio_high)
+                pg = -dual_clip_ratio(ratio, adv, clip_ratio_low,
+                                      clip_ratio_high, dual_clip_c)
             else:
                 pg = -adv * lp  # vanilla PG (no stored old_logp)
             sc_w = _sample_field(sample, 5)
@@ -1039,27 +1279,68 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
 def _grpo_step_adv_stats(kept_groups, config):
     """Read-only recompute of mean|advantage| + KL-anchored sample count (logging).
 
-    Mirrors pass-1 of :func:`_accumulate_grpo_grads` exactly (AVSPO variance-floor
-    advantages) so the logged ``adv_absmean`` is faithful, without touching the
-    training path or its return. Pure/CPU-cheap.
+    Mirrors pass-1 of :func:`_accumulate_grpo_grads` exactly -- including which
+    ESTIMATOR is in force -- so the logged ``adv_absmean`` is faithful, without
+    touching the training path or its return. A logger that reported pooled
+    advantages while the trainer used TRLOO would make the switch invisible in the
+    step log, which is where anyone would look to confirm it took effect.
+    Pure/CPU-cheap.
     """
-    from kore.policy import anticollapse as ac
-
     tau = getattr(config, "variance_floor", 0.0)
     k = getattr(config, "avspo_virtual_k", 2)
     eps = getattr(config, "adv_eps", _EPS)
+    estimator = getattr(config, "advantage_estimator", _trloo.GRPO)
     total = 0.0
     n = 0
     n_kl = 0
     for samples in kept_groups:
-        returns = [s[0] for s in samples]
-        advs = ac.avspo_advantages(returns, tau, k, eps)
+        advs = group_sample_advantages(
+            samples, variance_floor=tau, avspo_virtual_k=k, adv_eps=eps,
+            advantage_estimator=estimator)
+        if advs is None:
+            # Diagnostics must never be the thing that kills a step; the training
+            # path raises on this, so reaching here means logging ran first.
+            return 0.0, 0
         for a, s in zip(advs, samples):
             total += abs(a)
             n += 1
             if len(s) > 2 and s[2] is not None:
                 n_kl += 1
     return (total / n if n else 0.0), n_kl
+
+
+def _grpo_step_mismatch_stat(kept_groups, cap: float = 2.0):
+    """Mean/max rollout-vs-training importance weight over kept samples.
+
+    A diagnostic first and a correction second. With ``ppo_epochs=1`` the stored
+    ``old_logp`` was recomputed on the same weights that will be trained, so a
+    healthy step reports a mean weight of essentially 1.0. A mean that drifts, or
+    a max pinned at the cap, says the rollout and training policies disagree --
+    FSDP resharding, a dtype change, a stale replica -- which is a bug to find
+    rather than a number to divide out.
+
+    Returns ``(mean, max)`` or ``(None, None)`` when no sample carries the pair,
+    so the logger records a null instead of a misleading 1.0.
+    """
+    weights: list[float] = []
+    for samples in kept_groups:
+        for s in samples:
+            old_lp = _sample_field(s, 3)
+            if old_lp is None:
+                continue
+            # ``old_logp`` is the rollout-time log-prob; ``ret`` carries no
+            # log-prob, so a training-side value is only available once the step
+            # has recomputed it. Where it has not, the weight is exactly 1.0 by
+            # construction and contributes no information -- so it is skipped
+            # rather than padded in, which would drag the mean toward 1.0 and hide
+            # a real divergence.
+            train_lp = _sample_field(s, 7)
+            if train_lp is None:
+                continue
+            weights.append(mismatch_weight(train_lp, old_lp, cap))
+    if not weights:
+        return None, None
+    return sum(weights) / len(weights), max(weights)
 
 
 def _grpo_step_kl_stat(kept_groups):
@@ -2216,6 +2497,14 @@ def _train_grpo_fallback(config, tasks):
             _feature_invoked(config, "credit_incorrect_turns")
         if _physics_shaping_weight(config) > 0.0:
             _feature_invoked(config, "physics_shaping")
+        # MRS: reject low-quality trajectories BEFORE the samples are built, so a
+        # rejected trajectory contributes no PG term and no advantage. Declines
+        # rather than collapsing the group's contrast (see kore.policy.rejection).
+        traj_infra, _mrs = _apply_mrs(
+            config, traj_rewards, traj_correct, traj_speedups, traj_infra)
+        if _mrs is not None:
+            _feature_invoked(config, "rejection_sampling")
+            log.debug("mrs", task=task.task_id, **_mrs.as_dict())
         returns, index = build_kevin_samples(
             traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra,
             credit_incorrect=bool(getattr(config, "credit_incorrect_turns", False)),
@@ -2223,8 +2512,10 @@ def _train_grpo_fallback(config, tasks):
             phi_weight=_physics_shaping_weight(config))
         samples, codes = [], []
         for (ti, tu), ret in zip(index, returns):
+            # Field 6 is the (trajectory, turn) key TRLOO centres on. Here ``ti``
+            # already indexes the whole group, so it is global as required.
             samples.append([ret, turn_inputs[ti][tu], turn_ref[ti][tu],
-                            turn_old[ti][tu], turn_ntok[ti][tu], None])
+                            turn_old[ti][tu], turn_ntok[ti][tu], None, (ti, tu)])
             codes.append(turn_codes[ti][tu])
         correct_kernels = [turn_codes[ti][tu] for ti in range(G) for tu in range(len(traj_correct[ti]))
                            if traj_correct[ti][tu] and turn_codes[ti][tu]]
@@ -2387,14 +2678,17 @@ def _train_grpo_fallback(config, tasks):
         loss_value, n_terms, grad_norm = 0.0, 0, None
         for _epoch in range(ppo_epochs):
             opt.zero_grad()
-            if float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0:
+            _estimator = getattr(config, "advantage_estimator", _trloo.GRPO)
+            if (_estimator != _trloo.TRLOO
+                    and float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0):
                 _feature_invoked(config, "avspo")
             loss_value, n_terms = _accumulate_grpo_grads(
                 kept_groups, _logp_fn,
                 ref_anchor_coef=config.ref_anchor_coef,
                 clip_ratio_low=config.clip_ratio_low, clip_ratio_high=config.clip_ratio_high,
                 variance_floor=config.variance_floor, avspo_virtual_k=config.avspo_virtual_k,
-                adv_eps=config.adv_eps)
+                adv_eps=config.adv_eps, advantage_estimator=_estimator,
+                dual_clip_c=float(getattr(config, "dual_clip_c", 0.0) or 0.0))
             if n_terms == 0:
                 break
             _record_optimizer_tokens(
@@ -2513,24 +2807,51 @@ def merge_across_ranks(per_rank: list[list]) -> list:
 def distributed_group_advantages(per_rank_returns: list[list[float]],
                                  variance_floor: float = 0.0,
                                  avspo_virtual_k: int = 2,
-                                 adv_eps: float = _EPS) -> list[list[float]]:
+                                 adv_eps: float = _EPS,
+                                 per_rank_keys: Optional[list[list]] = None,
+                                 advantage_estimator: str = _trloo.GRPO,
+                                 ) -> list[list[float]]:
     """Global (cross-rank) group-relative advantages, split back per rank.
 
     ``per_rank_returns[r]`` is rank ``r``'s per-turn Kevin returns for ONE rollout
-    group (the trajectories that rank rolled out). GRPO's baseline MUST be over the
+    group (the trajectories that rank rolled out). The baseline MUST be over the
     FULL group - every trajectory on every rank - so the returns are concatenated
-    (rank order), normalized ONCE via the AVSPO variance-floor advantages
-    (:func:`anticollapse.avspo_advantages`, ``tau=variance_floor``), and the
-    resulting advantages are sliced back to each rank in the SAME order. Each rank
-    therefore trains its own trajectories but with a globally-correct advantage.
+    (rank order), turned into advantages ONCE, and sliced back to each rank in the
+    SAME order. Each rank therefore trains its own trajectories but with a
+    globally-correct advantage.
 
-    Pure (no torch/dist) so the cross-rank normalization math is unit-testable by
-    simulating each rank's rewards.
+    Under ``advantage_estimator="grpo"`` that single normalization is the AVSPO
+    variance-floor advantage (:func:`anticollapse.avspo_advantages`,
+    ``tau=variance_floor``). Under ``"trloo"`` it is the turn-level leave-one-out
+    baseline, which additionally needs ``per_rank_keys[r]`` -- rank ``r``'s
+    ``(trajectory_id, turn_id)`` per sample, with ``trajectory_id`` GLOBAL to the
+    group. That is load-bearing: each rank indexes its own slice from 0, so
+    concatenating local ids would make rank 0's first trajectory and rank 1's
+    first trajectory look like one trajectory, and each would land in the other's
+    leave-one-out baseline -- reintroducing exactly the self-inclusion TRLOO
+    removes. ``_rollout_slice_distributed`` maps through ``_rank_slice`` to emit
+    global ids.
+
+    Returns ``None`` when TRLOO is asked for without usable keys, so the caller
+    fails loudly instead of quietly training the pooled estimator.
+
+    Pure (no torch/dist) so the cross-rank math is unit-testable by simulating
+    each rank's rewards.
     """
     from kore.policy import anticollapse as ac
 
     flat = merge_across_ranks(per_rank_returns)
-    advs = ac.avspo_advantages(flat, variance_floor, avspo_virtual_k, adv_eps)
+    if advantage_estimator == _trloo.TRLOO:
+        if per_rank_keys is None:
+            return None
+        keys = merge_across_ranks(per_rank_keys)
+        if len(keys) != len(flat) or not all(
+                isinstance(k, (tuple, list)) and len(k) == 2 for k in keys):
+            return None
+        advs = _trloo.turn_loo_advantages(
+            flat, [(int(a), int(b)) for a, b in keys])
+    else:
+        advs = ac.avspo_advantages(flat, variance_floor, avspo_virtual_k, adv_eps)
     out: list[list[float]] = []
     i = 0
     for chunk in per_rank_returns:
@@ -2727,14 +3048,15 @@ def _accumulate_grpo_grads_distributed(local_terms, logp_fn, *, accelerator,
                                        global_total_tokens: int, grad_scale: float,
                                        max_micro_steps: int, ref_anchor_coef: float,
                                        clip_ratio_low: float, clip_ratio_high: float,
-                                       tok, device):
+                                       tok, device, dual_clip_c: float = 0.0):
     """Sharded O(1-sample) micro-batched backward, kept in LOCKSTEP across ranks.
 
     ``local_terms`` is this rank's list of ``(advantage, sample)`` pairs (sample =
     ``[ret, gen_inputs, ref_logp, old_logp, n_tokens, sc_weight]``). Each real
     sample recomputes its token-mean log-prob against the SHARDED live policy
     (``logp_fn`` -> a collective forward), forms the DAPO clip-higher surrogate
-    ``-min(r*A, clip(r,1-lo,1+hi)*A)`` (+ k3 KL anchor), scales by
+    ``-min(r*A, clip(r,1-lo,1+hi)*A)``, floored at ``c*A`` where the advantage is
+    negative when ``dual_clip_c > 1`` (:func:`dual_clip_ratio`), (+ k3 KL anchor), scales by
     ``n_tok / global_total_tokens`` for a GLOBAL token-mean over the whole batch
     across ALL ranks, and backprops via ``accelerator.backward`` (FSDP/DeepSpeed
     reduce-scatter accumulates into the sharded grad).
@@ -2770,7 +3092,8 @@ def _accumulate_grpo_grads_distributed(local_terms, logp_fn, *, accelerator,
             old_lp = _sample_field(sample, 3)
             if old_lp is not None:
                 ratio = torch.exp(lp - old_lp)
-                pg = -clip_higher_ratio(ratio, adv, clip_ratio_low, clip_ratio_high)
+                pg = -dual_clip_ratio(ratio, adv, clip_ratio_low,
+                                      clip_ratio_high, dual_clip_c)
             else:
                 pg = -adv * lp
             sc_w = _sample_field(sample, 5)
@@ -2965,6 +3288,16 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
         _feature_invoked(config, "credit_incorrect_turns")
     if _physics_shaping_weight(config) > 0.0:
         _feature_invoked(config, "physics_shaping")
+    # MRS on THIS rank's slice. Deliberately per-rank rather than cross-rank: the
+    # filter's variance check would otherwise need a gather before the samples
+    # exist, and a rank-local decision can only ever drop this rank's own
+    # trajectories -- it cannot desync the collectives, which tolerate ragged
+    # per-rank sample counts by design (the padding was built for infra drops).
+    traj_infra, _mrs = _apply_mrs(
+        config, traj_rewards, traj_correct, traj_speedups, traj_infra)
+    if _mrs is not None:
+        _feature_invoked(config, "rejection_sampling")
+        log.debug("mrs", task=task.task_id, rank=rank, **_mrs.as_dict())
     returns, index = build_kevin_samples(
         traj_rewards, traj_correct, config.gamma, traj_infra=traj_infra,
         credit_incorrect=bool(getattr(config, "credit_incorrect_turns", False)),
@@ -2972,8 +3305,12 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
         phi_weight=_physics_shaping_weight(config))
     samples, codes = [], []
     for (ti, tu), ret in zip(index, returns):
+        # ``ti`` indexes THIS rank's slice, so map it back through ``my`` to the
+        # trajectory's id within the whole group before it becomes the TRLOO key.
+        # Emitting the local index would make trajectory 0 of every rank collide,
+        # and each colliding trajectory would contaminate the others' baseline.
         samples.append([ret, turn_inputs[ti][tu], turn_ref[ti][tu],
-                        turn_old[ti][tu], turn_ntok[ti][tu], None])
+                        turn_old[ti][tu], turn_ntok[ti][tu], None, (my[ti], tu)])
         codes.append(turn_codes[ti][tu])
     correct_kernels = [turn_codes[ti][tu]
                        for ti in range(len(my)) for tu in range(len(traj_correct[ti]))
@@ -2987,6 +3324,7 @@ def _rollout_slice_distributed(model, tok, task, config, ref_model, rank, world,
                 _local_best_su = su
                 _local_best_src = (turn_codes[ti][tu] if tu < len(turn_codes[ti]) else None)
     return {"traj_scores": traj_scores, "returns": [s[0] for s in samples], "samples": samples,
+            "turn_keys": [s[6] for s in samples],
             "codes": codes, "correct_kernels": correct_kernels,
             "infra": sum(1 for inf in traj_infra for x in inf if x),
             "n_solved": sum(1 for tc in traj_correct if any(tc)), "n_traj": len(my),
@@ -3372,10 +3710,25 @@ def _train_grpo_distributed(config, tasks):
             g = groups[gi]
             # re-gather returns AFTER GTPO shaping so advantages see shaped returns.
             per_rank_returns = _all_gather_object(g["local"]["returns"], accelerator)
-            if float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0:
-                _feature_invoked(config, "avspo")
+            estimator = getattr(config, "advantage_estimator", _trloo.GRPO)
+            if estimator == _trloo.TRLOO:
+                # The leave-one-out baseline spans the whole group, so the keys
+                # have to be gathered exactly like the returns they align with.
+                per_rank_keys = _all_gather_object(
+                    g["local"].get("turn_keys"), accelerator)
+            else:
+                per_rank_keys = None
+                if float(getattr(config, "variance_floor", 0.0) or 0.0) > 0.0:
+                    _feature_invoked(config, "avspo")
             per_rank_adv = distributed_group_advantages(
-                per_rank_returns, config.variance_floor, config.avspo_virtual_k, config.adv_eps)
+                per_rank_returns, config.variance_floor, config.avspo_virtual_k,
+                config.adv_eps, per_rank_keys=per_rank_keys,
+                advantage_estimator=estimator)
+            if per_rank_adv is None:
+                raise AdvantageKeyError(
+                    "advantage_estimator='trloo' needs a (trajectory_id, "
+                    "turn_id) key per sample, gathered across ranks; this group "
+                    "has none, so the leave-one-out baseline cannot be formed")
             my_adv = per_rank_adv[rank] if rank < len(per_rank_adv) else []
             for adv, sample in zip(my_adv, g["local"]["samples"]):
                 if not sample[1]:
@@ -3409,7 +3762,8 @@ def _train_grpo_distributed(config, tasks):
                 global_total_tokens=global_total_tokens, grad_scale=float(world),
                 max_micro_steps=max_micro, ref_anchor_coef=config.ref_anchor_coef,
                 clip_ratio_low=config.clip_ratio_low, clip_ratio_high=config.clip_ratio_high,
-                tok=tok, device=accelerator.device)
+                tok=tok, device=accelerator.device,
+                dual_clip_c=float(getattr(config, "dual_clip_c", 0.0) or 0.0))
             if n_terms:
                 _record_optimizer_tokens(config, local_tokens)
             accelerator.clip_grad_norm_(model.parameters(), config.max_grad_norm)
@@ -3615,6 +3969,24 @@ def _rollout(model, tok, env, task, config, reward_token, ref_model=None):
                 rr.flags.append(f"dense_profile+{dense_term:.3f}")
                 rr.detail = (f"{rr.detail} | dense-profile +{dense_term:.4f}"
                              if rr.detail else f"dense-profile +{dense_term:.4f}")
+            # Coverage-aware profiling reward (Dr. Kernel's PR): what SHARE of GPU
+            # time this kernel owns, combined with its speedup by Amdahl's law. A
+            # separate signal from the counter bonus above -- that one asks how
+            # efficiently the kernel runs, this one asks whether it is the kernel
+            # that matters. Inert -> (0.0, "") unless the weight is armed AND a
+            # measured collector receipt exists, so the default path never calls
+            # collect_kernel_trace. Feedback is appended even when the term is 0.0,
+            # because "your kernels are 3% of GPU time" is the most actionable thing
+            # the profiler can say to a model that is tuning the wrong loop.
+            cov_term, cov_fb = _coverage_bonus(env, task, code, obs, config)
+            if cov_fb:
+                dense_fb = f"{dense_fb}{cov_fb}"
+            if cov_term > 0.0:
+                rr.reward += cov_term
+                rr.flags.append(f"coverage+{cov_term:.3f}")
+                rr.detail = (f"{rr.detail} | coverage +{cov_term:.4f}"
+                             if rr.detail else f"coverage +{cov_term:.4f}")
+                _feature_invoked(config, "profiling_reward")
         gen_inputs = [(ids.detach(), seq)]
         n_tok = max(int(seq.shape[0]), 1)
         # DAPO importance-ratio anchor: detached policy token-mean logp at rollout.
@@ -3802,6 +4174,43 @@ def _agentic_per_turn_signal(episode, turn_correct, n: int):
         else:
             phis.append(None)
     return codes, speedups, phis
+
+
+def _apply_mrs(config, traj_rewards, traj_correct, traj_speedups, traj_infra):
+    """MRS over one rolled group: mark rejected trajectories as INFRA drops.
+
+    Returns ``(traj_infra, report)``. Rejection is expressed by setting every turn
+    of a rejected trajectory in ``traj_infra``, which is the mechanism
+    :func:`build_kevin_samples` already uses to keep a turn out of the emitted
+    samples -- so a rejected trajectory contributes no policy-gradient term and no
+    advantage, exactly like an infrastructure failure, without a second parallel
+    drop path to keep in sync.
+
+    Returns the ORIGINAL ``traj_infra`` unchanged when rejection sampling is off or
+    when :func:`kore.policy.rejection.multi_turn_rejection_sample` declines. It
+    declines whenever filtering would leave too few trajectories or collapse the
+    group's reward variance, because that variance is the only thing a
+    group-relative estimator learns from -- see that module.
+    """
+    if not bool(getattr(config, "rejection_sampling", False)):
+        return traj_infra, None
+    from kore.policy import rejection as _rej
+
+    report = _rej.multi_turn_rejection_sample(
+        traj_rewards, traj_correct, traj_speedups=traj_speedups,
+        min_quality=float(getattr(config, "mrs_min_quality", 0.0) or 0.0),
+        aggregate=str(getattr(config, "rejection_aggregate", _rej.GEOMETRIC)),
+        require_improvement=bool(getattr(config, "mrs_require_improvement", False)),
+        max_plausible_speedup=float(
+            getattr(config, "max_plausible_speedup", 12.0) or 12.0))
+    keep = set(report.keep_indices)
+    out: list[list[bool]] = []
+    for ti, flags in enumerate(traj_infra):
+        if ti in keep:
+            out.append(list(flags))
+        else:
+            out.append([True] * len(flags))
+    return out, report
 
 
 def _agentic_turn_infra(episode, n: int) -> list[bool]:

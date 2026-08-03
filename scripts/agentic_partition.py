@@ -14,6 +14,16 @@ every node gets the same mix of cheap elementwise kernels and expensive
 attention/GEMM/MoE ones. Balancing by task count alone would leave the nodes that
 drew the attention kernels running hours after the rest finished.
 
+Tasks are also screened against the held-out eval BEFORE any GPU time is spent on
+them. 398 of the 1,289 trainable tasks have a seed kernel that the repo's own
+decontamination rules flag against a held-out task - almost all of them
+``genb_*`` breadth tasks whose held-out sibling differs only in a shape or dtype
+constant, so the two seeds are structurally the same program. Those trajectories
+are rejected at filter time no matter how good they are, and generating them
+first would burn roughly a third of the campaign to produce data that is thrown
+away. Screening on the seed is the cheap, deterministic proxy: it is the text the
+trajectory shares with the sibling, and it is known before the episode runs.
+
 Re-running is the resume operation: work already durable in the output directory
 is removed from the plan, so a second wave only covers what is left.
 """
@@ -40,6 +50,42 @@ def _family(task) -> str:
         return "unclassified"
 
 
+def screen_heldout_seeds(tasks) -> tuple[list, list[dict]]:
+    """Split tasks into (clean, flagged) by their seed's held-out overlap.
+
+    Uses the same ``analyze_text_contamination`` the filter applies to finished
+    trajectories, so a task cleared here is a task whose trajectories will not be
+    thrown away for a reason that was knowable up front. A task whose seed cannot
+    be read is kept: an unreadable seed is a task-registry problem, and silently
+    dropping tasks on a read error would shrink the campaign invisibly.
+    """
+    from kore.data.decontam import analyze_text_contamination, build_heldout_ngrams
+
+    index = build_heldout_ngrams()
+    clean: list = []
+    flagged: list[dict] = []
+    for task in tasks:
+        try:
+            source = task.seed_source
+        except Exception:  # noqa: BLE001 - missing seed is not a contamination verdict
+            clean.append(task)
+            continue
+        if not source:
+            clean.append(task)
+            continue
+        match = analyze_text_contamination(source, index)
+        if match is None:
+            clean.append(task)
+        else:
+            flagged.append({
+                "task_id": task.task_id,
+                "reason": match.reason,
+                "score": round(float(match.score), 4),
+                "heldout_reference": match.reference_id,
+            })
+    return clean, flagged
+
+
 def completed_counts(out_dir: Path) -> Counter:
     """Episodes already durable per task, across every shard in ``out_dir``."""
     from kore.data.saturated_agentic import completed_keys
@@ -63,6 +109,9 @@ def main() -> int:
     parser.add_argument("--episodes-per-task", type=int, default=6)
     parser.add_argument("--max-tasks", type=int, default=0,
                         help="cap the number of tasks planned (0 = all trainable)")
+    parser.add_argument("--no-decontam-screen", action="store_true",
+                        help="plan tasks whose seed overlaps a held-out task; their "
+                             "trajectories will be rejected at filter time")
     args = parser.parse_args()
 
     from kore.tasks.registry import train_tasks
@@ -73,6 +122,15 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tasks = list(train_tasks())
+    flagged: list[dict] = []
+    if not args.no_decontam_screen:
+        tasks, flagged = screen_heldout_seeds(tasks)
+        (shard_dir / "heldout_seed_screen.json").write_text(
+            json.dumps(flagged, indent=2) + "\n")
+        print(f"held-out seed screen: {len(flagged)} tasks excluded, "
+              f"{len(tasks)} eligible")
+        print(f"  reasons: {dict(Counter(f['reason'] for f in flagged).most_common())}")
+
     done = completed_counts(out_dir)
     # A task whose episode quota is already durable is finished; anything short is
     # replanned in full, because run_node_shard skips the individual work items it
@@ -103,7 +161,10 @@ def main() -> int:
         "shard_dir": str(shard_dir.resolve()),
         "n_shards": n_shards,
         "episodes_per_task": args.episodes_per_task,
-        "n_trainable_tasks": len(tasks),
+        "n_eligible_tasks": len(tasks),
+        "n_excluded_heldout_seed_overlap": len(flagged),
+        "heldout_screen_reasons": dict(
+            Counter(f["reason"] for f in flagged).most_common()),
         "n_tasks_planned": len(remaining),
         "n_tasks_already_complete": len(tasks) - len(remaining),
         "planned_episodes": len(remaining) * args.episodes_per_task,

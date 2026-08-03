@@ -132,6 +132,46 @@ def test_replanning_covers_only_the_missing_episodes(tmp_path):
     assert manifest["n_tasks_already_complete"] == 5
 
 
+def test_seed_screen_excludes_tasks_whose_seed_matches_a_heldout_task():
+    """Do not spend GPU hours producing trajectories the filter will reject.
+
+    398 of the 1,289 trainable tasks have a seed the repo's decontamination rules
+    flag against a held-out task, almost all ``genb_*`` breadth tasks whose
+    held-out sibling differs only in a shape or dtype constant. Generating those
+    first burns roughly a third of the campaign on data that is thrown away.
+    """
+    from kore.data.decontam import heldout_source_references
+
+    module = _load_partition_module()
+    references = heldout_source_references()
+    if not references:
+        pytest.skip("no held-out task sources available in this checkout")
+    leaky = max(references, key=lambda ref: len(ref.text)).text
+
+    class _Task:
+        def __init__(self, task_id, seed):
+            self.task_id = task_id
+            self.seed_source = seed
+
+    class _NoSeed:
+        task_id = "unreadable"
+
+        @property
+        def seed_source(self):
+            raise OSError("seed file missing")
+
+    clean, flagged = module.screen_heldout_seeds([
+        _Task("twin_of_heldout", leaky),
+        _Task("ordinary", "import triton\n\n@triton.jit\ndef k(p):\n    pass\n"),
+        _NoSeed(),
+    ])
+    assert [f["task_id"] for f in flagged] == ["twin_of_heldout"]
+    assert flagged[0]["heldout_reference"]
+    # An unreadable seed is a registry problem, not a contamination verdict;
+    # dropping it here would shrink the campaign invisibly.
+    assert sorted(t.task_id for t in clean) == ["ordinary", "unreadable"]
+
+
 def test_manifest_pins_the_commit_the_plan_was_built_from(tmp_path):
     manifest, _buckets = _run_partition(
         tmp_path, ["alpha", "beta"], shards=1, episodes=1)

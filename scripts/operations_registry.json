@@ -70,6 +70,13 @@
       "note": "read-only progress report from campaign telemetry"
     },
     {
+      "path": "scripts/aiter_bwd_dispatch_probe.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "records AITER backward dispatch and optional timing on gfx950; output is a run-specific diagnostic artifact"
+    },
+    {
       "path": "scripts/audit_decontamination.py",
       "classification": "diagnostic",
       "lifecycle": "active",
@@ -77,11 +84,11 @@
       "note": "read-only audit of a training file against the held-out eval set"
     },
     {
-      "path": "scripts/aiter_bwd_dispatch_probe.py",
+      "path": "scripts/audit_hip_tasks.py",
       "classification": "diagnostic",
       "lifecycle": "active",
       "deletes_artifacts": false,
-      "note": "records AITER backward dispatch and optional timing on gfx950; output is a run-specific diagnostic artifact"
+      "note": "read-only dedup and decontamination audit of newly added tasks, plus the operator-overlap disclosure against AgentKernelArena"
     },
     {
       "path": "scripts/build_agentic_sft_slice.py",
@@ -278,18 +285,18 @@
       "replacement": "scheduler-approved training submission"
     },
     {
+      "path": "scripts/run_e2e_14b.sh",
+      "classification": "deprecated",
+      "lifecycle": "deprecated",
+      "replacement": "scheduler validation job"
+    },
+    {
       "path": "scripts/run_evolve_agent.py",
       "classification": "active",
       "lifecycle": "active",
       "deletes_artifacts": false,
       "production": false,
       "note": "drives kore.search.evolve_agent over a task shard: population, strategy-niched archive, harness-proposed mutations, stabilised measurement. Append-only JSONL per shard. production=false: CPU-verified against scripted fakes only, never yet run on a gfx950 node"
-    },
-    {
-      "path": "scripts/run_e2e_14b.sh",
-      "classification": "deprecated",
-      "lifecycle": "deprecated",
-      "replacement": "scheduler validation job"
     },
     {
       "path": "scripts/run_full_14b.sh",
@@ -379,14 +386,6 @@
       "note": "compute-node launcher for audit_decontamination.py"
     },
     {
-      "path": "scripts/spur_evolve_agent_1node.sbatch",
-      "classification": "active",
-      "lifecycle": "active",
-      "deletes_artifacts": false,
-      "production": false,
-      "note": "one-node launcher for run_evolve_agent.py; refuses to start without a visible GPU or with <20G free on the shared /home. Takes ONE node under the QoS cap. production=false until it has been run on gfx950"
-    },
-    {
       "path": "scripts/spur_build_mixture_1node.sbatch",
       "classification": "active",
       "lifecycle": "active",
@@ -430,6 +429,14 @@
       "classification": "diagnostic",
       "lifecycle": "active",
       "role": "CPU-only half of the checkpoint A/B (generation + held-out LM loss + retention); used when GPU submissions are being held"
+    },
+    {
+      "path": "scripts/spur_evolve_agent_1node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "production": false,
+      "note": "one-node launcher for run_evolve_agent.py; refuses to start without a visible GPU or with <20G free on the shared /home. Takes ONE node under the QoS cap. production=false until it has been run on gfx950"
     },
     {
       "path": "scripts/spur_gpu_smoke.sbatch",
@@ -573,6 +580,20 @@
       "path": "scripts/verify_breadth.py",
       "classification": "diagnostic",
       "lifecycle": "active"
+    },
+    {
+      "path": "scripts/verify_hip_seeds.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "compile every HIP C++ seed on real gfx950 and report SNR against its own declared gate; the gate that decides which (op, dtype) pairs may become tasks"
+    },
+    {
+      "path": "scripts/verify_hip_tasks_e2e.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "feed each task its own declared seed through the real KoreEnv and report compile/correctness/timing-eligibility; proves a task is runnable before it is claimed as coverage"
     },
     {
       "path": "scripts/verify_tasks_gpu.py",

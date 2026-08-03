@@ -14,7 +14,7 @@ the 30B target has no Base sibling for either CPT or a residual merge.
 
 ## Task pool before trajectories
 
-The static registry contains 1,334 tasks, of which 1,289 are trainable. It
+The static registry contains 1,354 tasks, of which 1,309 are trainable. It
 cannot grow in place: the taxonomy digest guards split manifests, so adding a
 directory would invalidate a campaign already in flight.
 
@@ -73,7 +73,7 @@ Correctness is gated before speed. The task driver uses the FP32 oracle across
 declared shapes, plus adversarial and determinism checks when enabled. Timings
 are cold-cache, paired, and variance-gated.
 
-There are two baseline lanes. Of 1,334 registry tasks, 106 use a production
+There are two baseline lanes. Of 1,354 registry tasks, 106 use a production
 vendor baseline: 63 declare AITER, 4 declare hipBLASLt, runtime resolution adds
 33 `gemm_fusion` hipBLASLt tasks and 6 gated activations using AITER. The
 remaining 92%, including all 1,052 generated breadth tasks, use torch. A

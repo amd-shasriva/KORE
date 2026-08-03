@@ -52,6 +52,10 @@ kore = [
     "tasks/*/reference.py",
     "tasks/*/driver.py",
     "tasks/*/seed*.py",
+    # HIP C++ tasks declare seed_kernel_name: seed_hip.hip; without this the wheel
+    # installs a task whose declared seed is absent.
+    "tasks/*/seed*.hip",
+    "tasks/*/*.h",
     "eval/data/*.jsonl",
     "data/replay_samples/*.jsonl",
     "data/knowledge/*.md",

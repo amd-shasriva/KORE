@@ -67,10 +67,12 @@ EXPECTED_BAND_COUNTS = {
 }
 # Every train task the sweep measured now clears its own gate, so the default
 # eligibility policy removes nobody.  Pinned so a regression cannot arrive quietly.
-EXPECTED_TRAIN_TASKS = 1_289
-EXPECTED_ELIGIBLE_TRAIN_TASKS = 1_289
+EXPECTED_TRAIN_TASKS = 1_309
+EXPECTED_ELIGIBLE_TRAIN_TASKS = 1_309
 EXPECTED_STRICT_ELIGIBLE_TRAIN_TASKS = 1_009
-EXPECTED_UNMEASURED_TRAIN_TASKS = 280
+# +20 for the HIP C++ family, none of which the gfx950 sweep measured (it ran
+# with the genb_ prefix), so all 20 land in UNMEASURED rather than PASS.
+EXPECTED_UNMEASURED_TRAIN_TASKS = 300
 
 
 def _synthetic_artifact(path):
@@ -571,8 +573,8 @@ def test_unknown_verdicts_are_admitted_but_never_reported_as_verified():
         assert not decision.verdict.is_pass
 
     coverage = registry.hardware_verification_coverage()
-    assert coverage["tasks"] == 1_334
-    assert coverage["status_counts"]["UNKNOWN"] == 1_334 - 1_052
+    assert coverage["tasks"] == 1_354
+    assert coverage["status_counts"]["UNKNOWN"] == 1_354 - 1_052
     assert coverage["measured"] == 1_052
     assert coverage["artifact_digest"] == verification.report().digest
 

@@ -396,12 +396,14 @@ def test_grpo_config_comment_keys_name_a_real_knob():
 # the prose, rather than silently invalidating the prose.
 # --------------------------------------------------------------------------- #
 # Task registry composition. 63 + 4 + 33 + 6 = 106 vendor-lane tasks; the
-# remaining 1,228 (92%) are torch-anchored.
-EXPECTED_TOTAL_TASKS = 1_334
+# remaining 1,248 (92%) are torch-anchored. The total includes the 20-task HIP C++
+# family, all of which are torch-baselined (their production baseline is the eager
+# torch path they have to beat).
+EXPECTED_TOTAL_TASKS = 1_354
 EXPECTED_GENB_TASKS = 1_052
 EXPECTED_AITER_DECLARED = 63
 EXPECTED_HIPBLASLT_DECLARED = 4
-EXPECTED_TORCH_DECLARED = 1_259
+EXPECTED_TORCH_DECLARED = 1_279
 EXPECTED_GEMM_FUSION_UPGRADED = 33
 EXPECTED_GATED_ACT_UPGRADED = 6
 EXPECTED_VENDOR_LANE = 106

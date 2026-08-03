@@ -12,7 +12,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 TASKS = ROOT / "kore" / "tasks"
-TASK_FILES = ("task.yaml", "reference.py", "driver.py", "seed_triton.py")
+# Assets every task must ship regardless of backend.  The seed is NOT in this
+# list: its filename is declared per task by ``seed_kernel_name`` (a Triton task
+# ships ``seed_triton.py``, a HIP task ships ``seed_hip.hip``), so hard-coding one
+# name here would either reject a valid HIP task or, worse, pass a task whose
+# declared seed is absent while a stale ``seed_triton.py`` sits beside it.
+TASK_FILES = ("task.yaml", "reference.py", "driver.py")
 
 
 @pytest.mark.packaging
@@ -26,6 +31,17 @@ def test_source_task_assets_match_the_live_registry() -> None:
         for name in TASK_FILES:
             if not (task_yaml.parent / name).is_file():
                 asset_errors.append(f"{task_yaml.parent.name}: missing {name}")
+        # The seed the task actually declares must exist, whatever it is called.
+        try:
+            declared = (yaml.safe_load(task_yaml.read_text()) or {}).get("seed_kernel_name")
+        except yaml.YAMLError as exc:
+            asset_errors.append(f"{task_yaml.parent.name}: unreadable task.yaml ({exc})")
+            continue
+        if not isinstance(declared, str) or not declared.strip():
+            asset_errors.append(f"{task_yaml.parent.name}: declares no seed_kernel_name")
+        elif not (task_yaml.parent / declared.strip()).is_file():
+            asset_errors.append(
+                f"{task_yaml.parent.name}: missing declared seed {declared.strip()}")
 
     registered_ids = task_ids()
     if directory_ids != registered_ids:

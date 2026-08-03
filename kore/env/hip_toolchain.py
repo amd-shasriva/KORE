@@ -387,10 +387,10 @@ def compile_hip_source(
     arch = gpu_arch(gpu_target) or os.environ.get("PYTORCH_ROCM_ARCH") or detected_gpu_arch()
     if arch:
         os.environ["PYTORCH_ROCM_ARCH"] = gpu_arch(arch)
-    path = os.environ.get("PATH") or os.defpath
-    missing = [d for d in script_dirs() if d not in path.split(os.pathsep)]
+    search_path = os.environ.get("PATH") or os.defpath
+    missing = [d for d in script_dirs() if d not in search_path.split(os.pathsep)]
     if missing:
-        os.environ["PATH"] = os.pathsep.join([*missing, path])
+        os.environ["PATH"] = os.pathsep.join([*missing, search_path])
     os.environ.setdefault("MAX_JOBS", DEFAULT_MAX_JOBS)
 
     build_dir = Path(extension_cache_root()) / name

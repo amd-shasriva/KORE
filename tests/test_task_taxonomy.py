@@ -17,8 +17,11 @@ from kore.tasks import registry, taxonomy
 from kore.tasks.base import Task
 
 
+# Includes the 20-task HIP C++ family (kore/tasks/generate_hip.py): +9 activation
+# (gelu_tanh/silu/silu_mul x 3 dtypes), +6 normalization (layernorm/rmsnorm x 3),
+# +3 reduction (softmax_rows x 3), +2 quantization (per-token fp8, MXFP4 dequant).
 EXPECTED_PRODUCT_COUNTS = {
-    "activation": 85,
+    "activation": 94,
     "attention": 147,
     "convolution": 120,
     "data_movement": 2,
@@ -27,11 +30,11 @@ EXPECTED_PRODUCT_COUNTS = {
     "gemm": 95,
     "mla": 1,
     "moe": 89,
-    "normalization": 102,
+    "normalization": 108,
     "paged_attention": 1,
     "positional": 7,
-    "quantization": 33,
-    "reduction": 163,
+    "quantization": 35,
+    "reduction": 166,
     "sampling": 84,
     "sequence": 94,
     "sparse": 16,
@@ -40,9 +43,12 @@ EXPECTED_PRODUCT_COUNTS = {
 # Content-addressed over the versioned rules plus every live task assignment,
 # which now includes each task's contamination state. Recording that the midtrain
 # corpus saw 11 held-out tasks changes the payload, so the digest moves and every
-# manifest authored before the finding is correctly stale.
+# manifest authored before the finding is correctly stale. Adding the HIP C++
+# family moves it again, for the same reason and with the same consequence: a
+# split manifest frozen before the HIP tasks existed does not describe this
+# registry and must be re-frozen rather than reused.
 EXPECTED_TAXONOMY_DIGEST = (
-    "cd5c7769cd7597fe59232a6ee89778ff65d6ca38184a2eb953f104fc7127ac5c"
+    "dcb8653ff64f7aed3cd33fd9d837793cf30245e004aa94b80718318ccd744034"
 )
 CONTAMINATED_HELDOUT_TASKS = frozenset({
     "genb_cv_conv2d_1x1_s2_fp16",
@@ -61,7 +67,8 @@ CONTAMINATED_HELDOUT_TASKS = frozenset({
 
 def test_whole_registry_has_complete_stable_classification():
     tasks = registry.all_tasks()
-    assert len(tasks) == 1_334
+    # 1,334 Triton + 20 HIP C++ (kore/tasks/generate_hip.py).
+    assert len(tasks) == 1_354
     counts = Counter(registry.operator_family(task) for task in tasks)
     assert dict(sorted(counts.items())) == EXPECTED_PRODUCT_COUNTS
     assert set(counts) == set(taxonomy.PRODUCT_FAMILIES)
@@ -131,7 +138,7 @@ def test_attention_precedence_and_task_level_near_probes():
 
 def test_split_manifest_is_immutable_complete_and_lineage_disjoint():
     manifest = registry.build_split_manifest()
-    assert len(manifest.train_ids) == 1_289
+    assert len(manifest.train_ids) == 1_309
     assert len(manifest.eval_ids) == 45
     # Contaminated tasks stay in the held-out reservation and leave only the
     # zero-shot claim: 45 held out, 34 of them still scoreable.

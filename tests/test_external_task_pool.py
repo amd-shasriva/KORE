@@ -254,7 +254,7 @@ def test_a_heldout_task_seed_is_recognized_as_contaminated(decontaminator):
 
 
 def test_a_literal_heldout_task_id_is_refused(decontaminator):
-    heldout_id = sorted(registry.heldout_tasks())[0].task_id
+    heldout_id = sorted(t.task_id for t in registry.heldout_tasks())[0]
     source = SIMPLE_MODULE + f"\n# ported from {heldout_id}\n"
 
     verdict = decontaminator.check(_candidate(source=source))
@@ -281,7 +281,7 @@ def test_benchmark_problems_are_indexed_as_reference_documents():
 
 
 def test_evidence_never_carries_the_contaminated_text(decontaminator):
-    heldout_id = sorted(registry.heldout_tasks())[0].task_id
+    heldout_id = sorted(t.task_id for t in registry.heldout_tasks())[0]
     verdict = decontaminator.check(
         _candidate(source=SIMPLE_MODULE + f"\n# {heldout_id}\n")
     )
@@ -292,27 +292,63 @@ def test_evidence_never_carries_the_contaminated_text(decontaminator):
 # --------------------------------------------------------------------------- #
 # Dedup
 # --------------------------------------------------------------------------- #
-def test_dedup_collapses_a_renamed_and_reformatted_copy():
+@pytest.mark.parametrize("label,transform", [
+    ("class and submodule rename",
+     lambda s: s.replace("TinyMLP", "SmallMLP").replace("self.fc", "self.dense")
+                .replace("self.norm", "self.ln")),
+    ("argument rename",
+     lambda s: s.replace("def forward(self, x):", "def forward(self, h):")
+                .replace("self.fc(x)", "self.fc(h)")),
+    ("comments and blank lines",
+     lambda s: s.replace("import torch\n", "import torch  # tensors\n\n\n")),
+])
+def test_dedup_collapses_a_type_2_clone(label, transform):
+    """The same module under another author's naming or formatting is one task."""
     dedup = mining.Deduplicator()
     assert dedup.check(SIMPLE_MODULE, "a") is None
 
-    renamed = SIMPLE_MODULE.replace("TinyMLP", "SmallMLP").replace(
-        "self.fc", "self.dense"
-    ).replace("def forward(self, x):", "def forward(self, inp):\n        x = inp")
-    verdict = dedup.check(renamed, "b")
+    verdict = dedup.check(transform(SIMPLE_MODULE), "b")
 
-    assert verdict is not None and verdict[0].startswith("dedup:")
+    assert verdict is not None, label
+    assert verdict[0].startswith("dedup:")
     assert verdict[1]["duplicate_of"] == "a"
 
 
-def test_dedup_keeps_a_structurally_different_module():
+def test_submodule_attribute_names_are_not_a_distinguishing_feature():
+    """``self.fc`` and ``self.dense`` are one module, but ``tl.dot`` is not ``tl.load``.
+
+    ``kore.data.dedup`` preserves attribute names because that distinction is
+    load-bearing for Triton kernels. Applied to mined ``nn.Module`` sources
+    unchanged, it would report one module copied under two authors' naming as two
+    distinct tasks, so only attributes hung off ``self`` are canonicalized.
+    """
+    renamed = SIMPLE_MODULE.replace("self.fc", "self.dense").replace(
+        "self.norm", "self.ln"
+    )
+    assert mining.canonical_module_source(SIMPLE_MODULE) == \
+        mining.canonical_module_source(renamed)
+
+    from kore.data.dedup import structural_fingerprint
+
+    kernel = "import triton.language as tl\ndef k(a, b):\n    return tl.dot(a, b)\n"
+    other = kernel.replace("tl.dot", "tl.load")
+    assert structural_fingerprint(mining.canonical_module_source(kernel)) != \
+        structural_fingerprint(mining.canonical_module_source(other))
+
+
+@pytest.mark.parametrize("label,transform", [
+    ("different activation", lambda s: s.replace("gelu", "relu")),
+    ("added statement",
+     lambda s: s.replace("def forward(self, x):",
+                         "def forward(self, x):\n        x = x * 2")),
+    ("different composition",
+     lambda s: s.replace("self.norm(torch.nn.functional.gelu(self.fc(x)))",
+                         "self.norm(torch.softmax(self.fc(x), dim=-1)) + x")),
+])
+def test_dedup_keeps_a_structurally_different_module(label, transform):
     dedup = mining.Deduplicator()
     dedup.check(SIMPLE_MODULE, "a")
-    other = SIMPLE_MODULE.replace(
-        "self.norm(torch.nn.functional.gelu(self.fc(x)))",
-        "self.norm(torch.softmax(self.fc(x), dim=-1)) + x",
-    )
-    assert dedup.check(other, "b") is None
+    assert dedup.check(transform(SIMPLE_MODULE), "b") is None, label
 
 
 def test_dedup_is_seeded_with_the_registry_so_a_pool_task_cannot_restate_one():
@@ -325,9 +361,13 @@ def test_dedup_is_seeded_with_the_registry_so_a_pool_task_cannot_restate_one():
 
 def test_admit_applies_both_shared_state_gates_and_counts_every_drop(decontaminator):
     good = mining.screen_candidate(_candidate())
-    duplicate = mining.screen_candidate(
-        _candidate(source=SIMPLE_MODULE.replace("TinyMLP", "OtherMLP"), name="OtherMLP")
-    )
+    duplicate = mining.screen_candidate(_candidate(
+        source=SIMPLE_MODULE.replace("TinyMLP", "OtherMLP"),
+        name="OtherMLP",
+        entry="OtherMLP",
+    ))
+    assert duplicate.accepted, "the clone must reach the shared-state gates"
+    assert duplicate.spec.task_id != good.spec.task_id, "distinct content hashes"
     rejected = mining.Outcome(_candidate(), False, "safety", "forbidden_import: os")
 
     accepted, report = mining.admit(
@@ -447,7 +487,7 @@ def test_resolve_prefers_the_pool_and_falls_back_to_the_registry(accepted_spec, 
 def test_a_hand_edited_index_cannot_widen_the_train_set(accepted_spec, tmp_path):
     """Re-deriving the split at read time is what makes the index untrusted input."""
     payload = accepted_spec.to_dict()
-    payload["task_id"] = sorted(registry.heldout_tasks())[0].task_id
+    payload["task_id"] = sorted(t.task_id for t in registry.heldout_tasks())[0]
     payload["operation"] = "mla_decode"
     path = tmp_path / external.POOL_INDEX_NAME
     path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")

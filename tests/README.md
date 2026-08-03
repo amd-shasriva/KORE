@@ -174,7 +174,7 @@ the suite itself would skip every test anyway. On a Slurm cluster,
 | Contracts and integrity gates | `test_docs_contract.py`, `test_dataloader_contract.py`, `test_packaging_contract.py`, `test_task_integrity_gates.py`, `test_generated_breadth_contract.py`, `test_breadth_seed_contract.py`, `test_replay_contract.py`, `test_shape_certification.py`, `test_baseline_honesty.py`, `test_grpo_recipe_honesty.py`, `test_eval_integrity.py`, `test_data_integrity.py`, `test_data_durability.py`, `test_decontam_provenance.py`, `test_frontier_protocol.py`, `test_training_budget_ledger.py` |
 | Model / resource identity | `test_model_identity_wiring.py`, `test_model_spec_resources.py`, `test_preflight_identity.py`, `test_gpu_preflight_identity.py`, `test_generation_client.py`, `test_sandbox_boundary.py`, `test_sandbox_launch_plan.py`, `test_hack_scanner_hardening.py`, `test_oracle_wiring.py` |
 | Stage readiness / resume | `test_sft_launch_readiness.py`, `test_dpo_launch_readiness.py`, `test_grpo_launch_readiness.py`, `test_grpo_capabilities.py`, `test_grpo_checkpoint_resume.py`, `test_minimum_grpo_profile.py`, `test_preemption_checkpoints.py` |
-| Tasks / ops (cont.) | `test_task_taxonomy.py`, `test_ops_runtime.py`, `test_ops_verify.py`, `test_registered_curriculum.py`, `test_deepen_ksaturate.py` |
+| Tasks / ops (cont.) | `test_task_taxonomy.py`, `test_ops_runtime.py`, `test_ops_verify.py`, `test_registered_curriculum.py`, `test_deepen_ksaturate.py`, `test_external_task_pool.py` |
 | Data factory (cont.) | `test_teacher.py`, `test_amd_knowledge.py`, `test_humaneval_extract.py` |
 
 **The map above must name every module.** `test_docs_contract.py` fails if a

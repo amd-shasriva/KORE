@@ -91,13 +91,6 @@
       "note": "builds/verifies the instruction-residual transfer; writes only its --out dir"
     },
     {
-      "path": "scripts/build_task_pool.py",
-      "classification": "active",
-      "lifecycle": "active",
-      "deletes_artifacts": false,
-      "note": "mines external PyTorch modules into the decontaminated task pool; writes only its --out dir and never touches kore/tasks/"
-    },
-    {
       "path": "scripts/build_sft_v2_mixture.py",
       "classification": "active",
       "lifecycle": "active",
@@ -109,7 +102,7 @@
       "classification": "active",
       "lifecycle": "active",
       "deletes_artifacts": false,
-      "note": "expands the trainable task pool from KernelBook/synthetic sources; writes a new pool, never mutates the registry it reads"
+      "note": "mines external PyTorch modules into the decontaminated task pool; writes only its --out dir and never mutates the registry it reads"
     },
     {
       "path": "scripts/complete_base.py",

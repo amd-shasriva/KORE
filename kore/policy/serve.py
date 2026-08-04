@@ -404,6 +404,20 @@ def _apply_chat_no_think(tok, messages):
             messages, add_generation_prompt=True, return_tensors="pt")
 
 
+def _is_local_checkpoint(model_id) -> bool:
+    """Is this a path to a checkpoint on disk rather than a Hub repo id?
+
+    Checks for the config that any loadable checkpoint directory must contain,
+    not merely that the path exists: a bare directory that happens to match a
+    Hub id should still be treated as a Hub id, and a typo'd path should fail
+    loudly at load rather than quietly skip the revision pin.
+    """
+    try:
+        return os.path.isfile(os.path.join(str(model_id), "config.json"))
+    except Exception:  # noqa: BLE001 - a non-path-like model_id is simply a Hub id
+        return False
+
+
 def load_generate(
     model_id: str,
     *,
@@ -440,6 +454,19 @@ def load_generate(
             raise TypeError("model_spec must be a resolved ModelSpec")
         model_spec.validate_for_load(model_id, revision=revision)
         revision = model_spec.revision
+    elif _is_local_checkpoint(model_id):
+        # A pinned revision is a statement about WHICH Hub commit was fetched, and
+        # a local directory has no Hub commit to name -- the bytes on disk are the
+        # identity. Demanding one here does not make the load reproducible, it
+        # just makes it impossible: evaluating a checkpoint we trained ourselves
+        # failed outright with FloatingRevisionError before a single task ran.
+        # model_spec already takes this position for local paths ("ignores a Hub
+        # revision for a local directory, and logs that it did"); this is the same
+        # rule on the serving path. The guard is unchanged for Hub ids, which is
+        # where a floating revision can actually silently change what you loaded.
+        print(f"[serve] local checkpoint {model_id}: no Hub revision to pin",
+              flush=True)
+        revision = None
     else:
         revision = validate_pinned_revision(revision)
 

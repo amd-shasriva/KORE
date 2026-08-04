@@ -457,6 +457,9 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         save_total_limit=getattr(config, "save_total_limit", 2),
+        # Weights-only checkpoints when asked: ~61GB instead of ~488GB at 30B, which
+        # is what makes a write survivable on a volume other users can fill mid-save.
+        save_only_model=bool(getattr(config, "save_only_model", False)),
         report_to=config.report_to,
         dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
         dataloader_pin_memory=getattr(config, "dataloader_pin_memory", True),

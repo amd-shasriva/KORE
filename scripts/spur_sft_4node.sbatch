@@ -60,27 +60,24 @@ MASTER_ADDR="$(printf '%s' "$SLURM_JOB_NODELIST" | cut -d, -f1)"
 # smoke runs. The range avoids the ephemeral ports the kernel hands out.
 MASTER_PORT=$(( 29000 + (${SLURM_JOB_ID:-0} % 900) ))
 
-# SPUR runs this batch body once PER ALLOCATED NODE, even with --ntasks unset.
-# Measured: a --nodes=4 job printed START four times, and each copy then raced to
-# drive its own srun over the whole allocation. Exactly one copy may proceed.
+# THIS BODY IS THE PER-NODE WORKER. Established by scripts/probe_multinode.sbatch
+# rather than assumed, because SPUR differs from stock Slurm in ways that decide
+# the whole design:
 #
-# mkdir is the arbiter for the same reason it guards the resolve: atomic on NFS,
-# unlike a test-then-write. The winner runs the job; the others exit 0 so they do
-# not fail the array. Placed before any output so the log has one START.
-DRIVER_LOCK="$REPO/runs/sft4-${SLURM_JOB_ID:-manual}.driver.lock"
-if ! mkdir "$DRIVER_LOCK" 2>/dev/null; then
-    echo "[sft-4node] not the driver copy on $(hostname); exiting cleanly"
-    exit 0
-fi
-# Deliberately NOT released on exit. The first version cleared it in an EXIT
-# trap, which meant that when the driver finished the lock vanished and a
-# later-starting copy acquired it and began the whole job again -- three STARTs
-# in one job. The lock is scoped by job id, so leaving it held for the job's
-# lifetime cannot collide with anything else, and the runs/ directory is swept
-# by scripts/cleanup_stale_artifacts.sh.
+#   * the batch body executes once PER ALLOCATED NODE, not once on a batch host;
+#   * SLURM_NODEID is distinct per copy (0..N-1 observed), so each copy already
+#     knows its own rank;
+#   * srun from inside a body copy FAILS -- "job <id> is not running (state:
+#     Pending)" -- SPUR does not let a body copy create a job step.
+#
+# So there is no srun here. Each copy launches accelerate for its own node with
+# machine_rank=$SLURM_NODEID, and the 32 ranks find each other through the
+# rendezvous. Earlier revisions tried to elect a single driver and fan out with
+# srun, which is the stock-Slurm shape and cannot work on this controller.
+MACHINE_RANK="${SLURM_NODEID:?SLURM_NODEID unset -- this must run as a multi-node sbatch}"
 
-echo "[sft-4node] START job=${SLURM_JOB_ID:-none} nodes=$NNODES world=$NPROC_GLOBAL"
-echo "[sft-4node] master=$MASTER_ADDR:$MASTER_PORT nodelist=$SLURM_JOB_NODELIST"
+echo "[sft-4node] START job=${SLURM_JOB_ID:-none} node=$MACHINE_RANK/$NNODES host=$(hostname)"
+echo "[sft-4node] master=$MASTER_ADDR:$MASTER_PORT world=$NPROC_GLOBAL nodelist=$SLURM_JOB_NODELIST"
 
 # Resolve ONCE, before any rank loads 61GB of weights, so all 32 ranks read one
 # file off the shared filesystem and cannot disagree about the recipe.
@@ -109,44 +106,43 @@ else
 fi
 
 RC=0
-srun --nodes="$NNODES" --ntasks="$NNODES" bash -c '
-  set -euo pipefail
-  cd "'"$REPO"'"
-  source /home/shasriva/kore-venv/bin/activate
-  set -a; source "'"$REPO"'/.env.local" 2>/dev/null || true; set +a
+# Only rank 0 resolves; the rest wait for the file. Same reasoning as before, but
+# now the guard is a rank check rather than a lock, because SLURM_NODEID makes
+# "who goes first" explicit instead of a race to be arbitrated.
+cd "$REPO"
+source /home/shasriva/kore-venv/bin/activate
+set -a; source "$REPO/.env.local" 2>/dev/null || true; set +a
 
-  # Full-node GRES: accelerate sets per-worker masks itself, so any inherited
-  # visibility mask would leave 7 of 8 cards unused on every node.
-  unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
+# Full-node GRES: accelerate sets per-worker masks itself, so any inherited
+# visibility mask would leave 7 of 8 cards unused on this node.
+unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
 
-  export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
-  export HF_HOME=/home/shasriva/.cache/huggingface
-  export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
+export HF_HOME=/home/shasriva/.cache/huggingface
+export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
 
-  # RCCL over Mellanox IB. Pinning the fabric matters more at 32 ranks than at 8:
-  # the all-gather for a 30B MoE crosses nodes every layer, and letting RCCL fall
-  # back to sockets turns a compute-bound step into a network-bound one.
-  export NCCL_SOCKET_IFNAME=^lo,docker0
-  export NCCL_IB_HCA=mlx5
-  export NCCL_NET_GDR_LEVEL=3
-  export NCCL_DEBUG=WARN
-  export NCCL_ASYNC_ERROR_HANDLING=1
-  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-  # Load the checkpoint on rank 0 only and broadcast, instead of 32 ranks each
-  # pulling 61GB off the same NFS mount.
-  export FSDP_CPU_RAM_EFFICIENT_LOADING=1
+# RCCL over Mellanox IB. This matters more at 32 ranks than at 8: the all-gather
+# for a 30B MoE crosses nodes every layer, and a socket fallback turns a
+# compute-bound step into a network-bound one.
+export NCCL_SOCKET_IFNAME=^lo,docker0
+export NCCL_IB_HCA=mlx5
+export NCCL_NET_GDR_LEVEL=3
+export NCCL_DEBUG=WARN
+export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+# Load the checkpoint on rank 0 and broadcast, rather than 32 ranks each pulling
+# 61GB off the same NFS mount.
+export FSDP_CPU_RAM_EFFICIENT_LOADING=1
 
-  echo "[node $SLURM_NODEID/$SLURM_NNODES] host=$(hostname) -> machine_rank=$SLURM_NODEID"
-  exec accelerate launch \
-    --config_file "'"$REPO"'/configs/accelerate_fsdp.yaml" \
-    --num_machines "'"$NNODES"'" \
-    --num_processes "'"$NPROC_GLOBAL"'" \
-    --machine_rank "$SLURM_NODEID" \
-    --main_process_ip "'"$MASTER_ADDR"'" \
-    --main_process_port "'"$MASTER_PORT"'" \
+accelerate launch \
+    --config_file "$REPO/configs/accelerate_fsdp.yaml" \
+    --num_machines "$NNODES" \
+    --num_processes "$NPROC_GLOBAL" \
+    --machine_rank "$MACHINE_RANK" \
+    --main_process_ip "$MASTER_ADDR" \
+    --main_process_port "$MASTER_PORT" \
     --same_network \
-    -m kore.policy.sft "'"$RESOLVED"'"
-' || RC=$?
+    -m kore.policy.sft "$RESOLVED" || RC=$?
 
 echo "SFT_RC=$RC"
 echo "[sft-4node] END job=${SLURM_JOB_ID:-none} status=$RC"

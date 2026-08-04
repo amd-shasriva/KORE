@@ -72,7 +72,12 @@ if ! mkdir "$DRIVER_LOCK" 2>/dev/null; then
     echo "[sft-4node] not the driver copy on $(hostname); exiting cleanly"
     exit 0
 fi
-trap 'rmdir "$DRIVER_LOCK" 2>/dev/null || true' EXIT
+# Deliberately NOT released on exit. The first version cleared it in an EXIT
+# trap, which meant that when the driver finished the lock vanished and a
+# later-starting copy acquired it and began the whole job again -- three STARTs
+# in one job. The lock is scoped by job id, so leaving it held for the job's
+# lifetime cannot collide with anything else, and the runs/ directory is swept
+# by scripts/cleanup_stale_artifacts.sh.
 
 echo "[sft-4node] START job=${SLURM_JOB_ID:-none} nodes=$NNODES world=$NPROC_GLOBAL"
 echo "[sft-4node] master=$MASTER_ADDR:$MASTER_PORT nodelist=$SLURM_JOB_NODELIST"

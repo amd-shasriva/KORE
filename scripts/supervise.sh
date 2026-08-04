@@ -101,23 +101,26 @@ adopt_stray_ledger() {
 say "=== supervisor start (pid $$) ==="
 say "sft_out=$SFT_OUT  retire='${RETIRE}'"
 
-# --- one-time retirement of the misconfigured jobs -------------------------
-if [ -n "$RETIRE" ]; then
-    for _ in $(seq 1 240); do
-        if queue >/dev/null; then
-            for j in $RETIRE; do say "retiring stale job $j"; scancel "$j" 2>&1 | tee -a "$LOG"; done
-            sleep 10
-            break
-        fi
-        sleep 15
-    done
-fi
+[ -n "$RETIRE" ] && say "will retire on first scheduler contact: $RETIRE"
 
 while :; do
     if ! q="$(queue)"; then
         say "scheduler unreachable; waiting"
         sleep 30
         continue
+    fi
+
+    # Retire on the first successful contact, however long that takes. This used
+    # to be a bounded pre-loop that gave up after 60 minutes and logged nothing
+    # while it waited: a scheduler outage longer than that left the superseded job
+    # running, and the main loop then saw a job of the right name in the queue and
+    # never replaced it. On this cluster spurctld has been down for 40+ minutes at
+    # a stretch, so that ceiling was reachable.
+    if [ -n "$RETIRE" ]; then
+        for j in $RETIRE; do say "retiring superseded job $j"; scancel "$j" 2>&1 | tee -a "$LOG"; done
+        RETIRE=""
+        sleep 10
+        q="$(queue)" || continue
     fi
 
     prune_checkpoints "$SFT_OUT"

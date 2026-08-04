@@ -34,11 +34,35 @@ import random
 import sys
 
 # (dataset, config, split, bucket, preferred text/message fields)
+#
+# Ordered by measured quality, not by what happened to be cached. Two notes on
+# why these and not the obvious alternatives:
+#
+# CHAT. The best measured mixture is TuluTalk (arXiv 2506.06522, NeurIPS 2025):
+# a Magpie-annotated curation of Tulu-3 + SmolTalk that beats both on MMLU,
+# ARC-C (+2.8), BBH (+4.4), HellaSwag, WinoGrande and IFEval while using 14-23%
+# fewer samples. Its full 808k mixture was never released -- only annotated
+# fragments -- so we use Tulu-3, which is TuluTalk's main ingredient and the
+# stronger of the two sources it curates.
+#
+# CODING. OpenCodeReasoning-2 over OpenCodeInstruct, and the difference is the
+# shape of the data rather than its size: OCR-2 carries R1 reasoning traces and
+# QwQ critiques over ~35k competitive programming problems, where
+# OpenCodeInstruct is bare instruction->code. The capability we are protecting is
+# algorithmic reasoning under domain specialisation, so replay that contains the
+# reasoning is the right thing to rehearse. Nemotron-CP-v2 is the fallback.
+# Config/split names are as the hub actually reports them, not as they read in the
+# paper. All three coding sources were silently skipped on the first attempt for
+# exactly this: OCR-2 exposes one 'train' split and no per-language config,
+# OCR-1's split is 'split_0', and Nemotron-CP splits by subset name. The loader
+# reports the available names in its error, which is what these came from.
 CANDIDATES = [
     ("allenai/tulu-3-sft-mixture", None, "train", "chat", ("messages",)),
-    ("nvidia/OpenCodeInstruct", None, "train", "coding", ("input", "output")),
+    ("nvidia/OpenCodeReasoning-2", None, "python", "coding", ("question", "r1_generation")),
+    ("nvidia/Nemotron-SFT-Competitive-Programming-v2", None, "competitive_coding_python",
+     "coding", ("input", "output")),
+    ("nvidia/OpenCodeReasoning", None, "split_0", "coding", ("input", "output")),
     ("open-thoughts/OpenThoughts3-1.2M", None, "train", "coding", ("conversations", "messages")),
-    ("livecodebench/code_generation_lite", None, "test", "coding", ("question_content",)),
 ]
 
 

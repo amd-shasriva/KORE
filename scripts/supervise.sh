@@ -20,6 +20,11 @@ cd "$REPO" || exit 1
 SFT_OUT="/shared_nfs/shasriva/kore/runs/sft_v4"
 V3_MODEL="/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b"
 AKA_ARM="kore"
+# One fixed directory for the arena, not one per job id. 402 tasks at up to 900s
+# each cannot finish inside the eval's 8h allocation, so the run only completes by
+# resuming from its partial ledger across several jobs -- which requires every
+# attempt to land in the same place.
+AKA_OUT="$REPO/runs/aka_full_${AKA_ARM}"
 LOG="$REPO/runs/supervise.log"
 RETIRE="${*:-}"
 
@@ -66,9 +71,31 @@ aka_done() {
     # task, so it -- not the per-task ledger, which exists from task one -- is the
     # signal that the arena is finished. Getting this wrong means resubmitting a
     # completed 402-task eval forever and holding a GPU node for nothing.
-    local d
-    d="$(ls -dt "$REPO"/runs/aka_* 2>/dev/null | head -1)"
-    [ -n "$d" ] && [ -f "$d/results_${AKA_ARM}.json" ]
+    [ -f "$AKA_OUT/results_${AKA_ARM}.json" ]
+}
+
+# Carry a ledger written under an older per-job-id directory into the stable one,
+# so switching to a fixed output dir does not throw away tasks already scored.
+# Only ever adds tasks: lines are keyed by task_id and the longer ledger wins.
+adopt_stray_ledger() {
+    local best="" bestn=0 n f
+    mkdir -p "$AKA_OUT"
+    for d in "$REPO"/runs/aka_*; do
+        [ -d "$d" ] || continue
+        [ "$d" = "$AKA_OUT" ] && continue
+        f="$d/results_${AKA_ARM}.partial.jsonl"
+        [ -f "$f" ] || continue
+        n=$(wc -l < "$f" 2>/dev/null || echo 0)
+        if [ "$n" -gt "$bestn" ]; then bestn=$n; best=$f; fi
+    done
+    [ -z "$best" ] && return 0
+    local cur="$AKA_OUT/results_${AKA_ARM}.partial.jsonl"
+    local curn=0
+    [ -f "$cur" ] && curn=$(wc -l < "$cur" 2>/dev/null || echo 0)
+    if [ "$bestn" -gt "$curn" ]; then
+        say "adopting ledger with $bestn scored task(s) from $best (stable had $curn)"
+        cp "$best" "$cur"
+    fi
 }
 
 say "=== supervisor start (pid $$) ==="
@@ -117,8 +144,12 @@ while :; do
     if aka_done; then
         [ "$have_aka" = "0" ] && say "AKA COMPLETE (summary written)"
     elif [ "$have_aka" = "0" ]; then
-        say "AKA absent from queue -> submitting full arena (all types, no limit)"
-        sbatch scripts/spur_aka_1node.sbatch run - "$V3_MODEL" 0 "$AKA_ARM" 2>&1 | tee -a "$LOG"
+        adopt_stray_ledger
+        scored=0
+        [ -f "$AKA_OUT/results_${AKA_ARM}.partial.jsonl" ] && \
+            scored=$(wc -l < "$AKA_OUT/results_${AKA_ARM}.partial.jsonl")
+        say "AKA absent from queue -> submitting full arena (all types, no limit; $scored/402 already scored)"
+        sbatch scripts/spur_aka_1node.sbatch run - "$V3_MODEL" 0 "$AKA_ARM" "$AKA_OUT" 2>&1 | tee -a "$LOG"
     fi
 
     if sft_done && aka_done; then

@@ -35,7 +35,13 @@ LIMIT="${4:-0}"
 ARM="${5:-kore}"
 [ "$TYPES" = "-" ] && TYPES=""
 
-OUT="$REPO/runs/aka_${SLURM_JOB_ID:-manual}"
+# Sixth arg is an explicit output dir, and it is what makes a long arena run
+# finishable. The full arena is 402 tasks with a 900s per-task ceiling, so it
+# cannot fit in this script's 8h limit; it has to cross several allocations,
+# resuming from the partial ledger each time. Keying the default on SLURM_JOB_ID
+# gives every resubmission a fresh empty directory, which silently restarts the
+# run from task 1 forever. Pass a stable path for any run you expect to resume.
+OUT="${6:-$REPO/runs/aka_${SLURM_JOB_ID:-manual}}"
 echo "host=$(hostname) mode=$MODE types=${TYPES:-ALL} model=$MODEL limit=$LIMIT arm=$ARM"
 echo "arena=$HOME/third_party/AgentKernelArena  out=$OUT"
 

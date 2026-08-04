@@ -171,6 +171,20 @@ class SFTConfig(DistributedMixin):
     # out around each new save, so 1 leaves nothing resumable if the process dies
     # inside that window. Measured on gfx950: one 14B SFT checkpoint is 221 GB.
     save_total_limit: int = 2
+    # Write weights only, dropping Adam's fp32 moments. Adam holds ~16 bytes/param,
+    # so a 30.5B checkpoint is ~488GB with optimizer state and ~61GB without -- an
+    # 8x smaller window in which a write can fail. That matters on a shared volume:
+    # run 33992 trained cleanly for 200M tokens, then died at step 400 with
+    # "Disk quota exceeded (os error 122)" after writing 4 of 25 shards, on a
+    # filesystem sitting at 146T of 150T used where the remaining margin belongs
+    # to other users. Our own footprint was 15GB and an 80GB test write succeeded,
+    # so nothing about the run was at fault; the write was simply long enough for
+    # someone else to consume the space underneath it.
+    #
+    # The cost is that a killed run restarts instead of resuming. That is the right
+    # trade only when the checkpoint write is itself the most likely cause of death,
+    # which is why this defaults to False and is opted into per-config.
+    save_only_model: bool = False
     report_to: str = "none"
 
 

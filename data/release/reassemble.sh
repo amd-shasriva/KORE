@@ -14,4 +14,8 @@ cat ../b05factory/sft/multicap.jsonl ../b05factory/sft/kernel_multiturn_refine.j
 cat dpo/pairs.jsonl.gz.part*      | gunzip > ../b05factory/dpo/pairs.jsonl
 cat curriculum/curriculum_all.jsonl.gz.part* | gunzip > ../../kore_offline/curriculum_all.jsonl 2>/dev/null || true
 cat provenance/datagen.tar.gz.part* | gunzip | tar -C ../b05factory -xf -
+# v4: the mixture the 30B SFT config points at -- 244,732 rows, measured
+# 65.9/21.5/12.3 kernel/chat/coding by tokens. Rebuilt by concatenation like the
+# others so a fresh checkout reproduces it with no network and no hub account.
+cat sft/multicap_v4.jsonl.gz.part* | gunzip > ../b05factory/sft/multicap_v4.jsonl
 echo reassembled

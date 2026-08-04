@@ -60,6 +60,20 @@ MASTER_ADDR="$(printf '%s' "$SLURM_JOB_NODELIST" | cut -d, -f1)"
 # smoke runs. The range avoids the ephemeral ports the kernel hands out.
 MASTER_PORT=$(( 29000 + (${SLURM_JOB_ID:-0} % 900) ))
 
+# SPUR runs this batch body once PER ALLOCATED NODE, even with --ntasks unset.
+# Measured: a --nodes=4 job printed START four times, and each copy then raced to
+# drive its own srun over the whole allocation. Exactly one copy may proceed.
+#
+# mkdir is the arbiter for the same reason it guards the resolve: atomic on NFS,
+# unlike a test-then-write. The winner runs the job; the others exit 0 so they do
+# not fail the array. Placed before any output so the log has one START.
+DRIVER_LOCK="$REPO/runs/sft4-${SLURM_JOB_ID:-manual}.driver.lock"
+if ! mkdir "$DRIVER_LOCK" 2>/dev/null; then
+    echo "[sft-4node] not the driver copy on $(hostname); exiting cleanly"
+    exit 0
+fi
+trap 'rmdir "$DRIVER_LOCK" 2>/dev/null || true' EXIT
+
 echo "[sft-4node] START job=${SLURM_JOB_ID:-none} nodes=$NNODES world=$NPROC_GLOBAL"
 echo "[sft-4node] master=$MASTER_ADDR:$MASTER_PORT nodelist=$SLURM_JOB_NODELIST"
 

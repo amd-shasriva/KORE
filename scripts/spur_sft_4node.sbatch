@@ -54,15 +54,31 @@ MASTER_PORT=29519
 echo "[sft-4node] START job=${SLURM_JOB_ID:-none} nodes=$NNODES world=$NPROC_GLOBAL"
 echo "[sft-4node] master=$MASTER_ADDR:$MASTER_PORT nodelist=$SLURM_JOB_NODELIST"
 
-# Resolve ONCE on the batch host, before any rank loads 61GB of weights. Every
-# node then reads the same file off the shared filesystem, so the eight ranks
-# cannot disagree about the recipe -- resolving per-node would let a mid-flight
-# config edit produce ranks training different things.
+# Resolve ONCE, before any rank loads 61GB of weights, so all 32 ranks read one
+# file off the shared filesystem and cannot disagree about the recipe.
+#
+# "Once" needs enforcing: under --ntasks=4 SPUR runs this batch body on EVERY
+# task, not just the batch host, so the naive version raced -- two tasks resolved
+# concurrently, each writing <out>.partial.<pid> and renaming, and the loser died
+# with FileNotFoundError when its partial had already been moved. mkdir is the
+# atomic primitive here (open(O_CREAT|O_EXCL) semantics on every POSIX
+# filesystem, NFS included, unlike test -e followed by touch). The winner
+# resolves; the losers wait for the file rather than racing it.
 RESOLVED="$REPO/runs/sft4-${SLURM_JOB_ID:-manual}.resolved.json"
-"$PY" scripts/spur_resolve_launch_config.py \
-    --stage sft --config "$CFG" --out "$RESOLVED" \
-    --from-stage "$FROM_STAGE" --output-dir "$OUT_DIR"
-echo "[sft-4node] resolved -> $RESOLVED"
+LOCKDIR="$RESOLVED.lock"
+if mkdir "$LOCKDIR" 2>/dev/null; then
+    "$PY" scripts/spur_resolve_launch_config.py \
+        --stage sft --config "$CFG" --out "$RESOLVED" \
+        --from-stage "$FROM_STAGE" --output-dir "$OUT_DIR"
+    echo "[sft-4node] resolved -> $RESOLVED"
+else
+    echo "[sft-4node] another task is resolving; waiting for $RESOLVED"
+    for _ in $(seq 1 120); do
+        [ -s "$RESOLVED" ] && break
+        sleep 1
+    done
+    [ -s "$RESOLVED" ] || { echo "[sft-4node] FATAL resolve never appeared" >&2; exit 1; }
+fi
 
 RC=0
 srun --nodes="$NNODES" --ntasks="$NNODES" bash -c '

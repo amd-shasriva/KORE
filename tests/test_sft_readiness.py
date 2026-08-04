@@ -53,4 +53,12 @@ def test_the_30b_sft_config_keeps_resumable_checkpoints():
     assert raw.get("save_only_model") is False, (
         "optimizer state must be kept so a killed run resumes; if disk pressure "
         "returns, fix the disk rather than the resumability")
+    # limit=1 is what makes this self-cleaning: the Trainer writes the new
+    # checkpoint and then deletes the previous one, so steady state is one
+    # checkpoint and only the rotation window holds two.
     assert raw.get("save_total_limit") == 1
+    # A 662-step run with save_steps=400 has exactly ONE save point, and run
+    # 33992 died on it. Three save points bound the worst-case loss to ~200 steps.
+    assert raw.get("save_steps") <= 200, (
+        f"save_steps={raw.get('save_steps')} leaves too few checkpoints on a "
+        "662-step run; the previous failure landed on the only one")

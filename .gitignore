@@ -58,3 +58,15 @@ runs/bisect-*.out
 runs/kprobe*-*.out
 runs/min-*.out
 runs/gpu-smoke-*.out
+
+# Datagen intermediates. These are inputs to the v4 mixture, not the mixture
+# itself: the trainable artifact is data/release/sft/multicap_v4.* which is
+# tracked in 95MB parts and rebuilt by reassemble.sh. replay_v4.jsonl is 455MB
+# on its own, past GitHub's 100MB per-file ceiling, and every one of these is
+# reproducible from the scripts in scripts/ -- so tracking them would cost a
+# gigabyte and buy nothing.
+data/b501remain/
+data/b501supp/
+data/b501wave3/
+data/replay_v4.jsonl
+data/task_pool/

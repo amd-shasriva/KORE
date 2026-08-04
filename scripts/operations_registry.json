@@ -631,6 +631,12 @@
       "role": "single-node 8-rank SFT launcher; production must pass configs/sft_coder30b_a3b.json and '-' to preserve the direct instruct starting model"
     },
     {
+      "path": "scripts/spur_sft_4node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "multi-node FSDP SFT across 4 nodes x 8 GPUs; the v4 mixture is ~26h on one node"
+    },
+    {
       "path": "scripts/spur_stage_array.sbatch",
       "classification": "active",
       "lifecycle": "active",

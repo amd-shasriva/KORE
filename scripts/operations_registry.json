@@ -112,6 +112,12 @@
       "note": "builds the HipKittens knowledge SFT slice from a read-only MIT-licensed checkout; decontaminates against the held-out eval and dedups against the existing mixture before writing, and writes only --out/--report"
     },
     {
+      "path": "scripts/build_replay_slice.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "blend general chat and coding replay into the v4 kernel mixture to a TOKEN budget (70/17/13), from the local HF cache only"
+    },
+    {
       "path": "scripts/build_residual.py",
       "classification": "active",
       "lifecycle": "active",
@@ -157,6 +163,12 @@
       "classification": "active",
       "lifecycle": "active",
       "role": "SPUR-compatible repair/groups worker"
+    },
+    {
+      "path": "scripts/consolidate_datagen.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "hard-link every datagen wave into one directory the mixture builder can glob, prefixing by wave so identically-named shards do not overwrite each other"
     },
     {
       "path": "scripts/datagen_failure_probe.py",

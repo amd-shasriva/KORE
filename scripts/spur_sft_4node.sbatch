@@ -27,8 +27,13 @@
 #SBATCH --account=amd-general
 #SBATCH --partition=amd-spur
 #SBATCH --qos=amd-general-qos
+# --ntasks is deliberately NOT set here. On this SPUR controller an sbatch with
+# --ntasks=N runs the batch BODY on all N tasks, not just the batch host, and
+# each copy then calls `srun --nodes=4` against an allocation it does not own --
+# which fails with "job <id> not running on this node" for every node the copy
+# was not placed on. The task fan-out belongs on the srun line below, where it
+# is a request against this job's own allocation.
 #SBATCH --nodes=4
-#SBATCH --ntasks=4
 #SBATCH --gpus-per-node=mi355x:8
 #SBATCH --cpus-per-task=128
 #SBATCH --time=23:00:00
@@ -49,7 +54,11 @@ OUT_DIR="${3:--}"
 NNODES="${SLURM_NNODES:?not in an sbatch alloc}"
 NPROC_GLOBAL=$(( NNODES * 8 ))
 MASTER_ADDR="$(printf '%s' "$SLURM_JOB_NODELIST" | cut -d, -f1)"
-MASTER_PORT=29519
+# Derived from the job id, not fixed. A hard-coded port collides with any earlier
+# attempt whose ranks have not fully torn down -- accelerate then refuses to start
+# with "another process is utilizing it", which is what killed the first three
+# smoke runs. The range avoids the ephemeral ports the kernel hands out.
+MASTER_PORT=$(( 29000 + (${SLURM_JOB_ID:-0} % 900) ))
 
 echo "[sft-4node] START job=${SLURM_JOB_ID:-none} nodes=$NNODES world=$NPROC_GLOBAL"
 echo "[sft-4node] master=$MASTER_ADDR:$MASTER_PORT nodelist=$SLURM_JOB_NODELIST"

@@ -137,10 +137,21 @@ def cmd_run(args) -> int:
     # it had scored -- and on this cluster preemption is the normal way a long job
     # ends, not an exception. A full sweep is 254 tasks at 6-11 minutes each, so
     # that was throwing away many hours at a time.
-    ledger = out_root / f"results_{args.arm}.partial.jsonl"
+    #
+    # Under sharding each worker owns its own ledger. Eight processes appending to
+    # one file would interleave partial lines under concurrent writes, and the
+    # torn-line tolerance below is meant for a process that was killed, not for
+    # routine corruption.
+    ledger = out_root / _ledger_name(args)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     results = []
-    done: set[str] = set()
+    # Skip anything any ledger has already scored, not just this shard's. That
+    # covers resuming after a re-shard and after the earlier unsharded runs, whose
+    # results stay valid: a task's score does not depend on which GPU produced it.
+    done = _scored_task_ids(out_root, args.arm)
+    if done:
+        print(f"resume: {len(done)} task(s) already scored across "
+              f"{args.arm} ledgers in {out_root}", flush=True)
     if ledger.exists():
         for line in ledger.read_text().splitlines():
             try:
@@ -148,10 +159,15 @@ def cmd_run(args) -> int:
             except Exception:  # noqa: BLE001 - a torn last line is expected after a kill
                 continue
             if row.get("task_id"):
-                done.add(row["task_id"])
                 results.append(_result_from_dict(row))
-        print(f"resume: {len(done)} task(s) already scored in {ledger.name}",
-              flush=True)
+
+    if args.num_shards > 1:
+        # Stride rather than contiguous blocks: task cost varies a lot by category
+        # and the categories are discovered in order, so contiguous slices would
+        # hand one worker all the expensive kernels and leave others idle.
+        tasks = tasks[args.shard::args.num_shards]
+        print(f"shard {args.shard}/{args.num_shards}: {len(tasks)} task(s) of this "
+              f"worker's slice", flush=True)
 
     t0 = time.time()
     for i, task in enumerate(tasks, 1):
@@ -183,6 +199,83 @@ def cmd_run(args) -> int:
               f"({time.time()-t0:.0f}s)", flush=True)
         if not args.keep_workspaces:
             shutil.rmtree(ws, ignore_errors=True)
+    if args.num_shards > 1:
+        # Only the merge step may write results_<arm>.json: it is the signal that
+        # the whole arena is finished, and a shard that completes its own slice has
+        # no idea whether its siblings have.
+        print(f"shard {args.shard}/{args.num_shards} finished its slice; "
+              "run `merge` once every shard exits", flush=True)
+        return 0
+    _write(out_root / f"results_{args.arm}.json", results, args)
+    return 0
+
+
+def _ledger_name(args) -> str:
+    """Ledger filename, per-shard when sharded.
+
+    The unsharded name is left exactly as it was so an in-flight single-process
+    run keeps resuming from the file it has been writing.
+    """
+    if args.num_shards > 1:
+        return f"results_{args.arm}.shard{args.shard}of{args.num_shards}.partial.jsonl"
+    return f"results_{args.arm}.partial.jsonl"
+
+
+def _scored_task_ids(out_root: Path, arm: str) -> set:
+    """Every task id recorded by any ledger for this arm."""
+    done = set()
+    for f in sorted(out_root.glob(f"results_{arm}*.partial.jsonl")):
+        for line in f.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except Exception:  # noqa: BLE001 - torn last line after a kill
+                continue
+            if row.get("task_id"):
+                done.add(row["task_id"])
+    return done
+
+
+def cmd_merge(args) -> int:
+    """Combine every shard ledger into the final results_<arm>.json.
+
+    Runs after the shards exit. Deduplicates by task id, keeping the first
+    occurrence, because a re-shard can legitimately score a task twice.
+
+    results_<arm>.json is written only when every discovered task is present. It
+    is what the supervisor treats as "the arena is finished", so writing it after a
+    worker crashed would end the sweep early and quietly report a partial sweep as
+    a complete one. An incomplete merge instead reports what is missing and exits
+    non-zero, which leaves the job absent from the queue and gets it resubmitted.
+    """
+    out_root = Path(args.out)
+    ledgers = sorted(out_root.glob(f"results_{args.arm}*.partial.jsonl"))
+    seen, results = set(), []
+    for f in ledgers:
+        for line in f.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except Exception:  # noqa: BLE001 - torn last line after a kill
+                continue
+            tid = row.get("task_id")
+            if not tid or tid in seen:
+                continue
+            seen.add(tid)
+            results.append(_result_from_dict(row))
+    if not results:
+        print(f"merge: no ledgers found under {out_root}", flush=True)
+        return 1
+
+    tasks = discover_tasks(args.arena_root, task_types=args.types or None,
+                           gpu_arch=args.gpu_arch)[: args.limit or None]
+    expected = {t.task_id for t in tasks}
+    missing = expected - seen
+    print(f"merge: {len(results)} task(s) from {len(ledgers)} ledger(s); "
+          f"{len(expected)} expected, {len(missing)} missing", flush=True)
+    if missing:
+        sample = ", ".join(sorted(missing)[:5])
+        print(f"merge: INCOMPLETE -- not writing results_{args.arm}.json. "
+              f"missing e.g. {sample}", flush=True)
+        return 1
     _write(out_root / f"results_{args.arm}.json", results, args)
     return 0
 
@@ -220,7 +313,7 @@ def _write(path: Path, results, args) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=("discover", "baseline", "run"))
+    ap.add_argument("mode", choices=("discover", "baseline", "run", "merge"))
     ap.add_argument("--arena-root", default=str(DEFAULT_ARENA))
     ap.add_argument("--gpu-arch", default="gfx950")
     ap.add_argument("--types", nargs="*", default=[],
@@ -235,9 +328,23 @@ def main() -> int:
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--keep-workspaces", action="store_true")
     ap.add_argument("--json-out", default="")
+    # Task-level sharding. transformers loads this checkpoint with
+    # device_map="auto", and a 30B in bf16 is ~60GB against 192GB of HBM per
+    # MI350X, so the whole model lands on one GPU and the other seven idle --
+    # 12.5% of the node for a sweep measured in tens of hours. Tasks are
+    # independent and each already has a durable ledger entry, so the way to use
+    # the node is one worker per GPU on a disjoint slice.
+    ap.add_argument("--num-shards", type=int, default=1,
+                    help="number of parallel workers (one per GPU)")
+    ap.add_argument("--shard", type=int, default=0,
+                    help="which slice this worker owns, 0-based")
     args = ap.parse_args()
+    if args.num_shards < 1:
+        ap.error("--num-shards must be >= 1")
+    if not 0 <= args.shard < args.num_shards:
+        ap.error(f"--shard must be in [0, {args.num_shards}), got {args.shard}")
     return {"discover": cmd_discover, "baseline": cmd_baseline,
-            "run": cmd_run}[args.mode](args)
+            "run": cmd_run, "merge": cmd_merge}[args.mode](args)
 
 
 if __name__ == "__main__":

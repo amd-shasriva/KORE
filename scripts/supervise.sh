@@ -1,0 +1,125 @@
+#!/bin/bash
+# Keep the v4 SFT run and the full AgentKernelArena eval alive until they finish.
+#
+# Both jobs die to preemption on this cluster well before they can complete, and
+# spurctld itself goes away periodically -- a scancel/sbatch issued at the wrong
+# moment just errors out. So the loop treats "no scheduler" as a wait rather than
+# a failure, and re-submits only when a job is genuinely absent from the queue.
+#
+#   scripts/supervise.sh [KILL_JOBIDS...]
+#
+# Any job ids passed as arguments are cancelled once on the first successful
+# scheduler contact. That is how the older, wrongly-configured jobs get retired:
+# 38327 was checkpointing every 200 steps, and 38326 was scoring 40 tasks of one
+# category instead of the whole arena.
+set -uo pipefail
+
+REPO="/home/shasriva/Kore-RL/KORE"
+cd "$REPO" || exit 1
+
+SFT_OUT="/shared_nfs/shasriva/kore/runs/sft_v4"
+V3_MODEL="/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b"
+LOG="$REPO/runs/supervise.log"
+RETIRE="${*:-}"
+
+mkdir -p "$REPO/runs"
+
+say() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" | tee -a "$LOG"; }
+
+# Treat the scheduler as a resource that comes and goes. Returns the queue text
+# on success so callers can inspect it without a second round trip.
+queue() {
+    local out
+    out="$(squeue -u "$USER" 2>&1)"
+    if echo "$out" | grep -q JOBID; then printf '%s' "$out"; return 0; fi
+    return 1
+}
+
+# A 30B checkpoint with optimizer state is ~488GB, so extra copies are measured
+# in half-terabytes. save_total_limit=1 already rotates them, but that only holds
+# while the Trainer is alive to do it: a run killed mid-save, or two runs that
+# briefly overlap on one output_dir, can strand a checkpoint that nothing will
+# ever clean up. Keep the highest step and drop the rest.
+prune_checkpoints() {
+    local dir="$1" keep n
+    [ -d "$dir" ] || return 0
+    mapfile -t ck < <(ls -d "$dir"/checkpoint-* 2>/dev/null | sed 's/.*checkpoint-//' | grep -E '^[0-9]+$' | sort -n)
+    n=${#ck[@]}
+    [ "$n" -le 1 ] && return 0
+    keep="${ck[$((n-1))]}"
+    for s in "${ck[@]}"; do
+        [ "$s" = "$keep" ] && continue
+        say "prune: removing stale $dir/checkpoint-$s (keeping $keep)"
+        rm -rf "$dir/checkpoint-$s"
+    done
+}
+
+sft_done() {
+    # The Trainer writes the sharded weights and their index only after the last
+    # step, so the index is the signal that the run finished rather than stopped.
+    [ -f "$SFT_OUT/model.safetensors.index.json" ]
+}
+
+aka_done() {
+    local d
+    d="$(ls -dt "$REPO"/runs/aka_* 2>/dev/null | head -1)"
+    [ -n "$d" ] && [ -f "$d/summary.json" ]
+}
+
+say "=== supervisor start (pid $$) ==="
+say "sft_out=$SFT_OUT  retire='${RETIRE}'"
+
+# --- one-time retirement of the misconfigured jobs -------------------------
+if [ -n "$RETIRE" ]; then
+    for _ in $(seq 1 240); do
+        if queue >/dev/null; then
+            for j in $RETIRE; do say "retiring stale job $j"; scancel "$j" 2>&1 | tee -a "$LOG"; done
+            sleep 10
+            break
+        fi
+        sleep 15
+    done
+fi
+
+while :; do
+    if ! q="$(queue)"; then
+        say "scheduler unreachable; waiting"
+        sleep 30
+        continue
+    fi
+
+    prune_checkpoints "$SFT_OUT"
+
+    have_sft=0; have_aka=0
+    echo "$q" | grep -q "kore-sft" && have_sft=1
+    echo "$q" | grep -q "kore-aka" && have_aka=1
+
+    # --- SFT ---------------------------------------------------------------
+    if sft_done; then
+        [ "$have_sft" = "0" ] && say "SFT COMPLETE (index written in $SFT_OUT)"
+    elif [ "$have_sft" = "0" ]; then
+        # An existing checkpoint means this is a resume, not a fresh start; the
+        # launcher picks it up from output_dir on its own.
+        ck="$(ls -d "$SFT_OUT"/checkpoint-* 2>/dev/null | wc -l)"
+        say "SFT absent from queue -> submitting (existing checkpoints=$ck)"
+        sbatch scripts/spur_sft_1node.sbatch \
+            configs/sft_coder30b_a3b.json - "$SFT_OUT" 2>&1 | tee -a "$LOG"
+    fi
+
+    # --- AgentKernelArena: every task, every category ----------------------
+    # types='-' means all of torch2hip/hip2hip/triton2triton and limit=0 means no
+    # cap, so this is the whole arena rather than a sample of it.
+    if aka_done; then
+        [ "$have_aka" = "0" ] && say "AKA COMPLETE (summary written)"
+    elif [ "$have_aka" = "0" ]; then
+        say "AKA absent from queue -> submitting full arena (all types, no limit)"
+        sbatch scripts/spur_aka_1node.sbatch run - "$V3_MODEL" 0 kore 2>&1 | tee -a "$LOG"
+    fi
+
+    if sft_done && aka_done; then
+        say "=== both jobs complete; supervisor exiting ==="
+        exit 0
+    fi
+
+    sleep 60
+done

@@ -33,18 +33,24 @@ def test_every_key_in_the_30b_sft_config_is_recognised():
         f"identity/preflight keys, so they are silently ignored at load: {unknown}")
 
 
-def test_the_30b_sft_config_writes_weights_only_checkpoints():
-    """Weights-only is what makes a checkpoint survivable on this filesystem.
+def test_the_30b_sft_config_keeps_resumable_checkpoints():
+    """A killed run must resume, not restart.
 
     Run 33992 died at step 400 with 'Disk quota exceeded' after 200M tokens of
-    healthy training, writing 4 of 25 shards. /shared_nfs is 146T of 150T used
-    and shared, so a ~488GB write is long enough for someone else to take the
-    margin; ~61GB is not.
+    healthy training. The tempting fix was save_only_model, which shrinks the
+    write 8x by dropping Adam state -- but it also makes every future failure
+    unrecoverable, and the premise was wrong: there is no per-user quota. Both
+    volumes are NFSv3 with no quota tooling, and NFSv3 reports a full volume as
+    EDQUOT, so the write simply landed while other users had the volume at zero.
+    With 17T free against a 976GB rotation peak, the space is there and the
+    optimizer state should stay.
     """
     import json
     import pathlib
 
     path = pathlib.Path(__file__).resolve().parent.parent / "configs" / "sft_coder30b_a3b.json"
     raw = json.loads(path.read_text())
-    assert raw.get("save_only_model") is True
+    assert raw.get("save_only_model") is False, (
+        "optimizer state must be kept so a killed run resumes; if disk pressure "
+        "returns, fix the disk rather than the resumability")
     assert raw.get("save_total_limit") == 1

@@ -18,6 +18,12 @@
       "deletes_artifacts": true
     },
     {
+      "path": "scripts/_add_v4_to_reassemble.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "register the v4 mixture in data/release/reassemble.sh"
+    },
+    {
       "path": "scripts/_factory_smoke.py",
       "classification": "diagnostic",
       "lifecycle": "active"
@@ -292,6 +298,12 @@
       "role": "break an SFT mixture down by source with row and token counts, so the AMD-native fraction is measured rather than recalled"
     },
     {
+      "path": "scripts/package_v4_release.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "gzip and split the v4 SFT mixture into <100MB release parts with a reassembled-stream checksum"
+    },
+    {
       "path": "scripts/pilot_agentic_throughput.py",
       "classification": "diagnostic",
       "lifecycle": "active",
@@ -324,6 +336,12 @@
       "lifecycle": "active",
       "deletes_artifacts": false,
       "role": "measure WHY hip_gemm is not timing-admissible: times the hipBLASLt baseline solo and interleaved with the seed at each candidate shape, and judges both with the environment's own unmodified 3% publication admission gate"
+    },
+    {
+      "path": "scripts/probe_multinode.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "establish SPUR's multi-node semantics by measurement: how many times the batch body runs, whether SLURM_NODEID is distinct, whether srun works from a body copy"
     },
     {
       "path": "scripts/prove_dense_reward.py",
@@ -754,6 +772,12 @@
       "classification": "diagnostic",
       "lifecycle": "active",
       "role": "execute every registered task seed on real GPU hardware and record a per-task verdict (read-only w.r.t. the repo)"
+    },
+    {
+      "path": "scripts/watch_and_resume.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "keep a long job alive on a preempting cluster: resubmit on SIGTERM, release JobHoldMaxRequeue, cancel and re-place a wedged run"
     },
     {
       "path": "scripts/wins_deepen_supervise.sh",

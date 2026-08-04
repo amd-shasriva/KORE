@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -131,9 +132,31 @@ def cmd_run(args) -> int:
                           max_tokens=args.max_tokens,
                           temperature=args.temperature)
 
+    # Durable, append-as-you-go ledger. The previous version accumulated results
+    # in memory and wrote once after the loop, so a preempted run lost every task
+    # it had scored -- and on this cluster preemption is the normal way a long job
+    # ends, not an exception. A full sweep is 254 tasks at 6-11 minutes each, so
+    # that was throwing away many hours at a time.
+    ledger = out_root / f"results_{args.arm}.partial.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
     results = []
+    done: set[str] = set()
+    if ledger.exists():
+        for line in ledger.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except Exception:  # noqa: BLE001 - a torn last line is expected after a kill
+                continue
+            if row.get("task_id"):
+                done.add(row["task_id"])
+                results.append(_result_from_dict(row))
+        print(f"resume: {len(done)} task(s) already scored in {ledger.name}",
+              flush=True)
+
     t0 = time.time()
     for i, task in enumerate(tasks, 1):
+        if task.task_id in done:
+            continue
         ws = _workspace(task, out_root)
         try:
             src_rel = task.source_files[0] if task.source_files else "kernel.py"
@@ -149,6 +172,12 @@ def cmd_run(args) -> int:
             r = ArenaResult(task_id=task.task_id, task_type=task.task_type,
                             error=f"{type(exc).__name__}: {exc}")
         results.append(r)
+        # Append + flush + fsync before moving on. A score that is only in memory
+        # is a score we will pay for twice.
+        with ledger.open("a") as fh:
+            fh.write(json.dumps(r.to_dict()) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
         print(f"[{i}/{len(tasks)}] {task.task_id}: compiled={r.compiled} "
               f"correct={r.correct} speedup={r.speedup} score={r.score:.0f} "
               f"({time.time()-t0:.0f}s)", flush=True)
@@ -156,6 +185,19 @@ def cmd_run(args) -> int:
             shutil.rmtree(ws, ignore_errors=True)
     _write(out_root / f"results_{args.arm}.json", results, args)
     return 0
+
+
+
+def _result_from_dict(row: dict) -> "ArenaResult":
+    """Rebuild an ArenaResult from a ledger line.
+
+    Only the fields ArenaResult actually declares are passed through: the ledger
+    is written by to_dict() and may gain keys later, and a resumed run must not
+    die because it was written by a newer build than the one reading it.
+    """
+    import dataclasses
+    allowed = {f.name for f in dataclasses.fields(ArenaResult)}
+    return ArenaResult(**{k: v for k, v in row.items() if k in allowed})
 
 
 def _write(path: Path, results, args) -> None:

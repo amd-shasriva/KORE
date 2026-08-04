@@ -1,0 +1,8 @@
+{
+  "artifact": "multicap_v4.jsonl",
+  "rows": 244732,
+  "parts": 5,
+  "part_size_mb": 95,
+  "sha256_reassembled": "cf5fccf2a51178907adfb10b354337523344e339949b18fccd91f02e8585cdfc",
+  "reassemble": "cat multicap_v4.jsonl.gz.part* | gunzip > multicap_v4.jsonl"
+}

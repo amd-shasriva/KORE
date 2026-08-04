@@ -17,6 +17,19 @@ set -uo pipefail
 REPO="/home/shasriva/Kore-RL/KORE"
 cd "$REPO" || exit 1
 
+# spurctld's address lives in SPUR_CONTROLLER_ADDR, exported by
+# /etc/profile.d/spur.sh -- which only LOGIN shells read. Started as a plain
+# `bash scripts/supervise.sh`, this script inherited no such variable, so every
+# squeue/sbatch/scancel failed with "failed to connect to spurctld" and the loop
+# read its own broken environment as a cluster-wide outage: it waited politely for
+# 40+ minutes, submitted nothing, and retired nothing, while both jobs were in
+# fact running the whole time. Source the profile rather than hardcode the address,
+# so a controller move is picked up here too.
+if [ -z "${SPUR_CONTROLLER_ADDR:-}" ] && [ -r /etc/profile.d/spur.sh ]; then
+    # shellcheck disable=SC1091
+    . /etc/profile.d/spur.sh
+fi
+
 SFT_OUT="/shared_nfs/shasriva/kore/runs/sft_v4"
 V3_MODEL="/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b"
 AKA_ARM="kore"
@@ -100,6 +113,23 @@ adopt_stray_ledger() {
 
 say "=== supervisor start (pid $$) ==="
 say "sft_out=$SFT_OUT  retire='${RETIRE}'"
+say "controller=${SPUR_CONTROLLER_ADDR:-<unset>}"
+
+# Prove the scheduler is reachable at startup. Without this the two failure modes
+# are indistinguishable in the log -- a real outage and a missing
+# SPUR_CONTROLLER_ADDR both print "scheduler unreachable" forever -- and the second
+# one silently does nothing while looking patient.
+if queue >/dev/null; then
+    say "scheduler reachable at startup"
+elif [ -z "${SPUR_CONTROLLER_ADDR:-}" ]; then
+    say "FATAL: SPUR_CONTROLLER_ADDR is unset and /etc/profile.d/spur.sh was not"
+    say "       readable. Every submission would fail and this loop would wait"
+    say "       forever without submitting anything. Refusing to start blind."
+    exit 3
+else
+    say "WARNING: scheduler unreachable at startup but controller addr is set;"
+    say "         treating as a real outage and waiting."
+fi
 
 [ -n "$RETIRE" ] && say "will retire on first scheduler contact: $RETIRE"
 

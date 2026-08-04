@@ -19,6 +19,7 @@ cd "$REPO" || exit 1
 
 SFT_OUT="/shared_nfs/shasriva/kore/runs/sft_v4"
 V3_MODEL="/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b"
+AKA_ARM="kore"
 LOG="$REPO/runs/supervise.log"
 RETIRE="${*:-}"
 
@@ -61,9 +62,13 @@ sft_done() {
 }
 
 aka_done() {
+    # run_agent_kernel_arena.py writes results_<arm>.json only after the last
+    # task, so it -- not the per-task ledger, which exists from task one -- is the
+    # signal that the arena is finished. Getting this wrong means resubmitting a
+    # completed 402-task eval forever and holding a GPU node for nothing.
     local d
     d="$(ls -dt "$REPO"/runs/aka_* 2>/dev/null | head -1)"
-    [ -n "$d" ] && [ -f "$d/summary.json" ]
+    [ -n "$d" ] && [ -f "$d/results_${AKA_ARM}.json" ]
 }
 
 say "=== supervisor start (pid $$) ==="
@@ -113,7 +118,7 @@ while :; do
         [ "$have_aka" = "0" ] && say "AKA COMPLETE (summary written)"
     elif [ "$have_aka" = "0" ]; then
         say "AKA absent from queue -> submitting full arena (all types, no limit)"
-        sbatch scripts/spur_aka_1node.sbatch run - "$V3_MODEL" 0 kore 2>&1 | tee -a "$LOG"
+        sbatch scripts/spur_aka_1node.sbatch run - "$V3_MODEL" 0 "$AKA_ARM" 2>&1 | tee -a "$LOG"
     fi
 
     if sft_done && aka_done; then

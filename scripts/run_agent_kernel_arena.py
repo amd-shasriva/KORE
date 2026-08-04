@@ -122,8 +122,14 @@ def cmd_run(args) -> int:
 
     from kore.eval.policies import model_policy  # local: heavy import
 
-    policy = model_policy(model_id=args.model, revision=args.revision,
-                          max_tokens=args.max_tokens, temperature=args.temperature)
+    # model_policy takes the checkpoint positionally and has no `revision` or
+    # `model_id` parameter; the previous call passed both by keyword and raised
+    # TypeError before a single task ran. `revision` belongs to the hub-pinning
+    # path and is meaningless for a local checkpoint directory, which is what an
+    # evaluated run always points at.
+    policy = model_policy(args.model,
+                          max_tokens=args.max_tokens,
+                          temperature=args.temperature)
 
     results = []
     t0 = time.time()

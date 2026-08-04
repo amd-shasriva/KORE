@@ -69,16 +69,27 @@ if [ "$MODE" != "run" ] || [ "$VIS" -lt 2 ]; then
     "$PY" scripts/run_agent_kernel_arena.py "$MODE" $(common_args)
     rc=$?
 else
-    echo "fanning out $VIS workers, one per GPU"
+    # The allocation already exports a visibility mask naming our GPUs, and
+    # kore.policy.serve rejects two masks outright rather than intersecting them
+    # ("double masks are forbidden") -- so narrow the inherited mask to one entry
+    # per worker instead of adding HIP_VISIBLE_DEVICES on top of ROCR_VISIBLE_DEVICES.
+    # The ordinals come from the mask rather than from a 0..N-1 count, so each
+    # worker lands on a GPU we were actually given.
+    ALLOC="${ROCR_VISIBLE_DEVICES:-${HIP_VISIBLE_DEVICES:-}}"
+    [ -z "$ALLOC" ] && ALLOC="$(seq -s, 0 $((VIS - 1)))"
+    IFS=',' read -r -a GPULIST <<< "$ALLOC"
+    NSHARD="${#GPULIST[@]}"
+    echo "fanning out $NSHARD workers over allocated GPUs: $ALLOC"
     pids=""
-    for i in $(seq 0 $((VIS - 1))); do
+    for i in $(seq 0 $((NSHARD - 1))); do
         # shellcheck disable=SC2086
-        HIP_VISIBLE_DEVICES="$i" CUDA_VISIBLE_DEVICES="$i" \
+        env -u HIP_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
+            ROCR_VISIBLE_DEVICES="${GPULIST[$i]}" \
             "$PY" scripts/run_agent_kernel_arena.py run $(common_args) \
-            --num-shards "$VIS" --shard "$i" \
+            --num-shards "$NSHARD" --shard "$i" \
             > "$OUT/shard${i}.log" 2>&1 &
         pids="$pids $!"
-        echo "  shard $i -> GPU $i (pid $!)"
+        echo "  shard $i -> GPU ${GPULIST[$i]} (pid $!)"
     done
     rc=0
     for p in $pids; do wait "$p" || rc=1; done

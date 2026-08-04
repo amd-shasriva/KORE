@@ -117,3 +117,34 @@ def test_packing_stays_off_without_flash_attention():
             "packing is requested but the backend is SDPA; the trainer would "
             "disable it anyway, and a config that asks for something it cannot "
             "have is a trap for the next reader")
+
+
+def test_checkpoint_rotation_bounds_disk_to_one_checkpoint():
+    """40 save events must not mean 40 retained checkpoints.
+
+    save_steps=50 over a 2,024-step run fires ~40 times, and a 30B checkpoint
+    with optimizer state is ~488GB. Retaining them all would be ~19TB, which is
+    more than the whole shared volume has free. save_total_limit=1 is what makes
+    the frequency safe: the Trainer writes the new checkpoint and then deletes the
+    previous one, so steady state is one and only the rotation window briefly
+    holds two (~976GB against 17T).
+
+    Verified against reality as well as config -- the completed v3 run left
+    exactly one checkpoint directory on disk.
+    """
+    import json
+    import pathlib
+
+    path = (pathlib.Path(__file__).resolve().parent.parent
+            / "configs" / "sft_coder30b_a3b.json")
+    raw = json.loads(path.read_text())
+    steps = raw.get("save_steps")
+    limit = raw.get("save_total_limit")
+    assert limit == 1, (
+        f"save_total_limit={limit} with save_steps={steps}: at ~488GB per 30B "
+        "checkpoint, anything above 1 grows without bound over a long run")
+    # Frequent saves are only defensible while rotation is bounded. If someone
+    # raises the limit, they must also justify the frequency.
+    assert steps is not None and steps <= 50, (
+        f"save_steps={steps} -- preemption on this cluster kills runs at the "
+        "~2h mark, so the interval bounds how much work a kill costs")

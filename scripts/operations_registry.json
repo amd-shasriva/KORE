@@ -146,6 +146,13 @@
       "note": "mines external PyTorch modules into the decontaminated task pool; writes only its --out dir and never mutates the registry it reads"
     },
     {
+      "path": "scripts/cleanup_stale_artifacts.sh",
+      "classification": "destructive",
+      "lifecycle": "active",
+      "deletes_artifacts": true,
+      "role": "reclaim finished-job logs, superseded snapshots and git garbage; skips any job id still in squeue and never touches data/"
+    },
+    {
       "path": "scripts/complete_base.py",
       "classification": "active",
       "lifecycle": "active",

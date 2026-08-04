@@ -31,6 +31,13 @@ OUT_DIR="${KORE_SUPP_OUT:-$REPO/data/b501supp/out}"
 cd "$REPO"
 mkdir -p "$OUT_DIR"
 
+# PID files rather than command-line pattern matching. The operations registry's
+# contract test forbids pattern-based process lookup and signalling in registered
+# scripts, and it is right to: a pattern broad enough to find these shards is
+# also broad enough to match somebody else's python on a shared box.
+PIDDIR="${KORE_SUPP_PIDDIR:-$OUT_DIR/.pids}"
+mkdir -p "$PIDDIR"
+
 i=0
 for g in $GPUS; do
   idx=$(printf "%03d" "$i")
@@ -44,10 +51,16 @@ for g in $GPUS; do
     --gpu-ids "$g" \
     --teacher claude \
     > "/tmp/supp_shard$i.log" 2>&1 < /dev/null &
+  echo $! > "$PIDDIR/shard_$idx.pid"
   disown
-  echo "launched shard $i on gpu $g (workers=$WORKERS episodes=$EPISODES)"
+  echo "launched shard $i on gpu $g pid=$(cat "$PIDDIR/shard_$idx.pid") (workers=$WORKERS episodes=$EPISODES)"
   i=$((i + 1))
 done
 
 sleep 20
-echo "running shard processes: $(pgrep -fc run_agentic_shard.py || echo 0)"
+alive=0
+for f in "$PIDDIR"/shard_*.pid; do
+  [ -e "$f" ] || continue
+  kill -0 "$(cat "$f")" 2>/dev/null && alive=$((alive + 1))
+done
+echo "running shard processes: $alive"

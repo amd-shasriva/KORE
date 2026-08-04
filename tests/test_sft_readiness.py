@@ -62,3 +62,58 @@ def test_the_30b_sft_config_keeps_resumable_checkpoints():
     assert raw.get("save_steps") <= 200, (
         f"save_steps={raw.get('save_steps')} leaves too few checkpoints on a "
         "662-step run; the previous failure landed on the only one")
+
+
+def test_moe_router_stability_settings():
+    """Warmup and gradient clipping must be the MoE values, not the dense defaults.
+
+    Qwen3-Coder-30B-A3B routes each token to a subset of 128 experts through a
+    small linear router. Two dense-model defaults are actively harmful there:
+
+    * a 3% warmup lets a large early step collapse the router onto a few experts
+      before the loss has said anything useful, and the experts it stops routing
+      to then get no gradient to recover with;
+    * a 1.0 gradient clip permits spikes that are noise in a dense model but
+      permanently re-route tokens in an MoE.
+
+    Published MoE fine-tuning guidance is 0.10-0.15 warmup and 0.5 clip. v3 ran
+    at 0.03/1.0 and converged, which is exactly why this is a test rather than a
+    comment -- it is the kind of setting that looks fine until the run that
+    matters, and v4 is 3x the tokens.
+    """
+    import json
+    import pathlib
+
+    path = (pathlib.Path(__file__).resolve().parent.parent
+            / "configs" / "sft_coder30b_a3b.json")
+    raw = json.loads(path.read_text())
+    assert 0.10 <= raw.get("warmup_ratio", 0) <= 0.20, (
+        f"warmup_ratio={raw.get('warmup_ratio')} is outside the MoE band; the "
+        "dense 0.03 default risks router collapse")
+    assert raw.get("max_grad_norm") == 0.5, (
+        f"max_grad_norm={raw.get('max_grad_norm')} -- MoE wants 0.5, and an "
+        "absent key silently inherits HF's dense 1.0")
+
+
+def test_packing_stays_off_without_flash_attention():
+    """Packing on SDPA cross-contaminates documents, silently.
+
+    Packing concatenates examples into one sequence and depends on the attention
+    mask to isolate them. kore/policy/sft.py refuses to enable it outside
+    flash_attention_2 for that reason. This asserts the config does not ASK for
+    it either, so the intent and the guard agree rather than relying on the guard
+    to quietly override a config that says otherwise.
+    """
+    import json
+    import pathlib
+
+    from kore.policy.configs import preferred_attn_impl
+
+    path = (pathlib.Path(__file__).resolve().parent.parent
+            / "configs" / "sft_coder30b_a3b.json")
+    raw = json.loads(path.read_text())
+    if preferred_attn_impl() != "flash_attention_2":
+        assert raw.get("packing") is False, (
+            "packing is requested but the backend is SDPA; the trainer would "
+            "disable it anyway, and a config that asks for something it cannot "
+            "have is a trap for the next reader")

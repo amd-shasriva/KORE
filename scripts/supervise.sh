@@ -111,6 +111,65 @@ adopt_stray_ledger() {
     fi
 }
 
+# Resubmission backoff. A job that dies in seconds -- bad config, wedged node, a
+# bug in the launcher -- is absent from the queue on the very next poll, so the
+# naive loop resubmits it every 60s forever. That already happened here: four
+# submissions in about two minutes while a GPU-mask bug killed every worker
+# instantly. Unattended overnight that is hundreds of jobs.
+#
+# So count submissions that die young and space out the retries, escalating to a
+# long pause rather than giving up: a transient node problem should still recover
+# on its own, but it must not cost a submission per minute in the meantime.
+FAST_FAIL_SECS=300      # a job gone this fast never really started
+declare -A submitted_at=() fast_fails=()
+
+declare -A last_try=()
+
+note_submission() { submitted_at["$1"]=$(date +%s); }
+
+# True when $1 should be (re)submitted now: it is absent from the queue and any
+# backoff earned by previous fast failures has elapsed.
+should_submit() {
+    local kind="$1" wait_s now
+    record_absence "$kind"
+    now=$(date +%s)
+    wait_s="$(backoff_for "$kind")"
+    if [ "$wait_s" -eq 0 ] || [ $(( now - ${last_try[$kind]:-0} )) -ge "$wait_s" ]; then
+        last_try["$kind"]=$now
+        return 0
+    fi
+    return 1
+}
+
+# Returns the seconds to wait before submitting $1 again, 0 when clear.
+backoff_for() {
+    local kind="$1" n="${fast_fails[$1]:-0}"
+    if   [ "$n" -le 2 ]; then echo 0
+    elif [ "$n" -le 4 ]; then echo 120
+    elif [ "$n" -le 6 ]; then echo 600
+    else echo 1800
+    fi
+}
+
+# Called when a kind is absent from the queue: decide whether that absence
+# followed a suspiciously short run, and keep the tally.
+record_absence() {
+    local kind="$1" t0="${submitted_at[$1]:-0}" age
+    [ "$t0" = "0" ] && return 0
+    age=$(( $(date +%s) - t0 ))
+    if [ "$age" -lt "$FAST_FAIL_SECS" ]; then
+        fast_fails["$kind"]=$(( ${fast_fails[$kind]:-0} + 1 ))
+        say "$kind died after ${age}s (fast-fail #${fast_fails[$kind]}); backing off $(backoff_for "$kind")s"
+    else
+        # It ran long enough to be doing real work, so this is preemption or the
+        # wall clock, not a broken submission. Forget the earlier failures.
+        [ "${fast_fails[$kind]:-0}" -gt 0 ] && \
+            say "$kind ran ${age}s before exiting; clearing fast-fail count"
+        fast_fails["$kind"]=0
+    fi
+    submitted_at["$kind"]=0
+}
+
 say "=== supervisor start (pid $$) ==="
 say "sft_out=$SFT_OUT  retire='${RETIRE}'"
 say "controller=${SPUR_CONTROLLER_ADDR:-<unset>}"
@@ -162,13 +221,14 @@ while :; do
     # --- SFT ---------------------------------------------------------------
     if sft_done; then
         [ "$have_sft" = "0" ] && say "SFT COMPLETE (index written in $SFT_OUT)"
-    elif [ "$have_sft" = "0" ]; then
+    elif [ "$have_sft" = "0" ] && should_submit sft; then
         # An existing checkpoint means this is a resume, not a fresh start; the
         # launcher picks it up from output_dir on its own.
         ck="$(ls -d "$SFT_OUT"/checkpoint-* 2>/dev/null | wc -l)"
         say "SFT absent from queue -> submitting (existing checkpoints=$ck)"
         sbatch scripts/spur_sft_1node.sbatch \
             configs/sft_coder30b_a3b.json - "$SFT_OUT" 2>&1 | tee -a "$LOG"
+        note_submission sft
     fi
 
     # --- AgentKernelArena: every task, every category ----------------------
@@ -176,13 +236,14 @@ while :; do
     # cap, so this is the whole arena rather than a sample of it.
     if aka_done; then
         [ "$have_aka" = "0" ] && say "AKA COMPLETE (summary written)"
-    elif [ "$have_aka" = "0" ]; then
+    elif [ "$have_aka" = "0" ] && should_submit aka; then
         adopt_stray_ledger
-        scored=0
-        [ -f "$AKA_OUT/results_${AKA_ARM}.partial.jsonl" ] && \
-            scored=$(wc -l < "$AKA_OUT/results_${AKA_ARM}.partial.jsonl")
+        # Count across every shard ledger, not just the unsharded one, or the
+        # progress line reads 0/402 for the whole run.
+        scored=$(cat "$AKA_OUT"/results_"${AKA_ARM}"*.partial.jsonl 2>/dev/null | wc -l)
         say "AKA absent from queue -> submitting full arena (all types, no limit; $scored/402 already scored)"
         sbatch scripts/spur_aka_1node.sbatch run - "$V3_MODEL" 0 "$AKA_ARM" "$AKA_OUT" 2>&1 | tee -a "$LOG"
+        note_submission aka
     fi
 
     if sft_done && aka_done; then

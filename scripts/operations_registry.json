@@ -435,6 +435,12 @@
       "lifecycle": "active"
     },
     {
+      "path": "scripts/split_remaining_datagen.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "hand b501 the tail of each cluster shard so two boxes without a shared filesystem do not duplicate datagen"
+    },
+    {
       "path": "scripts/spur_agentic_pilot.sbatch",
       "classification": "diagnostic",
       "lifecycle": "active",
@@ -697,6 +703,12 @@
       "path": "scripts/verify_breadth.py",
       "classification": "diagnostic",
       "lifecycle": "active"
+    },
+    {
+      "path": "scripts/verify_checkpoint_write.sh",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "prove the checkpoint directory can absorb a full-size shard-by-shard write before the trainer needs it"
     },
     {
       "path": "scripts/verify_hip_seeds.py",

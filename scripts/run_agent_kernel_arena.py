@@ -175,6 +175,23 @@ def _link_required_repo(task, ws: Path) -> Optional[str]:
     return None
 
 
+def _generation_health(reply: str, code: str) -> str:
+    """Describe a reply that is suspect on its face, or "" when it looks fine.
+
+    A truncated or empty generation compiles to zero exactly like a wrong kernel,
+    so without a note here the two are indistinguishable in the ledger and a
+    generation-side regression reads as a capability result for the whole sweep.
+    """
+    if not (reply or "").strip():
+        return "EMPTY reply from the model"
+    if not (code or "").strip():
+        return f"reply had {len(reply)} chars but no code survived extraction"
+    # An opening fence with no closing fence is what a hit token-limit looks like.
+    if reply.count("```") % 2 == 1:
+        return f"UNCLOSED code fence ({len(reply)} chars) -- likely truncated"
+    return ""
+
+
 def _materialize_perf_helpers(ws: Path, arena_root: str) -> None:
     """Replace the sabotaged helper stubs the arena ships in task sources.
 
@@ -409,7 +426,16 @@ def cmd_run(args) -> int:
                      + _preserve_note(ws, dst_rel, task),
                 context=_render_context(task, ws))
             reply = policy(prompt)
-            _write_answer(ws / dst_rel, _extract_code(reply))
+            code = _extract_code(reply)
+            # Distinguish "the model produced nothing usable" from "the model
+            # wrote a bad kernel". Both compile to zero, and without this the
+            # ledger cannot tell them apart after the fact -- which is how a
+            # generation-side bug hides for a whole sweep looking like model
+            # failure.
+            gen_note = _generation_health(reply, code)
+            if gen_note:
+                print(f"    generation: {gen_note}", flush=True)
+            _write_answer(ws / dst_rel, code)
             r = evaluate_task(task, ws, timeout=args.timeout,
                               reference_latency=ref_latency.get(task.task_id))
         except Exception as exc:  # noqa: BLE001 - one bad task must not end the run
@@ -585,7 +611,11 @@ def main() -> int:
     ap.add_argument("--model", default="Qwen/Qwen3-Coder-30B-A3B-Instruct")
     ap.add_argument("--revision", default=None)
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--timeout", type=int, default=900)
+    # AKA allows 3600s per gate (src/evaluator.py, src/performance.py) and no task
+    # overrides it. At 900s we were failing exactly the expensive ones -- cpp
+    # extension JIT builds, rocPRIM CMake, multi-shape attention benchmarks -- and
+    # a compile timeout scores 0 rather than 20, so the penalty lands twice.
+    ap.add_argument("--timeout", type=int, default=3600)
     ap.add_argument("--max-tokens", type=int, default=8192)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--keep-workspaces", action="store_true")

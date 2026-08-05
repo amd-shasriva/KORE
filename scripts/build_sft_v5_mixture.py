@@ -85,23 +85,41 @@ def approx_tokens(rec: dict) -> int:
     return int(sum(len(str(m.get("content") or "")) for m in msgs) / CHARS_PER_TOKEN)
 
 
+#: HIP C++ markers. Needed because the v4 rows predate the _backend label, and
+#: without sniffing them every HIP row in the base is counted as Triton -- which
+#: reports 0% HIP coverage as 0% and 2.8% HIP coverage as 0% alike, hiding the
+#: very number the report exists to show.
+_HIP_MARKERS = ("__global__", "#include <hip/", "hipLaunchKernelGGL",
+                "PYBIND11_MODULE", "torch::Tensor")
+
+
+def _is_hip(rec: dict) -> bool:
+    backend = str(rec.get("_backend") or "")
+    if backend:
+        return backend == "hip"
+    msgs = rec.get("messages") or []
+    txt = "".join(str(m.get("content") or "") for m in msgs if isinstance(m, dict))
+    if "@triton.jit" in txt:
+        return False
+    return any(m in txt for m in _HIP_MARKERS)
+
+
 def classify(rec: dict) -> str:
     """Which arena question does this row teach?
 
-    Read from the row's own labels rather than guessed from its text: _source is
-    written by whichever builder produced it and is the only authority that knows
-    whether the prompt showed a kernel or a PyTorch module.
+    Shape comes from _source, which is written by whichever builder produced the
+    row and is the only authority on whether the prompt showed a kernel or a
+    PyTorch module. Language falls back to sniffing the text, because rows built
+    before the _backend label exists otherwise all read as Triton.
     """
     src = str(rec.get("_source") or "")
-    backend = str(rec.get("_backend") or "")
-    if src == "kernel_torch2kernel":
-        return "synthesize_hip" if backend == "hip" else "synthesize_other"
+    hip = _is_hip(rec)
+    if src in ("kernel_torch2kernel", "kernel_translate"):
+        return "synthesize_hip" if hip else "synthesize_other"
     if src == "kernel_instruction":
-        return "synthesize_other"
-    if src == "kernel_translate":
-        return "synthesize_hip" if backend == "hip" else "synthesize_other"
+        return "synthesize_hip" if hip else "synthesize_other"
     if src.startswith("kernel"):
-        return "optimize_hip" if backend == "hip" else "optimize_triton"
+        return "optimize_hip" if hip else "optimize_triton"
     return "replay"
 
 

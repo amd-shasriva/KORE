@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -84,6 +85,28 @@ Input dtype is {dtype}. It must reach at least {snr} dB SNR against the referenc
 
 Return ONLY the complete contents of the .hip file in a single ```cpp code block.
 """
+
+
+#: Layers that carry learned state. A module using any of them cannot be
+#: expressed as a bare .hip function: the harness calls the candidate with only
+#: the declared input tensors, so the weights are invisible to it and the kernel
+#: can never reproduce e.g. conv2d(x, W) for a W it cannot see. A Triton
+#: candidate is a Python file and can just instantiate the module to read them --
+#: that asymmetry is why the pool materializes cleanly to Triton and not to HIP.
+#:
+#: Measured on the pool: 3,607 of 13,570 modules (26.6%) are parameter-free,
+#: concentrated in reduction (79%), activation (85%) and data_movement (82%) --
+#: which are also the families where a naive HIP kernel is tractable to write.
+_PARAM_LAYERS = re.compile(
+    r"nn\.(Conv\d ?d?|Linear|BatchNorm\d ?d?|LayerNorm|Embedding|GroupNorm|"
+    r"InstanceNorm\dd|LSTM|GRU|RNN|MultiheadAttention|Bilinear|"
+    r"ConvTranspose\dd|PReLU|Parameter)", re.I)
+_EXPLICIT_PARAM = re.compile(r"nn\.Parameter|register_parameter|register_buffer")
+
+
+def is_parameter_free(spec: dict) -> bool:
+    src = spec.get("module_source", "")
+    return not _PARAM_LAYERS.search(src) and not _EXPLICIT_PARAM.search(src)
 
 
 def _spec_of(task_dir: Path) -> dict:
@@ -135,6 +158,9 @@ def main() -> int:
     ap.add_argument("--families", nargs="*", default=None,
                     help="restrict to these pool families (default: all)")
     ap.add_argument("--teacher", default="claude")
+    ap.add_argument("--allow-parameterized", action="store_true",
+                    help="also seed modules with learned weights (they cannot "
+                         "pass: a .hip function never sees the parameters)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -153,6 +179,7 @@ def main() -> int:
     ids = [t for t in ids if t not in attempted][args.offset:]
 
     selected = []
+    skipped_param = 0
     for tid in ids:
         if len(selected) >= args.limit:
             break
@@ -162,10 +189,15 @@ def main() -> int:
             continue
         if args.families and spec.get("family") not in args.families:
             continue
+        if not args.allow_parameterized and not is_parameter_free(spec):
+            skipped_param += 1
+            continue
         selected.append((tid, spec))
 
     print(f"selected {len(selected)} pool task(s) to seed"
-          + (f" (families={args.families})" if args.families else ""))
+          + (f" (families={args.families})" if args.families else "")
+          + (f"; skipped {skipped_param} with learned parameters"
+             if skipped_param else ""))
     if args.dry_run:
         for tid, spec in selected[:5]:
             print(f"  {tid}  family={spec.get('family')} dtype={spec.get('dtype')}")

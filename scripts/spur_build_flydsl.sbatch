@@ -23,16 +23,33 @@
 #SBATCH --qos=amd-general-qos
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=128
-#SBATCH --time=08:00:00
+# LLVM+MLIR from source is hours even on 128 cores, and the run is worthless if
+# it is killed at 95%: the install prefix is written last.
+#SBATCH --time=16:00:00
 #SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/flydsl-%j.out
 #SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/flydsl-%j.err
 
 set -uo pipefail
 SRC=/home/shasriva/third_party/flydsl
-PY=/home/shasriva/kore-venv/bin/python
-PIP=/home/shasriva/kore-venv/bin/pip
+VENV=/home/shasriva/kore-venv
+PY="$VENV/bin/python"
+PIP="$VENV/bin/pip"
 export TMPDIR=/shared_nfs/shasriva/tmp
 mkdir -p "$TMPDIR"
+
+# The build shells out to bare `python3` (to locate nanobind's cmake package) and
+# to pip. Without the venv first on PATH those resolve to the system interpreter,
+# where nanobind is absent and PEP 668 refuses installs -- which is how the first
+# attempt died with "externally-managed-environment" after having already cloned
+# 2.3GB of LLVM, a failure that looks like an LLVM problem and is not.
+export PATH="$VENV/bin:$PATH"
+export VIRTUAL_ENV="$VENV"
+
+# nanobind is a hard build dependency: scripts/build_llvm.sh asks python3 for its
+# cmake directory and feeds that to the MLIR configure.
+"$PIP" install -q nanobind 2>&1 | tail -2
+"$PY" -c "import nanobind, os; print('nanobind cmake:', os.path.dirname(nanobind.__file__) + '/cmake')" \
+    || { echo "[flydsl] FATAL nanobind unavailable; the MLIR configure cannot run" >&2; exit 4; }
 
 echo "[flydsl] host=$(hostname) cores=$(nproc) start=$(date -u +%H:%M:%S)"
 cd "$SRC" || exit 2

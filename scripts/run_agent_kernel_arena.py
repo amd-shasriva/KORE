@@ -28,6 +28,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -117,13 +118,55 @@ def _extract_code(text: str) -> str:
     return (m.group(1) if m else text).strip()
 
 
+#: Repositories a task may expect to find beside itself, checked out once and
+#: linked into each workspace. The `repository` and `image_kernel` tasks are
+#: edits to a real library: their task dir holds only a runner, and the file to
+#: change lives at e.g. aiter/ops/triton/... inside a checkout the runner adds to
+#: sys.path. Without it those 16 tasks cannot compile no matter what the model
+#: writes -- the file it is asked to edit does not exist.
+_REPO_CACHE = Path.home() / "third_party"
+
+
+def _link_required_repo(task, ws: Path) -> Optional[str]:
+    """Hard-link a checkout into the workspace if the task's files live in one."""
+    for rel in task.source_files:
+        top = rel.split("/")[0]
+        if not top or "/" not in rel or (ws / top).exists():
+            continue
+        src = _REPO_CACHE / top
+        if not src.is_dir():
+            return f"missing checkout {top} (expected at {src})"
+        # Hard links: a fresh 165MB copy per task, times eight parallel workers,
+        # is minutes of I/O for files nobody edits. Only the answer file is
+        # written, and the writer unlinks first so it never truncates a shared
+        # inode and corrupts another workspace's copy.
+        shutil.copytree(src, ws / top, copy_function=os.link,
+                        ignore=shutil.ignore_patterns(".git"))
+    return None
+
+
 def _workspace(task, out_root: Path) -> Path:
     ws = out_root / "workspaces" / task.task_id.replace("/", "__")
     if ws.exists():
         shutil.rmtree(ws)
     ws.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(task.root, ws)
+    _link_required_repo(task, ws)
     return ws
+
+
+def _write_answer(path: Path, code: str) -> None:
+    """Replace a file, never truncate it in place.
+
+    Workspaces share unedited files with a cached checkout by hard link, so
+    opening for write would rewrite the bytes every linked copy sees -- including
+    other tasks running concurrently. Unlinking first breaks this file out of the
+    link set and leaves the rest shared.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        path.unlink()
+    path.write_text(code)
 
 
 def cmd_discover(args) -> int:
@@ -294,9 +337,7 @@ def cmd_run(args) -> int:
                 task=_task_verb(task, src_rel, dst_rel),
                 context=_render_context(task, ws))
             reply = policy(prompt)
-            out_path = ws / dst_rel
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(_extract_code(reply))
+            _write_answer(ws / dst_rel, _extract_code(reply))
             r = evaluate_task(task, ws, timeout=args.timeout,
                               reference_latency=ref_latency.get(task.task_id))
         except Exception as exc:  # noqa: BLE001 - one bad task must not end the run

@@ -78,6 +78,22 @@ class ArenaTask:
     performance_command: list[list[str]]
     instructions: str = ""
     required_arch: Optional[str] = None
+    # Where the answer belongs, from the task's own `target_file_path`. For a
+    # translation task this is a DIFFERENT file, in a different language, from the
+    # one you read: torch2hip reads pytorch_code_module/*.py and its
+    # compile_command builds hip/*.hip. Writing back over the source leaves that
+    # target empty, and the build then yields an extension with no init symbol --
+    # "dynamic module does not define module export function" -- identically on
+    # every task in the category.
+    target_file: Optional[str] = None
+
+    def answer_path(self) -> str:
+        """Relative path the generated code must be written to."""
+        if self.target_file:
+            return self.target_file
+        # Same-language tasks (triton2triton, hip2hip) optimize in place and
+        # declare no separate target.
+        return self.source_files[0] if self.source_files else "kernel.py"
 
     def source_text(self) -> str:
         parts = []
@@ -152,6 +168,8 @@ def load_task(config_path: str | os.PathLike) -> ArenaTask:
         performance_command=_as_argv_list(cfg.get("performance_command")),
         instructions=str(prompt.get("instructions") or ""),
         required_arch=(str(plat.get("required_arch")) if plat.get("required_arch") else None),
+        target_file=(str(cfg["target_file_path"])
+                     if cfg.get("target_file_path") else None),
     )
 
 

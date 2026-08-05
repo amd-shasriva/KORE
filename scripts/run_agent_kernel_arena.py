@@ -36,22 +36,48 @@ from kore.eval.agent_kernel_arena import (  # noqa: E402
 
 DEFAULT_ARENA = Path.home() / "third_party" / "AgentKernelArena"
 
-PROMPT = """You are optimizing a GPU kernel for an AMD MI355X (gfx950).
+PROMPT = """You are writing a GPU kernel for an AMD MI355X (gfx950).
 
 {instructions}
 
-Rewrite the file `{filename}` so the kernel is FASTER while producing
-numerically identical results. Keep the function name(s) {targets} and the
-module's public interface exactly as they are -- the test harness imports them
-by name.
+{task} Keep the function name(s) {targets} and the public interface exactly as
+they are -- the test harness imports them by name, and the result must be
+numerically identical to the reference.
 
-Return ONLY the complete new contents of `{filename}` in a single ```python
+Return ONLY the complete contents of `{filename}` in a single ```{lang}
 code block, with no commentary before or after.
 
 Current implementation:
-```python
+```{source_lang}
 {source}
 ```"""
+
+#: Fence language per target extension. The fence tells the model which language
+#: to emit, and it is not always Python: a torch2hip task reads a .py module and
+#: must produce a .hip translation unit. Asking for ```python there invites a
+#: Python answer that cannot possibly build.
+_FENCE = {".py": "python", ".hip": "cpp", ".cu": "cpp", ".cuh": "cpp",
+          ".cpp": "cpp", ".cc": "cpp", ".h": "cpp", ".hpp": "cpp"}
+
+
+def _fence_lang(rel: str) -> str:
+    for ext, lang in _FENCE.items():
+        if rel.endswith(ext):
+            return lang
+    return "python"
+
+
+def _task_verb(task, src_rel: str, dst_rel: str) -> str:
+    """Say whether this is an in-place optimization or a translation.
+
+    Same-language tasks rewrite one file; translation tasks read one file and
+    write a different one, and telling the model to "rewrite" the file it is
+    supposed to be translating INTO is actively misleading.
+    """
+    if dst_rel == src_rel:
+        return f"Rewrite the file `{dst_rel}` so the kernel is FASTER."
+    return (f"Implement `{dst_rel}` as the {_fence_lang(dst_rel)} equivalent of "
+            f"`{src_rel}` shown below, and make it as FAST as possible.")
 
 
 def _extract_code(text: str) -> str:
@@ -176,13 +202,18 @@ def cmd_run(args) -> int:
         ws = _workspace(task, out_root)
         try:
             src_rel = task.source_files[0] if task.source_files else "kernel.py"
+            dst_rel = task.answer_path()
             source = (ws / src_rel).read_text() if (ws / src_rel).exists() else ""
             prompt = PROMPT.format(
                 instructions=task.instructions or "Optimize this kernel.",
-                filename=src_rel, targets=", ".join(task.target_functions) or "all",
-                source=source)
+                filename=dst_rel, targets=", ".join(task.target_functions) or "all",
+                source=source, lang=_fence_lang(dst_rel),
+                source_lang=_fence_lang(src_rel),
+                task=_task_verb(task, src_rel, dst_rel))
             reply = policy(prompt)
-            (ws / src_rel).write_text(_extract_code(reply))
+            out_path = ws / dst_rel
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(_extract_code(reply))
             r = evaluate_task(task, ws, timeout=args.timeout)
         except Exception as exc:  # noqa: BLE001 - one bad task must not end the run
             r = ArenaResult(task_id=task.task_id, task_type=task.task_type,

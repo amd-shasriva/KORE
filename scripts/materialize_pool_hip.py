@@ -159,9 +159,15 @@ def main() -> int:
             print(f"  {tid}  family={spec.get('family')} dtype={spec.get('dtype')}")
         return 0
 
-    from kore.teacher import get_teacher  # local: network/credentials only on real runs
+    # Local import: pulls credentials and network only on a real run, so --dry-run
+    # stays usable without them.
+    from kore.data.teacher import load_env_local, make_teacher
 
-    teacher = get_teacher(args.teacher)
+    load_env_local()
+    # resilient=True because this is a long unattended sweep against a rate-limited
+    # API, and one transient 429 should cost a retry rather than the remainder of
+    # the run.
+    teacher = make_teacher(args.teacher, resilient=True)
     ok = fail = 0
     with done_path.open("a") as ledger:
         for i, (tid, spec) in enumerate(selected, 1):
@@ -170,7 +176,7 @@ def main() -> int:
                 dtype=spec.get("dtype", "fp32"),
                 snr=spec.get("snr_threshold", 30))
             try:
-                reply = teacher.complete(prompt)
+                reply = teacher.generate([{"role": "user", "content": prompt}])
                 seed = _extract_code(reply)
                 if "PYBIND11_MODULE" not in seed:
                     raise ValueError("seed does not bind an entry point")

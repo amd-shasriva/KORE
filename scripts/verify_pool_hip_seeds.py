@@ -31,7 +31,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 
-def verify_one(task_dir: Path, timeout: int) -> dict:
+def verify_one(task_dir: Path, timeout: int, gpu: int | None = None) -> dict:
     """Compile and check one seed, returning a verdict row."""
     cfg = json.loads((task_dir / "task.yaml").read_text())
     rec = {"task_id": cfg.get("task_id"), "hip_twin_of": cfg.get("hip_twin_of"),
@@ -49,6 +49,12 @@ def verify_one(task_dir: Path, timeout: int) -> dict:
 
     env = dict(os.environ)
     env["PYTHONPATH"] = f"{REPO}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    if gpu is not None:
+        # One device per worker. Without this every worker builds and runs on
+        # device 0, which serializes the part that needs a GPU at all and leaves
+        # seven idle.
+        env["HIP_VISIBLE_DEVICES"] = str(gpu)
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     t0 = time.time()
     try:
         proc = subprocess.run(
@@ -97,6 +103,12 @@ def main() -> int:
     ap.add_argument("--json", default="")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=8,
+                    help="seeds gated at once, one GPU each. Gating is a compile "
+                         "plus a short run, so serial gating is what starves "
+                         "datagen of tasks")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip seeds already decided in the output report")
     args = ap.parse_args()
 
     sys.path.insert(0, str(REPO))
@@ -104,19 +116,62 @@ def main() -> int:
     # parameter-free ones. They differ only in how many tensors the entry takes,
     # which is the driver's business, not the gate's.
     dirs = sorted((Path(args.root) / "tasks").glob("*__hip*"))
+
+    # Carry forward verdicts from an earlier run of this root. Gating thousands of
+    # seeds outlives one job's time limit, and re-deciding a seed the last job
+    # already decided would mean the sweep never finishes.
+    rows: list[dict] = []
+    if args.resume and args.json and Path(args.json).is_file():
+        try:
+            rows = json.loads(Path(args.json).read_text()).get("rows", [])
+        except Exception:  # noqa: BLE001 - a truncated report just means redo it
+            rows = []
+        done = {r.get("task_id") for r in rows}
+        before = len(dirs)
+        dirs = [d for d in dirs if d.name not in done]
+        print(f"resuming: {before - len(dirs)} already decided, {len(dirs)} to go")
     if args.limit:
         dirs = dirs[: args.limit]
-    print(f"gating {len(dirs)} seed(s) on {os.uname().nodename}")
+    print(f"gating {len(dirs)} seed(s) on {os.uname().nodename} "
+          f"with {args.workers} worker(s)")
 
-    rows = []
     counts: dict[str, int] = {}
-    for i, d in enumerate(dirs, 1):
-        r = verify_one(d, args.timeout)
-        rows.append(r)
+    for r in rows:
+        counts[r.get("status", "?")] = counts.get(r.get("status", "?"), 0) + 1
+
+    def _emit(i: int, r: dict) -> None:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
         print(f"  [{i}/{len(dirs)}] {r['task_id']}: {r['status']}"
               + (f" snr={r['snr_db']}" if r.get("snr_db") is not None else ""),
               flush=True)
+
+    def _checkpoint() -> None:
+        """Write the report as we go. A gate job that is preempted at 90% must not
+        throw away the verdicts it already has."""
+        if args.json:
+            tmp = Path(args.json).with_suffix(".tmp")
+            tmp.write_text(json.dumps({"counts": counts, "rows": rows}, indent=2))
+            tmp.replace(args.json)
+
+    if args.workers > 1 and dirs:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        n_gpu = max(1, args.workers)
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            futs = {pool.submit(verify_one, d, args.timeout, i % n_gpu): d
+                    for i, d in enumerate(dirs)}
+            for i, fut in enumerate(as_completed(futs), 1):
+                r = fut.result()
+                rows.append(r)
+                _emit(i, r)
+                if i % 20 == 0:
+                    _checkpoint()
+    else:
+        for i, d in enumerate(dirs, 1):
+            r = verify_one(d, args.timeout, 0)
+            rows.append(r)
+            _emit(i, r)
+            if i % 20 == 0:
+                _checkpoint()
 
     n = len(rows) or 1
     print(f"\nyield: {counts.get('pass', 0)}/{len(rows)} "

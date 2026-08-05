@@ -175,6 +175,58 @@ def _link_required_repo(task, ws: Path) -> Optional[str]:
     return None
 
 
+def _attempt_task(task, ws, dst_rel, prompt, policy, args, ref_latency):
+    """Generate, score, and retry with the harness's own feedback. Best wins.
+
+    AKA's reference agents run with ``max_iterations: 3`` and full tool access in
+    the workspace: they compile, read the compiler error, and try again. Scoring
+    one shot against those published numbers compares two different procedures,
+    and the gap falls hardest on exactly the categories gated on compiling a
+    translation unit correctly first time -- torch2hip, which carries the highest
+    bar of all.
+
+    The workspace is deliberately NOT reset between attempts. AKA's agent
+    accumulates state in it across iterations, so rebuilding a clean tree each
+    time would be a different (easier, and less faithful) task.
+
+    The best attempt by AKA score is kept rather than the last, because a later
+    attempt can regress -- a model chasing speed can break correctness it already
+    had, and reporting the final state would score the regression.
+    """
+    best = None
+    feedback = None
+    for attempt in range(1, max(1, args.attempts) + 1):
+        reply = policy(prompt) if feedback is None else policy(prompt, feedback)
+        code = _extract_code(reply)
+        # Distinguish "the model produced nothing usable" from "the model wrote a
+        # bad kernel". Both score zero, and without this the ledger cannot tell
+        # them apart -- which is how a generation-side bug hides for a whole
+        # sweep looking like a capability result.
+        note = _generation_health(reply, code)
+        if note:
+            print(f"    attempt {attempt}: generation: {note}", flush=True)
+        _write_answer(ws / dst_rel, code)
+        r = evaluate_task(task, ws, timeout=args.timeout,
+                          reference_latency=ref_latency)
+        r.detail = {**(r.detail or {}), "attempt": attempt,
+                    "attempts_allowed": args.attempts}
+        if best is None or r.score > best.score:
+            best = r
+        if args.attempts == 1:
+            break
+        print(f"    attempt {attempt}/{args.attempts}: compiled={r.compiled} "
+              f"correct={r.correct} score={r.score:.0f}", flush=True)
+        # Feed the harness's own verdict back, the way the reference agent reads
+        # its compiler output. _render_feedback turns a correct result into
+        # "propose one further optimization", so a passing kernel keeps being
+        # improved rather than ending the budget early.
+        feedback = {"compiled": r.compiled, "correct": r.correct,
+                    "error_text": r.error, "speedup": r.speedup}
+    if best is not None and args.attempts > 1:
+        best.detail = {**(best.detail or {}), "best_of": args.attempts}
+    return best
+
+
 def _generation_health(reply: str, code: str) -> str:
     """Describe a reply that is suspect on its face, or "" when it looks fine.
 
@@ -425,19 +477,8 @@ def cmd_run(args) -> int:
                 task=_task_verb(task, src_rel, dst_rel)
                      + _preserve_note(ws, dst_rel, task),
                 context=_render_context(task, ws))
-            reply = policy(prompt)
-            code = _extract_code(reply)
-            # Distinguish "the model produced nothing usable" from "the model
-            # wrote a bad kernel". Both compile to zero, and without this the
-            # ledger cannot tell them apart after the fact -- which is how a
-            # generation-side bug hides for a whole sweep looking like model
-            # failure.
-            gen_note = _generation_health(reply, code)
-            if gen_note:
-                print(f"    generation: {gen_note}", flush=True)
-            _write_answer(ws / dst_rel, code)
-            r = evaluate_task(task, ws, timeout=args.timeout,
-                              reference_latency=ref_latency.get(task.task_id))
+            r = _attempt_task(task, ws, dst_rel, prompt, policy, args,
+                              ref_latency.get(task.task_id))
         except Exception as exc:  # noqa: BLE001 - one bad task must not end the run
             r = ArenaResult(task_id=task.task_id, task_type=task.task_type,
                             error=f"{type(exc).__name__}: {exc}")
@@ -618,6 +659,13 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=3600)
     ap.add_argument("--max-tokens", type=int, default=8192)
     ap.add_argument("--temperature", type=float, default=0.0)
+    # Matches AKA's reference agents (agents/*/agent_config.yaml: max_iterations:
+    # 3). Comparing a single shot against published numbers from a 3-iteration
+    # agentic loop with compiler feedback measures two different procedures, not
+    # two models. Set 1 for a deliberate single-shot measurement.
+    ap.add_argument("--attempts", type=int, default=3,
+                    help="generation attempts per task, with harness feedback "
+                         "between them (AKA reference agents use 3)")
     ap.add_argument("--keep-workspaces", action="store_true")
     ap.add_argument("--json-out", default="")
     # Task-level sharding. transformers loads this checkpoint with

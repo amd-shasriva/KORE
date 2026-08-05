@@ -177,7 +177,10 @@ class ArenaResult:
             "baseline_seconds": self.baseline_seconds,
             "optimized_seconds": self.optimized_seconds,
             "speedup": self.speedup, "score": self.score,
-            "error": self.error[:500], "seconds": round(self.seconds, 2),
+            # Wide enough to diagnose a failure from the ledger alone. The
+            # in-memory .error carries the full diagnostic for retry feedback;
+            # this is only what gets persisted.
+            "error": self.error[:4000], "seconds": round(self.seconds, 2),
             "detail": self.detail,
         }
 
@@ -279,9 +282,33 @@ def _run(cmds: list[list[str]], cwd: Path, timeout: int) -> tuple[bool, str]:
         except Exception as exc:  # noqa: BLE001
             return False, f"{type(exc).__name__}: {exc}"
         if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip()[-400:]
-            return False, f"exit {proc.returncode}: {tail}"
+            return False, f"exit {proc.returncode}: {_diagnostic(proc)}"
     return True, ""
+
+
+#: How much of a failing command's output to keep. A tail alone is close to
+#: useless as retry feedback: hipcc and C++ template errors print the diagnostic
+#: FIRST and the build system's "build stopped" summary LAST, so 400 trailing
+#: characters reliably capture the summary and never the error. Keeping both ends
+#: is what makes an attempt-2 fix possible.
+_DIAG_HEAD = 3000
+_DIAG_TAIL = 1500
+
+
+def _diagnostic(proc) -> str:
+    """The useful part of a failed command's output: the errors, then both ends."""
+    out = ((proc.stderr or "") + ("\n" + proc.stdout if proc.stdout else "")).strip()
+    if len(out) <= _DIAG_HEAD + _DIAG_TAIL:
+        return out
+    errs = [ln for ln in out.splitlines()
+            if "error:" in ln.lower() or "Error:" in ln][:20]
+    parts = []
+    if errs:
+        parts.append("ERRORS:\n" + "\n".join(errs))
+    parts.append(out[:_DIAG_HEAD])
+    parts.append(f"...[{len(out) - _DIAG_HEAD - _DIAG_TAIL} chars omitted]...")
+    parts.append(out[-_DIAG_TAIL:])
+    return "\n".join(parts)
 
 
 def _parse_speedup(text: str) -> tuple[Optional[float], Optional[float], Optional[float]]:

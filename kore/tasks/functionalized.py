@@ -55,22 +55,32 @@ def parameter_tensors(spec: dict) -> list[tuple[str, Any]]:
     return [(n, t.detach().clone()) for n, t in named]
 
 
+#: Above this many tensor arguments a "kernel" is really a whole network -- the
+#: pool's tail reaches 201 parameters. 91% of functionalizable modules sit at or
+#: below this, and the excluded tail is not kernel-shaped work.
+MAX_ARITY = 9
+
+
 def functional_namespace_from_spec(spec: dict) -> dict:
-    """An oracle namespace whose entry takes ``(activation, *parameters)``."""
+    """An oracle namespace whose entry takes ``(*activations, *parameters)``.
+
+    Modules taking several activations (attention's q/k/v, an actor-critic's
+    state/action) are ordinary here: every declared input is forwarded, so they
+    functionalize on the same path as single-input ones.
+    """
     import torch
     from torch.func import functional_call
 
     mod = _instantiate(spec)
-    names = [n for n, _ in list(mod.named_parameters()) + list(mod.named_buffers())]
-    base = {n: t.detach().clone()
-            for n, t in list(mod.named_parameters()) + list(mod.named_buffers())}
-    in_spec = (spec.get("input_specs") or [{}])[0]
-    base_shape = list(in_spec.get("shape") or [4, 4, 4, 4])
+    pairs = list(mod.named_parameters()) + list(mod.named_buffers())
+    names = [n for n, _ in pairs]
+    base = {n: t.detach().clone() for n, t in pairs}
+    in_specs = spec.get("input_specs") or [{}]
+    base_shapes = [list(s.get("shape") or [4, 4, 4, 4]) for s in in_specs]
 
-    def _scaled_shape(shape) -> list[int]:
-        """Resize the activation to `shape` elements, keeping its trailing dims."""
+    def _scale_one(base_shape: list[int], shape) -> list[int]:
         if shape is None:
-            return base_shape
+            return list(base_shape)
         try:
             want = int(shape)
         except (TypeError, ValueError):
@@ -78,25 +88,32 @@ def functional_namespace_from_spec(spec: dict) -> dict:
         tail = 1
         for d in base_shape[1:]:
             tail *= d
-        lead = max(1, want // max(1, tail))
-        return [lead] + base_shape[1:]
+        return [max(1, want // max(1, tail))] + base_shape[1:]
+
+    def _scaled_shape(shape):
+        return _scale_one(base_shapes[0], shape)
 
     def get_inputs(shape=None, device="cuda", seed=0):
         g = torch.Generator(device="cpu").manual_seed(seed)
-        x = torch.rand(*_scaled_shape(shape), generator=g).to(device)
+        acts = [torch.rand(*_scale_one(bs, shape), generator=g).to(device)
+                for bs in base_shapes]
         # Parameters keep their own shapes: a Conv2d weight is fixed by its
         # channel counts, not by the batch pushed through it.
-        return [x] + [base[n].to(device) for n in names]
+        return acts + [base[n].to(device) for n in names]
 
-    def ref_fn(x, *params):
+    n_act = len(base_shapes)
+
+    def ref_fn(*args):
+        acts, params = args[:n_act], args[n_act:]
         supplied = dict(zip(names, params)) if params else base
-        return functional_call(mod, supplied, (x,))
+        return functional_call(mod, supplied, tuple(acts))
 
     return {
         "entry_name": spec["entry_name"],
         "family": spec.get("family", "?"),
         "dtype_name": spec.get("dtype", "fp32"),
-        "arity": 1 + len(names),
+        "arity": n_act + len(names),
+        "n_activations": n_act,
         "mutates_input": False,
         "param_names": names,
         "get_inputs": get_inputs,

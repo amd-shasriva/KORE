@@ -38,6 +38,21 @@ AKA_ARM="kore"
 # resuming from its partial ledger across several jobs -- which requires every
 # attempt to land in the same place.
 AKA_OUT="$REPO/runs/aka_full_${AKA_ARM}"
+
+# The datagen array mining the external pool. Optional: set DATAGEN_SHARDS to a
+# shard directory to have this loop keep it staffed. Each element is an 8h
+# allocation over ~1,743 tasks and will be preempted long before it finishes, and
+# a preempted array element is simply gone -- nothing re-queues it. Left
+# unsupervised overnight the sweep quietly stops at whatever fraction survived.
+#
+# Re-submitting is safe by construction: the workers skip shards that are already
+# complete and write atomically, so a resubmitted element resumes rather than
+# redoing.
+DATAGEN_SHARDS="${DATAGEN_SHARDS:-}"
+DATAGEN_ROOT="${DATAGEN_ROOT:-$REPO/data/v5pool}"
+DATAGEN_N="${DATAGEN_N:-8}"
+DATAGEN_TARGET="${DATAGEN_TARGET:-3}"
+
 LOG="$REPO/runs/supervise.log"
 RETIRE="${*:-}"
 
@@ -246,8 +261,26 @@ while :; do
         note_submission aka
     fi
 
+    # --- datagen array over the external pool -------------------------------
+    if [ -n "$DATAGEN_SHARDS" ]; then
+        running=$(echo "$q" | grep -c "kore-fac" || true)
+        if [ "$running" -lt "$DATAGEN_N" ] && should_submit datagen; then
+            # Re-submit the whole array rather than tracking which elements died:
+            # an element whose shard is already complete exits immediately, so the
+            # cost of over-submitting is seconds, while the cost of missing a dead
+            # element is that its ~1,743 tasks are never mined.
+            say "datagen: $running/$DATAGEN_N elements up -> resubmitting array"
+            sbatch --array=0-$((DATAGEN_N - 1)) scripts/spur_datagen_array.sbatch \
+                "$DATAGEN_SHARDS" "$DATAGEN_ROOT" "$DATAGEN_TARGET" run 2>&1 | tee -a "$LOG"
+            note_submission datagen
+        fi
+    fi
+
+    # The supervisor's job is the training run and the arena sweep. Datagen is
+    # open-ended -- there is always another task to mine -- so it must not hold
+    # the loop open once those two are done.
     if sft_done && aka_done; then
-        say "=== both jobs complete; supervisor exiting ==="
+        say "=== SFT and arena complete; supervisor exiting ==="
         exit 0
     fi
 

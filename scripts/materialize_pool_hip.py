@@ -65,7 +65,18 @@ Reproduce the numerics of this PyTorch module exactly:
 {module_source}
 ```
 
-HARD REQUIREMENTS -- a seed that misses either of these is discarded:
+The harness calls your entry point as `{entry_name}({arg_list})` with {arity}
+tensor argument(s) of dtype {dtype}, and compares the result against the module
+above.
+
+HARD REQUIREMENTS -- a seed that misses any of these is discarded:
+
+0. SHAPES ARE NOT FIXED. The example shape {example_shape} is only one case; the
+   harness re-runs at other sizes (it scales to {primary_scale} elements and
+   validates at further scales). Read every extent from the tensor at runtime
+   with `.size(i)` / `.numel()`. A kernel with a compile-time shape baked in
+   passes the example and fails everything else.
+
 
 1. Bind the entry point under EXACTLY this name, which is the task's own and is \
 NOT "forward":
@@ -221,11 +232,18 @@ def main() -> int:
             # extension compiles and then the loader rejects it for exporting no
             # such symbol, which is how the first 12 seeds all died.
             entry = spec.get("entry_name") or "forward"
+            specs = spec.get("input_specs") or []
+            arity = len(specs) or 1
+            example = specs[0].get("shape") if specs else "[N]"
             prompt = SEED_PROMPT.format(
                 module_source=spec.get("module_source", "")[:8000],
                 dtype=spec.get("dtype", "fp32"),
                 snr=spec.get("snr_threshold", 30),
-                entry_name=entry)
+                entry_name=entry,
+                arity=arity,
+                arg_list=", ".join(f"t{i}" for i in range(arity)),
+                example_shape=example,
+                primary_scale=spec.get("primary_scale", "a larger size"))
             try:
                 reply = teacher.generate([{"role": "user", "content": prompt}])
                 seed = _extract_code(reply)

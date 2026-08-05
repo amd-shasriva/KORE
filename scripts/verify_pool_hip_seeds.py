@@ -62,8 +62,13 @@ def verify_one(task_dir: Path, timeout: int) -> dict:
 
     # The driver prints the verdict; trust it rather than re-deriving one here,
     # since it is the same authority datagen and the reward path use.
+    #
+    # It prints a Python bool -- `allclose: True` -- not the word "pass". Matching
+    # on "allclose: pass" can never fire, so every seed was reported incorrect
+    # whatever it actually did, and a batch reporting SNR 999 (a perfect match)
+    # read as 0% yield. The gate was rejecting good seeds.
     low = out.lower()
-    if "allclose: pass" in low or "verdict: pass" in low:
+    if "allclose: true" in low or "verdict: pass" in low:
         rec["status"] = "pass"
     else:
         rec["status"] = ("compile_or_run_fail" if proc.returncode != 0

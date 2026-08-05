@@ -64,9 +64,21 @@ Reproduce the numerics of this PyTorch module exactly:
 {module_source}
 ```
 
-Entry point: a function `forward` bound through \
-`PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)`, taking and returning `torch::Tensor` \
-in the same order as the module's forward().
+HARD REQUIREMENTS -- a seed that misses either of these is discarded:
+
+1. Bind the entry point under EXACTLY this name, which is the task's own and is \
+NOT "forward":
+
+       PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {{
+         m.def("{entry_name}", &{entry_name}, "seed");
+       }}
+
+   Its arguments and return must match the module's forward() in order and type \
+(`torch::Tensor`).
+
+2. Do NOT call any stream API. In particular \
+`at::cuda::getCurrentHIPStreamMasqueradingAsCUDA` does not exist in this ROCm \
+build. Launch on the default stream by passing 0 as the stream argument.
 
 Input dtype is {dtype}. It must reach at least {snr} dB SNR against the reference.
 
@@ -171,15 +183,26 @@ def main() -> int:
     ok = fail = 0
     with done_path.open("a") as ledger:
         for i, (tid, spec) in enumerate(selected, 1):
+            # The pool builds its oracle from this spec, and entry_name is the
+            # operation -- not "forward", which is what the hand-authored HIP
+            # tasks happen to use. Getting this wrong is not a soft failure: the
+            # extension compiles and then the loader rejects it for exporting no
+            # such symbol, which is how the first 12 seeds all died.
+            entry = spec.get("entry_name") or "forward"
             prompt = SEED_PROMPT.format(
                 module_source=spec.get("module_source", "")[:8000],
                 dtype=spec.get("dtype", "fp32"),
-                snr=spec.get("snr_threshold", 30))
+                snr=spec.get("snr_threshold", 30),
+                entry_name=entry)
             try:
                 reply = teacher.generate([{"role": "user", "content": prompt}])
                 seed = _extract_code(reply)
                 if "PYBIND11_MODULE" not in seed:
                     raise ValueError("seed does not bind an entry point")
+                # Check the symbol here rather than paying a GPU compile to find
+                # out: the loader looks up this exact name.
+                if f'"{entry}"' not in seed:
+                    raise ValueError(f"seed does not export {entry!r}")
                 materialize(tid, seed, out_root)
                 ok += 1
                 rec = {"task_id": tid, "status": "seeded", "chars": len(seed)}

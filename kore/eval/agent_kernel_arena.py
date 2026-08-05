@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -60,6 +61,16 @@ PUBLISHED_OPUS_MEAN_SPEEDUP = {
     "hip2hip": 6.69,          # Claude Code, Opus 4.6
     "triton2triton": 2.13,    # Cursor Agent, Opus 4.7 High
 }
+
+
+#: Harness and packaging files. Never the answer, and never the problem
+#: statement -- writing a kernel into the test runner would be scored as the
+#: model's work, and showing it as context just wastes the window.
+_SCAFFOLDING = frozenset({
+    "test_kernel_harness.py", "performance_utils_pytest.py", "task_runner.py",
+    "conftest.py", "__init__.py", "setup.py", "utils.py", "compile.py",
+    "correctness_check.py", "cal_kernel_perf.py", "kernel_loader_template.py",
+})
 
 
 class ArenaError(RuntimeError):
@@ -91,9 +102,50 @@ class ArenaTask:
         """Relative path the generated code must be written to."""
         if self.target_file:
             return self.target_file
-        # Same-language tasks (triton2triton, hip2hip) optimize in place and
-        # declare no separate target.
-        return self.source_files[0] if self.source_files else "kernel.py"
+        if self.source_files:
+            # Same-language tasks (triton2triton, hip2hip) optimize in place.
+            return self.source_files[0]
+        # instruction2triton declares no source at all -- the task IS the
+        # instruction. The file to write is the one its commands operate on, and
+        # it differs per task (gemm.py, layernorm.py, ...), so a fixed fallback
+        # writes the answer somewhere nothing reads and every task scores the
+        # shipped stub instead of the model.
+        inferred = self._file_named_in_commands()
+        return inferred or "kernel.py"
+
+    def context_files(self) -> list[str]:
+        """Files that state the problem without being the answer.
+
+        torch2flydsl ships model.py (the PyTorch to translate) beside kernel.py
+        (the empty target), and declares only kernel.py as its source. Showing the
+        model just its own blank target is why that category compiles almost
+        everything and gets none of it right.
+        """
+        answer = self.answer_path()
+        out = []
+        for p in sorted(self.root.glob("*.py")):
+            rel = p.name
+            if rel == answer or rel in _SCAFFOLDING or rel in self.source_files:
+                continue
+            out.append(rel)
+        return out
+
+    def _file_named_in_commands(self) -> Optional[str]:
+        """The .py file this task's own commands act on, if any.
+
+        Read from the commands rather than guessed, so it stays right when the
+        task is named layernorm.py instead of gemm.py.
+        """
+        text = " ".join(c[0] for c in
+                        (self.correctness_command + self.compile_command
+                         + self.performance_command) if c)
+        for name in re.findall(r"[\w./-]+\.py", text):
+            base = name.split("/")[-1]
+            if base in _SCAFFOLDING:
+                continue
+            if (self.root / base).exists():
+                return base
+        return None
 
     def source_text(self) -> str:
         parts = []

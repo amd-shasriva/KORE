@@ -46,8 +46,8 @@ numerically identical to the reference.
 
 Return ONLY the complete contents of `{filename}` in a single ```{lang}
 code block, with no commentary before or after.
-
-Current implementation:
+{context}
+Current contents of `{filename}`:
 ```{source_lang}
 {source}
 ```"""
@@ -65,6 +65,31 @@ def _fence_lang(rel: str) -> str:
         if rel.endswith(ext):
             return lang
     return "python"
+
+
+#: Cap on a single context file. A reference module is normally a few hundred
+#: lines; anything far bigger is a vendored blob that would crowd out the actual
+#: question.
+_CONTEXT_CHARS = 24_000
+
+
+def _render_context(task, ws) -> str:
+    """Show the problem statement that is not in the file being written.
+
+    torch2flydsl ships model.py (the PyTorch to translate) next to kernel.py (the
+    blank target) and declares only kernel.py, so without this the model is shown
+    an empty file and asked to match semantics it was never given -- which is
+    exactly the shape of that category's result: 41 of 45 compile, none correct.
+    """
+    parts = []
+    for rel in task.context_files():
+        p = ws / rel
+        if not p.exists():
+            continue
+        body = p.read_text()[:_CONTEXT_CHARS]
+        parts.append(f"Reference `{rel}` (the behaviour to reproduce):\n"
+                     f"```{_fence_lang(rel)}\n{body}\n```")
+    return ("\n" + "\n\n".join(parts) + "\n") if parts else ""
 
 
 def _task_verb(task, src_rel: str, dst_rel: str) -> str:
@@ -251,7 +276,7 @@ def cmd_run(args) -> int:
             continue
         ws = _workspace(task, out_root)
         try:
-            src_rel = task.source_files[0] if task.source_files else "kernel.py"
+            src_rel = task.source_files[0] if task.source_files else task.answer_path()
             dst_rel = task.answer_path()
             source = (ws / src_rel).read_text() if (ws / src_rel).exists() else ""
             prompt = PROMPT.format(
@@ -259,7 +284,8 @@ def cmd_run(args) -> int:
                 filename=dst_rel, targets=", ".join(task.target_functions) or "all",
                 source=source, lang=_fence_lang(dst_rel),
                 source_lang=_fence_lang(src_rel),
-                task=_task_verb(task, src_rel, dst_rel))
+                task=_task_verb(task, src_rel, dst_rel),
+                context=_render_context(task, ws))
             reply = policy(prompt)
             out_path = ws / dst_rel
             out_path.parent.mkdir(parents=True, exist_ok=True)

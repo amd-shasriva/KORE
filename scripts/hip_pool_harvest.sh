@@ -20,23 +20,32 @@ set -uo pipefail
 
 REPO=/home/shasriva/Kore-RL/KORE
 PY=/home/shasriva/kore-venv/bin/python
-SEEDS="$REPO/data/pool_hip"
 PROMOTED="$REPO/data/pool_hip_ok"
 DATA_ROOT="$REPO/data/v5hippool"
 SHARD_DIR="$REPO/runs/shards_hippool"
-GATE_JSON="$REPO/runs/pool_hip_gate.json"
 SHARDS="${1:-4}"
+
+# Both seed roots promote into one task root. Whether a seed's weights were
+# passed in as arguments is a property of how it was written, not of how it is
+# mined, so downstream sees a single flat set of HIP tasks.
+ROOTS="${HIP_ROOTS:-data/pool_hip data/pool_hip_f}"
 
 cd "$REPO" || exit 1
 . /etc/profile.d/spur.sh 2>/dev/null
 
-n_seeds=$(ls -d "$SEEDS"/tasks/*__hip 2>/dev/null | wc -l)
+n_seeds=$(ls -d $(for r in $ROOTS; do echo "$REPO/$r/tasks"; done)/*__hip* 2>/dev/null | wc -l)
 echo "[harvest] seeds available: $n_seeds"
 [ "$n_seeds" -eq 0 ] && { echo "[harvest] nothing to do"; exit 0; }
 
 # --- promote whatever the last gate approved --------------------------------
 mkdir -p "$PROMOTED/tasks"
-promoted=$("$PY" - "$GATE_JSON" "$SEEDS" "$PROMOTED" <<'PY'
+promoted=0
+for r in $ROOTS; do
+    # Each root's verdicts live in their own report, named after the root by the
+    # gate job, so one root's gate cannot mask another's.
+    gj="$REPO/runs/$(basename "$r")_gate.json"
+    [ -f "$gj" ] || continue
+    got=$("$PY" - "$gj" "$REPO/$r" "$PROMOTED" <<'PY'
 import json, shutil, sys
 from pathlib import Path
 gate, seeds, dst = (Path(p) for p in sys.argv[1:4])
@@ -57,13 +66,16 @@ for r in rows:
 print(n)
 PY
 )
+    echo "[harvest]   $r -> promoted ${got:-0}"
+    promoted=$(( promoted + ${got:-0} ))
+done
 echo "[harvest] promoted $promoted newly-passing seed(s)"
-total=$(ls -d "$PROMOTED"/tasks/*__hip 2>/dev/null | wc -l)
+total=$(ls -d "$PROMOTED"/tasks/*__hip* 2>/dev/null | wc -l)
 echo "[harvest] promoted total: $total"
 [ "$total" -eq 0 ] && { echo "[harvest] no gated seeds yet; run the gate first"; exit 0; }
 
 # --- shard and submit -------------------------------------------------------
-ls -d "$PROMOTED"/tasks/*__hip 2>/dev/null | xargs -n1 basename > "$REPO/runs/hippool_tasks.txt"
+ls -d "$PROMOTED"/tasks/*__hip* 2>/dev/null | xargs -n1 basename > "$REPO/runs/hippool_tasks.txt"
 # KORE_TASK_POOL points task resolution at the promoted root, so datagen can
 # resolve these ids the same way it resolves the Triton pool.
 export KORE_TASK_POOL="$PROMOTED"

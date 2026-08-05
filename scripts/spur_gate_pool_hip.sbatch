@@ -13,8 +13,11 @@
 # fails to bind on these nodes, so the job cycles through JobLaunchFailure into
 # JobHoldMaxRequeue while the partition still shows dozens of idle nodes.
 #SBATCH --gres=gpu:mi355x:8
-#SBATCH --cpus-per-task=32
-#SBATCH --time=01:00:00
+# The whole node's CPUs. Asking for a fraction alongside --exclusive is what this
+# scheduler rejects at launch, and gating is hipcc-bound anyway, so the cores are
+# the resource that actually makes it fast.
+#SBATCH --cpus-per-task=128
+#SBATCH --time=08:00:00
 #SBATCH --requeue
 #SBATCH --exclusive
 #SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/hipgate-%j.out
@@ -28,4 +31,5 @@ ROOT="${GATE_ROOT:-data/pool_hip}"
 TAG=$(basename "$ROOT")
 echo "gating root=$ROOT -> runs/${TAG}_gate.json"
 python scripts/verify_pool_hip_seeds.py --root "$ROOT" \
-    --json "runs/${TAG}_gate.json"
+    --json "runs/${TAG}_gate.json" \
+    --workers "${GATE_WORKERS:-8}" --resume

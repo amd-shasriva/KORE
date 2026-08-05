@@ -62,15 +62,27 @@ fi
 # The project ships its own LLVM bootstrap and pins the revision it needs, so use
 # it rather than guessing a system LLVM: MLIR's C++ API is unstable across
 # releases and a mismatched one fails deep in the build.
-if [ -x scripts/build_llvm.sh ] || [ -f scripts/build_llvm.sh ]; then
+MLIR_INSTALL=/home/shasriva/third_party/llvm-project/mlir_install
+if [ -d "$MLIR_INSTALL/lib/cmake/mlir" ]; then
+    # Already built by an earlier attempt. Rebuilding costs hours and cannot
+    # improve on a complete install, and this job has failed twice *after* this
+    # point -- repeating the expensive half to reach the same broken half is the
+    # slowest possible way to debug it.
+    echo "[flydsl] reusing existing MLIR install at $MLIR_INSTALL"
+else
     echo "[flydsl] building LLVM/MLIR (this is the long part)"
     bash scripts/build_llvm.sh 2>&1 | tail -40
-    rc=$?
-    echo "[flydsl] build_llvm rc=$rc"
-else
-    echo "[flydsl] FATAL no scripts/build_llvm.sh; cannot bootstrap MLIR" >&2
-    exit 3
+    echo "[flydsl] build_llvm rc=$?"
 fi
+export MLIR_PATH="$MLIR_INSTALL"
+echo "[flydsl] MLIR_PATH=$MLIR_PATH"
+
+# The two prior failures were both "a command build.sh calls is not on PATH",
+# reported only as exit 127 from three layers up inside pip. Run it directly with
+# tracing first so the missing command is named instead of inferred.
+echo "[flydsl] === tracing scripts/build.sh directly ==="
+bash -x scripts/build.sh 2>&1 | tail -45
+echo "[flydsl] build.sh rc=$?"
 
 echo "[flydsl] installing package"
 "$PIP" install -e . --no-build-isolation 2>&1 | tail -20

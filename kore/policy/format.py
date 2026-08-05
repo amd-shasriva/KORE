@@ -44,6 +44,14 @@ _ANALYSIS = "ANALYSIS"
 _PROPOSED = "PROPOSED_CHANGE"
 _FULL_KERNEL = "FULL_KERNEL"
 
+#: Opening fence with ANY language tag, not just python/py. The arena asks for
+#: ```cpp on .hip targets, and a python-only pattern could not match that opening
+#: marker -- so it latched onto a CLOSING marker instead and returned the prose
+#: that followed, or the first illustrative snippet, as the kernel. The caller
+#: then wrote that to the answer file, because ``parsed["kernel"] or out`` sees a
+#: non-empty (wrong) string and never falls back.
+_FENCE_RE = r"```[A-Za-z0-9_+.-]*[ \t]*\r?\n(.*?)```"
+
 # Optional deep-reasoning scratchpad. The block is OPTIONAL and, when present,
 # comes BEFORE the structured sections. It is captured separately by
 # ``parse_response`` and stripped before kernel/section extraction so it can never
@@ -311,22 +319,26 @@ def _extract_kernel(text: str) -> str:
     text = text or ""
     _, body = _split_think(text)
 
-    # Prefer a fenced block that appears after the FULL_KERNEL header.
+    # A FULL_KERNEL header is an explicit marker, so the first block after it is
+    # the answer by construction.
     fk = re.search(rf"{_FULL_KERNEL}\s*:?", body, flags=re.IGNORECASE)
-    scope = body[fk.end():] if fk else body
-    fenced = re.search(r"```(?:python|py)?\s*\n(.*?)```", scope, flags=re.DOTALL)
-    if fenced:
-        return fenced.group(1)
-    # No fence: take everything after the header as the kernel.
     if fk:
-        return scope
-    # Any fenced block in the think-stripped body.
-    any_fence = re.search(r"```(?:python|py)?\s*\n(.*?)```", body, flags=re.DOTALL)
-    if any_fence:
-        return any_fence.group(1)
+        scope = body[fk.end():]
+        fenced = re.search(_FENCE_RE, scope, flags=re.DOTALL)
+        # No fence after the header: everything after it is the kernel.
+        return fenced.group(1) if fenced else scope
+
+    # Without that marker, take the LARGEST fenced block rather than the first.
+    # Models routinely open with a small illustrative snippet ("here's the
+    # idea...") before emitting the real file, and taking the first one writes
+    # the sketch as the answer -- which then fails to compile and is scored as
+    # the model's work.
+    blocks = re.findall(_FENCE_RE, body, flags=re.DOTALL)
+    if blocks:
+        return max(blocks, key=len)
     # Last resort: a fenced block anywhere (incl. inside the scratchpad) - keeps
     # the pre-deep-CoT behavior for responses that ONLY carried code in <think>.
-    orig_fence = re.search(r"```(?:python|py)?\s*\n(.*?)```", text, flags=re.DOTALL)
+    orig_fence = re.search(_FENCE_RE, text, flags=re.DOTALL)
     return orig_fence.group(1) if orig_fence else ""
 
 

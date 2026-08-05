@@ -9,9 +9,13 @@
 #SBATCH --partition=amd-spur
 #SBATCH --qos=amd-general-qos
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:8
+# Typed GRES. An untyped "gpu:8" request is accepted at submit time and then
+# fails to bind on these nodes, so the job cycles through JobLaunchFailure into
+# JobHoldMaxRequeue while the partition still shows dozens of idle nodes.
+#SBATCH --gres=gpu:mi355x:8
 #SBATCH --cpus-per-task=32
 #SBATCH --time=01:00:00
+#SBATCH --requeue
 #SBATCH --exclusive
 #SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/hipgate-%j.out
 #SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/hipgate-%j.err

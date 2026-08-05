@@ -120,6 +120,67 @@ def is_parameter_free(spec: dict) -> bool:
     return not _PARAM_LAYERS.search(src) and not _EXPLICIT_PARAM.search(src)
 
 
+def _build_prompt(spec: dict) -> tuple[str, str]:
+    """The seed prompt for one task, and the entry symbol it must export."""
+    entry = spec.get("entry_name") or "forward"
+    specs = spec.get("input_specs") or []
+    arity = len(specs) or 1
+    return SEED_PROMPT.format(
+        module_source=spec.get("module_source", "")[:8000],
+        dtype=spec.get("dtype", "fp32"),
+        snr=spec.get("snr_threshold", 30),
+        entry_name=entry,
+        arity=arity,
+        arg_list=", ".join(f"t{i}" for i in range(arity)),
+        example_shape=(specs[0].get("shape") if specs else "[N]"),
+        primary_scale=spec.get("primary_scale", "a larger size")), entry
+
+
+def _seed_one(item, teacher, out_root: Path) -> dict:
+    tid, spec = item
+    prompt, entry = _build_prompt(spec)
+    try:
+        reply = teacher.generate([{"role": "user", "content": prompt}])
+        seed = _extract_code(reply)
+        if "PYBIND11_MODULE" not in seed:
+            raise ValueError("seed does not bind an entry point")
+        if f'"{entry}"' not in seed:
+            raise ValueError(f"seed does not export {entry!r}")
+        materialize(tid, seed, out_root)
+        return {"task_id": tid, "status": "seeded", "chars": len(seed)}
+    except Exception as exc:  # noqa: BLE001 - one bad task must not end the sweep
+        return {"task_id": tid, "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+def _seed_parallel(selected, teacher, done_path: Path, out_root: Path, args) -> int:
+    """Seed many tasks at once. The work is remote latency, not local compute."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    lock = threading.Lock()
+    ok = fail = 0
+    with done_path.open("a") as ledger, \
+            ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futs = {pool.submit(_seed_one, it, teacher, out_root): it[0]
+                for it in selected}
+        for i, fut in enumerate(as_completed(futs), 1):
+            rec = fut.result()
+            if rec["status"] == "seeded":
+                ok += 1
+            else:
+                fail += 1
+            with lock:
+                ledger.write(json.dumps(rec) + "\n")
+                ledger.flush()
+                os.fsync(ledger.fileno())
+            if i % 50 == 0:
+                print(f"  [{i}/{len(selected)}] seeded={ok} failed={fail}",
+                      flush=True)
+    print(f"\nseeded {ok}, failed {fail} -> {out_root}")
+    return 0
+
+
 def _spec_of(task_dir: Path) -> dict:
     """The JSON spec embedded in a pool task's reference.py."""
     text = (task_dir / "reference.py").read_text(errors="ignore")
@@ -172,6 +233,9 @@ def main() -> int:
     ap.add_argument("--allow-parameterized", action="store_true",
                     help="also seed modules with learned weights (they cannot "
                          "pass: a .hip function never sees the parameters)")
+    ap.add_argument("--workers", type=int, default=8,
+                    help="parallel teacher calls; the work is remote latency, "
+                         "so this is the difference between 19h and ~2h")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -223,6 +287,14 @@ def main() -> int:
     # API, and one transient 429 should cost a retry rather than the remainder of
     # the run.
     teacher = make_teacher(args.teacher, resilient=True)
+    # Seeding is teacher-bound at ~19s a seed and was running serially, which is
+    # 19 hours for 3,607 tasks -- the long pole in the whole HIP pipeline, and
+    # spent entirely waiting on a remote API rather than on anything local. The
+    # ledger append is under a lock and each task is independent, so this
+    # parallelises cleanly.
+    if args.workers > 1:
+        return _seed_parallel(selected, teacher, done_path, out_root, args)
+
     ok = fail = 0
     with done_path.open("a") as ledger:
         for i, (tid, spec) in enumerate(selected, 1):

@@ -1298,8 +1298,36 @@ def _reject_orphan_artifacts(ctx) -> None:
         )
 
 
+def _resolve_task_anywhere(task_id: str):
+    """A task by id, from the registry or from the external pool.
+
+    The pool (``kore.tasks.external``, 13,570 tasks) is deliberately kept out of
+    ``registry.all_tasks()`` so that growing it cannot move the taxonomy digest a
+    campaign's split manifest is pinned against. The side effect is that
+    ``get_task`` alone cannot see it, so naming a pool task on ``--tasks`` raised
+    KeyError -- and the whole pool was therefore unreachable from datagen.
+
+    That is 90% of the trainable corpus, and specifically every
+    synthesize-a-kernel-from-a-PyTorch-module task we own: 0 of those 13,570 have
+    ever produced a verified win, while 76% of the 1,546 registry tasks have. It
+    is also exactly the shape AgentKernelArena's torch2hip, torch2flydsl and
+    instruction2triton categories test, which is 133 of its 402 tasks.
+
+    Shadowing ``get_task`` here is the pattern the tree already uses;
+    ``CoevolutionController.resolve_task`` does the same for minted tasks.
+    """
+    from kore.tasks.registry import get_task
+
+    try:
+        return get_task(task_id)
+    except KeyError:
+        from kore.tasks.external import resolve_task
+
+        return resolve_task(task_id)
+
+
 def run(args) -> int:
-    from kore.tasks.registry import all_tasks, get_task
+    from kore.tasks.registry import all_tasks, get_task  # noqa: F401
 
     _validate_campaign_contract(args)
     # P5: propagate the hardware-counter dense-reward weight to every stage
@@ -1320,7 +1348,8 @@ def run(args) -> int:
         os.environ.setdefault("KORE_EVAL_FULL", "1")
         os.environ.setdefault("KORE_EVAL_N", str(getattr(args, "eval_n", 300)))
 
-    tasks = [get_task(t) for t in args.tasks.split(",")] if args.tasks else all_tasks()
+    tasks = ([_resolve_task_anywhere(t) for t in args.tasks.split(",")]
+             if args.tasks else all_tasks())
     if args.stages:
         stages = args.stages.split(",")
     else:

@@ -175,13 +175,54 @@ def _link_required_repo(task, ws: Path) -> Optional[str]:
     return None
 
 
-def _workspace(task, out_root: Path) -> Path:
+def _materialize_perf_helpers(ws: Path, arena_root: str) -> None:
+    """Replace the sabotaged helper stubs the arena ships in task sources.
+
+    AKA deliberately commits `performance_utils_pytest.py` and the vLLM
+    benchmark helper as stubs that `raise RuntimeError`, and replaces them per
+    workspace in setup_workspace(). Copying a task directory without that step
+    leaves the traps armed: every rocmbench kernel imports the helper at module
+    scope, so `pytest <kernel>.py` dies during collection and the task is scored
+    incorrect -- 61 tasks whose correctness result says nothing about the model.
+    The vLLM runners call the other stub in their performance phase, so a further
+    124 tasks can be correct and never report a speedup.
+
+    We call AKA's own function rather than reimplement it, so the helper we run
+    against is byte-identical to the one the published numbers used.
+    """
+    root = Path(arena_root)
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from src.perf_helper_materialization import (  # noqa: PLC0415
+            materialize_perf_helpers_in_workspace,
+        )
+    except Exception as exc:  # noqa: BLE001 - report once, do not kill the sweep
+        global _MATERIALIZE_WARNED
+        if not _MATERIALIZE_WARNED:
+            _MATERIALIZE_WARNED = True
+            print(f"WARNING: cannot import AKA perf-helper materialization "
+                  f"({type(exc).__name__}: {exc}); rocmbench and vLLM tasks will "
+                  f"fail on the shipped stubs", flush=True)
+        return
+    try:
+        materialize_perf_helpers_in_workspace(ws, root=root)
+    except Exception as exc:  # noqa: BLE001 - one task must not end the run
+        print(f"WARNING: perf-helper materialization failed for {ws.name}: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+
+
+_MATERIALIZE_WARNED = False
+
+
+def _workspace(task, out_root: Path, arena_root: str) -> Path:
     ws = out_root / "workspaces" / task.task_id.replace("/", "__")
     if ws.exists():
         shutil.rmtree(ws)
     ws.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(task.root, ws)
     _link_required_repo(task, ws)
+    _materialize_perf_helpers(ws, arena_root)
     return ws
 
 
@@ -248,7 +289,7 @@ def cmd_baseline(args) -> int:
     for i, task in enumerate(tasks, 1):
         if task.task_id in done:
             continue
-        ws = _workspace(task, out_root)
+        ws = _workspace(task, out_root, args.arena_root)
         r = evaluate_task(task, ws, timeout=args.timeout)
         results.append(r)
         with ledger.open("a") as fh:
@@ -354,7 +395,7 @@ def cmd_run(args) -> int:
     for i, task in enumerate(tasks, 1):
         if task.task_id in done:
             continue
-        ws = _workspace(task, out_root)
+        ws = _workspace(task, out_root, args.arena_root)
         try:
             src_rel = task.source_files[0] if task.source_files else task.answer_path()
             dst_rel = task.answer_path()

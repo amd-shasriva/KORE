@@ -324,6 +324,11 @@ def main() -> int:
                     help="pass each module's weights in as trailing tensor "
                          "arguments, so parameterized modules become HIP-"
                          "eligible: 11,964 of 13,570 tasks instead of 3,570")
+    ap.add_argument("--skip-parameter-free", action="store_true",
+                    help="seed only modules that needed functionalizing. Use when "
+                         "a plain sweep is already covering the parameter-free "
+                         "ones: their functionalized twin is the same task, so "
+                         "seeding both spends the teacher twice for one result")
     ap.add_argument("--workers", type=int, default=8,
                     help="parallel teacher calls; the work is remote latency, "
                          "so this is the difference between 19h and ~2h")
@@ -345,7 +350,7 @@ def main() -> int:
     ids = [t for t in ids if t not in attempted][args.offset:]
 
     selected = []
-    skipped_param = skipped_unfunc = n_func = 0
+    skipped_param = skipped_unfunc = skipped_free = n_func = 0
     for tid in ids:
         if len(selected) >= args.limit:
             break
@@ -355,7 +360,11 @@ def main() -> int:
             continue
         if args.families and spec.get("family") not in args.families:
             continue
-        if not is_parameter_free(spec):
+        if is_parameter_free(spec):
+            if args.skip_parameter_free:
+                skipped_free += 1
+                continue
+        else:
             if args.functionalize:
                 # Only admit a parameterized module if its weights really can be
                 # supplied from outside; verified per task, not assumed.
@@ -373,6 +382,8 @@ def main() -> int:
           + (f"; {n_func} functionalized" if n_func else "")
           + (f"; skipped {skipped_unfunc} not functionalizable"
              if skipped_unfunc else "")
+          + (f"; skipped {skipped_free} parameter-free (covered elsewhere)"
+             if skipped_free else "")
           + (f"; skipped {skipped_param} with learned parameters"
              if skipped_param else ""))
     if args.dry_run:

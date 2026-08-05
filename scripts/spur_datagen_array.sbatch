@@ -55,6 +55,22 @@ source /home/shasriva/kore-venv/bin/activate
 source "$REPO/scripts/lib/ops_runtime.sh"
 kore_secure_source_env "$REPO/.env.local"
 
+# Task ids outside the registry -- every promoted HIP pool task is one -- resolve
+# only when KORE_TASK_POOL points at their root. sbatch does not inherit the
+# submitter's environment, so the partitioner records the root in the manifest
+# and the worker re-exports it here. Without this the shard resolves nothing and
+# fails with "unknown task", which reads like a bad task list rather than a
+# missing variable.
+_POOL="$("$PY" -c "
+import json,sys
+try: print(json.load(open('$SHARD_DIR/manifest.json')).get('task_pool') or '')
+except Exception: print('')
+" 2>/dev/null)"
+if [ -n "$_POOL" ]; then
+    export KORE_TASK_POOL="$_POOL"
+    echo "[spur-worker] KORE_TASK_POOL=$KORE_TASK_POOL"
+fi
+
 "$PY" - "$SHARD_DIR/manifest.json" "$REPO" "$DATA_ROOT" "$TARGET" "$ARRAY_ID" <<'PY'
 import json
 from pathlib import Path

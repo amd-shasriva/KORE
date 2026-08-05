@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -95,14 +96,22 @@ def main() -> int:
 
     head = subprocess.check_output(["git", "rev-parse", "HEAD"],
                                    cwd=REPO, text=True).strip()
-    (out / "manifest.json").write_text(json.dumps({
+    manifest = {
         "repo_commit": head,
         "data_root": str(Path(args.data_root).resolve()),
         "target_wins": args.target,
         "n_shards": args.shards,
         "n_tasks": len(ids),
         "source_task_file": str(Path(args.task_file).resolve()),
-    }, indent=2) + "\n")
+    }
+    # Carry the pool root into the manifest. sbatch does not inherit the
+    # submitter's environment, so a worker that cannot see KORE_TASK_POOL cannot
+    # resolve ids that live outside the registry -- and every promoted HIP task
+    # does. Recording it here is what lets the job re-export it for itself.
+    pool = os.environ.get("KORE_TASK_POOL")
+    if pool:
+        manifest["task_pool"] = str(Path(pool).resolve())
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"PARTITION tasks={len(ids)} shards={args.shards} out={out}")
     return 0
 

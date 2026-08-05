@@ -93,6 +93,29 @@ def _render_context(task, ws) -> str:
     return ("\n" + "\n\n".join(parts) + "\n") if parts else ""
 
 
+def _preserve_note(ws, dst_rel: str, task) -> str:
+    """Warn when the file being rewritten also holds the tests that grade it.
+
+    The rocmbench tasks behind instruction2triton keep the kernel and its pytest
+    suite in one module, and the correctness command runs pytest against that same
+    file. A model told to "return the complete contents" returns the kernel and
+    drops the tests, so pytest collects nothing and exits 5 -- scored as incorrect
+    though the kernel was never actually judged. Every one of the 24 scored so far
+    failed this way, not on numerics.
+    """
+    p = ws / dst_rel
+    if not p.exists():
+        return ""
+    body = p.read_text(errors="ignore")
+    if "def test_" not in body and "pytest" not in body:
+        return ""
+    return ("\nThis file also contains the test suite that grades your work, and "
+            "it is run against this same file. Reproduce every existing test and "
+            "helper VERBATIM alongside your implementation -- if the tests are "
+            "missing, nothing can be collected and the task scores zero however "
+            "good the kernel is.\n")
+
+
 def _task_verb(task, src_rel: str, dst_rel: str) -> str:
     """Say whether this is an in-place optimization or a translation.
 
@@ -334,7 +357,8 @@ def cmd_run(args) -> int:
                 filename=dst_rel, targets=", ".join(task.target_functions) or "all",
                 source=source, lang=_fence_lang(dst_rel),
                 source_lang=_fence_lang(src_rel),
-                task=_task_verb(task, src_rel, dst_rel),
+                task=_task_verb(task, src_rel, dst_rel)
+                     + _preserve_note(ws, dst_rel, task),
                 context=_render_context(task, ws))
             reply = policy(prompt)
             _write_answer(ws / dst_rel, _extract_code(reply))

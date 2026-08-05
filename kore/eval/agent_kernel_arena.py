@@ -306,7 +306,24 @@ def _parse_speedup(text: str) -> tuple[Optional[float], Optional[float], Optiona
                 _num(d.get("optimized_time", d.get("optimized_seconds"))),
                 _num(sp),
             )
-    m = re.search(r"speedup[_ ]?(?:ratio)?\s*[:=]\s*([0-9]*\.?[0-9]+)", text, re.I)
+    # The gpumode harnesses print a per-case "speedup=" line for every shape and
+    # THEN an "Average: ... speedup=" line. Taking the first match records case 0
+    # and calls it the task's speedup -- wrong on all 79 hip2hip/torch2hip tasks,
+    # which are the two categories carrying the 6.69x and 6.89x bars, and wrong in
+    # an unpredictable direction because it depends on whether the first shape
+    # happened to be favourable. AKA averages the per-case ratios, so prefer an
+    # explicitly-labelled average and fall back to the mean of the per-case lines.
+    avg = re.search(r"average[^\n]*?speedup[_ ]?(?:ratio)?\s*[:=]\s*"
+                    r"([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", text, re.I)
+    if avg:
+        return None, None, _num(avg.group(1))
+    per_case = re.findall(r"case\s+\d+[^\n]*?speedup[_ ]?(?:ratio)?\s*[:=]\s*"
+                          r"([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", text, re.I)
+    vals = [v for v in (_num(x) for x in per_case) if v]
+    if vals:
+        return None, None, sum(vals) / len(vals)
+    m = re.search(r"speedup[_ ]?(?:ratio)?\s*[:=]\s*"
+                  r"([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", text, re.I)
     if m:
         return None, None, _num(m.group(1))
 
@@ -322,6 +339,64 @@ def _parse_speedup(text: str) -> tuple[Optional[float], Optional[float], Optiona
     m = re.search(r"GEAK_RESULT_LATENCY_MS\s*=\s*([0-9]*\.?[0-9]+)", text)
     if m:
         return None, _num(m.group(1)), None
+    return None, None, None
+
+
+#: Where the harnesses write their timings, in AKA's own precedence order
+#: (src/performance.py: performance_report_candidates).
+_REPORT_CANDIDATES = (
+    ("build", "performance_report.json"), ("performance_report.json",),
+    ("build", "perf_report.json"), ("perf_report.json",),
+    ("perf", "benchmark_results.json"),
+)
+
+#: Device-time keys, preferred over host/wall time. AKA's comment is that host
+#: timings "can be gamed by editing the test harness", so a report offering only
+#: host_time_ms is treated as no measurement rather than a weak one.
+_DEVICE_TIME_KEYS = ("execution_time_ms", "device_time_ms", "gpu_time_ms",
+                     "elapsed_ms", "time_ms")
+
+
+def _case_time(case: dict) -> Optional[float]:
+    for k in _DEVICE_TIME_KEYS:
+        if k in case:
+            return _num(case[k])
+    timing = case.get("timing_ms")
+    if isinstance(timing, dict):
+        return _num(timing.get("mean"))
+    return None
+
+
+def _parse_report_files(workspace: Path, task_type: str):
+    """Timings from the JSON report a harness wrote, if any.
+
+    Returns (baseline, optimized, speedup) in the same shape as _parse_speedup.
+    An explicit ratio in the report wins; otherwise the per-case device times are
+    returned as an aggregate so the caller can divide by a baseline run.
+    """
+    for parts in _REPORT_CANDIDATES:
+        p = workspace.joinpath(*parts)
+        if not p.is_file():
+            continue
+        try:
+            doc = json.loads(p.read_text())
+        except Exception:  # noqa: BLE001 - a torn report is not a measurement
+            continue
+        if isinstance(doc, dict):
+            sp = _num(doc.get("speedup_ratio", doc.get("speedup")))
+            if sp:
+                return (_num(doc.get("ori_time")), _num(doc.get("opt_time")), sp)
+            cases = doc.get("test_cases") or doc.get("cases") or []
+        elif isinstance(doc, list):
+            cases = doc
+        else:
+            continue
+        times = [t for t in (_case_time(c) for c in cases
+                             if isinstance(c, dict)) if t]
+        if times:
+            # Mean over cases, matching how the same quantity is aggregated on
+            # the baseline side, so the eventual ratio compares like with like.
+            return None, sum(times) / len(times), None
     return None, None, None
 
 
@@ -385,6 +460,13 @@ def evaluate_task(
                 timeout=timeout, capture_output=True, text=True,
             )
             base, opt, sp = _parse_speedup((proc.stdout or "") + (proc.stderr or ""))
+            # AKA reads the JSON report FIRST and stdout only as a fallback, and
+            # most harnesses write their timings there and print only a summary
+            # line. Reading stdout alone leaves 301 of 402 tasks with no speedup
+            # at all, capping their score at 120 -- including most of
+            # triton2triton, the category any Opus comparison rests on.
+            if sp is None and opt is None:
+                base, opt, sp = _parse_report_files(workspace, task.task_type)
             if base is None and reference_latency:
                 base = reference_latency
             res.baseline_seconds, res.optimized_seconds = base, opt

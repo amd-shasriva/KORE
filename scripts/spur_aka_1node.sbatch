@@ -64,7 +64,10 @@ ${TYPES:+--types $TYPES} --out $OUT --arm $ARM --model $MODEL --limit $LIMIT"
 # idle. Each worker therefore gets exactly one GPU via HIP_VISIBLE_DEVICES and its
 # own disjoint slice of tasks. Full copies rather than a shared engine: the model
 # fits with room to spare, and independent processes cannot stall each other.
-if [ "$MODE" != "run" ] || [ "$VIS" -lt 2 ]; then
+# baseline fans out for the same reason run does: it must cover all 402 tasks to
+# be a usable control, and single-process that does not fit in one allocation.
+case "$MODE" in run|baseline) FANOUT=1 ;; *) FANOUT=0 ;; esac
+if [ "$FANOUT" = "0" ] || [ "$VIS" -lt 2 ]; then
     # shellcheck disable=SC2086
     "$PY" scripts/run_agent_kernel_arena.py "$MODE" $(common_args)
     rc=$?
@@ -85,9 +88,9 @@ else
         # shellcheck disable=SC2086
         env -u HIP_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES \
             ROCR_VISIBLE_DEVICES="${GPULIST[$i]}" \
-            "$PY" scripts/run_agent_kernel_arena.py run $(common_args) \
+            "$PY" scripts/run_agent_kernel_arena.py "$MODE" $(common_args) \
             --num-shards "$NSHARD" --shard "$i" \
-            > "$OUT/shard${i}.log" 2>&1 &
+            > "$OUT/${MODE}_shard${i}.log" 2>&1 &
         pids="$pids $!"
         echo "  shard $i -> GPU ${GPULIST[$i]} (pid $!)"
     done
@@ -96,8 +99,9 @@ else
     echo "all shards exited (rc=$rc); merging ledgers"
     # Merge regardless: a shard that died still wrote every task it finished, and
     # the merge is what turns those ledgers into the completion artifact.
+    case "$MODE" in baseline) MERGE=baseline-merge ;; *) MERGE=merge ;; esac
     # shellcheck disable=SC2086
-    "$PY" scripts/run_agent_kernel_arena.py merge $(common_args) || rc=1
+    "$PY" scripts/run_agent_kernel_arena.py "$MERGE" $(common_args) || rc=1
 fi
 echo "aka rc=$rc"
 exit $rc

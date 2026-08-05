@@ -127,16 +127,66 @@ def cmd_baseline(args) -> int:
     out_root = Path(args.out); out_root.mkdir(parents=True, exist_ok=True)
     tasks = discover_tasks(args.arena_root, task_types=args.types or None,
                            gpu_arch=args.gpu_arch)[: args.limit or None]
+    # Shards and a durable ledger, for the same reasons `run` needs them: the
+    # control has to cover all 402 tasks to be worth anything, and single-process
+    # it does not fit in one allocation.
+    ledger = out_root / (f"baseline.shard{args.shard}of{args.num_shards}.jsonl"
+                         if args.num_shards > 1 else "baseline.partial.jsonl")
+    done = set()
+    for f in sorted(out_root.glob("baseline*.jsonl")):
+        for line in f.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except Exception:  # noqa: BLE001 - torn last line after a kill
+                continue
+            if row.get("task_id"):
+                done.add(row["task_id"])
+    if done:
+        print(f"resume: {len(done)} task(s) already timed", flush=True)
+    if args.num_shards > 1:
+        tasks = tasks[args.shard::args.num_shards]
+        print(f"shard {args.shard}/{args.num_shards}: {len(tasks)} task(s)", flush=True)
     results = []
     for i, task in enumerate(tasks, 1):
+        if task.task_id in done:
+            continue
         ws = _workspace(task, out_root)
         r = evaluate_task(task, ws, timeout=args.timeout)
         results.append(r)
+        with ledger.open("a") as fh:
+            fh.write(json.dumps(r.to_dict()) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
         print(f"[{i}/{len(tasks)}] {task.task_id}: compiled={r.compiled} "
               f"correct={r.correct} speedup={r.speedup} score={r.score:.0f}",
               flush=True)
         if not args.keep_workspaces:
             shutil.rmtree(ws, ignore_errors=True)
+    if args.num_shards > 1:
+        print(f"shard {args.shard} done; run `baseline-merge` when all exit", flush=True)
+        return 0
+    _write(out_root / "baseline_results.json", results, args)
+    return 0
+
+
+def cmd_baseline_merge(args) -> int:
+    """Combine baseline shard ledgers into baseline_results.json."""
+    out_root = Path(args.out)
+    seen, results = set(), []
+    for f in sorted(out_root.glob("baseline*.jsonl")):
+        for line in f.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            tid = row.get("task_id")
+            if tid and tid not in seen:
+                seen.add(tid)
+                results.append(_result_from_dict(row))
+    if not results:
+        print("baseline-merge: no ledgers", flush=True)
+        return 1
+    print(f"baseline-merge: {len(results)} task(s)", flush=True)
     _write(out_root / "baseline_results.json", results, args)
     return 0
 
@@ -344,7 +394,8 @@ def _write(path: Path, results, args) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=("discover", "baseline", "run", "merge"))
+    ap.add_argument("mode", choices=("discover", "baseline", "run", "merge",
+                                     "baseline-merge"))
     ap.add_argument("--arena-root", default=str(DEFAULT_ARENA))
     ap.add_argument("--gpu-arch", default="gfx950")
     ap.add_argument("--types", nargs="*", default=[],
@@ -375,7 +426,8 @@ def main() -> int:
     if not 0 <= args.shard < args.num_shards:
         ap.error(f"--shard must be in [0, {args.num_shards}), got {args.shard}")
     return {"discover": cmd_discover, "baseline": cmd_baseline,
-            "run": cmd_run, "merge": cmd_merge}[args.mode](args)
+            "run": cmd_run, "merge": cmd_merge,
+            "baseline-merge": cmd_baseline_merge}[args.mode](args)
 
 
 if __name__ == "__main__":

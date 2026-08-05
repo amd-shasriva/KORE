@@ -21,21 +21,28 @@ set -uo pipefail
 REPO=/home/shasriva/Kore-RL/KORE
 PY=/home/shasriva/kore-venv/bin/python
 LOG="$REPO/runs/hip_pipeline.log"
-SEEDS="$REPO/data/pool_hip"
 PROMOTED="$REPO/data/pool_hip_ok"
 GATE_EVERY="${GATE_EVERY:-40}"      # gate once this many new seeds have landed
 SHARDS="${HIP_SHARDS:-4}"
+
+# Two seed roots, gated the same way. pool_hip holds the parameter-free modules;
+# pool_hip_f holds functionalized ones, whose weights arrive as trailing tensor
+# arguments. That distinction matters when writing a seed and is invisible
+# afterwards, so both roots share one gate, one harvest and one sweep.
+ROOTS="${HIP_ROOTS:-data/pool_hip data/pool_hip_f}"
 
 cd "$REPO" || exit 1
 [ -z "${SPUR_CONTROLLER_ADDR:-}" ] && [ -r /etc/profile.d/spur.sh ] && . /etc/profile.d/spur.sh
 
 say() { echo "[$(date -u '+%H:%M:%SZ')] $*" | tee -a "$LOG"; }
 
-n_seeds() { ls -d "$SEEDS"/tasks/*__hip 2>/dev/null | wc -l; }
-n_promoted() { ls -d "$PROMOTED"/tasks/*__hip 2>/dev/null | wc -l; }
+# "__hip*" matches both suffixes: __hip and the functionalized __hipf.
+n_seeds() { ls -d $(for r in $ROOTS; do echo "$REPO/$r/tasks"; done)/*__hip* 2>/dev/null | wc -l; }
+n_promoted() { ls -d "$PROMOTED"/tasks/*__hip* 2>/dev/null | wc -l; }
 queued() { squeue -u "$USER" -h -n "$1" 2>/dev/null | wc -l; }
 
 say "=== hip pipeline loop start (pid $$) ==="
+say "roots: $ROOTS"
 last_gated=$(n_promoted)
 
 while :; do
@@ -49,7 +56,12 @@ while :; do
     if [ "$ungated" -ge "$GATE_EVERY" ] || { [ "$seeding_alive" = "0" ] && [ "$ungated" -gt 0 ]; }; then
         if [ "$(queued kore-hipgate)" -eq 0 ]; then
             say "gating: $seeds seeds on disk, $ungated since the last gate"
-            sbatch scripts/spur_gate_pool_hip.sbatch 2>&1 | tee -a "$LOG"
+            # One node gates every root in turn; a batch of seeds is minutes of
+            # work, so splitting them across jobs would only add queue wait.
+            for r in $ROOTS; do
+                [ -d "$REPO/$r/tasks" ] || continue
+                GATE_ROOT="$r" sbatch scripts/spur_gate_pool_hip.sbatch 2>&1 | tee -a "$LOG"
+            done
             last_gated=$seeds
         fi
     fi

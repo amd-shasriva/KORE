@@ -1,0 +1,27 @@
+#!/bin/bash
+# Gate one root of teacher-written HIP seeds on real gfx950.
+#
+# GATE_ROOT selects which root to gate, so the parameter-free seeds and the
+# functionalized ones (whose weights arrive as trailing arguments) go through the
+# same gate rather than needing a second script that could drift from this one.
+#SBATCH --job-name=kore-hipgate
+#SBATCH --account=amd-general
+#SBATCH --partition=amd-spur
+#SBATCH --qos=amd-general-qos
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:8
+#SBATCH --cpus-per-task=32
+#SBATCH --time=01:00:00
+#SBATCH --exclusive
+#SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/hipgate-%j.out
+#SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/hipgate-%j.err
+cd /home/shasriva/Kore-RL/KORE
+source /home/shasriva/kore-venv/bin/activate
+export PYTHONPATH=/home/shasriva/Kore-RL/KORE
+ROOT="${GATE_ROOT:-data/pool_hip}"
+# Name the report after the root so gating a second root cannot overwrite the
+# first one's verdicts, which harvest reads to decide what to promote.
+TAG=$(basename "$ROOT")
+echo "gating root=$ROOT -> runs/${TAG}_gate.json"
+python scripts/verify_pool_hip_seeds.py --root "$ROOT" \
+    --json "runs/${TAG}_gate.json"

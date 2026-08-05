@@ -100,7 +100,10 @@ def main() -> int:
     args = ap.parse_args()
 
     sys.path.insert(0, str(REPO))
-    dirs = sorted((Path(args.root) / "tasks").glob("*__hip"))
+    # "*__hip*" so functionalized twins (__hipf) are gated on the same path as
+    # parameter-free ones. They differ only in how many tensors the entry takes,
+    # which is the driver's business, not the gate's.
+    dirs = sorted((Path(args.root) / "tasks").glob("*__hip*"))
     if args.limit:
         dirs = dirs[: args.limit]
     print(f"gating {len(dirs)} seed(s) on {os.uname().nodename}")

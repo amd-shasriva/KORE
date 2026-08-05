@@ -979,7 +979,12 @@ def _worker(payload: dict) -> list[tuple]:
 
     from kore.data.teacher import load_env_local, make_teacher
     from kore.env.kore_env import KoreEnv
-    from kore.tasks.registry import get_task
+    # Pool-first, then registry. The external pool (13,570 PyTorch modules,
+    # plus any promoted HIP twins) is deliberately outside the registry so
+    # that growing it cannot move the taxonomy digest -- which means
+    # registry.get_task raises KeyError on every pool id, and a shard of them
+    # dies with "unknown task" before generating anything.
+    from kore.tasks.external import resolve_task as get_task
 
     load_env_local()
     tkw = {"model": payload["model_teacher"]} if payload.get("model_teacher") else {}
@@ -1022,7 +1027,12 @@ def _queue_worker(worker_id, gpu, task_q, result_q, kinds, data_root, counts,
 
     from kore.data.teacher import load_env_local, make_teacher
     from kore.env.kore_env import KoreEnv
-    from kore.tasks.registry import get_task
+    # Pool-first, then registry. The external pool (13,570 PyTorch modules,
+    # plus any promoted HIP twins) is deliberately outside the registry so
+    # that growing it cannot move the taxonomy digest -- which means
+    # registry.get_task raises KeyError on every pool id, and a shard of them
+    # dies with "unknown task" before generating anything.
+    from kore.tasks.external import resolve_task as get_task
 
     teacher = None
     try:

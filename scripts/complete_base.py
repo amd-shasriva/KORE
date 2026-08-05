@@ -155,7 +155,12 @@ def _complete_one_locked(
     from kore.data.gen_groups import generate_groups
     from kore.data.gen_repair import generate_repairs
     from kore.env.kore_env import KoreEnv
-    from kore.tasks.registry import get_task
+    # Pool-first, then registry. The external pool (13,570 PyTorch modules,
+    # plus any promoted HIP twins) is deliberately outside the registry so
+    # that growing it cannot move the taxonomy digest -- which means
+    # registry.get_task raises KeyError on every pool id, and a shard of them
+    # dies with "unknown task" before generating anything.
+    from kore.tasks.external import resolve_task as get_task
 
     todo = []
     for kind in KINDS:

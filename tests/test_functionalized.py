@@ -139,6 +139,30 @@ def test_arity_cap_excludes_whole_networks():
     assert _functional_info(CONV) is not None
 
 
+def test_multi_output_modules_are_not_admitted():
+    """Returning several tensors needs the seed to return a tuple through pybind,
+    a different contract from the one the prompt states."""
+    from scripts.materialize_pool_hip import _functional_info
+    two_out = dict(CONV)
+    two_out["module_source"] = (
+        "import torch.nn as nn\nclass M(nn.Module):\n"
+        "    def __init__(self):\n        super().__init__()\n"
+        "        self.c = nn.Conv2d(3, 5, 3, padding=1)\n"
+        "    def forward(self, x):\n"
+        "        y = self.c(x)\n        return y, y.sum()\n")
+    assert _functional_info(two_out) is None
+
+
+def test_admission_runs_the_module_rather_than_reading_its_source():
+    """A module whose weights cannot be supplied from outside must be rejected
+    before it costs a teacher call and a gate slot."""
+    from scripts.materialize_pool_hip import _functional_info
+    assert _functional_info(CONV) is not None
+    broken = dict(CONV)
+    broken["entry_class"] = "NotAClass"
+    assert _functional_info(broken) is None
+
+
 def test_prompt_names_every_parameter_with_its_shape_and_position():
     """An unnamed parameter list makes the teacher ignore the trailing arguments
     and recompute the module with weights of its own invention."""

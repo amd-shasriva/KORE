@@ -120,12 +120,58 @@ def is_parameter_free(spec: dict) -> bool:
     return not _PARAM_LAYERS.search(src) and not _EXPLICIT_PARAM.search(src)
 
 
-def _build_prompt(spec: dict) -> tuple[str, str]:
+#: Appended when the module's weights are passed in. Without naming them and
+#: giving their shapes, the teacher writes a kernel that ignores the trailing
+#: arguments and silently recomputes the module with implicit weights.
+_PARAM_BLOCK = """
+PARAMETERS ARE ARGUMENTS. This module has learned parameters, and they are NOT
+baked into your kernel -- they arrive as the trailing tensor arguments, in exactly
+this order:
+
+{param_lines}
+
+So the full call is `{entry_name}({arg_list})`: {n_act} activation tensor(s)
+followed by {n_param} parameter tensor(s). Use the parameter tensors you are
+given; do not initialise, hardcode, or assume any weight values. Read their
+extents at runtime like any other tensor.
+"""
+
+
+def _functional_info(spec: dict):
+    """(param_names, n_activations) for a functionalized task, or None."""
+    try:
+        from kore.tasks.functionalized import (MAX_ARITY,
+                                               functional_namespace_from_spec)
+        ns = functional_namespace_from_spec(spec)
+        if ns["arity"] <= ns["n_activations"] or ns["arity"] > MAX_ARITY:
+            return None
+        return ns["param_names"], ns["n_activations"]
+    except Exception:  # noqa: BLE001 - unfunctionalizable modules are skipped
+        return None
+
+
+def _build_prompt(spec: dict, functional=None) -> tuple[str, str]:
     """The seed prompt for one task, and the entry symbol it must export."""
     entry = spec.get("entry_name") or "forward"
     specs = spec.get("input_specs") or []
     arity = len(specs) or 1
-    return SEED_PROMPT.format(
+    prompt = SEED_PROMPT
+    extra = {}
+    if functional:
+        names, n_act = functional
+        import torch
+        from kore.tasks.functionalized import parameter_tensors
+        shapes = dict(parameter_tensors(spec))
+        lines = "\n".join(
+            f"  arg {n_act + i}: {n}  shape {tuple(shapes[n].shape)}"
+            for i, n in enumerate(names) if n in shapes)
+        arity = n_act + len(names)
+        prompt = SEED_PROMPT + _PARAM_BLOCK.format(
+            param_lines=lines, entry_name=entry, n_act=n_act,
+            n_param=len(names),
+            arg_list=", ".join([f"x{i}" for i in range(n_act)]
+                               + [n.replace(".", "_") for n in names]))
+    return prompt.format(
         module_source=spec.get("module_source", "")[:8000],
         dtype=spec.get("dtype", "fp32"),
         snr=spec.get("snr_threshold", 30),
@@ -133,12 +179,14 @@ def _build_prompt(spec: dict) -> tuple[str, str]:
         arity=arity,
         arg_list=", ".join(f"t{i}" for i in range(arity)),
         example_shape=(specs[0].get("shape") if specs else "[N]"),
-        primary_scale=spec.get("primary_scale", "a larger size")), entry
+        primary_scale=spec.get("primary_scale", "a larger size"),
+        **extra), entry
 
 
-def _seed_one(item, teacher, out_root: Path) -> dict:
+def _seed_one(item, teacher, out_root: Path, functionalize=False) -> dict:
     tid, spec = item
-    prompt, entry = _build_prompt(spec)
+    functional = _functional_info(spec) if functionalize else None
+    prompt, entry = _build_prompt(spec, functional)
     try:
         reply = teacher.generate([{"role": "user", "content": prompt}])
         seed = _extract_code(reply)
@@ -146,8 +194,12 @@ def _seed_one(item, teacher, out_root: Path) -> dict:
             raise ValueError("seed does not bind an entry point")
         if f'"{entry}"' not in seed:
             raise ValueError(f"seed does not export {entry!r}")
-        materialize(tid, seed, out_root)
-        return {"task_id": tid, "status": "seeded", "chars": len(seed)}
+        if functional:
+            materialize_functional(tid, spec, seed, out_root)
+        else:
+            materialize(tid, seed, out_root)
+        return {"task_id": tid, "status": "seeded", "chars": len(seed),
+                "functionalized": bool(functional)}
     except Exception as exc:  # noqa: BLE001 - one bad task must not end the sweep
         return {"task_id": tid, "status": "failed",
                 "error": f"{type(exc).__name__}: {exc}"[:200]}
@@ -162,7 +214,8 @@ def _seed_parallel(selected, teacher, done_path: Path, out_root: Path, args) -> 
     ok = fail = 0
     with done_path.open("a") as ledger, \
             ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futs = {pool.submit(_seed_one, it, teacher, out_root): it[0]
+        futs = {pool.submit(_seed_one, it, teacher, out_root,
+                            args.functionalize): it[0]
                 for it in selected}
         for i, fut in enumerate(as_completed(futs), 1):
             rec = fut.result()
@@ -267,6 +320,10 @@ def main() -> int:
     ap.add_argument("--allow-parameterized", action="store_true",
                     help="also seed modules with learned weights (they cannot "
                          "pass: a .hip function never sees the parameters)")
+    ap.add_argument("--functionalize", action="store_true",
+                    help="pass each module's weights in as trailing tensor "
+                         "arguments, so parameterized modules become HIP-"
+                         "eligible: 11,964 of 13,570 tasks instead of 3,570")
     ap.add_argument("--workers", type=int, default=8,
                     help="parallel teacher calls; the work is remote latency, "
                          "so this is the difference between 19h and ~2h")
@@ -288,7 +345,7 @@ def main() -> int:
     ids = [t for t in ids if t not in attempted][args.offset:]
 
     selected = []
-    skipped_param = 0
+    skipped_param = skipped_unfunc = n_func = 0
     for tid in ids:
         if len(selected) >= args.limit:
             break
@@ -298,13 +355,24 @@ def main() -> int:
             continue
         if args.families and spec.get("family") not in args.families:
             continue
-        if not args.allow_parameterized and not is_parameter_free(spec):
-            skipped_param += 1
-            continue
+        if not is_parameter_free(spec):
+            if args.functionalize:
+                # Only admit a parameterized module if its weights really can be
+                # supplied from outside; verified per task, not assumed.
+                if _functional_info(spec) is None:
+                    skipped_unfunc += 1
+                    continue
+                n_func += 1
+            elif not args.allow_parameterized:
+                skipped_param += 1
+                continue
         selected.append((tid, spec))
 
     print(f"selected {len(selected)} pool task(s) to seed"
           + (f" (families={args.families})" if args.families else "")
+          + (f"; {n_func} functionalized" if n_func else "")
+          + (f"; skipped {skipped_unfunc} not functionalizable"
+             if skipped_unfunc else "")
           + (f"; skipped {skipped_param} with learned parameters"
              if skipped_param else ""))
     if args.dry_run:

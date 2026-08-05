@@ -138,14 +138,42 @@ extents at runtime like any other tensor.
 
 
 def _functional_info(spec: dict):
-    """(param_names, n_activations) for a functionalized task, or None."""
+    """(param_names, n_activations) for a functionalized task, or None.
+
+    Admission is decided by running the module, not by reading its source. A
+    module is only seeded if supplying its weights from outside actually
+    reproduces it, so a mismatch costs one check here instead of a teacher call
+    and a gate slot on a task that could never pass.
+    """
     try:
+        import torch
         from kore.tasks.functionalized import (MAX_ARITY,
                                                functional_namespace_from_spec)
         ns = functional_namespace_from_spec(spec)
         if ns["arity"] <= ns["n_activations"] or ns["arity"] > MAX_ARITY:
             return None
-        return ns["param_names"], ns["n_activations"]
+
+        n_act = ns["n_activations"]
+        ins = ns["get_inputs"](None, device="cpu", seed=0)
+        env: dict = {}
+        exec(spec["module_source"], env)  # noqa: S102 - admitted upstream
+        torch.manual_seed(0)
+        mod = env[spec["entry_class"]](*(spec.get("init_args") or []),
+                                       **(spec.get("init_kwargs") or {}))
+        mod.eval()
+        with torch.no_grad():
+            direct = mod(*ins[:n_act])
+            via = ns["ref_fn"](*ins)
+
+        # A module returning several tensors would need the seed to return a
+        # tuple through pybind, a separate contract from the one the prompt
+        # states. It is 5.3% of the pool, so it is excluded rather than special-
+        # cased -- a seed written to the wrong contract fails the gate anyway.
+        if not isinstance(direct, torch.Tensor):
+            return None
+        if not torch.allclose(direct, via, atol=1e-6):
+            return None
+        return ns["param_names"], n_act
     except Exception:  # noqa: BLE001 - unfunctionalizable modules are skipped
         return None
 

@@ -262,6 +262,13 @@ def cmd_run(args) -> int:
             if row.get("task_id"):
                 results.append(_result_from_dict(row))
 
+    # Per-task reference latency from the baseline run, which is the denominator
+    # for every suite that reports an absolute time instead of a ratio.
+    ref_latency = _reference_latencies(out_root)
+    print(f"reference latencies available for {len(ref_latency)} task(s)"
+          + ("" if ref_latency else " -- run `baseline` first or speedups will be"
+             " unavailable for GEAK-style suites"), flush=True)
+
     if args.num_shards > 1:
         # Stride rather than contiguous blocks: task cost varies a lot by category
         # and the categories are discovered in order, so contiguous slices would
@@ -290,7 +297,8 @@ def cmd_run(args) -> int:
             out_path = ws / dst_rel
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(_extract_code(reply))
-            r = evaluate_task(task, ws, timeout=args.timeout)
+            r = evaluate_task(task, ws, timeout=args.timeout,
+                              reference_latency=ref_latency.get(task.task_id))
         except Exception as exc:  # noqa: BLE001 - one bad task must not end the run
             r = ArenaResult(task_id=task.task_id, task_type=task.task_type,
                             error=f"{type(exc).__name__}: {exc}")
@@ -315,6 +323,39 @@ def cmd_run(args) -> int:
         return 0
     _write(out_root / f"results_{args.arm}.json", results, args)
     return 0
+
+
+def _reference_latencies(out_root: Path) -> dict:
+    """Baseline latency per task id, from whatever the baseline run left behind.
+
+    Reads the shard ledgers as well as the merged file so a baseline that is still
+    in flight is already usable -- there is no reason to wait for all 402 before
+    scoring the tasks it has already timed.
+    """
+    out = {}
+    files = sorted(out_root.glob("baseline*.jsonl"))
+    merged = out_root / "baseline_results.json"
+    rows = []
+    for f in files:
+        for line in f.read_text().splitlines():
+            try:
+                rows.append(json.loads(line))
+            except Exception:  # noqa: BLE001 - torn last line after a kill
+                continue
+    if merged.exists():
+        try:
+            rows.extend(json.loads(merged.read_text()).get("results", []))
+        except Exception:  # noqa: BLE001 - a half-written merge must not stop a run
+            pass
+    for r in rows:
+        lat = r.get("optimized_seconds")
+        tid = r.get("task_id")
+        # Only a correct baseline is a meaningful denominator: timing a reference
+        # that failed its own correctness check would inflate every speedup
+        # measured against it.
+        if tid and lat and r.get("correct"):
+            out[tid] = lat
+    return out
 
 
 def _ledger_name(args) -> str:

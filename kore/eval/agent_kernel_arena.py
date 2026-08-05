@@ -307,7 +307,22 @@ def _parse_speedup(text: str) -> tuple[Optional[float], Optional[float], Optiona
                 _num(sp),
             )
     m = re.search(r"speedup[_ ]?(?:ratio)?\s*[:=]\s*([0-9]*\.?[0-9]+)", text, re.I)
-    return None, None, (_num(m.group(1)) if m else None)
+    if m:
+        return None, None, _num(m.group(1))
+
+    # The GEAK suites -- which are most of the arena, all of triton2triton and
+    # triton2flydsl -- report an absolute geomean latency and no ratio at all,
+    # because a single run has nothing to compare against. Their number is still
+    # the measurement we want; the denominator just has to come from the baseline
+    # run of the same task. Returning it as the optimized time lets the caller
+    # divide, instead of discarding a timing that was taken successfully.
+    #
+    # This is why 92 of 95 correct triton2triton kernels scored as if they had no
+    # speedup: the harness measured them fine and the parser only knew one format.
+    m = re.search(r"GEAK_RESULT_LATENCY_MS\s*=\s*([0-9]*\.?[0-9]+)", text)
+    if m:
+        return None, _num(m.group(1)), None
+    return None, None, None
 
 
 def _num(v: Any) -> Optional[float]:
@@ -331,11 +346,18 @@ def evaluate_task(
     task: ArenaTask,
     workspace: Path,
     timeout: int = 900,
+    reference_latency: Optional[float] = None,
 ) -> ArenaResult:
     """Compile, check, then time -- gated in that order, as AKA does.
 
     Gating matters for honesty: timing a kernel that failed correctness would
     reward exactly the shortcut we filter out of the training data.
+
+    ``reference_latency`` is the same task's latency from a baseline run, in the
+    units its own harness reports. Suites that print an absolute latency rather
+    than a ratio -- the GEAK ones, which are most of the arena -- can only yield a
+    speedup by comparison with it, so without it a perfectly good measurement is
+    thrown away and a correct kernel scores as though it were no faster.
     """
     started = time.time()
     res = ArenaResult(task_id=task.task_id, task_type=task.task_type)
@@ -363,6 +385,8 @@ def evaluate_task(
                 timeout=timeout, capture_output=True, text=True,
             )
             base, opt, sp = _parse_speedup((proc.stdout or "") + (proc.stderr or ""))
+            if base is None and reference_latency:
+                base = reference_latency
             res.baseline_seconds, res.optimized_seconds = base, opt
             if sp is None and base and opt:
                 sp = base / opt

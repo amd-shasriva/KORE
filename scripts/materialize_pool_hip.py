@@ -199,6 +199,40 @@ def _extract_code(text: str) -> str:
     return (m.group(1) if m else text).strip()
 
 
+#: reference.py for a functionalized twin. The oracle is rebuilt from the same
+#: spec the Triton task uses, so a HIP win and a Triton win on one task_id are
+#: still graded against the same semantics -- only the calling convention differs.
+_FUNCTIONAL_REFERENCE = '''"""GENERATED functionalized reference for a HIP pool twin.
+The module's parameters are passed as explicit inputs so a .hip candidate can see
+them. See kore/tasks/functionalized.py. Do not hand-edit."""
+import json
+
+from kore.tasks.functionalized import functional_namespace_from_spec
+
+_SPEC = json.loads({spec!r})
+globals().update(functional_namespace_from_spec(_SPEC))
+'''
+
+
+def materialize_functional(task_id: str, spec: dict, seed_src: str,
+                           out_root: Path) -> Path:
+    """A HIP twin whose oracle takes (activation, *parameters)."""
+    src = POOL / task_id
+    dst = out_root / "tasks" / f"{task_id}__hipf"
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copy(src / "driver.py", dst / "driver.py")
+    (dst / "reference.py").write_text(
+        _FUNCTIONAL_REFERENCE.format(spec=json.dumps(spec)))
+    cfg = json.loads((src / "task.yaml").read_text())
+    cfg.update({"task_id": f"{task_id}__hipf", "backend": "hip",
+                "seed_kernel_name": "seed_hip.hip",
+                "provenance_root": task_id, "hip_twin_of": task_id,
+                "functionalized": True})
+    (dst / "task.yaml").write_text(json.dumps(cfg, indent=2) + "\n")
+    (dst / "seed_hip.hip").write_text(seed_src)
+    return dst
+
+
 def materialize(task_id: str, seed_src: str, out_root: Path) -> Path:
     """Write a backend:hip twin of a pool task.
 

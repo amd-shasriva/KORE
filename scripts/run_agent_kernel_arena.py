@@ -130,14 +130,21 @@ def _task_verb(task, src_rel: str, dst_rel: str) -> str:
 
 
 def _extract_code(text: str) -> str:
-    """Pull the first fenced python block; fall back to the whole reply.
+    """Pull the first fenced code block, whatever language it is tagged with.
 
-    A model that ignores the fence still usually emits valid source, and
-    refusing it would score a formatting slip as a compile failure.
+    Any tag, not just python: the prompt asks for ```cpp on .hip targets, and a
+    pattern that only accepted ```python silently fell through to "return the
+    whole reply", handing the compiler the model's prose along with its kernel.
+    That regressed hip2hip from 23 compiled to 12 -- a change to the prompt
+    breaking an assumption in the parser, with nothing in between to catch it.
+
+    The fallback is still deliberate: a model that ignores the fence usually emits
+    valid source anyway, and refusing that would score a formatting slip as a
+    compile failure.
     """
     import re
 
-    m = re.search(r"```(?:python)?\s*\n(.*?)```", text, re.S)
+    m = re.search(r"```[A-Za-z0-9_+.-]*[ \t]*\r?\n(.*?)```", text, re.S)
     return (m.group(1) if m else text).strip()
 
 

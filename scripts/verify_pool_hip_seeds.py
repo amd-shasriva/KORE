@@ -65,12 +65,16 @@ def verify_one(task_dir: Path, timeout: int) -> dict:
     low = out.lower()
     if "allclose: pass" in low or "verdict: pass" in low:
         rec["status"] = "pass"
-    elif proc.returncode != 0:
-        rec["status"] = "compile_or_run_fail"
-        rec["error"] = out.strip()[-400:]
     else:
-        rec["status"] = "incorrect"
-        rec["error"] = out.strip()[-400:]
+        rec["status"] = ("compile_or_run_fail" if proc.returncode != 0
+                         else "incorrect")
+        # Keep the compiler's own diagnostics, not just the tail. hipcc prints
+        # the error first and ninja's "build stopped" last, so a short tail
+        # captures only the fact that something failed and never what.
+        errs = [ln for ln in out.splitlines()
+                if "error:" in ln.lower() or "warning: " in ln.lower()]
+        rec["diagnostics"] = errs[:12]
+        rec["error"] = out.strip()[-2000:]
     for key in ("snr_db", "snr"):
         idx = low.rfind(key + ":")
         if idx >= 0:

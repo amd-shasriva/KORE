@@ -657,7 +657,13 @@ def main() -> int:
     # extension JIT builds, rocPRIM CMake, multi-shape attention benchmarks -- and
     # a compile timeout scores 0 rather than 20, so the penalty lands twice.
     ap.add_argument("--timeout", type=int, default=3600)
-    ap.add_argument("--max-tokens", type=int, default=8192)
+    # 8192 truncates real answers. A smoke run caught a reply cut off at 27,481
+    # characters -- almost exactly 8192 tokens -- mid-kernel, which then fails to
+    # compile and is scored as though the model wrote a broken kernel. A .hip
+    # translation unit carrying its own launcher and pybind bindings routinely
+    # runs past that, and instruction2triton files that must be reproduced whole
+    # are larger still.
+    ap.add_argument("--max-tokens", type=int, default=24576)
     ap.add_argument("--temperature", type=float, default=0.0)
     # Matches AKA's reference agents (agents/*/agent_config.yaml: max_iterations:
     # 3). Comparing a single shot against published numbers from a 3-iteration

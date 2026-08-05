@@ -33,6 +33,7 @@ ROOTS="${HIP_ROOTS:-data/pool_hip data/pool_hip_f}"
 
 cd "$REPO" || exit 1
 [ -z "${SPUR_CONTROLLER_ADDR:-}" ] && [ -r /etc/profile.d/spur.sh ] && . /etc/profile.d/spur.sh
+. "$REPO/scripts/gpu_slots.sh"
 
 say() { echo "[$(date -u '+%H:%M:%SZ')] $*" | tee -a "$LOG"; }
 
@@ -46,21 +47,28 @@ say "roots: $ROOTS"
 last_gated=$(n_promoted)
 
 while :; do
+    # Held jobs hold a GPU slot and do no work, so clear them before deciding
+    # anything. Left alone they accumulate until nothing can launch.
+    purge_held | while read -r l; do say "$l"; done
+
     # Stop when seeding is done AND everything it produced has been gated.
     seeding_alive=0
     pgrep -f materialize_pool_hip >/dev/null && seeding_alive=1
     seeds=$(n_seeds); promoted=$(n_promoted)
 
     # --- gate, when enough new seeds have accumulated to be worth a node ------
+    # Gating comes before mining when slots are scarce: nothing can be mined that
+    # has not been gated, and gating a backlog turns one node into hundreds of
+    # tasks, while a sweep over the handful already promoted re-walks the same few.
     ungated=$(( seeds - last_gated ))
     if [ "$ungated" -ge "$GATE_EVERY" ] || { [ "$seeding_alive" = "0" ] && [ "$ungated" -gt 0 ]; }; then
-        if [ "$(queued kore-hipgate)" -eq 0 ]; then
-            say "gating: $seeds seeds on disk, $ungated since the last gate"
-            # One node gates every root in turn; a batch of seeds is minutes of
-            # work, so splitting them across jobs would only add queue wait.
+        if [ "$(queued kore-hipgate)" -eq 0 ] && have_slot; then
+            say "gating: $seeds seeds on disk, $ungated since the last gate ($(gpu_free) slot(s) free)"
             for r in $ROOTS; do
                 [ -d "$REPO/$r/tasks" ] || continue
+                have_slot || { say "  no slot left; $r waits for the next pass"; break; }
                 GATE_ROOT="$r" sbatch scripts/spur_gate_pool_hip.sbatch 2>&1 | tee -a "$LOG"
+                sleep 5   # let the submission register before re-counting slots
             done
             last_gated=$seeds
         fi
@@ -69,9 +77,12 @@ while :; do
     # --- promote whatever passed, and keep the sweep staffed -----------------
     # Harvest is cheap and idempotent, so run it whenever datagen has room
     # rather than trying to detect "new passers" separately.
-    if [ "$(queued kore-factory)" -lt "$SHARDS" ] && [ "$promoted" -gt 0 ]; then
-        say "harvest: $promoted promoted task(s), factory below $SHARDS -> submitting"
-        bash scripts/hip_pool_harvest.sh "$SHARDS" 2>&1 | tail -3 | tee -a "$LOG"
+    want=$(gpu_free)
+    [ "$want" -gt "$SHARDS" ] && want=$SHARDS
+    if [ "$(queued kore-factory)" -lt "$SHARDS" ] && [ "$promoted" -gt 0 ] \
+       && [ "$want" -gt 0 ]; then
+        say "harvest: $promoted promoted task(s), $want slot(s) free -> submitting"
+        bash scripts/hip_pool_harvest.sh "$want" 2>&1 | tail -3 | tee -a "$LOG"
     fi
 
     if [ "$seeding_alive" = "0" ] && [ "$ungated" -le 0 ] && [ "$(queued kore-hipgate)" -eq 0 ]; then

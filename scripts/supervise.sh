@@ -30,6 +30,9 @@ if [ -z "${SPUR_CONTROLLER_ADDR:-}" ] && [ -r /etc/profile.d/spur.sh ]; then
     . /etc/profile.d/spur.sh
 fi
 
+# shellcheck disable=SC1091
+. "$(dirname "$0")/gpu_slots.sh"
+
 SFT_OUT="/shared_nfs/shasriva/kore/runs/sft_v4"
 V3_MODEL="/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b"
 AKA_ARM="kore"
@@ -214,6 +217,12 @@ while :; do
         continue
     fi
 
+    # A held job holds a GPU slot and does no work. This loop resubmits on a
+    # timer, so without purging them they accumulate until the cap is full of
+    # corpses and nothing launches -- which presents as an unavailable cluster
+    # rather than as a queue this loop filled itself.
+    purge_held | while read -r l; do say "$l"; done
+
     # Retire on the first successful contact, however long that takes. This used
     # to be a bounded pre-loop that gave up after 60 minutes and logged nothing
     # while it waited: a scheduler outage longer than that left the superseded job
@@ -236,7 +245,7 @@ while :; do
     # --- SFT ---------------------------------------------------------------
     if sft_done; then
         [ "$have_sft" = "0" ] && say "SFT COMPLETE (index written in $SFT_OUT)"
-    elif [ "$have_sft" = "0" ] && should_submit sft; then
+    elif [ "$have_sft" = "0" ] && should_submit sft && have_slot; then
         # An existing checkpoint means this is a resume, not a fresh start; the
         # launcher picks it up from output_dir on its own.
         ck="$(ls -d "$SFT_OUT"/checkpoint-* 2>/dev/null | wc -l)"
@@ -251,7 +260,7 @@ while :; do
     # cap, so this is the whole arena rather than a sample of it.
     if aka_done; then
         [ "$have_aka" = "0" ] && say "AKA COMPLETE (summary written)"
-    elif [ "$have_aka" = "0" ] && should_submit aka; then
+    elif [ "$have_aka" = "0" ] && should_submit aka && have_slot; then
         adopt_stray_ledger
         # Count across every shard ledger, not just the unsharded one, or the
         # progress line reads 0/402 for the whole run.
@@ -264,13 +273,19 @@ while :; do
     # --- datagen array over the external pool -------------------------------
     if [ -n "$DATAGEN_SHARDS" ]; then
         running=$(echo "$q" | grep -c "kore-fac" || true)
-        if [ "$running" -lt "$DATAGEN_N" ] && should_submit datagen; then
-            # Re-submit the whole array rather than tracking which elements died:
-            # an element whose shard is already complete exits immediately, so the
-            # cost of over-submitting is seconds, while the cost of missing a dead
-            # element is that its ~1,743 tasks are never mined.
-            say "datagen: $running/$DATAGEN_N elements up -> resubmitting array"
-            sbatch --array=0-$((DATAGEN_N - 1)) scripts/spur_datagen_array.sbatch \
+        # Size the array to the slots actually available. Asking for the full
+        # width when the cap is nearly used up gets the surplus elements held,
+        # and held elements block the next honest submission as well as this one.
+        want=$(gpu_free)
+        [ "$want" -gt "$DATAGEN_N" ] && want=$DATAGEN_N
+        if [ "$running" -lt "$DATAGEN_N" ] && [ "$want" -gt 0 ] \
+           && should_submit datagen; then
+            # Re-submit rather than tracking which elements died: an element whose
+            # shard is already complete exits immediately, so the cost of
+            # over-submitting is seconds, while the cost of missing a dead element
+            # is that its ~1,743 tasks are never mined.
+            say "datagen: $running/$DATAGEN_N up, $want slot(s) free -> submitting"
+            sbatch --array=0-$((want - 1)) scripts/spur_datagen_array.sbatch \
                 "$DATAGEN_SHARDS" "$DATAGEN_ROOT" "$DATAGEN_TARGET" run 2>&1 | tee -a "$LOG"
             note_submission datagen
         fi

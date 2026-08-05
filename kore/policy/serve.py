@@ -368,16 +368,38 @@ _THINK_RE = _re.compile(r"<think>.*?</think>", _re.DOTALL)
 _THINK_OPEN_RE = _re.compile(r"<think>.*$", _re.DOTALL)
 
 
+#: Where an answer starts, when an unclosed ``<think>`` means we cannot rely on
+#: the closing tag to find it. Mirrors ``kore.policy.format._split_think``.
+_ANSWER_MARKERS = _re.compile(
+    r"(ANALYSIS\s*:|PROPOSED_CHANGE\s*:|FULL_KERNEL\s*:|```)", _re.IGNORECASE)
+
+
 def _strip_think(text: str) -> str:
-    """Remove ``<think>...</think>`` reasoning spans (and a dangling unclosed
-    ``<think>`` when the token budget cut it off) so downstream answer parsing --
-    MMLU letter, code block, JSON tool call -- never sees the trace. Retention/eval
-    scoring must read the ANSWER, not the reasoning (audit R2 soup-eval C1)."""
+    """Remove ``<think>...</think>`` reasoning spans so downstream answer parsing
+    -- MMLU letter, code block, JSON tool call -- never sees the trace.
+    Retention/eval scoring must read the ANSWER, not the reasoning (audit R2
+    soup-eval C1).
+
+    An UNCLOSED ``<think>`` is cut at the first answer marker rather than to end
+    of string. Deleting to the end discards everything after the tag, so a reply
+    whose scratchpad was merely missing its closing tag -- complete, correct
+    kernel and all -- became the empty string, was written as an empty file, and
+    scored zero exactly like a model that produced nothing. The system prompt
+    actively invites an unbounded scratchpad, so this was not a rare shape.
+
+    Never returns "" for non-empty input: if nothing survives the cut, the raw
+    text is more useful to a parser than nothing at all.
+    """
     if not text:
         return text
-    text = _THINK_RE.sub("", text)
-    text = _THINK_OPEN_RE.sub("", text)
-    return text.strip()
+    stripped = _THINK_RE.sub("", text)
+    open_at = stripped.find("<think>")
+    if open_at >= 0:
+        after = stripped[open_at + len("<think>"):]
+        m = _ANSWER_MARKERS.search(after)
+        stripped = (stripped[:open_at] + (after[m.start():] if m else "")).strip()
+    stripped = stripped.strip()
+    return stripped or text.strip()
 
 
 def _is_lora_adapter_dir(path: str) -> bool:

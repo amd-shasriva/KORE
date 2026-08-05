@@ -46,6 +46,18 @@ def task_prompt(task) -> str:
     second copy of the rendering would be a silent way for the two arms to drift
     apart.
     """
+    # A caller that already built its own prompt gets it back untouched. The
+    # arena driver does exactly that -- it composes a per-category prompt naming
+    # the target file, the language fence and the reference module -- and passing
+    # a str through the template below wrapped that whole thing in "Optimize the
+    # ... kernel (task '...')" with the prompt interpolated TWICE, announced the
+    # wrong architecture (the gfx942 default, against gfx950 hardware), and
+    # appended a FULL_KERNEL instruction contradicting the "return only a fenced
+    # code block" the embedded prompt asks for. Every arena task was asked that
+    # question.
+    if isinstance(task, str):
+        return task
+
     tid = _task_id(task)
     op = getattr(task, "operation", tid)
     gpu = getattr(task, "gpu_target", "gfx942")

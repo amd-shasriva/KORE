@@ -256,7 +256,7 @@ while :; do
         # launcher picks it up from output_dir on its own.
         ck="$(ls -d "$SFT_OUT"/checkpoint-* 2>/dev/null | wc -l)"
         say "SFT absent from queue -> submitting (existing checkpoints=$ck)"
-        sbatch scripts/spur_sft_1node.sbatch \
+        sbatch $QOS_ARG scripts/spur_sft_1node.sbatch \
             configs/sft_coder30b_a3b.json - "$SFT_OUT" 2>&1 | tee -a "$LOG"
         note_submission sft
     fi
@@ -274,7 +274,7 @@ while :; do
         # progress line reads 0/402 for the whole run.
         scored=$(cat "$AKA_OUT"/results_"${AKA_ARM}"*.partial.jsonl 2>/dev/null | wc -l)
         say "AKA absent from queue -> submitting full arena (all types, no limit; $scored/402 already scored)"
-        sbatch scripts/spur_aka_1node.sbatch run - "$AKA_MODEL" 0 "$AKA_ARM" "$AKA_OUT" 2>&1 | tee -a "$LOG"
+        sbatch $QOS_ARG scripts/spur_aka_1node.sbatch run - "$AKA_MODEL" 0 "$AKA_ARM" "$AKA_OUT" 2>&1 | tee -a "$LOG"
         note_submission aka
     fi
 
@@ -293,7 +293,7 @@ while :; do
             # over-submitting is seconds, while the cost of missing a dead element
             # is that its ~1,743 tasks are never mined.
             say "datagen: $running/$DATAGEN_N up, $want slot(s) free -> submitting"
-            sbatch --array=0-$((want - 1)) scripts/spur_datagen_array.sbatch \
+            sbatch $QOS_ARG --array=0-$((want - 1)) scripts/spur_datagen_array.sbatch \
                 "$DATAGEN_SHARDS" "$DATAGEN_ROOT" "$DATAGEN_TARGET" run 2>&1 | tee -a "$LOG"
             note_submission datagen
         fi

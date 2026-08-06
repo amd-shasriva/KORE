@@ -32,6 +32,7 @@ ROOTS="${HIP_ROOTS:-data/pool_hip data/pool_hip_f}"
 
 cd "$REPO" || exit 1
 . /etc/profile.d/spur.sh 2>/dev/null
+. "$REPO/scripts/gpu_slots.sh"
 
 # Count each root separately; a glob appended to a multi-line command
 # substitution binds to the last path only and silently counts one root.
@@ -91,5 +92,5 @@ PYTHONPATH="$REPO" "$PY" scripts/partition_any_tasks.py \
 
 running=$(squeue -u "$USER" -h -n kore-factory 2>/dev/null | wc -l)
 echo "[harvest] kore-factory elements already up: $running"
-sbatch --array=0-$((SHARDS - 1)) scripts/spur_datagen_array.sbatch \
+sbatch ${QOS_ARG:-} --array=0-$((SHARDS - 1)) scripts/spur_datagen_array.sbatch \
     "$SHARD_DIR" "$DATA_ROOT" 3 run 2>&1 | tail -1

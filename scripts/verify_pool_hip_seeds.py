@@ -69,6 +69,17 @@ def verify_one(task_dir: Path, timeout: int, gpu: int | None = None) -> dict:
         env["MIOPEN_USER_DB_PATH"] = str(mio / "db")
         env["MIOPEN_CUSTOM_CACHE_DIR"] = str(mio / "cache")
         env["MIOPEN_DISABLE_CACHE"] = "0"
+
+    # A private compile cache per seed, discarded once the verdict is in. Every
+    # seed is a different source, so the cache can never hit -- retaining it only
+    # accumulates. Left shared, eight workers compiling thousands of extensions
+    # filled the node's 123 GB /tmp and the run ended with 3,534 seeds recorded as
+    # "No space left on device", which is indistinguishable in the ledger from a
+    # kernel that genuinely does not build.
+    cache = Path(env.get("TMPDIR", "/tmp")) / "kore_gate_cache" / rec["task_id"]
+    cache.mkdir(parents=True, exist_ok=True)
+    env["KORE_COMPILE_CACHE_DIR"] = str(cache)
+    env["TORCH_EXTENSIONS_DIR"] = str(cache)
     t0 = time.time()
     try:
         proc = subprocess.run(
@@ -77,6 +88,10 @@ def verify_one(task_dir: Path, timeout: int, gpu: int | None = None) -> dict:
             timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         return {**rec, "status": "timeout", "seconds": timeout}
+    finally:
+        # Reclaim the build whatever the outcome, including on timeout: a seed
+        # that hangs is exactly the one leaving the largest partial build behind.
+        shutil.rmtree(cache, ignore_errors=True)
     out = (proc.stdout or "") + (proc.stderr or "")
     rec["seconds"] = round(time.time() - t0, 1)
 

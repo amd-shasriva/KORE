@@ -99,7 +99,7 @@ while :; do
        && [ ! -f "$REPO/runs/seeding.done" ] && have_slot; then
         say "seeding absent -> submitting ($SEED_ARGS)"
         # shellcheck disable=SC2086
-        sbatch scripts/spur_seed_hip.sbatch $SEED_ARGS 2>&1 | tee -a "$LOG"
+        sbatch $QOS_ARG scripts/spur_seed_hip.sbatch $SEED_ARGS 2>&1 | tee -a "$LOG"
         seeding_alive=1
     fi
 
@@ -119,7 +119,7 @@ while :; do
             [ "$(queued "kore-gate-$tag")" -gt 0 ] && continue
             have_slot || { say "  no slot for gate-$tag; waits for next pass"; break; }
             say "gating $r: $n_root seeds ($(gpu_free) slot(s) free)"
-            GATE_ROOT="$r" sbatch --job-name="kore-gate-$tag" \
+            GATE_ROOT="$r" sbatch $QOS_ARG --job-name="kore-gate-$tag" \
                 scripts/spur_gate_pool_hip.sbatch 2>&1 | tee -a "$LOG"
             sleep 5   # let the submission register before re-counting slots
         done

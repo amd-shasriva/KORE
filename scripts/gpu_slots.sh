@@ -23,17 +23,16 @@ _squeue() { squeue -u "$USER" -h "$@" 2>/dev/null; }
 # Held jobs occupy the cap without running. Nothing recovers them -- the
 # scheduler has already given up -- so the only useful action is to remove them
 # and let the loop resubmit deliberately.
+# Only genuinely held jobs. JobLaunchFailure looks similar but is transient --
+# the scheduler retries it, and jobs do recover: a gate sat in JobLaunchFailure
+# and then ran for half an hour. Cancelling on sight made this loop destroy its
+# own work, submitting a datagen sweep and killing it seconds later, forever.
 purge_held() {
     local n=0 j
     for j in $(_squeue -t PD -o "%i %R" | grep -i "hold" | awk '{print $1}'); do
         scancel "$j" 2>/dev/null && n=$((n + 1))
     done
-    # A job stuck in JobLaunchFailure is on its way to being held; drop it now
-    # rather than after it has burned its requeues.
-    for j in $(_squeue -t PD -o "%i %R" | grep -i "launchfailure" | awk '{print $1}'); do
-        scancel "$j" 2>/dev/null && n=$((n + 1))
-    done
-    [ "$n" -gt 0 ] && echo "purged $n held/failing job(s)"
+    [ "$n" -gt 0 ] && echo "purged $n held job(s)"
     return 0
 }
 

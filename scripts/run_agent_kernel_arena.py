@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import threading
 import sys
@@ -158,22 +159,84 @@ def _extract_code(text: str) -> str:
 _REPO_CACHE = Path.home() / "third_party"
 
 
+#: A checkout can be needed under a name that appears nowhere in the task's declared
+#: source paths. `repository/rocprim/*` asks for a directory called `rocPRIM` -- the
+#: repository's own capitalisation -- while its sources are listed as `rocprim/...`,
+#: and the run failed with "Source directory not found: <ws>/rocPRIM". Matching case-
+#: insensitively against what is on disk is what connects the two.
+def _resolve_checkout(name: str) -> Optional[Path]:
+    direct = _REPO_CACHE / name
+    if direct.is_dir():
+        return direct
+    if not _REPO_CACHE.is_dir():
+        return None
+    lowered = name.lower()
+    for cand in _REPO_CACHE.iterdir():
+        if cand.is_dir() and cand.name.lower() == lowered:
+            return cand
+    return None
+
+
+def _stage_repo(src: Path, dst: Path) -> None:
+    """Hard-link a checkout into a workspace.
+
+    Hard links: a fresh 165MB copy per task, times eight parallel workers, is
+    minutes of I/O for files nobody edits. Only the answer file is written, and the
+    writer unlinks first so it never truncates a shared inode and corrupts another
+    workspace's copy.
+    """
+    if dst.exists():
+        return
+    shutil.copytree(src, dst, copy_function=os.link,
+                    ignore=shutil.ignore_patterns(".git"))
+
+
+def _rewrite_container_repo_path(ws: Path) -> Optional[str]:
+    """Point a task's ``repo_path`` at a checkout that exists on this machine.
+
+    The image_kernel tasks declare an absolute ``repo_path: /sgl-workspace/aiter``,
+    which is a path inside the arena's Docker image. On bare metal it does not
+    exist and cannot be created -- /sgl-workspace is not writable without root --
+    so the task's own runner resolved an empty repo root and died in
+    ``os.chdir('')`` with FileNotFoundError before any kernel was considered. All
+    image_kernel and repository tasks scored zero compiled for this reason and none
+    was judged on its code.
+    """
+    cfg = ws / "config.yaml"
+    if not cfg.is_file():
+        return None
+    text = cfg.read_text(errors="ignore")
+    m = re.search(r"^(\s*repo_path:\s*)(\S+)\s*$", text, re.M)
+    if not m:
+        return None
+    declared = Path(m.group(2))
+    if declared.is_dir():
+        return None                      # already valid here; leave it alone
+    local = _resolve_checkout(declared.name)
+    if local is None:
+        return f"missing checkout {declared.name} (expected under {_REPO_CACHE})"
+    # Stage it inside the workspace and point the task at that copy, so the task
+    # edits its own hard-linked tree rather than the shared checkout.
+    _stage_repo(local, ws / declared.name)
+    cfg.write_text(text[:m.start()] + m.group(1) + str(ws / declared.name)
+                   + text[m.end():])
+    return None
+
+
 def _link_required_repo(task, ws: Path) -> Optional[str]:
-    """Hard-link a checkout into the workspace if the task's files live in one."""
+    """Make every checkout a task needs present in its workspace."""
     for rel in task.source_files:
         top = rel.split("/")[0]
         if not top or "/" not in rel or (ws / top).exists():
             continue
-        src = _REPO_CACHE / top
-        if not src.is_dir():
-            return f"missing checkout {top} (expected at {src})"
-        # Hard links: a fresh 165MB copy per task, times eight parallel workers,
-        # is minutes of I/O for files nobody edits. Only the answer file is
-        # written, and the writer unlinks first so it never truncates a shared
-        # inode and corrupts another workspace's copy.
-        shutil.copytree(src, ws / top, copy_function=os.link,
-                        ignore=shutil.ignore_patterns(".git"))
-    return None
+        src = _resolve_checkout(top)
+        if src is None:
+            # Not every leading path segment is a repository: aiter's own sources
+            # are declared as csrc/... and sglang's as python/sglang/..., so a
+            # missing directory here is only fatal if repo_path cannot supply it.
+            continue
+        _stage_repo(src, ws / top)
+    return _rewrite_container_repo_path(ws)
 
 
 def _attempt_task(task, ws, dst_rel, prompt, policy, args, ref_latency):

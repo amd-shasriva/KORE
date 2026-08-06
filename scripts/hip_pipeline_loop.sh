@@ -96,7 +96,7 @@ while :; do
     if [ "$promoted" -gt 0 ] && [ "$want" -gt 0 ] \
        && [ "$(queued kore-factory)" -lt "$SHARDS" ]; then
         say "harvest: $promoted promoted task(s), $want slot(s) free"
-        bash scripts/hip_pool_harvest.sh "$want" 2>&1 | tail -3 | tee -a "$LOG"
+        NO_SUBMIT=1 bash scripts/hip_pool_harvest.sh "$want" 2>&1 | tail -3 | tee -a "$LOG"
     fi
     bash scripts/staff_datagen.sh 2>&1 | tail -2 | tee -a "$LOG"
 

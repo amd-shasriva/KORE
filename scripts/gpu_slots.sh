@@ -12,10 +12,21 @@
 #   purge_held   drop held jobs, because they hold slots while doing no work
 #   gpu_free     ask before submitting, instead of submitting and hoping
 
-# Measured, not guessed: with four jobs running a fifth is accepted and then
-# fails to launch, while the partition still shows dozens of idle nodes. The cap
-# counts jobs, not GPUs, and CPU-only jobs count too.
-GPU_JOB_CAP="${GPU_JOB_CAP:-4}"
+# The ceiling is a QoS group limit, not a per-user job limit, which is why it
+# looked like four: amd-general-qos caps the whole QoS at 8 nodes shared across
+# users, and 6 were already taken. The idle nodes sinfo reports belong to other
+# QoS pools and are unreachable from ours, so "47 nodes idle" and "cannot launch"
+# were both true at once.
+#
+# amd-burst-qos is the large pool (90+ nodes) and caps each user at 8 running
+# jobs. Every job here is requeue-safe and ledgered, so preemptible capacity is
+# the right trade: a preempted shard resumes instead of being lost.
+GPU_JOB_CAP="${GPU_JOB_CAP:-8}"
+
+#: Passed to every sbatch. A command-line --qos overrides the script's own
+#: directive, so the workhorse jobs move pools without editing 33 sbatch files.
+KORE_QOS="${KORE_QOS:-amd-burst-qos}"
+QOS_ARG="${QOS_ARG:---qos=$KORE_QOS}"
 
 # Names that must never be purged or counted as expendable: losing training
 # progress to make room for a gate would be a bad trade.

@@ -90,7 +90,15 @@ PYTHONPATH="$REPO" "$PY" scripts/partition_any_tasks.py \
     --out-dir "$SHARD_DIR" --data-root "$DATA_ROOT" \
     --shards "$SHARDS" --target 3 --skip-check 2>&1 | tail -4
 
-running=$(squeue -u "$USER" -h -n kore-factory 2>/dev/null | wc -l)
+# Submitting is not this script's job when NO_SUBMIT is set. The staffing script
+# owns slot decisions, and having two submitters means a stream gets queued twice
+# -- which on a pool running 35 jobs deep costs real queue position, since the
+# duplicate has to be cancelled and the survivor keeps waiting.
+if [ -n "${NO_SUBMIT:-}" ]; then
+    echo "[harvest] promoted and partitioned; submission left to staff_datagen.sh"
+    exit 0
+fi
+running=$(squeue -u "${USER:-$(id -un)}" -h -n kore-factory 2>/dev/null | wc -l)
 echo "[harvest] kore-factory elements already up: $running"
 sbatch ${QOS_ARG:-} --array=0-$((SHARDS - 1)) scripts/spur_datagen_array.sbatch \
-    "$SHARD_DIR" "$DATA_ROOT" 3 run 2>&1 | tail -1
+    "$SHARD_DIR" "$DATA_ROOT" "$TARGET" run 2>&1 | tail -1

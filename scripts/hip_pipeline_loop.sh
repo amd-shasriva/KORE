@@ -38,7 +38,18 @@ cd "$REPO" || exit 1
 say() { echo "[$(date -u '+%H:%M:%SZ')] $*" | tee -a "$LOG"; }
 
 # "__hip*" matches both suffixes: __hip and the functionalized __hipf.
-n_seeds() { ls -d $(for r in $ROOTS; do echo "$REPO/$r/tasks"; done)/*__hip* 2>/dev/null | wc -l; }
+#
+# Count each root separately. Appending the glob to a command substitution that
+# emits several paths attaches it to the last one only, so this counted a single
+# root: with 3,600 seeds on disk it reported 197, and the loop under-triggered
+# gating for as long as that undercount stayed below the threshold.
+n_seeds() {
+    local n=0 r
+    for r in $ROOTS; do
+        n=$(( n + $(ls -d "$REPO/$r"/tasks/*__hip* 2>/dev/null | wc -l) ))
+    done
+    echo "$n"
+}
 n_promoted() { ls -d "$PROMOTED"/tasks/*__hip* 2>/dev/null | wc -l; }
 queued() { squeue -u "$USER" -h -n "$1" 2>/dev/null | wc -l; }
 

@@ -45,7 +45,12 @@ def verify_one(task_dir: Path, timeout: int, gpu: int | None = None) -> dict:
     # present candidates exactly this way.
     from kore.env.hip_toolchain import CANDIDATE_FILENAMES, HIP_BACKEND
 
-    shutil.copy(seed, task_dir / CANDIDATE_FILENAMES[HIP_BACKEND])
+    # The backend the task declares, not HIP's name unconditionally: a FlyDSL twin
+    # is graded as kernel.py, and staging it as kernel.hip would hand hipcc a
+    # Python file and read as a compile failure.
+    backend = cfg.get("backend") or HIP_BACKEND
+    shutil.copy(seed, task_dir / CANDIDATE_FILENAMES.get(
+        backend, CANDIDATE_FILENAMES[HIP_BACKEND]))
 
     env = dict(os.environ)
     env["PYTHONPATH"] = f"{REPO}{os.pathsep}{env.get('PYTHONPATH', '')}"
@@ -144,7 +149,11 @@ def main() -> int:
     # "*__hip*" so functionalized twins (__hipf) are gated on the same path as
     # parameter-free ones. They differ only in how many tensors the entry takes,
     # which is the driver's business, not the gate's.
-    dirs = sorted((Path(args.root) / "tasks").glob("*__hip*"))
+    # "*__hip*" and "*__flydsl": one gate for every twin kind. What differs is
+    # the candidate filename, which the backend already declares.
+    dirs = sorted(set((Path(args.root) / "tasks").glob("*__hip*"))
+                  | set((Path(args.root) / "tasks").glob("*__flydsl")))
+    dirs = sorted(dirs)
 
     # Carry forward verdicts from an earlier run of this root. Gating thousands of
     # seeds outlives one job's time limit, and re-deciding a seed the last job

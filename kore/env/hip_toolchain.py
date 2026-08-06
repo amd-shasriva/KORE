@@ -60,13 +60,22 @@ from typing import Any, Mapping, Optional
 
 TRITON_BACKEND = "triton"
 HIP_BACKEND = "hip"
+#: FlyDSL: a Python-embedded MLIR builder API, not a C dialect. A candidate is a
+#: ``.py`` file like Triton's, but the entry is a ``@flyc.jit`` launch wrapper
+#: around a ``@flyc.kernel`` device kernel rather than a plain function.
+FLYDSL_BACKEND = "flydsl"
 
 #: Candidate artifact name per declared backend.  ``triton`` keeps ``kernel.py``
 #: verbatim: 1,334 existing task drivers read that exact filename, so the Triton
 #: path must be byte-identical to what it was.
+#:
+#: FlyDSL deliberately shares that filename. The mapping is only ever read
+#: backend -> filename, so two backends naming the same artifact is unambiguous,
+#: and a task states which backend it is in its own task.yaml.
 CANDIDATE_FILENAMES: Mapping[str, str] = {
     TRITON_BACKEND: "kernel.py",
     HIP_BACKEND: "kernel.hip",
+    FLYDSL_BACKEND: "kernel.py",
 }
 SUPPORTED_BACKENDS: frozenset[str] = frozenset(CANDIDATE_FILENAMES)
 
@@ -74,6 +83,7 @@ SUPPORTED_BACKENDS: frozenset[str] = frozenset(CANDIDATE_FILENAMES)
 SOURCE_LANGUAGES: Mapping[str, str] = {
     TRITON_BACKEND: "python",
     HIP_BACKEND: "cpp",
+    FLYDSL_BACKEND: "python",
 }
 
 #: Extensions staged into an evaluation workdir alongside ``*.py``.  Deliberately

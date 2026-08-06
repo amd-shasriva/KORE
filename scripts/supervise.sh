@@ -248,6 +248,19 @@ while :; do
     echo "$q" | grep -q "kore-sft" && have_sft=1
     echo "$q" | grep -q "kore-aka" && have_aka=1
 
+    # Reap duplicate arenas, keeping the oldest.
+    #
+    # Two arena jobs write the same partial ledgers and score the same tasks: each
+    # reads the ledger once at startup, so neither sees the other's rows and both
+    # work the same slice. It happens whenever a submission of ours lands in the
+    # same minute as this loop's own check -- exactly what a manual restart does --
+    # and it costs a node plus duplicate rows in the results the whole run is for.
+    for extra in $(squeue -u "$KORE_USER" -h -n kore-aka -o "%i" 2>/dev/null |
+                   sort -n | tail -n +2); do
+        say "duplicate arena $extra -> cancelling (keeping the oldest)"
+        scancel "$extra" 2>&1 | tee -a "$LOG"
+    done
+
     # --- SFT ---------------------------------------------------------------
     if sft_done; then
         [ "$have_sft" = "0" ] && say "SFT COMPLETE (index written in $SFT_OUT)"

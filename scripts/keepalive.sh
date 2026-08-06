@@ -29,7 +29,9 @@ say "=== keepalive $NAME starting (pid $$): $* ==="
 fails=0
 while :; do
     t0=$(date +%s)
-    "$@" >> "$REPO/runs/${NAME}.log" 2>&1
+    # ".out", not ".log": a wrapped command may already tee to runs/NAME.log, and
+    # capturing its stdout into the same file duplicates every line.
+    "$@" >> "$REPO/runs/${NAME}.out" 2>&1
     rc=$?
     dur=$(( $(date +%s) - t0 ))
 

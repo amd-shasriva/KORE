@@ -71,19 +71,40 @@ refresh_if_stale() {
         "$REPO/scripts/refresh_shards.py" "$1" >> "$LOG" 2>&1
 }
 
-#: Shard indices a stream already has covered, read from each worker's own startup
-#: line. The scheduler cannot answer this -- it reports "?" for the array index and
-#: exposes neither ArrayTaskId nor the submit command -- so the worker's log is the
-#: only source of truth for which shard a job is actually on.
+#: Shard indices a stream already has covered.
+#:
+#: Two sources, because neither alone is complete. A running worker prints the shard
+#: it took, which is authoritative -- the scheduler cannot answer this at all, it
+#: reports "?" for the array index and exposes neither ArrayTaskId nor the submit
+#: command. But a job submitted seconds ago has printed nothing yet, and treating it
+#: as uncovered puts the next pass on the same shard: that is exactly how two
+#: pool-Triton workers both ended up on shard 000. So the index is also recorded at
+#: submit time and believed for any job still in the queue.
+_CLAIMS="${_CLAIMS:-$REPO/runs/shard_claims.tsv}"
+
+claim_shard() { printf '%s\t%s\n' "$1" "$2" >> "$_CLAIMS"; }
+
 covered_shards() {
-    local names="$1" j nm
-    for j in $(_squeue -t R,PD -o "%i"); do
-        nm=$(_squeue -j "$j" -o "%j" | head -1)
-        case " $names " in *" $nm "*) ;; *) continue ;; esac
-        grep -aoE "START job=$j array=[0-9]+ .*shard=[0-9]+" \
-            "$REPO/runs/spur-$j.out" 2>/dev/null | tail -1 |
-            grep -oE "shard=[0-9]+" | cut -d= -f2 | sed 's/^0*//;s/^$/0/'
-    done | sort -un
+    local names="$1" j nm live
+    live=" $(_squeue -t R,PD -o "%i" | tr '\n' ' ') "
+    {
+        for j in $(_squeue -t R,PD -o "%i"); do
+            nm=$(_squeue -j "$j" -o "%j" | head -1)
+            case " $names " in *" $nm "*) ;; *) continue ;; esac
+            grep -aoE "START job=$j array=[0-9]+ .*shard=[0-9]+" \
+                "$REPO/runs/spur-$j.out" 2>/dev/null | tail -1 |
+                grep -oE "shard=[0-9]+" | cut -d= -f2 | sed 's/^0*//;s/^$/0/'
+        done
+        # Claims made at submit time, kept only while the job is still queued so a
+        # finished job stops reserving its shard.
+        if [ -f "$_CLAIMS" ]; then
+            while IFS=$'\t' read -r cj cs; do
+                case "$live" in *" $cj "*) ;; *) continue ;; esac
+                nm=$(_squeue -j "$cj" -o "%j" | head -1)
+                case " $names " in *" $nm "*) echo "$cs" ;; esac
+            done < "$_CLAIMS"
+        fi
+    } | sort -un
 }
 
 for spec in $STREAMS; do
@@ -125,9 +146,14 @@ import json;print(json.load(open('$REPO/$dir/manifest.json')).get('n_shards',0))
         # One element per submission: a range would re-queue indices that are
         # already covered, and there is no way to express a gap in an array range.
         # shellcheck disable=SC2086
-        sbatch $QOS_ARG --job-name="kore-mine-$name" --array="$idx-$idx" \
+        out=$(sbatch $QOS_ARG --job-name="kore-mine-$name" --array="$idx-$idx" \
             scripts/spur_datagen_array.sbatch \
-            "$REPO/$dir" "$REPO/$root" 3 run >> "$LOG" 2>&1
+            "$REPO/$dir" "$REPO/$root" 3 run 2>&1)
+        echo "$out" >> "$LOG"
+        jid=$(printf '%s' "$out" | grep -oE '[0-9]+$' | tail -1)
+        # Claim the index immediately: the job will not print its own shard for a
+        # minute or more, and until then the next pass would pick it again.
+        [ -n "$jid" ] && claim_shard "$jid" "$idx"
         sleep 3
     done
 done

@@ -33,12 +33,12 @@ start() {
 # the loops back with the same settings a human start would give them. The cap is
 # the measured four concurrent jobs.
 start hip_pipeline \
-    GPU_JOB_CAP=4 HIP_SHARDS=2 SEED_ARGS="" \
-    HIP_ROOTS="data/pool_hip_f data/pool_hip" \
+    GPU_JOB_CAP=8 HIP_SHARDS=7 SEED_ARGS="" \
+    HIP_ROOTS="" \
     bash "$REPO/scripts/keepalive.sh" hip_pipeline -- bash "$REPO/scripts/hip_pipeline_loop.sh"
 
 start supervise \
-    GPU_JOB_CAP=4 AKA_AFTER_SFT=1 AKA_ARM=v4 \
+    GPU_JOB_CAP=8 AKA_AFTER_SFT=1 AKA_ARM=v4 \
     AKA_MODEL=/shared_nfs/shasriva/kore/runs/sft_v4 \
     bash "$REPO/scripts/keepalive.sh" supervise -- bash "$REPO/scripts/supervise.sh"
 

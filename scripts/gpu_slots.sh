@@ -32,7 +32,10 @@ QOS_ARG="${QOS_ARG:---qos=$KORE_QOS}"
 # progress to make room for a gate would be a bad trade.
 PROTECTED="${PROTECTED:-kore-sft}"
 
-_squeue() { squeue -u "$USER" -h "$@" 2>/dev/null; }
+# $USER is not set in a cron environment, and these scripts run under set -u,
+# so referencing it directly aborted the harvest mid-run.
+KORE_USER="${USER:-${LOGNAME:-$(id -un)}}"
+_squeue() { squeue -u "$KORE_USER" -h "$@" 2>/dev/null; }
 
 # Held jobs occupy the cap without running. Nothing recovers them -- the
 # scheduler has already given up -- so the only useful action is to remove them

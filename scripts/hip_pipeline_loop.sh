@@ -25,15 +25,19 @@ PROMOTED="$REPO/data/pool_hip_ok"
 GATE_EVERY="${GATE_EVERY:-40}"      # gate once this many new seeds have landed
 SHARDS="${HIP_SHARDS:-4}"
 
+# Two seed roots, gated the same way. Set HIP_ROOTS="" to pause gating; "-"
+# rather than ":-" so that empty means empty.
 # Two seed roots, gated the same way. pool_hip holds the parameter-free modules;
 # pool_hip_f holds functionalized ones, whose weights arrive as trailing tensor
 # arguments. That distinction matters when writing a seed and is invisible
 # afterwards, so both roots share one gate, one harvest and one sweep.
-ROOTS="${HIP_ROOTS:-data/pool_hip data/pool_hip_f}"
+ROOTS="${HIP_ROOTS-data/pool_hip data/pool_hip_f}"
 
-# Selector for the seeding sweep this loop keeps staffed. The parameter-free
+# Selector for the seeding sweep this loop keeps staffed. Note "-" not ":-":
+# an explicitly empty value must mean "disabled", and ":-" would treat it as
+# unset and substitute the default, re-enabling the stage that was paused. The parameter-free
 # sweep is complete, so what remains is the functionalized set.
-SEED_ARGS="${SEED_ARGS:---functionalize --skip-parameter-free}"
+SEED_ARGS="${SEED_ARGS---functionalize --skip-parameter-free}"
 
 cd "$REPO" || exit 1
 [ -z "${SPUR_CONTROLLER_ADDR:-}" ] && [ -r /etc/profile.d/spur.sh ] && . /etc/profile.d/spur.sh

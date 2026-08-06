@@ -203,36 +203,60 @@ def _stage_repo(src: Path, dst: Path) -> None:
                     ignore=shutil.ignore_patterns(".git"))
 
 
-def _rewrite_container_repo_path(ws: Path) -> Optional[str]:
-    """Point a task's ``repo_path`` at a checkout that exists on this machine.
+def _provide_task_repo(ws: Path) -> Optional[str]:
+    """Give a task the repository checkout it expects, locally.
 
-    The image_kernel tasks declare an absolute ``repo_path: /sgl-workspace/aiter``,
-    which is a path inside the arena's Docker image. On bare metal it does not
-    exist and cannot be created -- /sgl-workspace is not writable without root --
-    so the task's own runner resolved an empty repo root and died in
-    ``os.chdir('')`` with FileNotFoundError before any kernel was considered. All
-    image_kernel and repository tasks scored zero compiled for this reason and none
-    was judged on its code.
+    Two families, two mechanisms, and both scored zero *compiled* in the v4 run with
+    nothing judged on its code.
+
+    ``image_kernel`` declares ``image_repo_path: /sgl-workspace/aiter`` -- an absolute
+    path inside the arena's Docker image. On bare metal it does not exist and cannot
+    be created, since /sgl-workspace is not writable without root, so the task's own
+    runner resolved an empty repo root and died in ``os.chdir('')`` with
+    FileNotFoundError. The key is ``image_repo_path``, not ``repo_path``: matching the
+    shorter name as a whole line silently matched nothing, and grepping for it matched
+    the longer key as a substring, which made a broken rewrite look like a working one.
+
+    ``repository`` declares ``repo_url: https://github.com/ROCm/rocPRIM.git`` and
+    expects the clone already present under the repository's own name, failing with
+    "Source directory not found: <ws>/rocPRIM". Nothing clones it during a run, so it
+    is staged from the local checkout -- found case-insensitively, because the
+    directory is ``rocPRIM`` while the task's own source paths say ``rocprim``.
     """
     cfg = ws / "config.yaml"
     if not cfg.is_file():
         return None
     text = cfg.read_text(errors="ignore")
-    m = re.search(r"^(\s*repo_path:\s*)(\S+)\s*$", text, re.M)
-    if not m:
-        return None
-    declared = Path(m.group(2))
-    if declared.is_dir():
-        return None                      # already valid here; leave it alone
-    local = _resolve_checkout(declared.name)
-    if local is None:
-        return f"missing checkout {declared.name} (expected under {_REPO_CACHE})"
-    # Stage it inside the workspace and point the task at that copy, so the task
-    # edits its own hard-linked tree rather than the shared checkout.
-    _stage_repo(local, ws / declared.name)
-    cfg.write_text(text[:m.start()] + m.group(1) + str(ws / declared.name)
-                   + text[m.end():])
-    return None
+    missing = []
+
+    m = re.search(r"^(\s*[A-Za-z_]*repo_path:[ \t]*)(\S+)[ \t]*$", text, re.M)
+    if m:
+        declared = Path(m.group(2))
+        if not declared.is_dir():
+            local = _resolve_checkout(declared.name)
+            if local is None:
+                missing.append(f"{declared.name} (for {m.group(1).strip()})")
+            else:
+                # Stage inside the workspace and point the task at that copy, so it
+                # edits its own hard-linked tree and never the shared checkout.
+                _stage_repo(local, ws / declared.name)
+                text = (text[:m.start()] + m.group(1) + str(ws / declared.name)
+                        + text[m.end():])
+                cfg.write_text(text)
+
+    for um in re.finditer(r"^\s*repo_url:[ \t]*(\S+)[ \t]*$", text, re.M):
+        name = um.group(1).rstrip("/").rsplit("/", 1)[-1]
+        if name.endswith(".git"):
+            name = name[:-4]
+        if not name or (ws / name).exists():
+            continue
+        local = _resolve_checkout(name)
+        if local is None:
+            missing.append(f"{name} (for repo_url)")
+            continue
+        _stage_repo(local, ws / name)
+
+    return "missing checkout(s): " + "; ".join(missing) if missing else None
 
 
 def _link_required_repo(task, ws: Path) -> Optional[str]:
@@ -248,7 +272,7 @@ def _link_required_repo(task, ws: Path) -> Optional[str]:
             # missing directory here is only fatal if repo_path cannot supply it.
             continue
         _stage_repo(src, ws / top)
-    return _rewrite_container_repo_path(ws)
+    return _provide_task_repo(ws)
 
 
 def _attempt_task(task, ws, dst_rel, prompt, policy, args, ref_latency):

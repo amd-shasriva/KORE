@@ -46,10 +46,10 @@ def test_container_repo_path_is_rewritten_to_a_local_checkout(cache, tmp_path):
     ws.mkdir()
     (ws / "config.yaml").write_text(
         "task_type: image_kernel\n"
-        "repo_path: /sgl-workspace/aiter\n"
+        "image_repo_path: /sgl-workspace/aiter\n"
         "repository_language: triton\n")
 
-    assert aka._rewrite_container_repo_path(ws) is None
+    assert aka._provide_task_repo(ws) is None
     text = (ws / "config.yaml").read_text()
     assert "/sgl-workspace/aiter" not in text
     assert str(ws / "aiter") in text
@@ -65,17 +65,17 @@ def test_a_repo_path_that_already_exists_is_left_alone(cache, tmp_path):
     ws.mkdir()
     real = tmp_path / "already_here"
     real.mkdir()
-    (ws / "config.yaml").write_text(f"repo_path: {real}\n")
-    assert aka._rewrite_container_repo_path(ws) is None
-    assert (ws / "config.yaml").read_text() == f"repo_path: {real}\n"
+    (ws / "config.yaml").write_text(f"image_repo_path: {real}\n")
+    assert aka._provide_task_repo(ws) is None
+    assert (ws / "config.yaml").read_text() == f"image_repo_path: {real}\n"
 
 
 def test_a_repo_we_do_not_have_is_reported_not_silently_skipped(cache, tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
-    (ws / "config.yaml").write_text("repo_path: /sgl-workspace/sglang\n")
-    err = aka._rewrite_container_repo_path(ws)
-    assert err and "sglang" in err
+    (ws / "config.yaml").write_text("image_repo_path: /sgl-workspace/nope\n")
+    err = aka._provide_task_repo(ws)
+    assert err and "nope" in err
 
 
 def test_a_leading_path_segment_that_is_not_a_repo_is_not_fatal(cache, tmp_path):
@@ -84,7 +84,7 @@ def test_a_leading_path_segment_that_is_not_a_repo_is_not_fatal(cache, tmp_path)
     Treating that as a missing checkout aborted tasks that were fine."""
     ws = tmp_path / "ws"
     ws.mkdir()
-    (ws / "config.yaml").write_text("repo_path: /sgl-workspace/aiter\n")
+    (ws / "config.yaml").write_text("image_repo_path: /sgl-workspace/aiter\n")
 
     class T:
         source_files = ["csrc/py_itfs_ck/mha_batch_prefill_kernels.cu"]
@@ -113,3 +113,27 @@ def test_staging_is_idempotent(cache, tmp_path):
     aka._stage_repo(cache / "aiter", dst)
     aka._stage_repo(cache / "aiter", dst)          # must be a no-op
     assert (dst / "csrc" / "k.cu").is_file()
+
+
+def test_repo_url_stages_the_clone_the_task_expects(cache, tmp_path):
+    """`repository` tasks declare repo_url and expect the clone already present under
+    the repository's own name, failing with "Source directory not found: <ws>/rocPRIM".
+    Nothing clones it during a run."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "config.yaml").write_text(
+        "repo_url: https://github.com/ROCm/rocPRIM.git\n"
+        "task_type: repository\n")
+    assert aka._provide_task_repo(ws) is None
+    assert (ws / "rocPRIM" / "rocprim" / "block.hpp").is_file()
+
+
+def test_the_key_is_image_repo_path_not_repo_path(cache, tmp_path):
+    """Anchoring on `repo_path:` matched nothing, while grepping for it matched
+    `image_repo_path` as a substring -- which made a broken rewrite look correct."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "config.yaml").write_text("image_repo_path: /sgl-workspace/aiter\n")
+    assert aka._provide_task_repo(ws) is None
+    assert "/sgl-workspace" not in (ws / "config.yaml").read_text()
+    assert str(ws / "aiter") in (ws / "config.yaml").read_text()

@@ -91,3 +91,25 @@ def test_a_leading_path_segment_that_is_not_a_repo_is_not_fatal(cache, tmp_path)
 
     assert aka._link_required_repo(T(), ws) is None
     assert (ws / "aiter").is_dir()      # supplied via repo_path, not the segment
+
+
+def test_staging_falls_back_to_copy_when_links_cannot_cross_filesystems(
+        cache, tmp_path, monkeypatch):
+    """A hard link cannot cross filesystems. With the workspace on node-local disk
+    and the checkout on /home, every file raises EXDEV and staging fails entirely --
+    so linking has to be an optimisation, not a requirement."""
+    def _no_links(src, dst):
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr(aka.os, "link", _no_links)
+    dst = tmp_path / "staged"
+    aka._stage_repo(cache / "aiter", dst)
+    assert (dst / "csrc" / "k.cu").read_text() == "// aiter\n"
+
+
+def test_staging_is_idempotent(cache, tmp_path):
+    """Workspaces are rebuilt per attempt; re-staging must not fail or duplicate."""
+    dst = tmp_path / "staged"
+    aka._stage_repo(cache / "aiter", dst)
+    aka._stage_repo(cache / "aiter", dst)          # must be a no-op
+    assert (dst / "csrc" / "k.cu").is_file()

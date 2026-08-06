@@ -178,16 +178,28 @@ def _resolve_checkout(name: str) -> Optional[Path]:
 
 
 def _stage_repo(src: Path, dst: Path) -> None:
-    """Hard-link a checkout into a workspace.
+    """Hard-link a checkout into a workspace, copying when links are impossible.
 
     Hard links: a fresh 165MB copy per task, times eight parallel workers, is
     minutes of I/O for files nobody edits. Only the answer file is written, and the
     writer unlinks first so it never truncates a shared inode and corrupts another
     workspace's copy.
+
+    A link cannot cross filesystems (EXDEV), so linking is an optimisation and not a
+    requirement: with the workspace on node-local disk and the checkout on /home,
+    every file raises "Invalid cross-device link" and the whole staging fails. Fall
+    back per file so the task still runs, just slower.
     """
     if dst.exists():
         return
-    shutil.copytree(src, dst, copy_function=os.link,
+
+    def _link_or_copy(a, b):
+        try:
+            os.link(a, b)
+        except OSError:
+            shutil.copy2(a, b)
+
+    shutil.copytree(src, dst, copy_function=_link_or_copy,
                     ignore=shutil.ignore_patterns(".git"))
 
 

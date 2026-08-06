@@ -16,8 +16,11 @@ from kore.tasks.functionalized import (  # noqa: E402
 
 CONV = {
     "task_id": "t_conv", "entry_name": "fused_conv", "entry_class": "M",
-    "family": "convolution", "dtype": "fp32", "primary_scale": 4096,
-    "input_specs": [{"shape": [4, 3, 8, 8]}],
+    "operation": "fused_conv",
+    "family": "convolution", "dtype": "fp32", "primary_scale": 768,
+    "input_specs": [{"shape": [4, 3, 8, 8], "dtype": "float32",
+                     "kind": "uniform", "low": 0.0, "high": 1.0,
+                     "scalable": True}],
     "module_source": (
         "import torch.nn as nn\n"
         "class M(nn.Module):\n"
@@ -30,8 +33,11 @@ CONV = {
 
 PARAM_FREE = {
     "task_id": "t_free", "entry_name": "scale", "entry_class": "M",
+    "operation": "scale", "primary_scale": 128,
     "family": "activation", "dtype": "fp32",
-    "input_specs": [{"shape": [8, 16]}],
+    "input_specs": [{"shape": [8, 16], "dtype": "float32",
+                     "kind": "uniform", "low": 0.0, "high": 1.0,
+                     "scalable": True}],
     "module_source": (
         "import torch.nn as nn\n"
         "class M(nn.Module):\n"
@@ -41,8 +47,12 @@ PARAM_FREE = {
 
 TWO_INPUT = {
     "task_id": "t_two", "entry_name": "bilin", "entry_class": "M",
+    "operation": "bilin", "primary_scale": 24,
     "family": "gemm", "dtype": "fp32",
-    "input_specs": [{"shape": [4, 6]}, {"shape": [4, 6]}],
+    "input_specs": [{"shape": [4, 6], "dtype": "float32", "kind": "uniform",
+                     "low": 0.0, "high": 1.0, "scalable": True},
+                    {"shape": [4, 6], "dtype": "float32", "kind": "uniform",
+                     "low": 0.0, "high": 1.0, "scalable": True}],
     "module_source": (
         "import torch\nimport torch.nn as nn\n"
         "class M(nn.Module):\n"
@@ -66,7 +76,7 @@ def _plain(spec):
 def test_oracle_is_exact_against_the_stateful_module():
     """The whole approach rests on functional_call being the same computation."""
     ns = functional_namespace_from_spec(CONV)
-    ins = ns["get_inputs"](None, device="cpu", seed=0)
+    ins = ns["get_inputs"](ns["parse_shape"]("default"), device="cpu", seed=0)
     with torch.no_grad():
         assert torch.equal(_plain(CONV)(ins[0]), ns["ref_fn"](*ins))
 
@@ -76,7 +86,7 @@ def test_parameters_are_exposed_as_trailing_arguments():
     assert ns["n_activations"] == 1
     assert ns["param_names"] == ["c.weight", "c.bias"]
     assert ns["arity"] == 3
-    ins = ns["get_inputs"](None, device="cpu", seed=0)
+    ins = ns["get_inputs"](ns["parse_shape"]("default"), device="cpu", seed=0)
     assert [tuple(t.shape) for t in ins[1:]] == [(5, 3, 3, 3), (5,)]
 
 
@@ -92,13 +102,40 @@ def test_scaling_resizes_the_activation_and_leaves_weights_alone():
     """A Conv2d weight is fixed by its channel counts; scaling it with the batch
     would hand the module a shape it cannot consume."""
     ns = functional_namespace_from_spec(CONV)
-    small = ns["get_inputs"](None, device="cpu", seed=0)
-    big = ns["get_inputs"](8192, device="cpu", seed=0)
-    assert big[0].shape[0] > small[0].shape[0]
-    assert big[0].shape[1:] == small[0].shape[1:]
+    small = ns["get_inputs"](ns["parse_shape"]("default"), device="cpu", seed=0)
+    big = ns["get_inputs"]({"S": 8192}, device="cpu", seed=0)
+    assert big[0].numel() > small[0].numel()
     assert [tuple(t.shape) for t in big[1:]] == [tuple(t.shape) for t in small[1:]]
     with torch.no_grad():
         assert ns["ref_fn"](*big).shape[0] == big[0].shape[0]
+
+
+def test_shape_follows_the_pool_convention():
+    """The driver calls parse_shape(a.shape) with the string "default" and hands
+    the result to get_inputs. Treating that string as a sequence turned it into
+    seven single-character "dimensions", and every functionalized seed failed to
+    run -- the parameter-free ones in the same root passed, so it read as the
+    functionalization idea being wrong rather than a shape-parsing bug."""
+    ns = functional_namespace_from_spec(CONV)
+    parsed = ns["parse_shape"]("default")
+    assert isinstance(parsed, dict) and "S" in parsed
+    ins = ns["get_inputs"](parsed, device="cpu", seed=0)
+    assert all(torch.is_tensor(t) for t in ins)
+    with torch.no_grad():
+        assert torch.is_tensor(ns["ref_fn"](*ins))
+
+
+def test_activations_match_the_triton_task_exactly():
+    """A HIP twin and its Triton counterpart must be graded on the same inputs,
+    so the activations come from the pool's builder rather than a second one."""
+    from kore.tasks.external import reference_namespace_from_spec
+    base = reference_namespace_from_spec(CONV)
+    ns = functional_namespace_from_spec(CONV)
+    shape = ns["parse_shape"]("default")
+    a = list(base["get_inputs"](shape, device="cpu", seed=0))
+    b = ns["get_inputs"](shape, device="cpu", seed=0)
+    assert len(b) == len(a) + len(ns["param_names"])
+    assert all(torch.equal(x, y) for x, y in zip(a, b))
 
 
 def test_multi_input_modules_forward_every_activation():
@@ -106,7 +143,7 @@ def test_multi_input_modules_forward_every_activation():
     TypeError and silently cost 1,121 pool tasks."""
     ns = functional_namespace_from_spec(TWO_INPUT)
     assert ns["n_activations"] == 2
-    ins = ns["get_inputs"](None, device="cpu", seed=0)
+    ins = ns["get_inputs"](ns["parse_shape"]("default"), device="cpu", seed=0)
     with torch.no_grad():
         assert torch.equal(_plain(TWO_INPUT)(ins[0], ins[1]), ns["ref_fn"](*ins))
 

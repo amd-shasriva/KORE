@@ -64,44 +64,34 @@ MAX_ARITY = 9
 def functional_namespace_from_spec(spec: dict) -> dict:
     """An oracle namespace whose entry takes ``(*activations, *parameters)``.
 
+    The activations come from the pool's own reference builder rather than being
+    regenerated here. That is what keeps a HIP twin comparable to its Triton
+    counterpart -- same shapes, dtype, distribution and scaling rules, from one
+    implementation -- and it means the shape argument follows the pool's
+    convention (``parse_shape`` returns a dict, ``"default"`` is a valid value)
+    instead of a second convention that has to be kept in step with it.
+
     Modules taking several activations (attention's q/k/v, an actor-critic's
     state/action) are ordinary here: every declared input is forwarded, so they
     functionalize on the same path as single-input ones.
     """
-    import torch
     from torch.func import functional_call
 
+    from kore.tasks.external import reference_namespace_from_spec
+
+    base_ns = reference_namespace_from_spec(spec)
     mod = _instantiate(spec)
     pairs = list(mod.named_parameters()) + list(mod.named_buffers())
     names = [n for n, _ in pairs]
     base = {n: t.detach().clone() for n, t in pairs}
-    in_specs = spec.get("input_specs") or [{}]
-    base_shapes = [list(s.get("shape") or [4, 4, 4, 4]) for s in in_specs]
-
-    def _scale_one(base_shape: list[int], shape) -> list[int]:
-        if shape is None:
-            return list(base_shape)
-        try:
-            want = int(shape)
-        except (TypeError, ValueError):
-            return list(shape)
-        tail = 1
-        for d in base_shape[1:]:
-            tail *= d
-        return [max(1, want // max(1, tail))] + base_shape[1:]
-
-    def _scaled_shape(shape):
-        return _scale_one(base_shapes[0], shape)
+    n_act = len(spec.get("input_specs") or [{}])
 
     def get_inputs(shape=None, device="cuda", seed=0):
-        g = torch.Generator(device="cpu").manual_seed(seed)
-        acts = [torch.rand(*_scale_one(bs, shape), generator=g).to(device)
-                for bs in base_shapes]
+        acts = list(base_ns["get_inputs"](shape, device=device, seed=seed))
         # Parameters keep their own shapes: a Conv2d weight is fixed by its
-        # channel counts, not by the batch pushed through it.
+        # channel counts, not by the batch pushed through it, so they are
+        # appended untouched however the activations were scaled.
         return acts + [base[n].to(device) for n in names]
-
-    n_act = len(base_shapes)
 
     def ref_fn(*args):
         acts, params = args[:n_act], args[n_act:]
@@ -119,5 +109,5 @@ def functional_namespace_from_spec(spec: dict) -> dict:
         "get_inputs": get_inputs,
         "ref_fn": ref_fn,
         "baseline_fn": ref_fn,
-        "parse_shape": _scaled_shape,
+        "parse_shape": base_ns["parse_shape"],
     }

@@ -143,6 +143,24 @@ def _row(source: str, messages: list, meta: dict) -> dict:
     return {"messages": messages, "_source": source, **meta}
 
 
+def _op_key(op: str) -> str:
+    """The backend-independent identity of an operation.
+
+    Two naming schemes have to collapse onto one key or nothing pairs. Registry
+    tasks mark the backend with a prefix (``hip_add_bf16``); pool twins mark it
+    with a suffix (``kbk_softmax_..._fp32__hipf``). Stripping only the prefix left
+    every pool twin under a key its Triton original could never match, so the
+    translate shape -- the only source of dialect-to-dialect training data -- would
+    have emitted nothing however much was mined.
+    """
+    key = op[4:] if op.startswith("hip_") else op
+    for suffix in ("__hipf", "__hip", "__flydsl", "__triton"):
+        if key.endswith(suffix):
+            key = key[: -len(suffix)]
+            break
+    return key
+
+
 def build(roots, out_path: Path, seed: int = 0) -> dict:
     rng = random.Random(seed)
     stats = collections.Counter()
@@ -177,7 +195,7 @@ def build(roots, out_path: Path, seed: int = 0) -> dict:
         op = w.get("operation") or _yaml_field(
             (td / "task.yaml").read_text(errors="ignore"), "operation")
         if op:
-            by_op_backend[str(op).replace("hip_", "", 1)][backend] = (kernel, lang, meta)
+            by_op_backend[_op_key(str(op))][backend] = (kernel, lang, meta)
 
         # --- shape 1: PyTorch -> kernel (torch2hip / torch2flydsl) -----------
         ref = _reference_source(td)

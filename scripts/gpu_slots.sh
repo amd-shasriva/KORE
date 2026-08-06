@@ -12,7 +12,7 @@
 #   purge_held   drop held jobs, because they hold slots while doing no work
 #   gpu_free     ask before submitting, instead of submitting and hoping
 
-GPU_JOB_CAP="${GPU_JOB_CAP:-4}"
+GPU_JOB_CAP="${GPU_JOB_CAP:-7}"
 
 # Names that must never be purged or counted as expendable: losing training
 # progress to make room for a gate would be a bad trade.
@@ -37,7 +37,11 @@ purge_held() {
 }
 
 # GPU jobs currently held by me, running or pending.
-gpu_used() { _squeue -o "%i" | wc -l; }
+#
+# Count only jobs that actually asked for a GPU. Seeding is CPU-only, and
+# counting it here would retire a mining slot to pay for a job that never
+# competed for one.
+gpu_used() { _squeue -o "%b" | grep -ci "gpu"; }
 
 # How many more GPU jobs may be submitted right now.
 gpu_free() {

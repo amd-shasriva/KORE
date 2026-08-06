@@ -91,18 +91,26 @@ while :; do
     # Gating comes before mining when slots are scarce: nothing can be mined that
     # has not been gated, and gating a backlog turns one node into hundreds of
     # tasks, while a sweep over the handful already promoted re-walks the same few.
+    # Each root gets its own gate job, named after the root and tracked
+    # separately. A single shared gate slot meant that while the parameter-free
+    # root was being gated -- hours of work -- the functionalized root could never
+    # start, so the seeds that unlock most of the pool would have sat undecided
+    # all night behind the ones that were already nearly done.
     ungated=$(( seeds - last_gated ))
     if [ "$ungated" -ge "$GATE_EVERY" ] || { [ "$seeding_alive" = "0" ] && [ "$ungated" -gt 0 ]; }; then
-        if [ "$(queued kore-hipgate)" -eq 0 ] && have_slot; then
-            say "gating: $seeds seeds on disk, $ungated since the last gate ($(gpu_free) slot(s) free)"
-            for r in $ROOTS; do
-                [ -d "$REPO/$r/tasks" ] || continue
-                have_slot || { say "  no slot left; $r waits for the next pass"; break; }
-                GATE_ROOT="$r" sbatch scripts/spur_gate_pool_hip.sbatch 2>&1 | tee -a "$LOG"
-                sleep 5   # let the submission register before re-counting slots
-            done
-            last_gated=$seeds
-        fi
+        for r in $ROOTS; do
+            [ -d "$REPO/$r/tasks" ] || continue
+            tag=$(basename "$r")
+            n_root=$(ls -d "$REPO/$r"/tasks/*__hip* 2>/dev/null | wc -l)
+            [ "$n_root" -eq 0 ] && continue
+            [ "$(queued "kore-gate-$tag")" -gt 0 ] && continue
+            have_slot || { say "  no slot for gate-$tag; waits for next pass"; break; }
+            say "gating $r: $n_root seeds ($(gpu_free) slot(s) free)"
+            GATE_ROOT="$r" sbatch --job-name="kore-gate-$tag" \
+                scripts/spur_gate_pool_hip.sbatch 2>&1 | tee -a "$LOG"
+            sleep 5   # let the submission register before re-counting slots
+        done
+        last_gated=$seeds
     fi
 
     # --- promote whatever passed, and keep the sweep staffed -----------------
@@ -120,7 +128,8 @@ while :; do
     # not merely by no seeding job being queued right now, which is also true
     # between a preemption and the next resubmission.
     if [ -f "$REPO/runs/seeding.done" ] && [ "$ungated" -le 0 ] \
-       && [ "$(queued kore-hipgate)" -eq 0 ]; then
+       && [ "$(queued kore-gate-pool_hip)" -eq 0 ] \
+       && [ "$(queued kore-gate-pool_hip_f)" -eq 0 ]; then
         say "seeding finished, everything gated ($promoted promoted); loop exiting"
         exit 0
     fi

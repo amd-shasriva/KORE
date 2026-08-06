@@ -41,6 +41,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+from functools import lru_cache
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -269,13 +271,38 @@ def discover_tasks(
     return out
 
 
+@lru_cache(maxsize=1)
+def _task_env() -> dict:
+    """The environment a task's own commands need.
+
+    Tasks invoke ``python3``, not an interpreter we choose, and with the ambient
+    environment that resolves to /usr/bin/python3 -- which has no torch. Whole
+    families failed on that alone and none was judged on its code: a repository task
+    died with ``ModuleNotFoundError: No module named 'torch'`` inside its own runner,
+    and 19 torch2flydsl tasks failed every case with ``No module named 'aiter'``.
+
+    So put the interpreter that has torch first on PATH, and add the aiter checkout
+    to PYTHONPATH, since several tasks import it as a library rather than editing it.
+    """
+    env = dict(os.environ)
+    venv_bin = str(Path(sys.executable).parent)
+    if env.get("PATH", "").split(os.pathsep)[:1] != [venv_bin]:
+        env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+    aiter = Path.home() / "third_party" / "aiter"
+    if aiter.is_dir():
+        parts = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+        if str(aiter) not in parts:
+            env["PYTHONPATH"] = os.pathsep.join([str(aiter), *parts])
+    return env
+
+
 def _run(cmds: list[list[str]], cwd: Path, timeout: int) -> tuple[bool, str]:
     """Run each declared command in order; the first failure stops the gate."""
     for argv in cmds:
         try:
             proc = subprocess.run(
                 argv[0], shell=True, cwd=str(cwd), timeout=timeout,
-                capture_output=True, text=True,
+                capture_output=True, text=True, env=_task_env(),
             )
         except subprocess.TimeoutExpired:
             return False, f"timeout after {timeout}s: {argv[0][:120]}"

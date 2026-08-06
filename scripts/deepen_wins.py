@@ -47,6 +47,7 @@ import fcntl
 import hashlib
 import json
 import os
+import pathlib
 from pathlib import Path
 import tempfile
 import time
@@ -354,6 +355,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-root", required=True)
     ap.add_argument("--tasks", default="", help="comma list; empty => all train tasks")
+    ap.add_argument("--tasks-file", default="",
+                    help="file of task ids, comma or newline separated. Preferred "
+                         "over --tasks: a 4,524-id shard is 180 KB as one argument "
+                         "and exec fails with 'Argument list too long' before the "
+                         "process starts, which reads as a job that ran and "
+                         "produced nothing")
     ap.add_argument("--gpu-ids", default="0")
     ap.add_argument("--workers", type=int, default=0)
     ap.add_argument("--target", type=int, default=3)
@@ -364,6 +371,15 @@ def main():
                     default=int(os.environ.get("KORE_DEEP_OVERSAMPLE", "3")),
                     help="max concurrent trajectories per task = need * oversample")
     a = ap.parse_args()
+
+    # A shard list passed as one argument hits ARG_MAX. pool-Triton's 4,524 ids are
+    # 180 KB and exec failed with "Argument list too long", so the worker held a node
+    # for its whole allocation having never started, and the stream looked merely
+    # slow. Reading the same ids from a file has no such limit.
+    if getattr(a, "tasks_file", ""):
+        _raw = pathlib.Path(a.tasks_file).read_text()
+        a.tasks = ",".join(t.strip() for t in _raw.replace("\n", ",").split(",")
+                           if t.strip())
 
     import multiprocessing as mp
     import queue

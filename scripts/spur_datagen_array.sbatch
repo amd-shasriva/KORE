@@ -45,6 +45,10 @@ DEEP_FILE="$SHARD_DIR/deep_${IDX}.txt"
 BASE_FILE="$SHARD_DIR/base_${IDX}.txt"
 [[ -f "$DEEP_FILE" ]] || { echo "missing task list: $DEEP_FILE" >&2; exit 2; }
 [[ -f "$BASE_FILE" ]] || { echo "missing task list: $BASE_FILE" >&2; exit 2; }
+# Read only to count and validate. The lists themselves are handed to the workers
+# as file paths: a 4,524-id shard is 180 KB, and passing that as one argument makes
+# exec fail with "Argument list too long" before the worker starts -- which shows up
+# as a job that ran for its whole allocation and produced nothing.
 DEEP_TASKS="$(cat "$DEEP_FILE" 2>/dev/null || true)"
 BASE_TASKS="$(cat "$BASE_FILE" 2>/dev/null || true)"
 
@@ -228,7 +232,7 @@ if [[ -n "$BASE_TASKS" ]]; then
     ((N_BASE > BASE_COUNT)) && N_BASE="$BASE_COUNT"
     KORE_RUNS_DIR="$LOCAL_ROOT/replay/base" setsid "$PY" scripts/complete_base.py \
         --data-root "$DATA_ROOT" \
-        --tasks "$BASE_TASKS" \
+        --tasks-file "$BASE_FILE" \
         --gpu-ids 0,1,2,3,4,5,6,7 \
         --workers "$N_BASE" \
         --n-repair 50 --n-parents 20 --k 6 \
@@ -246,7 +250,7 @@ if [[ -n "$DEEP_TASKS" ]]; then
     ((N_DEEP > DEEP_COUNT)) && N_DEEP="$DEEP_COUNT"
     KORE_RUNS_DIR="$LOCAL_ROOT/replay/deepen" setsid "$PY" scripts/deepen_wins.py \
         --data-root "$DATA_ROOT" \
-        --tasks "$DEEP_TASKS" \
+        --tasks-file "$DEEP_FILE" \
         --gpu-ids 0,1,2,3,4,5,6,7 \
         --workers "$N_DEEP" \
         --target "$TARGET" --gens "$GENS" \

@@ -87,13 +87,18 @@ while :; do
     # is wrong now that 1,600+ gated tasks are queued, far more than a night of
     # mining can consume. Gating more tasks onto that pile produces nothing until
     # the pile is drawn down, while every mining slot produces training data.
+    # Promote newly gated seeds into the mining root, then staff every stream.
+    # Harvest only re-partitions pool-HIP; staffing covers pool-Triton and
+    # registry-HIP too, which is where translation pairs and the hip2hip quality
+    # gap are addressed.
     want=$(gpu_free)
     [ "$want" -gt "$SHARDS" ] && want=$SHARDS
-    if [ "$(queued kore-factory)" -lt "$SHARDS" ] && [ "$promoted" -gt 0 ] \
-       && [ "$want" -gt 0 ]; then
-        say "harvest: $promoted promoted task(s), $want slot(s) free -> submitting"
+    if [ "$promoted" -gt 0 ] && [ "$want" -gt 0 ] \
+       && [ "$(queued kore-factory)" -lt "$SHARDS" ]; then
+        say "harvest: $promoted promoted task(s), $want slot(s) free"
         bash scripts/hip_pool_harvest.sh "$want" 2>&1 | tail -3 | tee -a "$LOG"
     fi
+    bash scripts/staff_datagen.sh 2>&1 | tail -2 | tee -a "$LOG"
 
     # --- keep the seeding sweep staffed --------------------------------------
     # Only when explicitly enabled. Seeding is currently ahead of gating -- 2,500

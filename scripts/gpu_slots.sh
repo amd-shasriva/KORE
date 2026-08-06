@@ -12,7 +12,10 @@
 #   purge_held   drop held jobs, because they hold slots while doing no work
 #   gpu_free     ask before submitting, instead of submitting and hoping
 
-GPU_JOB_CAP="${GPU_JOB_CAP:-7}"
+# Measured, not guessed: with four jobs running a fifth is accepted and then
+# fails to launch, while the partition still shows dozens of idle nodes. The cap
+# counts jobs, not GPUs, and CPU-only jobs count too.
+GPU_JOB_CAP="${GPU_JOB_CAP:-4}"
 
 # Names that must never be purged or counted as expendable: losing training
 # progress to make room for a gate would be a bad trade.
@@ -36,12 +39,10 @@ purge_held() {
     return 0
 }
 
-# GPU jobs currently held by me, running or pending.
-#
-# Count only jobs that actually asked for a GPU. Seeding is CPU-only, and
-# counting it here would retire a mining slot to pay for a job that never
-# competed for one.
-gpu_used() { _squeue -o "%b" | grep -ci "gpu"; }
+# Every job I hold, running or pending. The cap counts jobs rather than GPUs, and
+# a CPU-only job occupies one just as a training job does -- measured by adding a
+# CPU-only seeding job and watching the next GPU submission fail to launch.
+gpu_used() { _squeue -o "%i" | wc -l; }
 
 # How many more GPU jobs may be submitted right now.
 gpu_free() {

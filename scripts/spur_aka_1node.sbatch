@@ -11,7 +11,7 @@
 #SBATCH --partition=amd-spur
 #SBATCH --qos=amd-general-qos
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:8
+#SBATCH --gres=gpu:mi355x:8
 #SBATCH --cpus-per-task=32
 #SBATCH --time=08:00:00
 #SBATCH --exclusive
@@ -62,6 +62,9 @@ ${TYPES:+--types $TYPES} --out $OUT --arm $ARM --model $MODEL --limit $LIMIT"
 # transformers loads with device_map="auto" and a 30B in bf16 is ~60GB against
 # 192GB of HBM, so a single process puts the whole model on GPU 0 and leaves seven
 # idle. Each worker therefore gets exactly one GPU via HIP_VISIBLE_DEVICES and its
+# own vLLM engine, and keeps several tasks in flight so that engine batches: one
+# task at a time made every generate call a batch of one, so all eight GPUs were
+# busy and none was saturated.
 # own disjoint slice of tasks. Full copies rather than a shared engine: the model
 # fits with room to spare, and independent processes cannot stall each other.
 # baseline fans out for the same reason run does: it must cover all 402 tasks to
@@ -90,6 +93,7 @@ else
             ROCR_VISIBLE_DEVICES="${GPULIST[$i]}" \
             "$PY" scripts/run_agent_kernel_arena.py "$MODE" $(common_args) \
             --num-shards "$NSHARD" --shard "$i" \
+            --task-concurrency "${AKA_TASK_CONCURRENCY:-4}" \
             > "$OUT/${MODE}_shard${i}.log" 2>&1 &
         pids="$pids $!"
         echo "  shard $i -> GPU ${GPULIST[$i]} (pid $!)"

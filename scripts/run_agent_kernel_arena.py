@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import shutil
+import threading
 import sys
 import time
 from pathlib import Path
@@ -461,9 +462,10 @@ def cmd_run(args) -> int:
               f"worker's slice", flush=True)
 
     t0 = time.time()
-    for i, task in enumerate(tasks, 1):
-        if task.task_id in done:
-            continue
+    pending = [t for t in tasks if t.task_id not in done]
+
+    def _score_one(task):
+        """Everything one task needs, start to finish, with no shared state."""
         ws = _workspace(task, out_root, args.arena_root)
         try:
             src_rel = task.source_files[0] if task.source_files else task.answer_path()
@@ -482,6 +484,25 @@ def cmd_run(args) -> int:
         except Exception as exc:  # noqa: BLE001 - one bad task must not end the run
             r = ArenaResult(task_id=task.task_id, task_type=task.task_type,
                             error=f"{type(exc).__name__}: {exc}")
+        if not args.keep_workspaces:
+            shutil.rmtree(ws, ignore_errors=True)
+        return r
+
+    # Several tasks in flight per worker. Each task's three attempts stay strictly
+    # sequential -- attempt two needs attempt one's compiler output -- but tasks are
+    # independent, so overlapping them is what lets vLLM batch at all. Scored one
+    # task at a time, every generate call was a batch of one, which is single-stream
+    # latency from an engine whose whole advantage is continuous batching: 8 GPUs
+    # were busy and none was saturated.
+    #
+    # Each task owns its workspace and writes only its own answer file, so the
+    # concurrency needs no coordination beyond serialising the ledger append.
+    lock = threading.Lock()
+    n_done = 0
+
+    def _record(i: int, r: ArenaResult) -> None:
+        nonlocal n_done
+        n_done += 1
         results.append(r)
         # Append + flush + fsync before moving on. A score that is only in memory
         # is a score we will pay for twice.
@@ -489,11 +510,20 @@ def cmd_run(args) -> int:
             fh.write(json.dumps(r.to_dict()) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
-        print(f"[{i}/{len(tasks)}] {task.task_id}: compiled={r.compiled} "
+        print(f"[{n_done}/{len(pending)}] {r.task_id}: compiled={r.compiled} "
               f"correct={r.correct} speedup={r.speedup} score={r.score:.0f} "
               f"({time.time()-t0:.0f}s)", flush=True)
-        if not args.keep_workspaces:
-            shutil.rmtree(ws, ignore_errors=True)
+
+    if args.task_concurrency > 1 and len(pending) > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=args.task_concurrency) as pool:
+            futs = {pool.submit(_score_one, t): t for t in pending}
+            for i, fut in enumerate(as_completed(futs), 1):
+                with lock:
+                    _record(i, fut.result())
+    else:
+        for i, task in enumerate(pending, 1):
+            _record(i, _score_one(task))
     if args.num_shards > 1:
         # Only the merge step may write results_<arm>.json: it is the signal that
         # the whole arena is finished, and a shard that completes its own slice has
@@ -672,6 +702,10 @@ def main() -> int:
     ap.add_argument("--attempts", type=int, default=3,
                     help="generation attempts per task, with harness feedback "
                          "between them (AKA reference agents use 3)")
+    ap.add_argument("--task-concurrency", type=int, default=4,
+                    help="tasks in flight per worker. Each task's attempts stay "
+                         "sequential; overlapping tasks is what lets vLLM batch, "
+                         "and at 1 every generate call is a batch of one")
     ap.add_argument("--keep-workspaces", action="store_true")
     ap.add_argument("--json-out", default="")
     # Task-level sharding. transformers loads this checkpoint with

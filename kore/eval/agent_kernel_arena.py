@@ -41,6 +41,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import sys
 from functools import lru_cache
 import time
@@ -296,6 +297,13 @@ def _task_env() -> dict:
     return env
 
 
+#: Held while a task times its kernel. Generation and compilation overlap
+#: freely; timing must not. Several kernels benchmarked at once on one GPU
+#: all read slower than they are, which biases every speedup downward
+#: without looking wrong.
+_BENCH_LOCK = threading.Lock()
+
+
 def _run(cmds: list[list[str]], cwd: Path, timeout: int) -> tuple[bool, str]:
     """Run each declared command in order; the first failure stops the gate."""
     for argv in cmds:
@@ -509,10 +517,22 @@ def evaluate_task(
 
     if task.performance_command:
         try:
-            proc = subprocess.run(
-                task.performance_command[0][0], shell=True, cwd=str(workspace),
-                timeout=timeout, capture_output=True, text=True,
-            )
+            # One benchmark on this GPU at a time.
+            #
+            # Generation, compilation and correctness all overlap happily -- that is
+            # what makes several tasks in flight worthwhile. Timing does not: a
+            # kernel benchmarked while three other kernels share the same GPU reads
+            # slower than it is, and speedup is one of the three things scored here.
+            # Raising concurrency without this lock buys throughput by corrupting the
+            # measurement the run exists to produce, and the corruption is invisible
+            # -- the numbers look plausible, just wrong, and wrong in the direction
+            # that understates every kernel.
+            with _BENCH_LOCK:
+                proc = subprocess.run(
+                    task.performance_command[0][0], shell=True, cwd=str(workspace),
+                    timeout=timeout, capture_output=True, text=True,
+                    env=_task_env(),
+                )
             base, opt, sp = _parse_speedup((proc.stdout or "") + (proc.stderr or ""))
             # AKA reads the JSON report FIRST and stdout only as a fallback, and
             # most harnesses write their timings there and print only a summary

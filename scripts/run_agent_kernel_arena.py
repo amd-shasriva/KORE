@@ -296,6 +296,70 @@ def _workspace(task, out_root: Path, arena_root: str) -> Path:
     return ws
 
 
+def _splice_answer(original: str, code: str) -> str:
+    """Put the model's functions back into the file they came from.
+
+    The rocmbench tasks behind instruction2triton hand over a whole module --
+    imports, helpers, and the pytest suite that grades it -- and ask for one
+    function to be filled in. A model reliably returns just that function, and
+    writing the reply as the file therefore deletes the imports it needs. The
+    result reads as a model failure and is not one: the compile check is
+    ``ast.parse``, which a bare decorated function passes, so the task scores
+    "compiled" and then dies at import with ``NameError: name 'triton' is not
+    defined``. All 18 scored instruction2triton tasks failed exactly that way, and
+    none was judged on numerics.
+
+    Asking the model to reproduce the scaffolding verbatim was tried first and does
+    not hold. Splicing does not depend on the model cooperating: each function the
+    reply defines replaces the one of that name in the original, and everything
+    else -- imports, helpers, tests -- is preserved because it is never rewritten.
+
+    Returns the merged text, or ``code`` unchanged when the reply is already a
+    complete module or nothing can be matched up.
+    """
+    import ast
+
+    try:
+        new_tree = ast.parse(code)
+        old_tree = ast.parse(original)
+    except SyntaxError:
+        return code   # cannot reason about it; caller's behaviour is unchanged
+
+    def _defs(tree):
+        return {n.name: n for n in tree.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    new_defs, old_defs = _defs(new_tree), _defs(old_tree)
+    shared = set(new_defs) & set(old_defs)
+    if not shared:
+        return code
+
+    # A reply that already carries the original's imports is a complete file and
+    # must be left alone -- splicing it would duplicate the module.
+    old_imports = {a.name.split(".")[0]
+                   for n in ast.walk(old_tree) if isinstance(n, ast.Import)
+                   for a in n.names}
+    new_imports = {a.name.split(".")[0]
+                   for n in ast.walk(new_tree) if isinstance(n, ast.Import)
+                   for a in n.names}
+    if old_imports and old_imports <= new_imports:
+        return code
+
+    def _span(node):
+        """Line span of a definition, decorators included."""
+        start = min([node.lineno] + [d.lineno for d in node.decorator_list])
+        return start - 1, node.end_lineno
+
+    old_lines = original.splitlines()
+    new_lines = code.splitlines()
+    # Replace from the bottom so earlier spans keep their line numbers.
+    for name in sorted(shared, key=lambda n: old_defs[n].lineno, reverse=True):
+        o_start, o_end = _span(old_defs[name])
+        n_start, n_end = _span(new_defs[name])
+        old_lines[o_start:o_end] = new_lines[n_start:n_end]
+    return "\n".join(old_lines) + "\n"
+
+
 def _write_answer(path: Path, code: str) -> None:
     """Replace a file, never truncate it in place.
 
@@ -305,6 +369,11 @@ def _write_answer(path: Path, code: str) -> None:
     link set and leaves the rest shared.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix == ".py" and path.exists():
+        try:
+            code = _splice_answer(path.read_text(errors="ignore"), code)
+        except Exception:  # noqa: BLE001 - a splice failure must not lose the answer
+            pass
     if path.exists() or path.is_symlink():
         path.unlink()
     path.write_text(code)

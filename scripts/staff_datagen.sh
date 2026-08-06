@@ -34,8 +34,12 @@ say() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" >> "$LOG"; }
 #: called kore-factory and are still mining pool-HIP. Not counting them made the
 #: stream look understaffed, and the top-up landed a second worker on a shard
 #: another job was already grinding through.
+#: Wanted counts sum to one less than the job cap, leaving a slot for the arena --
+#: which the supervisor owns, not this script. Sizing them to the cap instead left
+#: the arena unable to launch; sizing them below it left slots idle, which on a pool
+#: this contended is the more expensive mistake.
 STREAMS="${DATAGEN_STREAMS:-\
-poolhip:runs/shards_hippool:data/v5hippool:3:kore-mine-poolhip+kore-factory \
+poolhip:runs/shards_hippool:data/v5hippool:4:kore-mine-poolhip+kore-factory \
 pooltriton:runs/shards_pooltriton:data/v5pooltriton:2:kore-mine-pooltriton \
 hipreg:runs/shards_hipreg:data/v5hip:1:kore-mine-hipreg}"
 

@@ -55,6 +55,20 @@ def verify_one(task_dir: Path, timeout: int, gpu: int | None = None) -> dict:
         # seven idle.
         env["HIP_VISIBLE_DEVICES"] = str(gpu)
         env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+
+        # Give each worker its own MIOpen databases. MIOpen keeps a SQLite
+        # performance-db and a compiled-kernel cache, and eight workers sharing
+        # them raise miopenStatusInternalError from inside the *reference*
+        # convolution -- so a perfectly good seed is recorded as a broken task.
+        # It accounted for 2,875 of 2,892 failures here, ~44% of the
+        # functionalized set, and it grows with the run as contention builds,
+        # which is why an early sample looked healthy at 87% yield.
+        mio = Path(env.get("TMPDIR", "/tmp")) / f"miopen_w{gpu}"
+        (mio / "db").mkdir(parents=True, exist_ok=True)
+        (mio / "cache").mkdir(parents=True, exist_ok=True)
+        env["MIOPEN_USER_DB_PATH"] = str(mio / "db")
+        env["MIOPEN_CUSTOM_CACHE_DIR"] = str(mio / "cache")
+        env["MIOPEN_DISABLE_CACHE"] = "0"
     t0 = time.time()
     try:
         proc = subprocess.run(

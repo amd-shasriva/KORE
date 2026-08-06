@@ -51,6 +51,64 @@ def _resolvable(task_ids, sample: int = 40):
     return checked, bad
 
 
+#: Families in the order we want them reached, hardest first. A sweep is unlikely
+#: to finish every task, so what gets mined is whatever a worker reaches -- and the
+#: order it reaches things in decides the shape of the dataset.
+_FAMILY_PRIORITY = ("attention", "gemm", "convolution", "normalization",
+                    "sequence", "reduction", "sparse", "fusion", "quantization",
+                    "sampling", "data_movement", "activation", "elementwise")
+
+
+def _family_of(task_id: str) -> str:
+    """The op family a task id belongs to, from its task.yaml."""
+    import json
+    root = os.environ.get("KORE_TASK_POOL")
+    for base in ([Path(root)] if root else []) + [REPO / "data" / "task_pool"]:
+        for cand in (base / "tasks" / task_id, base / task_id):
+            y = cand / "task.yaml"
+            if y.is_file():
+                try:
+                    cfg = json.loads(y.read_text())
+                except Exception:  # noqa: BLE001 - a malformed task is just unknown
+                    return "?"
+                return str(cfg.get("op_family") or cfg.get("family") or "?")
+    return "?"
+
+
+def _order_by_family(ids: list[str]) -> list[str]:
+    """Interleave families, hardest first, instead of leaving ids in name order.
+
+    Task lists arrive sorted by id, and a worker walks its shard in order. With
+    thousands of tasks and a sweep that will be stopped long before it finishes,
+    name order decides coverage -- and name order is arbitrary with respect to
+    difficulty. Measured after one afternoon: elementwise 41% mined and
+    quantization 43%, against gemm 6%, convolution 3% and attention 1 task of 81.
+    The easy families were not preferred on purpose; they simply sort early.
+
+    Round-robining the families means any prefix of the sweep is balanced, and
+    listing the hard ones first in each cycle means the families that matter most
+    to a kernel benchmark are reached first rather than last.
+    """
+    import collections
+    by_fam = collections.defaultdict(list)
+    for t in ids:
+        by_fam[_family_of(t)].append(t)
+    if len(by_fam) <= 1:
+        return ids   # nothing to interleave; leave the caller's order alone
+    order = [f for f in _FAMILY_PRIORITY if f in by_fam]
+    order += [f for f in sorted(by_fam) if f not in order]
+    out, cursors = [], {f: 0 for f in order}
+    while len(out) < len(ids):
+        progressed = False
+        for f in order:
+            i = cursors[f]
+            if i < len(by_fam[f]):
+                out.append(by_fam[f][i]); cursors[f] = i + 1; progressed = True
+        if not progressed:
+            break
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--task-file", required=True)
@@ -78,6 +136,8 @@ def main() -> int:
             print("FATAL: nothing resolves; refusing to queue an array that can "
                   "only fail", file=sys.stderr)
             return 3
+
+    ids = _order_by_family(ids)
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)

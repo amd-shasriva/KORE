@@ -9,7 +9,12 @@
 # No --gres: this never touches a GPU, so it does not spend one of the few
 # concurrent GPU-job slots that gating and datagen compete for.
 #
-#   SEED_ARGS="--functionalize --skip-parameter-free" sbatch scripts/spur_seed_hip.sbatch
+# Selector flags are passed as script arguments, not through --export. An
+# --export list is comma-separated, so a value containing a space silently
+# arrives empty -- which here meant the sweep ran with no selector at all and
+# started seeding the wrong task set into the functionalized root.
+#
+#   sbatch scripts/spur_seed_hip.sbatch --functionalize --skip-parameter-free
 #SBATCH --job-name=kore-seed
 #SBATCH --account=amd-general
 #SBATCH --partition=amd-spur
@@ -29,8 +34,13 @@ OUT="${SEED_OUT:-data/pool_hip_f}"
 WORKERS="${SEED_WORKERS:-16}"
 LIMIT="${SEED_LIMIT:-9000}"
 
-echo "[seed] host=$(hostname) out=$OUT workers=$WORKERS args=${SEED_ARGS:-}"
+echo "[seed] host=$(hostname) out=$OUT workers=$WORKERS args=$*"
+if [ "$#" -eq 0 ]; then
+    echo "[seed] refusing to run with no selector: an unselected sweep seeds the"
+    echo "[seed] wrong task set into $OUT. Pass e.g. --functionalize." >&2
+    exit 2
+fi
 # The attempt ledger in $OUT makes this restart-safe, so a requeue after
 # preemption resumes the sweep instead of re-paying for seeds already written.
-python scripts/materialize_pool_hip.py ${SEED_ARGS:-} \
+python scripts/materialize_pool_hip.py "$@" \
     --limit "$LIMIT" --workers "$WORKERS" --out "$OUT"

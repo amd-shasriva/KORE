@@ -40,16 +40,31 @@ _squeue() { squeue -u "$KORE_USER" -h "$@" 2>/dev/null; }
 # Held jobs occupy the cap without running. Nothing recovers them -- the
 # scheduler has already given up -- so the only useful action is to remove them
 # and let the loop resubmit deliberately.
-# Only genuinely held jobs. JobLaunchFailure looks similar but is transient --
-# the scheduler retries it, and jobs do recover: a gate sat in JobLaunchFailure
-# and then ran for half an hour. Cancelling on sight made this loop destroy its
-# own work, submitting a datagen sweep and killing it seconds later, forever.
+# Recover held jobs rather than destroy them.
+#
+# The cycle a job actually goes through here is: (Priority) -> the scheduler picks
+# a node -> the launch fails on that node -> requeue -> after a few rounds,
+# JobHoldMaxRequeue. Cancelling at that point threw the job away, and the loop then
+# resubmitted it to the back of a 25-deep queue. Nine miners died that way in one
+# afternoon while burst was starting a job a minute.
+#
+# `scontrol release` un-holds the job so it queues again. Only a job this has
+# already failed to rescue is cancelled, so a genuinely broken submission still
+# cannot accumulate.
+_HOLD_STATE="${_HOLD_STATE:-/tmp/kore_held_seen}"
 purge_held() {
-    local n=0 j
+    local n_rel=0 n_kill=0 j seen
     for j in $(_squeue -t PD -o "%i %R" | grep -i "hold" | awk '{print $1}'); do
-        scancel "$j" 2>/dev/null && n=$((n + 1))
+        seen=$(grep -c "^$j\$" "$_HOLD_STATE" 2>/dev/null || echo 0)
+        if [ "$seen" -ge 3 ]; then
+            scancel "$j" 2>/dev/null && n_kill=$((n_kill + 1))
+        else
+            echo "$j" >> "$_HOLD_STATE"
+            scontrol release "$j" >/dev/null 2>&1 && n_rel=$((n_rel + 1))
+        fi
     done
-    [ "$n" -gt 0 ] && echo "purged $n held job(s)"
+    [ "$n_rel" -gt 0 ] && echo "released $n_rel held job(s) back to the queue"
+    [ "$n_kill" -gt 0 ] && echo "cancelled $n_kill job(s) held repeatedly"
     return 0
 }
 

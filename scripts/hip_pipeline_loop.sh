@@ -77,20 +77,33 @@ while :; do
     [ "$(queued kore-seed)" -gt 0 ] && seeding_alive=1
     seeds=$(n_seeds); promoted=$(n_promoted)
 
+    # --- mine first ----------------------------------------------------------
+    # Slots go to mining before gating, which reverses the earlier rule. That rule
+    # was right when 14 tasks were promoted and gating was what produced work; it
+    # is wrong now that 1,600+ gated tasks are queued, far more than a night of
+    # mining can consume. Gating more tasks onto that pile produces nothing until
+    # the pile is drawn down, while every mining slot produces training data.
+    want=$(gpu_free)
+    [ "$want" -gt "$SHARDS" ] && want=$SHARDS
+    if [ "$(queued kore-factory)" -lt "$SHARDS" ] && [ "$promoted" -gt 0 ] \
+       && [ "$want" -gt 0 ]; then
+        say "harvest: $promoted promoted task(s), $want slot(s) free -> submitting"
+        bash scripts/hip_pool_harvest.sh "$want" 2>&1 | tail -3 | tee -a "$LOG"
+    fi
+
     # --- keep the seeding sweep staffed --------------------------------------
-    # It needs no GPU, so it never competes with gating or mining for a slot.
+    # Only when explicitly enabled. Seeding is currently ahead of gating -- 2,500
+    # seeds are on disk undecided -- so another seeding job would occupy one of
+    # only four slots to deepen a queue nothing is draining.
     if [ "$seeding_alive" = "0" ] && [ -n "$SEED_ARGS" ] \
-       && [ ! -f "$REPO/runs/seeding.done" ]; then
+       && [ ! -f "$REPO/runs/seeding.done" ] && have_slot; then
         say "seeding absent -> submitting ($SEED_ARGS)"
         # shellcheck disable=SC2086
         sbatch scripts/spur_seed_hip.sbatch $SEED_ARGS 2>&1 | tee -a "$LOG"
         seeding_alive=1
     fi
 
-    # --- gate, when enough new seeds have accumulated to be worth a node ------
-    # Gating comes before mining when slots are scarce: nothing can be mined that
-    # has not been gated, and gating a backlog turns one node into hundreds of
-    # tasks, while a sweep over the handful already promoted re-walks the same few.
+    # --- gate whatever slots remain ------------------------------------------
     # Each root gets its own gate job, named after the root and tracked
     # separately. A single shared gate slot meant that while the parameter-free
     # root was being gated -- hours of work -- the functionalized root could never
@@ -111,17 +124,6 @@ while :; do
             sleep 5   # let the submission register before re-counting slots
         done
         last_gated=$seeds
-    fi
-
-    # --- promote whatever passed, and keep the sweep staffed -----------------
-    # Harvest is cheap and idempotent, so run it whenever datagen has room
-    # rather than trying to detect "new passers" separately.
-    want=$(gpu_free)
-    [ "$want" -gt "$SHARDS" ] && want=$SHARDS
-    if [ "$(queued kore-factory)" -lt "$SHARDS" ] && [ "$promoted" -gt 0 ] \
-       && [ "$want" -gt 0 ]; then
-        say "harvest: $promoted promoted task(s), $want slot(s) free -> submitting"
-        bash scripts/hip_pool_harvest.sh "$want" 2>&1 | tail -3 | tee -a "$LOG"
     fi
 
     # Only stop once seeding is genuinely finished -- marked by runs/seeding.done,

@@ -91,12 +91,15 @@ while :; do
     # Harvest only re-partitions pool-HIP; staffing covers pool-Triton and
     # registry-HIP too, which is where translation pairs and the hip2hip quality
     # gap are addressed.
-    want=$(gpu_free)
-    [ "$want" -gt "$SHARDS" ] && want=$SHARDS
-    if [ "$promoted" -gt 0 ] && [ "$want" -gt 0 ] \
-       && [ "$(queued kore-factory)" -lt "$SHARDS" ]; then
-        say "harvest: $promoted promoted task(s), $want slot(s) free"
-        NO_SUBMIT=1 bash scripts/hip_pool_harvest.sh "$want" 2>&1 | tail -3 | tee -a "$LOG"
+    # Harvest is passed $SHARDS, never the free-slot count. How the task set is
+    # divided is a property of the task set and must stay fixed; how many workers
+    # run against it is staffing's decision. Passing free slots here re-partitioned
+    # the layout on every pass -- 7 shards became 2, then 1 -- and a worker holding
+    # an array index above the new count dies with "array index is outside manifest
+    # shard range" while still holding its node.
+    if [ "$promoted" -gt 0 ]; then
+        say "harvest: $promoted promoted task(s) -> promote+partition into $SHARDS shard(s)"
+        NO_SUBMIT=1 bash scripts/hip_pool_harvest.sh "$SHARDS" 2>&1 | tail -3 | tee -a "$LOG"
     fi
     bash scripts/staff_datagen.sh 2>&1 | tail -2 | tee -a "$LOG"
 

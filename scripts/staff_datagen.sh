@@ -59,48 +59,16 @@ staffed_for() { _squeue -t R,PD -n "kore-mine-$1" -o "%i" | wc -l; }
 # NonZeroExitCode and the stream looks like it is merely waiting in the queue: that
 # is exactly how pool-Triton produced nothing for an entire afternoon while three
 # fixes landed on top of its manifest.
+# Delegate to Python. This was shell, and the shell was the bug: reading the
+# manifest with a here-document nested inside a command substitution mis-parsed
+# twice -- once shifting fields so n_shards came back wrong, once failing outright
+# with "here-document delimited by end-of-file" -- and both times rebuilt a
+# seven-shard layout as one shard, making every array index above 0 illegal.
+# scripts/refresh_shards.py parses JSON with a JSON parser and refuses to
+# re-partition on values that cannot be right.
 refresh_if_stale() {
-    local dir="$1" m="$REPO/$1/manifest.json" head
-    [ -f "$m" ] || return 1
-    head=$(git -C "$REPO" rev-parse HEAD)
-
-    # One field per line, read positionally. Reading five space-separated fields
-    # from one line silently shifts every field when an earlier one is empty, and
-    # the field that ends up wrong is n_shards: it became 1, the re-partition
-    # rebuilt a 7-shard set as a single shard, and every array index above 0 was
-    # then illegal. A node sat "running" for half an hour on
-    # "array index is outside manifest shard range".
-    local got src droot pool nsh
-    { read -r got; read -r src; read -r droot; read -r pool; read -r nsh; } <<EOF
-$("${KORE_PY:-/home/shasriva/kore-venv/bin/python}" - "$m" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
-for key, default in (("repo_commit", ""), ("source_task_file", ""),
-                     ("data_root", ""), ("task_pool", "-"), ("n_shards", "")):
-    print(d.get(key, default) or default)
-PY
-)
-EOF
-    [ "$got" = "$head" ] && return 0
-
-    # Refuse to re-partition on values that cannot be right. Guessing here is what
-    # destroyed the shard layout; leaving the manifest stale merely blocks new
-    # submissions for this stream, which is visible and recoverable.
-    case "$nsh" in
-        ''|*[!0-9]*) say "$dir: manifest n_shards=[$nsh] unusable; NOT re-partitioning"
-                     return 1 ;;
-    esac
-    [ "$nsh" -lt 1 ] && { say "$dir: n_shards<1; NOT re-partitioning"; return 1; }
-    [ -f "$src" ] || { say "$dir: source task file [$src] missing; NOT re-partitioning"
-                       return 1; }
-
-    say "$dir: manifest at ${got:0:8} but checkout is ${head:0:8} -> re-partitioning $nsh shard(s)"
-    if [ "$pool" != "-" ] && [ -n "$pool" ]; then export KORE_TASK_POOL="$pool"
-    else unset KORE_TASK_POOL; fi
-    PYTHONPATH="$REPO" "${KORE_PY:-/home/shasriva/kore-venv/bin/python}" \
-        "$REPO/scripts/partition_any_tasks.py" --task-file "$src" \
-        --out-dir "$REPO/$dir" --data-root "$droot" --shards "$nsh" \
-        --target 3 --skip-check >> "$LOG" 2>&1
+    "${KORE_PY:-/home/shasriva/kore-venv/bin/python}" \
+        "$REPO/scripts/refresh_shards.py" "$1" >> "$LOG" 2>&1
 }
 
 #: Shard indices a stream already has covered, read from each worker's own startup

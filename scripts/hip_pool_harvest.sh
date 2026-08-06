@@ -33,7 +33,12 @@ ROOTS="${HIP_ROOTS:-data/pool_hip data/pool_hip_f}"
 cd "$REPO" || exit 1
 . /etc/profile.d/spur.sh 2>/dev/null
 
-n_seeds=$(ls -d $(for r in $ROOTS; do echo "$REPO/$r/tasks"; done)/*__hip* 2>/dev/null | wc -l)
+# Count each root separately; a glob appended to a multi-line command
+# substitution binds to the last path only and silently counts one root.
+n_seeds=0
+for r in $ROOTS; do
+    n_seeds=$(( n_seeds + $(ls -d "$REPO/$r"/tasks/*__hip* 2>/dev/null | wc -l) ))
+done
 echo "[harvest] seeds available: $n_seeds"
 [ "$n_seeds" -eq 0 ] && { echo "[harvest] nothing to do"; exit 0; }
 

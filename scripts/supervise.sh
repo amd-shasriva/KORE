@@ -33,9 +33,15 @@ fi
 # shellcheck disable=SC1091
 . "$(dirname "$0")/gpu_slots.sh"
 
-SFT_OUT="/shared_nfs/shasriva/kore/runs/sft_v4"
-V3_MODEL="/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b"
-AKA_ARM="kore"
+SFT_OUT="${SFT_OUT:-/shared_nfs/shasriva/kore/runs/sft_v4}"
+AKA_MODEL="${AKA_MODEL:-/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b}"
+AKA_ARM="${AKA_ARM:-kore}"
+# Hold the arena until training is done. Slots are capped at four, so an eval
+# started early does not run "as well as" mining -- it runs instead of it, and the
+# model it would score is a checkpoint we are about to replace. Gating on
+# completion also means the slot SFT frees is taken immediately rather than
+# sitting idle until someone notices.
+AKA_AFTER_SFT="${AKA_AFTER_SFT:-0}"
 # One fixed directory for the arena, not one per job id. 402 tasks at up to 900s
 # each cannot finish inside the eval's 8h allocation, so the run only completes by
 # resuming from its partial ledger across several jobs -- which requires every
@@ -260,13 +266,15 @@ while :; do
     # cap, so this is the whole arena rather than a sample of it.
     if aka_done; then
         [ "$have_aka" = "0" ] && say "AKA COMPLETE (summary written)"
+    elif [ "$AKA_AFTER_SFT" = "1" ] && ! sft_done; then
+        :   # training still running; the arena waits for its slot
     elif [ "$have_aka" = "0" ] && should_submit aka && have_slot; then
         adopt_stray_ledger
         # Count across every shard ledger, not just the unsharded one, or the
         # progress line reads 0/402 for the whole run.
         scored=$(cat "$AKA_OUT"/results_"${AKA_ARM}"*.partial.jsonl 2>/dev/null | wc -l)
         say "AKA absent from queue -> submitting full arena (all types, no limit; $scored/402 already scored)"
-        sbatch scripts/spur_aka_1node.sbatch run - "$V3_MODEL" 0 "$AKA_ARM" "$AKA_OUT" 2>&1 | tee -a "$LOG"
+        sbatch scripts/spur_aka_1node.sbatch run - "$AKA_MODEL" 0 "$AKA_ARM" "$AKA_OUT" 2>&1 | tee -a "$LOG"
         note_submission aka
     fi
 

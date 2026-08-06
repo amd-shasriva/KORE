@@ -31,6 +31,10 @@ SHARDS="${HIP_SHARDS:-4}"
 # afterwards, so both roots share one gate, one harvest and one sweep.
 ROOTS="${HIP_ROOTS:-data/pool_hip data/pool_hip_f}"
 
+# Selector for the seeding sweep this loop keeps staffed. The parameter-free
+# sweep is complete, so what remains is the functionalized set.
+SEED_ARGS="${SEED_ARGS:---functionalize --skip-parameter-free}"
+
 cd "$REPO" || exit 1
 [ -z "${SPUR_CONTROLLER_ADDR:-}" ] && [ -r /etc/profile.d/spur.sh ] && . /etc/profile.d/spur.sh
 . "$REPO/scripts/gpu_slots.sh"
@@ -63,9 +67,25 @@ while :; do
     purge_held | while read -r l; do say "$l"; done
 
     # Stop when seeding is done AND everything it produced has been gated.
+    #
+    # Seeding runs as a compute job, not a local process, so liveness is a queue
+    # question. Checking only for a local process would report seeding finished
+    # the moment it moved off the login node, and the loop would exit while
+    # thousands of tasks were still unseeded.
     seeding_alive=0
     pgrep -f materialize_pool_hip >/dev/null && seeding_alive=1
+    [ "$(queued kore-seed)" -gt 0 ] && seeding_alive=1
     seeds=$(n_seeds); promoted=$(n_promoted)
+
+    # --- keep the seeding sweep staffed --------------------------------------
+    # It needs no GPU, so it never competes with gating or mining for a slot.
+    if [ "$seeding_alive" = "0" ] && [ -n "$SEED_ARGS" ] \
+       && [ ! -f "$REPO/runs/seeding.done" ]; then
+        say "seeding absent -> submitting ($SEED_ARGS)"
+        # shellcheck disable=SC2086
+        sbatch scripts/spur_seed_hip.sbatch $SEED_ARGS 2>&1 | tee -a "$LOG"
+        seeding_alive=1
+    fi
 
     # --- gate, when enough new seeds have accumulated to be worth a node ------
     # Gating comes before mining when slots are scarce: nothing can be mined that
@@ -96,7 +116,11 @@ while :; do
         bash scripts/hip_pool_harvest.sh "$want" 2>&1 | tail -3 | tee -a "$LOG"
     fi
 
-    if [ "$seeding_alive" = "0" ] && [ "$ungated" -le 0 ] && [ "$(queued kore-hipgate)" -eq 0 ]; then
+    # Only stop once seeding is genuinely finished -- marked by runs/seeding.done,
+    # not merely by no seeding job being queued right now, which is also true
+    # between a preemption and the next resubmission.
+    if [ -f "$REPO/runs/seeding.done" ] && [ "$ungated" -le 0 ] \
+       && [ "$(queued kore-hipgate)" -eq 0 ]; then
         say "seeding finished, everything gated ($promoted promoted); loop exiting"
         exit 0
     fi

@@ -44,3 +44,13 @@ fi
 # preemption resumes the sweep instead of re-paying for seeds already written.
 python scripts/materialize_pool_hip.py "$@" \
     --limit "$LIMIT" --workers "$WORKERS" --out "$OUT"
+rc=$?
+
+# Mark completion explicitly. The pipeline loop keeps this sweep staffed, so it
+# needs to tell "finished the whole selection" apart from "not queued at this
+# instant", which is also true between a preemption and the resubmission.
+if [ "$rc" -eq 0 ]; then
+    touch /home/shasriva/Kore-RL/KORE/runs/seeding.done
+    echo "[seed] sweep complete; wrote runs/seeding.done"
+fi
+exit "$rc"

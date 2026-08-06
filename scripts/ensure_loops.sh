@@ -29,16 +29,22 @@ start() {
     sleep 2
 }
 
+# Slot budget: 6 mining (3 pool-HIP + 2 pool-Triton + 1 registry-HIP) and 2
+# arenas -- the v4 run and the untuned-base baseline that makes it
+# interpretable. Wanting 7 mining left no room for the second arena, and the
+# staffing loop reclaimed the slot within a minute of it being freed by hand.
+#
 # Configuration lives here, not in the caller, so a cron-triggered restart brings
 # the loops back with the same settings a human start would give them. The cap is
 # the measured four concurrent jobs.
 start hip_pipeline \
-    GPU_JOB_CAP=8 HIP_SHARDS=7 SEED_ARGS="" \
+    GPU_JOB_CAP=8 HIP_SHARDS=7 SEED_ARGS=""
+    DATAGEN_STREAMS="poolhip:runs/shards_hippool:data/v5hippool:3:kore-mine-poolhip+kore-factory pooltriton:runs/shards_pooltriton:data/v5pooltriton:2:kore-mine-pooltriton hipreg:runs/shards_hipreg:data/v5hip:1:kore-mine-hipreg" \
     HIP_ROOTS="" \
     bash "$REPO/scripts/keepalive.sh" hip_pipeline -- bash "$REPO/scripts/hip_pipeline_loop.sh"
 
 start supervise \
-    GPU_JOB_CAP=8 AKA_AFTER_SFT=1 AKA_ARM=v4 \
+    GPU_JOB_CAP=8 AKA_AFTER_SFT=1 AKA_ARM=v4 AKA_TASK_CONCURRENCY=12 \
     AKA_MODEL=/shared_nfs/shasriva/kore/runs/sft_v4 \
     bash "$REPO/scripts/keepalive.sh" supervise -- bash "$REPO/scripts/supervise.sh"
 

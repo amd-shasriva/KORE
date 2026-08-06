@@ -1,0 +1,283 @@
+#!/usr/bin/env python
+"""Materialize pool tasks as FlyDSL twins, by translating their Triton kernel.
+
+Why translate rather than synthesize from the PyTorch module, as the HIP path
+does: FlyDSL is not a kernel language but an MLIR builder API. The smallest
+kernel in the arena is a 255-line softmax, against roughly 30 lines of Triton,
+and authoring one means writing explicit tiling, copy atoms, predication and
+shared-memory layout. Asking a teacher to invent that from ``torch.softmax`` is a
+much longer reach than asking it to port a working Triton kernel that already
+expresses the same tiling decisions.
+
+Why pool tasks and not the arena's own FlyDSL tasks: the arena ships 60 working
+FlyDSL kernels and training on them would be training on the benchmark. Pool
+tasks come from KernelBook -- real GitHub repositories, disjoint from the arena --
+so a verified FlyDSL kernel here is uncontaminated data that should transfer to
+any benchmark rather than to this one.
+
+The API is taught from FlyDSL's own ``examples/`` and ``CLAUDE.md``, not from
+arena task sources, for the same reason.
+
+    python scripts/materialize_pool_flydsl.py --limit 24 --workers 8 \
+        --out data/pool_flydsl
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+POOL = REPO / "data" / "task_pool" / "tasks"
+FLYDSL_REPO = Path.home() / "third_party" / "flydsl"
+
+#: A worked example and the project's own authoring rules. Both come from the
+#: FlyDSL repository, so nothing here is derived from benchmark task sources.
+_EXAMPLE = FLYDSL_REPO / "examples" / "01-vectorAdd.py"
+_GUIDE = FLYDSL_REPO / "CLAUDE.md"
+
+
+SEED_PROMPT = """You are porting a working GPU kernel to FlyDSL for an AMD MI355X \
+(gfx950).
+
+FlyDSL is a Python-embedded MLIR builder with a CuTe-style layout API. It is not \
+Triton: there is no `tl.load`/`tl.store` and no automatic masking. You describe \
+tiling explicitly with layouts, copy atoms and predicates.
+
+Here are FlyDSL's own authoring conventions:
+
+{conventions}
+
+Here is a complete, working FlyDSL kernel (vectorized 2D elementwise add) showing \
+the required structure -- a `@flyc.kernel` device kernel plus a `@flyc.jit` launch \
+wrapper:
+
+```python
+{example}
+```
+
+TASK. Reproduce the numerics of this PyTorch module:
+
+```python
+{module_source}
+```
+
+A working Triton implementation of the same computation is given below. It \
+already encodes correct tiling and indexing for this problem; port it, do not \
+redesign it:
+
+```python
+{triton_source}
+```
+
+HARD REQUIREMENTS -- a seed that misses any of these is discarded:
+
+1. Export a `@flyc.jit` launch wrapper named EXACTLY `{entry_name}`, called as
+   `{entry_name}({arg_list})` with {arity} torch tensor argument(s) of dtype \
+{dtype}, returning a torch tensor.
+
+2. SHAPES ARE NOT FIXED. Read every extent from the tensors at runtime. The \
+harness re-runs at other sizes, so a compile-time shape baked in passes one case \
+and fails the rest.
+
+3. Use only `flydsl.compiler` (`flyc`) and `flydsl.expr` (`fx`). Do NOT import \
+from `kernels.*` -- those helper modules are not on the path here. If you need a \
+helper, define it in the file.
+
+4. Predicate every copy whose tile can exceed the tensor bounds, as the example \
+does with `fx.elem_less`. An unpredicated border block reads out of bounds.
+
+5. Keep a single exit path in traced functions: no early `return`, no \
+branch-local `return`.
+
+It must reach at least {snr} dB SNR against the reference.
+
+Return ONLY the complete contents of the .py file in a single ```python code block.
+"""
+
+
+def _spec_of(task_dir: Path) -> dict:
+    """The JSON spec embedded in a pool task's reference.py."""
+    text = (task_dir / "reference.py").read_text(errors="ignore")
+    start = text.find('_SPEC = json.loads("')
+    if start < 0:
+        raise ValueError("no _SPEC in reference.py")
+    literal_start = text.index('"', start + len("_SPEC = json.loads"))
+    literal_end = text.index('")', literal_start)
+    return json.loads(json.loads(text[literal_start:literal_end + 1]))
+
+
+def _extract_code(reply: str) -> str:
+    import re
+    m = re.search(r"```[A-Za-z0-9_+.-]*[ \t]*\r?\n(.*?)```", reply, re.S)
+    return (m.group(1) if m else reply).strip()
+
+
+def _conventions() -> str:
+    """The authoring rules, trimmed to what governs writing one kernel.
+
+    The full guide is 217 lines of repository routing and module-placement policy
+    that would only crowd the prompt; the section that constrains kernel code is
+    what the teacher needs.
+    """
+    if not _GUIDE.is_file():
+        return "(FlyDSL guide unavailable)"
+    text = _GUIDE.read_text(errors="ignore")
+    start = text.find("## Kernel Authoring Conventions")
+    if start < 0:
+        return "(conventions section not found)"
+    end = text.find("\n## ", start + 10)
+    body = text[start:end if end > 0 else len(text)]
+    # Drop the repository-organisation bullets: they govern where a helper lives
+    # in the FlyDSL tree, which has no bearing on a standalone kernel file.
+    keep = [ln for ln in body.splitlines()
+            if not ln.lstrip().startswith("- **Helper placement")
+            and not ln.lstrip().startswith("- **`expr/")]
+    return "\n".join(keep)[:4000]
+
+
+def _build_prompt(spec: dict, triton_source: str) -> tuple[str, str]:
+    entry = spec.get("entry_name") or "forward"
+    specs = spec.get("input_specs") or []
+    arity = len(specs) or 1
+    return SEED_PROMPT.format(
+        conventions=_conventions(),
+        example=_EXAMPLE.read_text(errors="ignore")[:6000]
+        if _EXAMPLE.is_file() else "(example unavailable)",
+        module_source=spec.get("module_source", "")[:6000],
+        triton_source=triton_source[:8000],
+        entry_name=entry,
+        arity=arity,
+        arg_list=", ".join(f"t{i}" for i in range(arity)),
+        dtype=spec.get("dtype", "fp32"),
+        snr=spec.get("snr_threshold", 30)), entry
+
+
+#: The twin reuses the pool task's own reference.py and driver.py, so a FlyDSL
+#: candidate is graded against exactly the oracle its Triton counterpart is.
+def materialize(task_id: str, seed_src: str, out_root: Path) -> Path:
+    src = POOL / task_id
+    dst = out_root / "tasks" / f"{task_id}__flydsl"
+    dst.mkdir(parents=True, exist_ok=True)
+    for name in ("driver.py", "reference.py"):
+        shutil.copy(src / name, dst / name)
+    cfg = json.loads((src / "task.yaml").read_text())
+    cfg.update({"task_id": f"{task_id}__flydsl", "backend": "flydsl",
+                "seed_kernel_name": "seed_flydsl.py",
+                "provenance_root": task_id, "flydsl_twin_of": task_id})
+    (dst / "task.yaml").write_text(json.dumps(cfg, indent=2) + "\n")
+    (dst / "seed_flydsl.py").write_text(seed_src)
+    return dst
+
+
+def _seed_one(item, teacher, out_root: Path) -> dict:
+    tid, spec, triton_src = item
+    prompt, entry = _build_prompt(spec, triton_src)
+    try:
+        reply = teacher.generate([{"role": "user", "content": prompt}])
+        seed = _extract_code(reply)
+        # Cheap structural checks. They cost nothing and keep a reply that
+        # ignored the contract from consuming a gate slot on a GPU node.
+        if "flyc.jit" not in seed:
+            raise ValueError("no @flyc.jit launch wrapper")
+        if f"def {entry}" not in seed:
+            raise ValueError(f"does not define {entry!r}")
+        if "from kernels" in seed or "import kernels" in seed:
+            raise ValueError("imports kernels.* which is not on the path")
+        materialize(tid, seed, out_root)
+        return {"task_id": tid, "status": "seeded", "chars": len(seed)}
+    except Exception as exc:  # noqa: BLE001 - one bad task must not end the sweep
+        return {"task_id": tid, "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default="data/pool_flydsl")
+    ap.add_argument("--limit", type=int, default=24)
+    ap.add_argument("--offset", type=int, default=0)
+    ap.add_argument("--families", nargs="*", default=None)
+    ap.add_argument("--teacher", default="claude")
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    out_root = Path(args.out)
+    out_root.mkdir(parents=True, exist_ok=True)
+    done_path = out_root / "seed_attempts.jsonl"
+    attempted = set()
+    if done_path.exists():
+        for line in done_path.read_text().splitlines():
+            try:
+                attempted.add(json.loads(line)["task_id"])
+            except Exception:  # noqa: BLE001 - torn line after a kill
+                continue
+
+    ids = sorted(p.name for p in POOL.glob("*/") if (p / "task.yaml").is_file())
+    ids = [t for t in ids if t not in attempted][args.offset:]
+
+    selected = []
+    no_triton = 0
+    for tid in ids:
+        if len(selected) >= args.limit:
+            break
+        td = POOL / tid
+        seed = td / "seed_triton.py"
+        if not seed.is_file():
+            # Nothing to port from. Synthesizing FlyDSL without a working
+            # reference is a far harder ask, so skip rather than spend a call.
+            no_triton += 1
+            continue
+        try:
+            spec = _spec_of(td)
+        except Exception:  # noqa: BLE001 - a malformed task is not worth failing on
+            continue
+        if args.families and spec.get("family") not in args.families:
+            continue
+        selected.append((tid, spec, seed.read_text(errors="ignore")))
+
+    print(f"selected {len(selected)} pool task(s) to port to FlyDSL"
+          + (f"; skipped {no_triton} without a Triton kernel to port"
+             if no_triton else ""))
+    if args.dry_run:
+        for tid, spec, _ in selected[:5]:
+            print(f"  {tid}  family={spec.get('family')} entry={spec.get('entry_name')}")
+        return 0
+
+    from kore.data.teacher import load_env_local, make_teacher
+
+    load_env_local()
+    teacher = make_teacher(args.teacher, resilient=True)
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    lock = threading.Lock()
+    ok = fail = 0
+    with done_path.open("a") as ledger, \
+            ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futs = {pool.submit(_seed_one, it, teacher, out_root): it[0]
+                for it in selected}
+        for i, fut in enumerate(as_completed(futs), 1):
+            rec = fut.result()
+            ok += rec["status"] == "seeded"
+            fail += rec["status"] != "seeded"
+            with lock:
+                ledger.write(json.dumps(rec) + "\n")
+                ledger.flush()
+                os.fsync(ledger.fileno())
+            if i % 10 == 0:
+                print(f"  [{i}/{len(selected)}] seeded={ok} failed={fail}",
+                      flush=True)
+    print(f"\nseeded {ok}, failed {fail} -> {out_root}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

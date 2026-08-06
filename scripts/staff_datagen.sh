@@ -44,9 +44,39 @@ hipreg:runs/shards_hipreg:data/v5hip:1}"
 # stream up, and only when the scheduler says that stream is genuinely short.
 staffed_for() { _squeue -t R,PD -n "kore-mine-$1" -o "%i" | wc -l; }
 
+# A shard manifest records the commit it was partitioned at, and the worker refuses
+# to mine a shard whose code has moved -- a deliberate guard, but it means every
+# commit invalidates every manifest. Left unhandled, submissions die instantly with
+# NonZeroExitCode and the stream looks like it is merely waiting in the queue: that
+# is exactly how pool-Triton produced nothing for an entire afternoon while three
+# fixes landed on top of its manifest.
+refresh_if_stale() {
+    local dir="$1" m="$REPO/$1/manifest.json" head
+    [ -f "$m" ] || return 1
+    head=$(git -C "$REPO" rev-parse HEAD)
+    local got src droot pool nsh
+    read -r got src droot pool nsh <<< "$(
+        "${KORE_PY:-/home/shasriva/kore-venv/bin/python}" - "$m" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(d.get("repo_commit", ""), d.get("source_task_file", ""),
+      d.get("data_root", ""), d.get("task_pool", "-"), d.get("n_shards", 1))
+PY
+    )"
+    [ "$got" = "$head" ] && return 0
+    say "$dir: manifest at ${got:0:8} but checkout is ${head:0:8} -> re-partitioning"
+    if [ "$pool" != "-" ] && [ -n "$pool" ]; then export KORE_TASK_POOL="$pool"
+    else unset KORE_TASK_POOL; fi
+    PYTHONPATH="$REPO" "${KORE_PY:-/home/shasriva/kore-venv/bin/python}" \
+        "$REPO/scripts/partition_any_tasks.py" --task-file "$src" \
+        --out-dir "$REPO/$dir" --data-root "$droot" --shards "$nsh" \
+        --target 3 --skip-check >> "$LOG" 2>&1
+}
+
 for spec in $STREAMS; do
     IFS=: read -r name dir root want <<< "$spec"
     [ -d "$REPO/$dir" ] || { say "$name: no shard dir $dir; skipping"; continue; }
+    refresh_if_stale "$dir"
     have=$(staffed_for "$name")
     free=$(gpu_free)
     need=$(( want - have ))

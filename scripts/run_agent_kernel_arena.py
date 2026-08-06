@@ -384,6 +384,28 @@ def _materialize_perf_helpers(ws: Path, arena_root: str) -> None:
 _MATERIALIZE_WARNED = False
 
 
+#: A pytest config of our own, placed in the workspace so ours cannot reach it.
+#:
+#: A workspace lives inside this repository, so pytest walks up from it, finds our
+#: pyproject.toml, and adopts it as the rootdir config. Ours carries
+#: `addopts = [..., "-m", "not gpu and not release"]`, and that filter applies to the
+#: task's tests: measured on a two-test file, "1 passed, 1 deselected" against
+#: "2 passed" once isolated. On a GPU benchmark most tests are marked gpu, so a task
+#: whose tests are all GPU tests collected nothing and scored incorrect having never
+#: been run.
+#:
+#: An ini file beside the tests wins over an ancestor pyproject.toml, so this makes
+#: the workspace its own rootdir with no inherited opinions. (`python_files` is not
+#: the problem -- pytest collects an explicitly named file whatever the pattern -- but
+#: it is set permissively here so a task naming a directory behaves too.)
+_WORKSPACE_PYTEST_INI = """[pytest]
+python_files = *.py
+python_classes = Test*
+python_functions = test_*
+addopts =
+"""
+
+
 def _workspace(task, out_root: Path, arena_root: str) -> Path:
     ws = out_root / "workspaces" / task.task_id.replace("/", "__")
     if ws.exists():
@@ -392,6 +414,10 @@ def _workspace(task, out_root: Path, arena_root: str) -> Path:
     shutil.copytree(task.root, ws)
     _link_required_repo(task, ws)
     _materialize_perf_helpers(ws, arena_root)
+    # Only if the task ships none of its own, so a task that has an opinion keeps it.
+    if not any((ws / n).exists() for n in
+               ("pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml")):
+        (ws / "pytest.ini").write_text(_WORKSPACE_PYTEST_INI)
     return ws
 
 

@@ -229,6 +229,12 @@
       "lifecycle": "active"
     },
     {
+      "path": "scripts/hold_arena_nodes.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "reserve only the nodes our own arena arms already occupy, so an 8h wall-clock rollover gets the same machine back instead of losing it to another tenant on a cluster with zero idle nodes; never reserves a node we are not running on, and a lapsed hold degrades to ordinary scheduling"
+    },
+    {
       "path": "scripts/kore_monitor.py",
       "classification": "diagnostic",
       "lifecycle": "active",

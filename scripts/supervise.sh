@@ -304,7 +304,8 @@ while :; do
         # progress line reads 0/402 for the whole run.
         scored=$(cat "$AKA_OUT"/results_"${AKA_ARM}"*.partial.jsonl 2>/dev/null | wc -l)
         say "AKA absent from queue -> submitting full arena (all types, no limit; $scored/402 already scored)"
-        sbatch $QOS_ARG --job-name="$AKA_JOB_NAME" \
+        # shellcheck disable=SC2046,SC2086
+        sbatch $QOS_ARG $(res_arg) --job-name="$AKA_JOB_NAME" \
             scripts/spur_aka_1node.sbatch run - "$AKA_MODEL" 0 "$AKA_ARM" "$AKA_OUT" 2>&1 | tee -a "$LOG"
         note_submission aka
     fi

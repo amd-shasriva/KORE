@@ -84,3 +84,28 @@ gpu_free() {
 
 # True when at least one slot is available.
 have_slot() { [ "$(gpu_free)" -gt 0 ]; }
+
+# The node hold to submit against, when one exists.
+#
+# The arena is the one thing that must not lose its node. It cannot finish inside
+# an 8h allocation, so it crosses several, and on a cluster with zero idle nodes
+# the gap between one job ending and its successor being submitted is enough for
+# someone else to take the machine -- which is how a 413-task sweep ends up
+# waiting hours between rollovers. A reservation on the node it already occupies
+# closes that gap without taking anything from anyone else.
+#
+# A reservation on this controller excludes every job that does not ask for it,
+# so the hold is only useful if the submission also requests it. That cuts both
+# ways: requesting it restricts the job to reserved nodes, so this belongs on the
+# arena (which wants exactly its own node back) and NOT on mining (which should
+# land anywhere free).
+#
+# Empty when the reservation is absent or expired, so this fails open -- a lapsed
+# hold degrades to ordinary scheduling instead of blocking every submission.
+KORE_RESERVATION="${KORE_RESERVATION:-kore_hold}"
+res_arg() {
+    if scontrol show reservation 2>/dev/null |
+       grep -q "ReservationName=${KORE_RESERVATION}$"; then
+        echo "--reservation=${KORE_RESERVATION}"
+    fi
+}

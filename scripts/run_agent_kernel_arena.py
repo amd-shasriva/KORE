@@ -118,6 +118,62 @@ def _preserve_note(ws, dst_rel: str, task) -> str:
             "good the kernel is.\n")
 
 
+def _loader_entry_point(task) -> str:
+    """The attribute the task's own loader reads off the built extension.
+
+    Read rather than assumed. Every one of the 79 templates present today wants
+    ``forward``, but hardcoding it would silently mislead the model on the first
+    task that does not, and a wrong entry point fails identically to no entry
+    point at all.
+    """
+    tpl = task.root / "eval_tools" / "kernel_loader_template.py"
+    if not tpl.exists():
+        return ""
+    m = re.search(r"_ext\.([A-Za-z_]\w*)", tpl.read_text(errors="ignore"))
+    return m.group(1) if m else ""
+
+
+def _extension_contract(ws, dst_rel: str, task) -> str:
+    """State the torch-extension contract when the target starts out empty.
+
+    torch2hip ships all 57 of its targets as zero-byte .hip files, so there is no
+    existing interface to preserve, and the loader the task generates does:
+
+        ext = torch.utils.cpp_extension.load(name=..., sources=[that .hip])
+        fn  = ext.forward
+
+    A model that writes only a __global__ kernel produces a translation unit with
+    no pybind11 module, and the build fails before numerics are ever considered.
+    All 62 torch2hip candidates across both arms failed that way. hip2hip, whose
+    56 targets all ship non-empty, scored normally on the same toolchain -- the
+    boilerplate is simply visible there in the file being rewritten.
+
+    kernel_loader_template.py stays out of the context window as harness
+    scaffolding, which is correct: it is not the problem statement. The entry
+    point it requires is, so name it here.
+    """
+    if _fence_lang(dst_rel) != "cpp":
+        return ""
+    p = ws / dst_rel
+    if p.exists() and p.read_text(errors="ignore").strip():
+        return ""   # an existing implementation already demonstrates the contract
+    entry = _loader_entry_point(task)
+    if not entry:
+        return ""
+    return (
+        f"\nThis file is empty and is built as a PyTorch C++ extension with "
+        f"`torch.utils.cpp_extension.load`, then called as `ext.{entry}`. So it "
+        f"must be a COMPLETE translation unit, not just a kernel: include "
+        f"<torch/extension.h> and <hip/hip_runtime.h>, implement the host-side "
+        f"function that allocates the output and launches the kernel, and export "
+        f"it as\n"
+        f"    PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) "
+        f"{{ m.def(\"{entry}\", &your_host_function); }}\n"
+        f"Without that module block the extension has no entry point and the task "
+        f"scores zero no matter how good the kernel is.\n"
+    )
+
+
 def _task_verb(task, src_rel: str, dst_rel: str) -> str:
     """Say whether this is an in-place optimization or a translation.
 
@@ -671,7 +727,8 @@ def cmd_run(args) -> int:
                 source=source, lang=_fence_lang(dst_rel),
                 source_lang=_fence_lang(src_rel),
                 task=_task_verb(task, src_rel, dst_rel)
-                     + _preserve_note(ws, dst_rel, task),
+                     + _preserve_note(ws, dst_rel, task)
+                     + _extension_contract(ws, dst_rel, task),
                 context=_render_context(task, ws))
             r = _attempt_task(task, ws, dst_rel, prompt, policy, args,
                               ref_latency.get(task.task_id))

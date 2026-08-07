@@ -28,6 +28,26 @@ cd "$REPO" || exit 1
 LOG="$REPO/runs/staff_datagen.log"
 say() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" >> "$LOG"; }
 
+# One staffing pass at a time, across every caller.
+#
+# Deciding to submit is a read-then-write against the queue: gpu_free() and
+# covered_shards() ask the scheduler what exists, and the submission happens
+# afterwards. Nothing makes that atomic, so concurrent passes all read the same
+# answer and all act on it. Ten copies of the pipeline loop did exactly that --
+# each logged "1/3 staffed, 2 free -> adding shard(s) 0 2" in the same second,
+# each submitted shard 0, slept 3s, submitted shard 2 -- and twenty jobs landed
+# against an eight-job cap, on two shards, in three seconds.
+#
+# Holding the lock for the whole pass makes a second pass observe the first
+# one's submissions rather than race them. Skipping rather than waiting is
+# deliberate: a queued pass would submit against a queue snapshot that is
+# already stale by the time it wakes, which is the bug again with extra steps.
+exec 9>"$REPO/runs/.staff_datagen.lock"
+if ! flock -n 9; then
+    say "another staffing pass holds the lock; skipping this one"
+    exit 0
+fi
+
 #: name | shard dir | data root | wanted elements | job names that serve it
 #:
 #: The name list matters: jobs submitted before per-stream naming existed are still

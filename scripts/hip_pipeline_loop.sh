@@ -64,6 +64,7 @@ queued() { squeue -u "$USER" -h -n "$1" 2>/dev/null | wc -l; }
 say "=== hip pipeline loop start (pid $$) ==="
 say "roots: $ROOTS"
 last_gated=$(n_promoted)
+seed_phase_done=0
 
 while :; do
     # Held jobs hold a GPU slot and do no work, so clear them before deciding
@@ -97,7 +98,7 @@ while :; do
     # the layout on every pass -- 7 shards became 2, then 1 -- and a worker holding
     # an array index above the new count dies with "array index is outside manifest
     # shard range" while still holding its node.
-    if [ "$promoted" -gt 0 ]; then
+    if [ "$promoted" -gt 0 ] && [ "$seed_phase_done" = "0" ]; then
         say "harvest: $promoted promoted task(s) -> promote+partition into $SHARDS shard(s)"
         NO_SUBMIT=1 bash scripts/hip_pool_harvest.sh "$SHARDS" 2>&1 | tail -3 | tee -a "$LOG"
     fi
@@ -138,14 +139,29 @@ while :; do
         last_gated=$seeds
     fi
 
-    # Only stop once seeding is genuinely finished -- marked by runs/seeding.done,
-    # not merely by no seeding job being queued right now, which is also true
-    # between a preemption and the next resubmission.
-    if [ -f "$REPO/runs/seeding.done" ] && [ "$ungated" -le 0 ] \
+    # Seeding finishing is not this loop finishing.
+    #
+    # Retiring the seed and gate stages here is right -- marked by
+    # runs/seeding.done rather than by no seed job being queued, which is also
+    # true between a preemption and the next resubmission. Exiting was not.
+    # staff_datagen.sh is called from inside this loop and is the only thing
+    # that keeps pool-Triton and registry-HIP staffed, neither of which has
+    # anything to do with HIP seeding; mining also runs for many hours after the
+    # last seed is gated. So the exit took all three streams down with it: five
+    # of six miners ended overnight and nothing resubmitted them, because the
+    # only caller of the staffing pass had returned rc=0 and keepalive correctly
+    # declined to restart a command that had finished cleanly.
+    #
+    # Retire the stages that are genuinely done, keep looping on the one that
+    # is not.
+    if [ "$seed_phase_done" = "0" ] && [ -f "$REPO/runs/seeding.done" ] \
+       && [ "$ungated" -le 0 ] \
        && [ "$(queued kore-gate-pool_hip)" -eq 0 ] \
        && [ "$(queued kore-gate-pool_hip_f)" -eq 0 ]; then
-        say "seeding finished, everything gated ($promoted promoted); loop exiting"
-        exit 0
+        say "seeding finished, everything gated ($promoted promoted); retiring seed+gate, staying up to staff datagen"
+        seed_phase_done=1
+        SEED_ARGS=""   # nothing left to seed
+        ROOTS=""       # nothing left to gate
     fi
     sleep 300
 done

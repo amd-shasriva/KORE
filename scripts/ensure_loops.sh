@@ -17,6 +17,16 @@ cd "$REPO" || exit 1
 
 say() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" >> "$LOG"; }
 
+# Only one of these may run at a time. The idempotency below is per-loop and
+# depends on pgrep seeing a wrapper that a concurrent invocation has not started
+# yet, so two copies racing each other both conclude nothing is running. A lock
+# is the part that cannot be raced.
+exec 9>"$REPO/runs/.ensure_loops.lock"
+if ! flock -n 9; then
+    say "another ensure_loops holds the lock; exiting"
+    exit 0
+fi
+
 # Match the keepalive wrapper rather than the loop itself: the wrapper is what
 # restarts the loop, so a loop running without its wrapper is still degraded.
 running() { pgrep -f "keepalive.sh $1 " >/dev/null; }
@@ -38,7 +48,7 @@ start() {
 # the loops back with the same settings a human start would give them. The cap is
 # the measured four concurrent jobs.
 start hip_pipeline \
-    GPU_JOB_CAP=8 HIP_SHARDS=7 SEED_ARGS=""
+    GPU_JOB_CAP=8 HIP_SHARDS=7 SEED_ARGS="" \
     DATAGEN_STREAMS="poolhip:runs/shards_hippool:data/v5hippool:3:kore-mine-poolhip+kore-factory pooltriton:runs/shards_pooltriton:data/v5pooltriton:2:kore-mine-pooltriton hipreg:runs/shards_hipreg:data/v5hip:1:kore-mine-hipreg" \
     HIP_ROOTS="" \
     bash "$REPO/scripts/keepalive.sh" hip_pipeline -- bash "$REPO/scripts/hip_pipeline_loop.sh"

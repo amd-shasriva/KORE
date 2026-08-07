@@ -177,45 +177,75 @@ def check_triton_jit() -> None:
                f"{type(exc).__name__}: {str(exc)[:300]}")
 
 
-def check_hip_extension(keep: str | None) -> None:
-    """Reproduce the torch2hip compile path and surface the real diagnostic.
+def check_arch_env() -> None:
+    """The three variables AKA's setup_rocm_env exports and we did not.
 
-    torch's cpp_extension raises a CalledProcessError whose message contains the
-    ninja log; the task driver discards it. Printing it here is the whole point of
-    this check -- without it, "compilation failed" is unactionable.
+    Without PYTORCH_ROCM_ARCH, torch falls back to a built-in arch list, and
+    gfx950 is new enough that being on that list is not something to assume.
+    """
+    have = {v: os.environ.get(v, "") for v in
+            ("PYTORCH_ROCM_ARCH", "AMDGPU_TARGETS", "GPU_TARGETS")}
+    ok = all(have.values()) and len(set(have.values())) == 1
+    record("ROCm arch env set and consistent", ok,
+           ", ".join(f"{k}={v or '<unset>'}" for k, v in have.items()))
+
+
+def _build_one(ext: str, keep: str | None) -> tuple[bool, str, str]:
+    """Build the same HIP source under one file extension. Returns (ok, kind, msg).
+
+    The extension is the whole experiment. torch decides whether to run the HIP
+    toolchain by looking at the source's suffix -- ``.hip`` goes through hipcc with
+    ROCm includes, while ``.cpp`` is compiled by plain c++ with only
+    -D__HIP_PLATFORM_AMD__ defined and no -I for the ROCm headers. That is why a
+    file containing <hip/hip_runtime.h> fails as .cpp and can succeed as .hip, and
+    why testing only one of them tells you nothing about the other.
+    """
+    import torch
+    from torch.utils.cpp_extension import load
+
+    root = keep or tempfile.mkdtemp(prefix="kore_hipcheck_")
+    build_dir = pathlib.Path(root) / ext.lstrip(".")
+    build_dir.mkdir(parents=True, exist_ok=True)
+    src = build_dir / f"add_one{ext}"
+    src.write_text(_HIP_SRC)
+    name = f"kore_hipcheck_{ext.lstrip('.')}"
+    try:
+        mod = load(name=name, sources=[str(src)],
+                   build_directory=str(build_dir), verbose=False)
+        if torch.cuda.is_available():
+            x = torch.ones(64, device="cuda")
+            if not bool(torch.allclose(mod.add_one(x), x + 1)):
+                return False, "numerics wrong", ""
+            return True, "built and correct on device", ""
+        return True, "built (no GPU to run it)", ""
+    except Exception as exc:  # noqa: BLE001 - the message IS the finding
+        return False, type(exc).__name__, str(exc)
+
+
+def check_hip_extension(keep: str | None) -> None:
+    """Reproduce the torch2hip compile path under both source extensions.
+
+    torch's cpp_extension raises a CalledProcessError whose message carries the
+    ninja log; the task driver discards it and prints hipify's success line
+    instead. Surfacing it is the point of this check -- "compilation failed" on
+    its own is unactionable, and it cost 62 of 62 torch2hip candidates.
     """
     try:
-        import torch
-        from torch.utils.cpp_extension import load
+        import torch  # noqa: F401
+        from torch.utils.cpp_extension import load  # noqa: F401
     except Exception as exc:  # noqa: BLE001
         record("HIP extension builds", False, f"import failed: {exc}")
         return
 
-    build_dir = keep or tempfile.mkdtemp(prefix="kore_hipcheck_")
-    pathlib.Path(build_dir).mkdir(parents=True, exist_ok=True)
-    src = pathlib.Path(build_dir) / "add_one.cpp"
-    src.write_text(_HIP_SRC)
-    try:
-        mod = load(name="kore_hipcheck_add_one", sources=[str(src)],
-                   build_directory=build_dir, verbose=False)
-        if torch.cuda.is_available():
-            x = torch.ones(64, device="cuda")
-            ok = bool(torch.allclose(mod.add_one(x), x + 1))
-            record("HIP extension builds and runs", ok,
-                   "" if ok else "numerics wrong")
-        else:
-            record("HIP extension builds", True, "built; no GPU to run it on")
-    except Exception as exc:  # noqa: BLE001 - the message IS the finding
-        msg = str(exc)
-        record("HIP extension builds", False, f"{type(exc).__name__}")
-        print("\n  ---- full compiler diagnostic (the part the task driver drops) ----",
-              flush=True)
-        for line in msg.splitlines()[:60]:
-            print(f"    {line}", flush=True)
-        log = pathlib.Path(build_dir) / "build.ninja"
-        if log.exists():
-            print(f"  ---- build.ninja retained at {log} ----", flush=True)
-        print(f"  ---- build dir kept: {build_dir} ----\n", flush=True)
+    for ext in (".hip", ".cpp"):
+        ok, kind, msg = _build_one(ext, keep)
+        record(f"HIP extension builds from {ext}", ok, kind)
+        if not ok and msg:
+            print(f"\n  ---- diagnostic for {ext} "
+                  "(the part the task driver drops) ----", flush=True)
+            for line in msg.splitlines()[:40]:
+                print(f"    {line}", flush=True)
+            print("", flush=True)
 
 
 def check_hipcc() -> None:
@@ -251,6 +281,7 @@ def main() -> int:
     check_triton_version()
     check_single_triton_dist()
     check_torch_rocm()
+    check_arch_env()
     check_hipcc()
     check_ninja()
     check_triton_jit()

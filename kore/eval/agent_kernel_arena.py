@@ -284,6 +284,14 @@ def _task_env() -> dict:
 
     So put the interpreter that has torch first on PATH, and add the aiter checkout
     to PYTHONPATH, since several tasks import it as a library rather than editing it.
+
+    The GPU architecture is the third thing they need and the one we were not
+    giving them. AKA sets it in ``src/preprocessing.setup_rocm_env``, which we
+    never call because we drive the tasks directly rather than through their
+    runner; its own docstring says that without it "PyTorch and CMake will fall
+    back to their built-in arch lists", and gfx950 is new enough that falling back
+    is not safe. Every torch2hip candidate -- 62 of 62 across both arms -- failed
+    to compile while the models were producing plausible HIP.
     """
     env = dict(os.environ)
     venv_bin = str(Path(sys.executable).parent)
@@ -294,7 +302,49 @@ def _task_env() -> dict:
         parts = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
         if str(aiter) not in parts:
             env["PYTHONPATH"] = os.pathsep.join([str(aiter), *parts])
+    arch = _detect_gfx_arch()
+    if arch:
+        # All three, together, exactly as AKA does: PyTorch reads
+        # PYTORCH_ROCM_ARCH and CMake-based HIP builds read the other two, and a
+        # task that mixes both must not see two different architectures.
+        for var in ("PYTORCH_ROCM_ARCH", "AMDGPU_TARGETS", "GPU_TARGETS"):
+            env.setdefault(var, arch)
     return env
+
+
+@lru_cache(maxsize=1)
+def _detect_gfx_arch() -> str:
+    """The gfx target of the GPU this worker was given, or "" if unknowable.
+
+    Asks torch before rocminfo: torch is what compiles the extension, so its view
+    of the device is the one that has to be satisfied, and it is already loaded
+    here. The feature suffix is stripped -- torch reports
+    ``gfx950:sramecc+:xnack-`` and PYTORCH_ROCM_ARCH wants the bare target.
+
+    Returns "" rather than guessing. A wrong architecture compiles cleanly and
+    then fails at launch, which is far harder to diagnose than the missing-arch
+    fallback it would be papering over.
+    """
+    try:
+        import torch  # noqa: PLC0415 - heavy, and only needed on a GPU worker
+
+        if torch.cuda.is_available() and torch.cuda.device_count():
+            name = torch.cuda.get_device_properties(0).gcnArchName or ""
+            if name.startswith("gfx"):
+                return name.split(":")[0]
+    except Exception:  # noqa: BLE001 - fall through to rocminfo
+        pass
+    try:
+        out = subprocess.run(["rocminfo"], capture_output=True, text=True,
+                             timeout=30)
+        for line in (out.stdout or "").splitlines():
+            if "gfx" in line and "Name:" in line:
+                tok = line.split()[-1].strip()
+                if tok.startswith("gfx"):
+                    return tok.split(":")[0]
+    except Exception:  # noqa: BLE001 - no rocminfo on a login node
+        pass
+    return ""
 
 
 #: Held while a task times its kernel. Generation and compilation overlap

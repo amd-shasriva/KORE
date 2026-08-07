@@ -87,13 +87,29 @@ staffed_for() { _squeue -t R,PD -n "kore-mine-$1" -o "%i" | wc -l; }
 # outright: "not permitted for user under account amd-general"). So prefer it
 # when it has headroom, and fall back to burst when it does not -- a queued
 # burst job is still better than no job.
+# Two limits, not one. Free capacity says whether a job *can* start there; the
+# self-imposed cap says whether it *should*. General is 8 nodes for all 363
+# users on this filesystem, and the two arena arms already sit there because the
+# eval is the one thing whose progress has to be observable. Letting mining take
+# every slot that happens to be free would leave nothing for anyone else, so
+# mining is held to three and the remainder falls back to burst.
 GENERAL_QOS_CAP="${GENERAL_QOS_CAP:-8}"
+GENERAL_MINE_MAX="${GENERAL_MINE_MAX:-3}"
 pick_qos() {
-    local used free
+    local used free mine
     used=$(squeue -t R -h -o "%q %D" 2>/dev/null |
            awk '$1=="amd-general-qos"{s+=$2} END{print s+0}')
     free=$(( GENERAL_QOS_CAP - used ))
-    if [ "$free" -gt 0 ]; then echo "--qos=amd-general-qos"; else echo "$QOS_ARG"; fi
+    # Count queued as well as running: a submission that has not started yet
+    # still intends to occupy a slot, and ignoring it lets one pass overshoot
+    # the cap several times over before the first job appears as running.
+    mine=$(_squeue -t R,PD -o "%q %j" |
+           awk '$1=="amd-general-qos" && $2 ~ /^kore-mine-/ {n++} END{print n+0}')
+    if [ "$free" -gt 0 ] && [ "$mine" -lt "$GENERAL_MINE_MAX" ]; then
+        echo "--qos=amd-general-qos"
+    else
+        echo "$QOS_ARG"
+    fi
 }
 
 # A shard manifest records the commit it was partitioned at, and the worker refuses

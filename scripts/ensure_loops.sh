@@ -35,7 +35,12 @@ start() {
     local name="$1"; shift
     running "$name" && return 0
     say "$name not running -> starting"
-    setsid nohup env "$@" >/dev/null 2>&1 < /dev/null &
+    # 9>&- closes the lock fd in the child. Without it the long-lived loop
+    # inherits the descriptor and therefore the lock, so the lock outlives this
+    # script by days and every later invocation decides another copy is already
+    # running and does nothing -- which is worse than the duplication the lock
+    # was added to prevent.
+    setsid nohup env "$@" >/dev/null 2>&1 < /dev/null 9>&- &
     sleep 2
 }
 

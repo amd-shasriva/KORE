@@ -73,6 +73,29 @@ hipreg:runs/shards_hipreg:data/v5hip:1:kore-mine-hipreg}"
 # stream up, and only when the scheduler says that stream is genuinely short.
 staffed_for() { _squeue -t R,PD -n "kore-mine-$1" -o "%i" | wc -l; }
 
+# Submit to the pool that can actually start the job.
+#
+# Every mining submission went to burst, because that is the default in
+# gpu_slots.sh and nothing here overrode it. Burst is the large pool but it is
+# persistently saturated -- 125 nodes running against 55 queued -- so a
+# replacement worker for a stream that had just lost its node sat queued for
+# hours, and the stream stayed dead the whole time. Both pool-Triton and
+# registry-HIP died that way twice in one night.
+#
+# amd-general-qos is small, 8 nodes shared with every other user, and it is the
+# only other pool this account may submit to (amd-primus-qos is refused
+# outright: "not permitted for user under account amd-general"). So prefer it
+# when it has headroom, and fall back to burst when it does not -- a queued
+# burst job is still better than no job.
+GENERAL_QOS_CAP="${GENERAL_QOS_CAP:-8}"
+pick_qos() {
+    local used free
+    used=$(squeue -t R -h -o "%q %D" 2>/dev/null |
+           awk '$1=="amd-general-qos"{s+=$2} END{print s+0}')
+    free=$(( GENERAL_QOS_CAP - used ))
+    if [ "$free" -gt 0 ]; then echo "--qos=amd-general-qos"; else echo "$QOS_ARG"; fi
+}
+
 # A shard manifest records the commit it was partitioned at, and the worker refuses
 # to mine a shard whose code has moved -- a deliberate guard, but it means every
 # commit invalidates every manifest. Left unhandled, submissions die instantly with
@@ -166,9 +189,12 @@ import json;print(json.load(open('$REPO/$dir/manifest.json')).get('n_shards',0))
         # One element per submission: a range would re-queue indices that are
         # already covered, and there is no way to express a gap in an array range.
         # shellcheck disable=SC2086
-        out=$(sbatch $QOS_ARG --job-name="kore-mine-$name" --array="$idx-$idx" \
+        qos_arg="$(pick_qos)"
+        # shellcheck disable=SC2086
+        out=$(sbatch $qos_arg --job-name="kore-mine-$name" --array="$idx-$idx" \
             scripts/spur_datagen_array.sbatch \
             "$REPO/$dir" "$REPO/$root" 3 run 2>&1)
+        say "  shard $idx via ${qos_arg#--qos=}"
         echo "$out" >> "$LOG"
         jid=$(printf '%s' "$out" | grep -oE '[0-9]+$' | tail -1)
         # Claim the index immediately: the job will not print its own shard for a

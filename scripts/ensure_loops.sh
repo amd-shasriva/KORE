@@ -55,7 +55,23 @@ start hip_pipeline \
 
 start supervise \
     GPU_JOB_CAP=8 AKA_AFTER_SFT=1 AKA_ARM=v4 AKA_TASK_CONCURRENCY=12 \
+    AKA_JOB_NAME=kore-aka \
     AKA_MODEL=/shared_nfs/shasriva/kore/runs/sft_v4 \
     bash "$REPO/scripts/keepalive.sh" supervise -- bash "$REPO/scripts/supervise.sh"
+
+# The untuned base arm, which is what makes the v4 number mean anything. It had
+# no supervisor at all: it was submitted by hand, and the one instance running
+# watches only kore-aka, so when the base arena hit its 8h wall nothing brought
+# it back. Same script, its own arm, queue name, ledger and log.
+#
+# DATAGEN_SHARDS stays unset so this instance never staffs mining, and SFT is
+# already complete, so in practice it supervises exactly one thing.
+start supervise_base \
+    GPU_JOB_CAP=8 AKA_AFTER_SFT=1 AKA_ARM=base AKA_TASK_CONCURRENCY=12 \
+    AKA_JOB_NAME=kore-aka-base \
+    AKA_OUT="$REPO/runs/aka_base" \
+    SUPERVISE_LOG="$REPO/runs/supervise_base.log" \
+    AKA_MODEL=/home/shasriva/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-30B-A3B-Instruct/snapshots/b2cff646eb4bb1d68355c01b18ae02e7cf42d120 \
+    bash "$REPO/scripts/keepalive.sh" supervise_base -- bash "$REPO/scripts/supervise.sh"
 
 exit 0

@@ -10,7 +10,17 @@
 #SBATCH --gres=gpu:mi355x:8
 #SBATCH --cpus-per-task=128
 #SBATCH --time=08:00:00
-#SBATCH --requeue
+# --requeue is deliberately ABSENT, matching spur_grpo_1node.sbatch. On this
+# SPUR controller a requeued job trips JobHoldMaxRequeue on its FIRST requeue
+# and is held permanently -- still counting against the eight-job cap while
+# doing no work, which is how held elements used to accumulate until nothing
+# could launch. These elements run on preemptible burst capacity, so automatic
+# requeue is not a rare path here, it is the normal end of a shard.
+#
+# Nothing is lost by dropping it: shards are ledgered, the drivers skip
+# completed work, and staff_datagen.sh resubmits a stream that is short. The
+# explicit self-requeue below still runs before the wall clock; if the
+# controller refuses it the element simply ends and gets re-staffed.
 #SBATCH --exclusive
 #SBATCH --open-mode=append
 # SPUR expands %j (child job id), but not Slurm's %A/%a array placeholders.

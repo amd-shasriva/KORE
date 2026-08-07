@@ -58,9 +58,17 @@ start hip_pipeline \
     HIP_ROOTS="" \
     bash "$REPO/scripts/keepalive.sh" hip_pipeline -- bash "$REPO/scripts/hip_pipeline_loop.sh"
 
+# Arenas go to amd-general-qos, mining stays on burst.
+#
+# Burst is the big pool but it is genuinely saturated -- 125 nodes running
+# cluster-wide -- and a burst job simply waits, which for the eval means the
+# thing we are actually trying to measure makes no progress. amd-general-qos
+# caps the whole QoS at 8 nodes across all users and only 4 were taken, so a
+# one-node arena fits there now and starts immediately. Mining is throughput
+# work that can afford to queue; the eval is not.
 start supervise \
     GPU_JOB_CAP=8 AKA_AFTER_SFT=1 AKA_ARM=v4 AKA_TASK_CONCURRENCY=12 \
-    AKA_JOB_NAME=kore-aka \
+    AKA_JOB_NAME=kore-aka KORE_QOS=amd-general-qos \
     AKA_MODEL=/shared_nfs/shasriva/kore/runs/sft_v4 \
     bash "$REPO/scripts/keepalive.sh" supervise -- bash "$REPO/scripts/supervise.sh"
 
@@ -73,7 +81,7 @@ start supervise \
 # already complete, so in practice it supervises exactly one thing.
 start supervise_base \
     GPU_JOB_CAP=8 AKA_AFTER_SFT=1 AKA_ARM=base AKA_TASK_CONCURRENCY=12 \
-    AKA_JOB_NAME=kore-aka-base \
+    AKA_JOB_NAME=kore-aka-base KORE_QOS=amd-general-qos \
     AKA_OUT="$REPO/runs/aka_base" \
     SUPERVISE_LOG="$REPO/runs/supervise_base.log" \
     AKA_MODEL=/home/shasriva/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-30B-A3B-Instruct/snapshots/b2cff646eb4bb1d68355c01b18ae02e7cf42d120 \

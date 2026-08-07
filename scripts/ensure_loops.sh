@@ -44,7 +44,15 @@ start() {
     sleep 2
 }
 
-# Slot budget: 6 mining (3 pool-HIP + 2 pool-Triton + 1 registry-HIP) and 2
+# Registry-HIP is retired at 0 workers: all 171 of its tasks have produced
+# output, so it is complete on coverage and the staffing loop -- which only
+# compares staffed-against-wanted and cannot tell a finished stream from an
+# unstarted one -- kept refilling a slot that had nothing left to add. Its share
+# goes to pool-HIP, which is also 100% HIP-language and still has 6,010 of 6,457
+# tasks untouched. Pool-Triton drops to one worker: it is the translation-pair
+# source and only needs to keep producing, not to race.
+#
+# Slot budget: 5 mining (4 pool-HIP + 1 pool-Triton) and 2
 # arenas -- the v4 run and the untuned-base baseline that makes it
 # interpretable. Wanting 7 mining left no room for the second arena, and the
 # staffing loop reclaimed the slot within a minute of it being freed by hand.
@@ -54,7 +62,7 @@ start() {
 # the measured four concurrent jobs.
 start hip_pipeline \
     GPU_JOB_CAP=8 HIP_SHARDS=7 SEED_ARGS="" \
-    DATAGEN_STREAMS="poolhip:runs/shards_hippool:data/v5hippool:3:kore-mine-poolhip+kore-factory pooltriton:runs/shards_pooltriton:data/v5pooltriton:2:kore-mine-pooltriton hipreg:runs/shards_hipreg:data/v5hip:1:kore-mine-hipreg" \
+    DATAGEN_STREAMS="poolhip:runs/shards_hippool:data/v5hippool:4:kore-mine-poolhip+kore-factory pooltriton:runs/shards_pooltriton:data/v5pooltriton:1:kore-mine-pooltriton hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
     HIP_ROOTS="" \
     bash "$REPO/scripts/keepalive.sh" hip_pipeline -- bash "$REPO/scripts/hip_pipeline_loop.sh"
 

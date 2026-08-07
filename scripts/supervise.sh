@@ -46,7 +46,16 @@ AKA_AFTER_SFT="${AKA_AFTER_SFT:-0}"
 # each cannot finish inside the eval's 8h allocation, so the run only completes by
 # resuming from its partial ledger across several jobs -- which requires every
 # attempt to land in the same place.
-AKA_OUT="$REPO/runs/aka_full_${AKA_ARM}"
+AKA_OUT="${AKA_OUT:-$REPO/runs/aka_full_${AKA_ARM}}"
+
+# The queue name this instance owns.
+#
+# Two arms run at once: the tuned checkpoint and the untuned base that makes it
+# interpretable. Each needs its own supervisor, and each supervisor has to be
+# able to tell its own arena apart from the other one -- both for liveness and
+# for the duplicate reaper, which would otherwise cancel the other arm as if it
+# were a stray copy of itself.
+AKA_JOB_NAME="${AKA_JOB_NAME:-kore-aka}"
 
 # The datagen array mining the external pool. Optional: set DATAGEN_SHARDS to a
 # shard directory to have this loop keep it staffed. Each element is an 8h
@@ -62,7 +71,10 @@ DATAGEN_ROOT="${DATAGEN_ROOT:-$REPO/data/v5pool}"
 DATAGEN_N="${DATAGEN_N:-8}"
 DATAGEN_TARGET="${DATAGEN_TARGET:-3}"
 
-LOG="$REPO/runs/supervise.log"
+# Per-instance, because two supervisors run at once (one arm each). Sharing one
+# file is how the duplicated pipeline loops hid for hours: four writers, one log,
+# and no way to tell which line came from which process.
+LOG="${SUPERVISE_LOG:-$REPO/runs/supervise.log}"
 RETIRE="${*:-}"
 
 mkdir -p "$REPO/runs"
@@ -246,7 +258,12 @@ while :; do
 
     have_sft=0; have_aka=0
     echo "$q" | grep -q "kore-sft" && have_sft=1
-    echo "$q" | grep -q "kore-aka" && have_aka=1
+    # Ask the scheduler for this exact name rather than grepping the queue text.
+    # "kore-aka" is a substring of "kore-aka-base", so while the base arm was up
+    # this read as the v4 arena being alive and the v4 arena was never
+    # resubmitted -- it came back only when the base arm happened to die too,
+    # which is 13 minutes of a node sitting idle in the case that produced this.
+    [ -n "$(_squeue -t R,PD -n "$AKA_JOB_NAME" -o '%i')" ] && have_aka=1
 
     # Reap duplicate arenas, keeping the oldest.
     #
@@ -255,7 +272,7 @@ while :; do
     # work the same slice. It happens whenever a submission of ours lands in the
     # same minute as this loop's own check -- exactly what a manual restart does --
     # and it costs a node plus duplicate rows in the results the whole run is for.
-    for extra in $(squeue -u "$KORE_USER" -h -n kore-aka -o "%i" 2>/dev/null |
+    for extra in $(squeue -u "$KORE_USER" -h -n "$AKA_JOB_NAME" -o "%i" 2>/dev/null |
                    sort -n | tail -n +2); do
         say "duplicate arena $extra -> cancelling (keeping the oldest)"
         scancel "$extra" 2>&1 | tee -a "$LOG"
@@ -287,7 +304,8 @@ while :; do
         # progress line reads 0/402 for the whole run.
         scored=$(cat "$AKA_OUT"/results_"${AKA_ARM}"*.partial.jsonl 2>/dev/null | wc -l)
         say "AKA absent from queue -> submitting full arena (all types, no limit; $scored/402 already scored)"
-        sbatch $QOS_ARG scripts/spur_aka_1node.sbatch run - "$AKA_MODEL" 0 "$AKA_ARM" "$AKA_OUT" 2>&1 | tee -a "$LOG"
+        sbatch $QOS_ARG --job-name="$AKA_JOB_NAME" \
+            scripts/spur_aka_1node.sbatch run - "$AKA_MODEL" 0 "$AKA_ARM" "$AKA_OUT" 2>&1 | tee -a "$LOG"
         note_submission aka
     fi
 

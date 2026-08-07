@@ -354,6 +354,15 @@
       "lifecycle": "active"
     },
     {
+      "path": "scripts/purge_arena_harness_failures.py",
+      "classification": "destructive",
+      "lifecycle": "active",
+      "deletes_artifacts": true,
+      "side_effect_free_by_default": true,
+      "mutation_requires": "--apply",
+      "role": "remove only the arena ledger rows whose verdict came from a fixed harness bug, so resume re-judges those tasks and keeps every other verdict; never purges a CORRECT row, and copies each ledger aside before an atomic rewrite"
+    },
+    {
       "path": "scripts/quarantine_heldout_wins.py",
       "classification": "destructive",
       "lifecycle": "active",
@@ -734,6 +743,13 @@
       "classification": "diagnostic",
       "lifecycle": "active",
       "role": "hardware validation of the rocprofv3 kernel-trace path: dominant/minor/decoy workloads on gfx950"
+    },
+    {
+      "path": "scripts/verify_arena_toolchain.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "side_effect_free": true,
+      "role": "prove the arena toolchain on gfx950 one known failure mode at a time: triton >= 3.6.0 and exactly one distribution owning triton/, torch's ROCm build, the arch env AKA sets and we did not, hipcc, ninja, a real triton JIT compile, aiter's gluon import, and a HIP extension built from both .hip and .cpp -- printing the compiler diagnostic the task driver discards"
     },
     {
       "path": "scripts/verify_breadth.py",

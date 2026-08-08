@@ -225,7 +225,13 @@ def _build_prompt(spec: dict, functional=None) -> tuple[str, str]:
 
 def _seed_one(item, teacher, out_root: Path, functionalize=False) -> dict:
     tid, spec = item
-    functional = _functional_info(spec) if functionalize else None
+    # A registry task is already a pure function of its declared inputs, so
+    # there are no module parameters to lift and no entry_class to
+    # instantiate. Running functionalization on one raises and the task is
+    # silently dropped, which is indistinguishable from it being unsuitable.
+    functional = (_functional_info(spec)
+                  if functionalize and not spec.get("registry_task")
+                  else None)
     prompt, entry = _build_prompt(spec, functional)
     try:
         reply = teacher.generate([{"role": "user", "content": prompt}])
@@ -274,12 +280,75 @@ def _seed_parallel(selected, teacher, done_path: Path, out_root: Path, args) -> 
     return 0
 
 
+def _read_task_cfg(task_dir: Path) -> dict:
+    """task.yaml, whichever dialect of it this task speaks.
+
+    Generated pool tasks write JSON; hand-authored registry tasks write real
+    YAML with nested shape maps and comments. json.loads on the latter raises,
+    which is what stopped the twin path at the registry boundary.
+    """
+    text = (task_dir / "task.yaml").read_text(errors="ignore")
+    if text.lstrip().startswith("{"):
+        return json.loads(text)
+    import yaml  # noqa: PLC0415 - only registry tasks need it
+
+    return yaml.safe_load(text) or {}
+
+
+def _registry_spec(task_dir: Path) -> dict:
+    """Synthesize the pool's spec shape for a hand-authored registry task.
+
+    The two task kinds describe themselves differently. A pool task embeds a
+    JSON ``_SPEC`` whose ``module_source`` is a PyTorch nn.Module and whose
+    ``entry_class`` names it. A registry task's reference.py *is* the oracle --
+    plain Python defining ``ref_fn`` and ``get_inputs``, often importing AITER --
+    and its shapes live in task.yaml.
+
+    That difference is why the frontier set was unreachable: flash attention,
+    fused MoE and fp8 GEMM are all registry tasks, so the HIP and FlyDSL twin
+    paths could only ever see the external pool, whose median baseline is 17us.
+
+    ``entry_class`` is deliberately omitted. There is no nn.Module to
+    instantiate, so ``_functional_info`` must not run -- and it does not need
+    to: functionalization exists to turn a module's hidden parameters into
+    explicit arguments, and a registry task is already a pure function of its
+    declared inputs.
+    """
+    cfg = _read_task_cfg(task_dir)
+    source = (task_dir / "reference.py").read_text(errors="ignore")
+    shapes = (cfg.get("shapes") or {}).get("primary") or {}
+    dims = [v for v in shapes.values() if isinstance(v, int) and v > 0]
+    scale = 1
+    for d in dims:
+        scale *= d
+    targets = cfg.get("targets") or {}
+    return {
+        "module_source": source,
+        "entry_name": cfg.get("operation") or task_dir.name,
+        "dtype": cfg.get("dtype") or "fp32",
+        "snr_threshold": cfg.get("snr_threshold") or targets.get("snr_db") or 30,
+        "family": cfg.get("op_family") or cfg.get("taxonomy_family") or "registry",
+        "primary_scale": scale or "a larger size",
+        # One entry per declared dimension is wrong as an arity and right as a
+        # hint: the prompt only uses it for an example shape, and the true
+        # signature is visible in module_source, which is the whole reference.
+        "input_specs": [{"shape": [d for d in dims] or [1]}],
+        "registry_task": True,
+        "task_id": cfg.get("task_id") or task_dir.name,
+    }
+
+
 def _spec_of(task_dir: Path) -> dict:
-    """The JSON spec embedded in a pool task's reference.py."""
+    """The spec for a task, whichever kind it is.
+
+    Pool tasks carry an embedded JSON ``_SPEC``; registry tasks are adapted.
+    Falling back rather than branching on the source root keeps a mixed
+    --source-root working, and keeps the caller from having to know.
+    """
     text = (task_dir / "reference.py").read_text(errors="ignore")
     start = text.find('_SPEC = json.loads("')
     if start < 0:
-        raise ValueError("no _SPEC in reference.py")
+        return _registry_spec(task_dir)
     literal_start = text.index('"', start + len("_SPEC = json.loads"))
     literal_end = text.index('")', literal_start)
     return json.loads(json.loads(text[literal_start:literal_end + 1]))
@@ -316,7 +385,7 @@ def materialize_functional(task_id: str, spec: dict, seed_src: str,
     shutil.copy(src / "driver.py", dst / "driver.py")
     (dst / "reference.py").write_text(
         _FUNCTIONAL_REFERENCE.format(spec=json.dumps(spec)))
-    cfg = json.loads((src / "task.yaml").read_text())
+    cfg = _read_task_cfg(src)
     cfg.update({"task_id": f"{task_id}__hipf", "backend": "hip",
                 "seed_kernel_name": "seed_hip.hip",
                 "provenance_root": task_id, "hip_twin_of": task_id,
@@ -338,7 +407,7 @@ def materialize(task_id: str, seed_src: str, out_root: Path) -> Path:
     dst.mkdir(parents=True, exist_ok=True)
     for name in ("reference.py", "driver.py"):
         shutil.copy(src / name, dst / name)
-    cfg = json.loads((src / "task.yaml").read_text())
+    cfg = _read_task_cfg(src)
     cfg["task_id"] = f"{task_id}__hip"
     cfg["backend"] = "hip"
     cfg["seed_kernel_name"] = "seed_hip.hip"

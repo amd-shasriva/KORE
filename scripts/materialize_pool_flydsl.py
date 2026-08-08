@@ -102,6 +102,19 @@ and fails the rest.
 from `kernels.*` -- those helper modules are not on the path here. If you need a \
 helper, define it in the file.
 
+3a. These are the ONLY names those two modules export. If what you want is not \
+in this list it does not exist -- build it out of what is here rather than \
+guessing a name, and match the capitalisation exactly.
+
+flyc: {flyc_api}
+
+fx: {fx_api}
+
+3b. A FlyDSL value is not a torch tensor. It has no `.device`, `.reshape`, \
+`.shape`, `.dtype` or any other torch method; shapes come from the layout you \
+declare and from extents you read explicitly. Only the `@flyc.jit` wrapper sees \
+real torch tensors.
+
 4. Predicate every copy whose tile can exceed the tensor bounds, as the example \
 does with `fx.elem_less`. An unpredicated border block reads out of bounds.
 
@@ -157,11 +170,39 @@ def _conventions() -> str:
     return "\n".join(keep)[:4000]
 
 
+def _api_surface(module: str) -> str:
+    """Every public name a FlyDSL module exports, as a flat list.
+
+    The teacher was inventing the API. Measured across 2,005 gated ports, 242
+    failures were a name that does not exist -- ``fx.constexpr`` for
+    ``fx.Constexpr`` 137 times on its own, then ``fx.empty`` and ``fx.maximum``
+    -- and another 104 called torch methods on FlyDSL values. None of that is a
+    reasoning failure; it is a model writing against an API it has never seen,
+    from a guide that documents conventions rather than symbols.
+
+    Listing the names costs a few thousand characters of prompt and removes the
+    entire class. It is read from the installed package, so it cannot drift from
+    the FlyDSL the gate actually compiles against.
+    """
+    try:
+        import importlib  # noqa: PLC0415 - only needed when a prompt is built
+        import sys
+
+        if str(FLYDSL_REPO / "python") not in sys.path:
+            sys.path.insert(0, str(FLYDSL_REPO / "python"))
+        mod = importlib.import_module(module)
+    except Exception:  # noqa: BLE001 - a dry-run without FlyDSL still builds
+        return "(unavailable -- follow the example and the guide above)"
+    return ", ".join(sorted(n for n in dir(mod) if not n.startswith("_")))
+
+
 def _build_prompt(spec: dict, triton_source: str) -> tuple[str, str]:
     entry = spec.get("entry_name") or "forward"
     specs = spec.get("input_specs") or []
     arity = len(specs) or 1
     return SEED_PROMPT.format(
+        flyc_api=_api_surface("flydsl.compiler"),
+        fx_api=_api_surface("flydsl.expr"),
         conventions=_conventions(),
         example=_EXAMPLE.read_text(errors="ignore")[:6000]
         if _EXAMPLE.is_file() else "(example unavailable)",

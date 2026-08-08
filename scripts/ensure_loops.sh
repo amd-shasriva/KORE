@@ -90,6 +90,7 @@ start frontier_pipeline \
     GPU_JOB_CAP=8 FRONTIER_FAMILIES="attention gemm quantization" \
     HIP_ROOT=data/pool_hip_frontier FLYDSL_ROOT=data/pool_flydsl \
     REG_HIP_ROOT=data/registry_hip_frontier \
+    REG_FLYDSL_ROOT=data/registry_flydsl_frontier \
     KORE_QOS=amd-burst-qos \
     DATAGEN_STREAMS="frontier:runs/shards_frontier:data/v5frontier:6:kore-mine-frontier pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
     bash "$REPO/scripts/keepalive.sh" frontier_pipeline -- \

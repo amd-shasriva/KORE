@@ -48,6 +48,71 @@ TWIN_SUFFIXES: dict[str, tuple[str, ...]] = {
 }
 
 
+def registry_spec(task_dir: Path) -> dict:
+    """Synthesize the pool's spec shape for a hand-authored registry task.
+
+    The two task kinds describe themselves differently. A pool task embeds a
+    JSON ``_SPEC`` whose ``module_source`` is a PyTorch nn.Module and whose
+    ``entry_class`` names it. A registry task's reference.py *is* the oracle --
+    plain Python defining ``ref_fn`` and ``get_inputs``, often importing AITER
+    -- and its shapes live in task.yaml.
+
+    That difference is why the frontier set was unreachable: flash attention,
+    fused MoE and fp8 GEMM are all registry tasks, so a twin path that only
+    understood the embedded ``_SPEC`` could see nothing but the external pool,
+    whose median baseline is 17us.
+
+    ``entry_class`` is deliberately omitted. There is no nn.Module to
+    instantiate, so functionalization must not run on one -- and it does not
+    need to: functionalization exists to turn a module's hidden parameters into
+    explicit arguments, and a registry task is already a pure function of its
+    declared inputs.
+    """
+    cfg = read_task_cfg(task_dir)
+    source = (task_dir / "reference.py").read_text(errors="ignore")
+    shapes = (cfg.get("shapes") or {}).get("primary") or {}
+    dims = [v for v in shapes.values() if isinstance(v, int) and v > 0]
+    scale = 1
+    for d in dims:
+        scale *= d
+    targets = cfg.get("targets") or {}
+    return {
+        "module_source": source,
+        "entry_name": cfg.get("operation") or task_dir.name,
+        "dtype": cfg.get("dtype") or "fp32",
+        "snr_threshold": cfg.get("snr_threshold") or targets.get("snr_db") or 30,
+        "family": cfg.get("op_family") or cfg.get("taxonomy_family") or "registry",
+        "primary_scale": scale or "a larger size",
+        # One entry per declared dimension is wrong as an arity and right as a
+        # hint: the prompt only uses it for an example shape, and the true
+        # signature is visible in module_source, which is the whole reference.
+        "input_specs": [{"shape": [d for d in dims] or [1]}],
+        "registry_task": True,
+        "task_id": cfg.get("task_id") or task_dir.name,
+    }
+
+
+def spec_of(task_dir: Path) -> dict:
+    """The spec for a task, whichever kind it is.
+
+    Pool tasks carry an embedded JSON ``_SPEC``; registry tasks are adapted.
+    Falling back rather than branching on the source root keeps a mixed
+    ``--source-root`` working and keeps the caller from having to know.
+
+    Shared by both dialects on purpose. When only the HIP path knew how to read
+    a registry task, HIP twinned the frontier and FlyDSL silently could not --
+    it raised on every registry reference.py and was left porting the pool,
+    which is the launch-bound half of the corpus.
+    """
+    text = (task_dir / "reference.py").read_text(errors="ignore")
+    start = text.find('_SPEC = json.loads("')
+    if start < 0:
+        return registry_spec(task_dir)
+    literal_start = text.index('"', start + len("_SPEC = json.loads"))
+    literal_end = text.index('")', literal_start)
+    return json.loads(json.loads(text[literal_start:literal_end + 1]))
+
+
 def mark_exhausted(out_root: Path, selected: int, examined: int) -> None:
     """Record whether a root still has anything to seed.
 

@@ -134,6 +134,46 @@ def test_marker_records_what_was_examined(tmp_path):
     assert rec["examined"] == 787 and rec["selected"] == 0
 
 
+def test_both_dialects_read_a_registry_task():
+    """Neither dialect may be the only one that can see the frontier.
+
+    The registry is where the difficulty is -- flash attention, fused MoE, fp8
+    GEMM -- and for a while only the HIP path could parse it. FlyDSL raised on
+    every registry reference.py and was left porting the pool, which is the
+    launch-bound half of the corpus and 25% of the arena scored against it.
+    """
+    for script in ("materialize_pool_hip.py", "materialize_pool_flydsl.py"):
+        src = (Path(__file__).resolve().parents[1] / "scripts" / script).read_text()
+        assert "from kore.data.twins import spec_of" in src, \
+            f"{script} does not use the shared spec adapter"
+        assert "no _SPEC in reference.py" not in src, \
+            f"{script} still rejects registry tasks outright"
+
+
+def test_registry_roots_do_not_mask_each_other():
+    """Both registry streams pass --source-root kore/tasks, so liveness keyed
+    on that string would make each answer for the other and whichever started
+    second would never run. It must key on --out."""
+    src = (Path(__file__).resolve().parents[1]
+           / "scripts" / "frontier_pipeline.sh").read_text()
+    assert 'pgrep -f "source-root kore/tasks"' not in src
+    assert "start_registry_materializer" in src
+    assert "REG_FLYDSL_ROOT" in src, "the registry FlyDSL root is not wired in"
+
+    loops = (Path(__file__).resolve().parents[1]
+             / "scripts" / "ensure_loops.sh").read_text()
+    assert "REG_FLYDSL_ROOT=" in loops, "root not configured for the live loop"
+
+
+def test_every_seed_root_is_gated():
+    """A root that is seeded but never gated produces no training rows at all."""
+    src = (Path(__file__).resolve().parents[1]
+           / "scripts" / "frontier_pipeline.sh").read_text()
+    gate_line = next(l for l in src.splitlines() if l.strip().startswith("for root in"))
+    for root in ("REG_HIP_ROOT", "REG_FLYDSL_ROOT", "HIP_ROOT", "FLYDSL_ROOT"):
+        assert root in gate_line, f"{root} is seeded but never gated"
+
+
 def test_flydsl_gets_a_teacher_that_can_write_flydsl():
     """opus-5 writes HIP and cannot write FlyDSL: on the port prompt it runs to
     the token ceiling and returns zero characters, every call. The stream needs

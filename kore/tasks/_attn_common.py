@@ -40,7 +40,6 @@ the CPU oracle sanity check) never needs a GPU or the aiter runtime.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import math
 import os
 
@@ -202,12 +201,15 @@ def _time_fn(fn, warmup: int, iters: int) -> int:
 def _load_candidate(task_dir: str, entry: str):
     # Cache the module so a stateful kernel's globals persist from the bench timing
     # loop into the post-timing re-verification (anti invocation-count timing hack).
+    # The candidate is not always Python: a HIP task stages kernel.hip and no
+    # kernel.py at all, and loading the latter unconditionally failed in the
+    # loader before anything was compiled -- reported as compile_or_run_fail, as
+    # though the seed were at fault. Shared with every other driver family so
+    # the twin of a task is gradeable wherever the task itself is graded.
     if getattr(_load_candidate, "_mod", None) is None:
-        path = os.path.join(task_dir, "kernel.py")
-        spec = importlib.util.spec_from_file_location("candidate_kernel", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _load_candidate._mod = mod
+        from kore.env.hip_toolchain import load_candidate_module
+
+        _load_candidate._mod = load_candidate_module(task_dir)
     return getattr(_load_candidate._mod, entry)
 
 

@@ -30,7 +30,6 @@ prong could not run. ``3`` must never be read as a pass.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import math
 import os
 from dataclasses import dataclass, field
@@ -91,13 +90,12 @@ def _emit_inconclusive(reason: str, payload: dict[str, Any]) -> int:
 
 
 def _load_candidate(task_dir: str, entry: str):
-    path = os.path.join(task_dir, "kernel.py")
-    spec = importlib.util.spec_from_file_location("candidate_kernel", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load candidate from {path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return getattr(mod, entry)
+    # Dispatches on what the task staged: a HIP candidate is kernel.hip and
+    # there is no kernel.py beside it, so loading Python unconditionally failed
+    # in the loader rather than in the compile it was meant to exercise.
+    from kore.env.hip_toolchain import load_candidate_module
+
+    return getattr(load_candidate_module(task_dir), entry)
 
 
 def _clone(value):

@@ -81,15 +81,40 @@ def test_flydsl_stages_python(tmp_path):
 
 # ---- both drivers must go through it --------------------------------------
 
-@pytest.mark.parametrize("module", ["kore/tasks/_genops.py",
-                                    "kore/tasks/_training_common.py"])
-def test_drivers_share_the_dispatch(module):
+@pytest.mark.parametrize("module", [
+    "kore/tasks/_genops.py",
+    "kore/tasks/_training_common.py",
+    "kore/tasks/_attn_common.py",
+    "kore/tasks/_moe_common.py",
+    "kore/tasks/_quant_common.py",
+    "kore/verify/runner.py",
+])
+def test_driver_families_share_the_dispatch(module):
     src = (Path(__file__).resolve().parents[1] / module).read_text()
     assert "load_candidate_module" in src, f"{module} does not share the dispatch"
 
 
-def test_registry_driver_no_longer_hardcodes_kernel_py():
-    src = (Path(__file__).resolve().parents[1]
-           / "kore" / "tasks" / "_training_common.py").read_text()
-    loader = src.split("def _load_candidate")[1].split("\ndef ")[0]
-    assert 'os.path.join(task_dir, "kernel.py")' not in loader
+def test_no_live_loader_hardcodes_kernel_py():
+    """There were six driver families and only one knew about .hip. Fixing them
+    one at a time is how flash-attention backward started passing while
+    chunked-prefill went on failing in a different file for the same reason."""
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for path in list((root / "kore").rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if "_drafts/" in rel:        # not imported at runtime
+            continue
+        src = path.read_text(errors="ignore")
+        if 'os.path.join(task_dir, "kernel.py")' in src or \
+           'os.path.abspath(__file__)), "kernel.py")' in src:
+            offenders.append(rel)
+    assert not offenders, f"still loading Python unconditionally: {offenders[:5]}"
+
+
+def test_per_task_drivers_were_all_converted():
+    """Each hand-authored task carries its own loader, and a HIP twin copies it
+    verbatim -- so one unconverted driver means that task's twin is ungradeable."""
+    root = Path(__file__).resolve().parents[1] / "kore" / "tasks"
+    stale = [p.parent.name for p in root.glob("*/driver.py")
+             if 'spec_from_file_location("candidate_kernel"' in p.read_text(errors="ignore")]
+    assert not stale, f"task drivers still importing Python directly: {stale[:5]}"

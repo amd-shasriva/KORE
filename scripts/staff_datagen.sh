@@ -68,6 +68,29 @@ pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton \
 poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory \
 hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg}"
 
+#: Arena arms this script must not crowd out.
+#:
+#: "One less than the cap" above assumed a single arm. There are two, plus a
+#: gate, so six miners filled all eight slots -- and the arena cannot staff
+#: itself out of that: the supervisor submits it, and only when a slot is free.
+#: An arm's allocation ends every 8 hours, and its slot is then free for exactly
+#: as long as it takes the next staffing pass to take it. After that the
+#: supervisor finds the cap full and, having no branch for it, silently does
+#: nothing. The v4 arm sat dead for 50 minutes that way while its node stood
+#: reserved for it.
+#:
+#: The hold-back counts only the arms that are *absent*, so a running arena
+#: costs nothing here and the slots go to mining as before.
+ARENA_JOB_NAMES="${ARENA_JOB_NAMES:-kore-aka kore-aka-base}"
+
+arena_reserve() {
+    local n=0 j
+    for j in $ARENA_JOB_NAMES; do
+        [ "$(_squeue -t R,PD -n "$j" -o '%i' | wc -l)" -eq 0 ] && n=$(( n + 1 ))
+    done
+    echo "$n"
+}
+
 # Count by job name, which the scheduler knows for a job the moment it is
 # submitted. Counting by reading each job's log missed every pending job, because
 # a job that has not started has written nothing -- so a stream already fully
@@ -188,6 +211,11 @@ import json;print(json.load(open('$REPO/$dir/manifest.json')).get('n_shards',0))
         have=$(( have + $(_squeue -t R,PD -n "$extra" -o "%i" | wc -l) ))
     done
     free=$(gpu_free)
+    reserve=$(arena_reserve)
+    if [ "$reserve" -gt 0 ]; then
+        free=$(( free - reserve )); [ "$free" -lt 0 ] && free=0
+        say "$name: holding $reserve slot(s) for absent arena arm(s); $free usable"
+    fi
     need=$(( want - have )); [ "$want" -gt "$nsh" ] && need=$(( nsh - have ))
     [ "$need" -gt "$free" ] && need=$free
     [ "$need" -le 0 ] && continue

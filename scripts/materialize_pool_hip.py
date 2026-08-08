@@ -367,6 +367,11 @@ def main() -> int:
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--families", nargs="*", default=None,
                     help="restrict to these pool families (default: all)")
+    ap.add_argument("--task-list", default=None,
+                    help="file of task ids to twin, one per line. A source root "
+                         "is not a work list: kore/tasks is 1,549 dirs of which "
+                         "482 are frontier, and the rest are taken first in "
+                         "name order")
     ap.add_argument("--teacher", default="claude")
     ap.add_argument("--allow-parameterized", action="store_true",
                     help="also seed modules with learned weights (they cannot "
@@ -420,6 +425,12 @@ def main() -> int:
         attempted |= cross
 
     ids = sorted(p.name for p in POOL.glob("*/") if (p / "task.yaml").is_file())
+    if args.task_list:
+        from kore.data.twins import read_task_list
+
+        wanted = read_task_list(Path(args.task_list))
+        ids = [t for t in ids if t in wanted]
+        print(f"restricted to {len(ids)} task(s) from {args.task_list}")
     ids = [t for t in ids if t not in attempted][args.offset:]
 
     selected = []

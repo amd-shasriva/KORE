@@ -48,6 +48,25 @@ TWIN_SUFFIXES: dict[str, tuple[str, ...]] = {
 }
 
 
+def read_task_list(path: Path) -> set[str]:
+    """Task ids from a selection file, one per line, ``#`` for comments.
+
+    A source root is not a work list. kore/tasks holds 1,549 task dirs and only
+    482 of them are frontier; the rest are generated elementwise and reduction
+    ops -- gen_abs, gelu_tanh, gen_add_add_relu -- which is precisely the
+    launch-bound work the frontier selection exists to skip. Walking the root
+    directly takes them in name order, so both registry streams spent their
+    first thousand teacher calls there: 66% of the twins they had produced were
+    off-target.
+    """
+    wanted = set()
+    for line in path.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            wanted.add(line)
+    return wanted
+
+
 def registry_spec(task_dir: Path) -> dict:
     """Synthesize the pool's spec shape for a hand-authored registry task.
 

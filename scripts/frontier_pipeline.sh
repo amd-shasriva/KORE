@@ -63,6 +63,16 @@ REG_HIP_ROOT="${REG_HIP_ROOT:-data/registry_hip_frontier}"
 #: what the port prompt needs.
 REG_FLYDSL_ROOT="${REG_FLYDSL_ROOT:-data/registry_flydsl_frontier}"
 
+#: The 482 ids select_frontier_tasks ranked above the histogram break.
+#:
+#: Pointing a registry stream at the source root alone was wrong: kore/tasks is
+#: 1,549 dirs, and the other 1,067 are generated elementwise and reduction ops
+#: that sort before the interesting ones. Both registry streams therefore spent
+#: their first thousand teacher calls on gen_abs and gelu_tanh -- 66% of the
+#: twins they had produced were off-target -- while flash attention and fused
+#: MoE waited behind them in name order.
+FRONTIER_TASK_LIST="${FRONTIER_TASK_LIST:-$REPO/runs/frontier_tasks.txt}"
+
 #: The FlyDSL port is written by a different teacher than the HIP seeds.
 #:
 #: .env.local points KORE_TEACHER_MODEL at claude-opus-5, which writes HIP fine
@@ -144,15 +154,31 @@ start_materializer() {
 #: Liveness keys on --out like the pool ones do. Matching "source-root
 #: kore/tasks" instead would have made the two registry dialects answer for
 #: each other, and whichever started second would never run.
+#: Rebuild the selection if it is missing. Without it these streams would fall
+#: back to the whole registry, which is the failure this guards -- two thirds of
+#: the teacher calls spent on generated elementwise ops. Skipping the stream is
+#: the better failure: seeding the wrong thing costs more than seeding nothing.
+ensure_task_list() {
+    [ -s "$FRONTIER_TASK_LIST" ] && return 0
+    say "frontier task list missing -> rebuilding $FRONTIER_TASK_LIST"
+    "$PY" "$REPO/scripts/select_frontier_tasks.py" --out "$FRONTIER_TASK_LIST" \
+        >> "$LOG" 2>&1
+    [ -s "$FRONTIER_TASK_LIST" ] && return 0
+    say "  could not build the frontier list; skipping registry streams"
+    return 1
+}
+
 start_registry_materializer() {
     local script="$1" out="$2" limit="$3" log="$4"
     shift 4
     materializer_alive "$out" && return 0
     root_exhausted "$out" && return 0
+    ensure_task_list || return 0
     say "registry materializer $script absent -> starting (out=$out)"
     setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 "$@" \
         "$PY" "$REPO/scripts/$script" \
-        --source-root kore/tasks --limit "$limit" --workers 8 --out "$out" \
+        --source-root kore/tasks --task-list "$FRONTIER_TASK_LIST" \
+        --limit "$limit" --workers 8 --out "$out" \
         >> "$REPO/runs/$log" 2>&1 < /dev/null &
     sleep 2
 }

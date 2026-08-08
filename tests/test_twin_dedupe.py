@@ -174,6 +174,37 @@ def test_every_seed_root_is_gated():
         assert root in gate_line, f"{root} is seeded but never gated"
 
 
+def test_task_list_filters_to_the_selection(tmp_path):
+    """A source root is not a work list."""
+    (tmp_path / "list.txt").write_text(
+        "# ranked by select_frontier_tasks\n"
+        "flash_attn_decode_bf16\n"
+        "\n"
+        "fused_moe_silu_bf16   # trailing comment\n")
+    from kore.data.twins import read_task_list
+
+    assert read_task_list(tmp_path / "list.txt") == {
+        "flash_attn_decode_bf16", "fused_moe_silu_bf16"}
+
+
+@pytest.mark.parametrize("script", ["materialize_pool_hip.py",
+                                    "materialize_pool_flydsl.py"])
+def test_materializers_accept_a_task_list(script):
+    src = (Path(__file__).resolve().parents[1] / "scripts" / script).read_text()
+    assert "--task-list" in src, f"{script} cannot be restricted to a selection"
+    assert "read_task_list" in src
+
+
+def test_registry_streams_are_restricted_to_the_frontier():
+    """Both registry streams walked kore/tasks in name order, so 66% of what
+    they twinned was gen_abs and gelu_tanh rather than flash attention."""
+    src = (Path(__file__).resolve().parents[1]
+           / "scripts" / "frontier_pipeline.sh").read_text()
+    assert "FRONTIER_TASK_LIST" in src
+    assert '--task-list "$FRONTIER_TASK_LIST"' in src, \
+        "registry materializers still take the whole registry"
+
+
 def test_flydsl_gets_a_teacher_that_can_write_flydsl():
     """opus-5 writes HIP and cannot write FlyDSL: on the port prompt it runs to
     the token ceiling and returns zero characters, every call. The stream needs

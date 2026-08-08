@@ -43,12 +43,24 @@ import os
 import re
 import shutil
 import sys
+import pathlib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-POOL = REPO / "data" / "task_pool" / "tasks"
+DEFAULT_SOURCE_ROOT = REPO / "data" / "task_pool" / "tasks"
+#: The directory whose task dirs get a twin in the target language. Defaults to
+#: the external pool, which is what this was built for, but the transformation is
+#: not pool-specific: a task dir is reference.py + driver.py + task.yaml + a
+#: language-specific seed, and the registry's hand-authored frontier tasks --
+#: flash attention, fused MoE, fp8 GEMM -- have exactly that shape.
+#:
+#: That matters because the pool is where the easy work is. Its median baseline
+#: is 17us and 86% of it is under 100us, so a HIP or FlyDSL twin of a pool task
+#: is a twin of a launch-bound kernel. Pointing --source-root at kore/tasks
+#: produces the same twin for a kernel that actually has headroom.
+POOL = DEFAULT_SOURCE_ROOT
 
 SEED_PROMPT = """You are writing a DELIBERATELY SIMPLE, correct HIP C++ kernel for \
 an AMD MI355X (gfx950).
@@ -340,6 +352,8 @@ def materialize(task_id: str, seed_src: str, out_root: Path) -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="data/pool_hip")
+    ap.add_argument("--source-root", default=None,
+                    help="task dirs to twin (default: the external pool; point at kore/tasks for the frontier registry set)")
     ap.add_argument("--limit", type=int, default=50)
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--families", nargs="*", default=None,
@@ -362,6 +376,14 @@ def main() -> int:
                          "so this is the difference between 19h and ~2h")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+
+    if args.source_root:
+        global POOL
+        POOL = pathlib.Path(args.source_root).resolve()
+        if not POOL.is_dir():
+            print(f"source root does not exist: {POOL}", file=sys.stderr)
+            return 2
+        print(f"source root: {POOL}")
 
     out_root = Path(args.out)
     out_root.mkdir(parents=True, exist_ok=True)

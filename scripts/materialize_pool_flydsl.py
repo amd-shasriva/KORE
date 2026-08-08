@@ -179,7 +179,9 @@ def materialize(task_id: str, seed_src: str, out_root: Path) -> Path:
     dst.mkdir(parents=True, exist_ok=True)
     for name in ("driver.py", "reference.py"):
         shutil.copy(src / name, dst / name)
-    cfg = json.loads((src / "task.yaml").read_text())
+    from kore.data.twins import read_task_cfg
+
+    cfg = read_task_cfg(src)
     cfg.update({"task_id": f"{task_id}__flydsl", "backend": "flydsl",
                 "seed_kernel_name": "seed_flydsl.py",
                 "provenance_root": task_id, "flydsl_twin_of": task_id})
@@ -219,6 +221,10 @@ def main() -> int:
     ap.add_argument("--families", nargs="*", default=None)
     ap.add_argument("--teacher", default="claude")
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--reseed-existing", action="store_true",
+                    help="also port tasks that already have a FlyDSL twin in "
+                         "another output root. Off by default: re-porting one "
+                         "spends a teacher call to rewrite a file that exists")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -240,6 +246,16 @@ def main() -> int:
                 attempted.add(json.loads(line)["task_id"])
             except Exception:  # noqa: BLE001 - torn line after a kill
                 continue
+
+    if not args.reseed_existing:
+        from kore.data.twins import TWIN_SUFFIXES, existing_twins
+
+        cross = existing_twins(TWIN_SUFFIXES["flydsl"], REPO / "data")
+        fresh = cross - attempted
+        if fresh:
+            print(f"skipping {len(fresh)} task(s) already twinned in another "
+                  f"output root")
+        attempted |= cross
 
     ids = sorted(p.name for p in POOL.glob("*/") if (p / "task.yaml").is_file())
     ids = [t for t in ids if t not in attempted][args.offset:]

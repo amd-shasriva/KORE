@@ -284,6 +284,21 @@ def test_flydsl_gets_a_teacher_that_can_write_flydsl():
         "load_env_local would overwrite the per-stream model with .env.local"
 
 
+def test_exhausted_marker_is_invalidated_by_a_changed_root():
+    """A marker older than the root it describes answers about a different root.
+    After a batch of twins was deleted, two registry streams sat idle on a
+    verdict recorded before the deletion, with hours of TTL left."""
+    src = (Path(__file__).resolve().parents[1]
+           / "scripts" / "frontier_pipeline.sh").read_text()
+    body = src.split("root_exhausted()")[1].split("\n}")[0]
+    assert '"$tasks" -nt "$marker"' in body, \
+        "marker is not compared against the root it describes"
+    assert 'rm -f "$marker"' in body, "a stale marker is not cleared"
+    # stat's %Y is whole seconds, so a cleanup finishing in the same second the
+    # marker was written compares equal and the staleness is missed.
+    assert 'stat -c %Y "$tasks"' not in body, "second-granularity comparison"
+
+
 def test_pipeline_skips_exhausted_and_matches_roots_not_script_names():
     """Two roots run the same script, so liveness must key on --out.
 

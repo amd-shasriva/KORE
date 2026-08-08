@@ -111,6 +111,43 @@ def test_no_live_loader_hardcodes_kernel_py():
     assert not offenders, f"still loading Python unconditionally: {offenders[:5]}"
 
 
+def test_twin_drivers_are_kept_in_sync(tmp_path):
+    """A twin copies its driver once, at seed time, so a later fix to that
+    driver never reaches twins already on disk -- 34 of them went on failing in
+    a loader that had already been fixed."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import refresh_twin_drivers as R
+
+    repo = Path(__file__).resolve().parents[1]
+    src = repo / "kore" / "tasks" / "flash_attn_decode_bf16"
+    if not (src / "driver.py").is_file():
+        pytest.skip("registry task not present")
+    twin = tmp_path / "tasks" / "flash_attn_decode_bf16__hip"
+    twin.mkdir(parents=True)
+    (twin / "driver.py").write_text("# stale\n")
+
+    import os
+    rel = os.path.relpath(tmp_path, repo)
+    assert R.refresh([rel], check=True) == (1, 0), "drift not detected"
+    assert R.refresh([rel], check=False) == (1, 1), "drift not repaired"
+    assert (twin / "driver.py").read_text() == (src / "driver.py").read_text()
+
+
+def test_refresher_leaves_the_oracle_alone(tmp_path):
+    """reference.py is generated for a functionalized twin; copying the
+    source's over it would change what the twin is graded against."""
+    src = (Path(__file__).resolve().parents[1]
+           / "scripts" / "refresh_twin_drivers.py").read_text()
+    assert "reference.py" not in src.split('"""', 2)[2], \
+        "the refresher touches reference.py"
+
+
+def test_pipeline_refreshes_twin_drivers():
+    src = (Path(__file__).resolve().parents[1]
+           / "scripts" / "frontier_pipeline.sh").read_text()
+    assert "refresh_twin_drivers.py" in src
+
+
 def test_per_task_drivers_were_all_converted():
     """Each hand-authored task carries its own loader, and a HIP twin copies it
     verbatim -- so one unconverted driver means that task's twin is ungradeable."""

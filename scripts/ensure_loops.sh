@@ -86,13 +86,23 @@ start() {
 # the login node -- they are gateway-bound and would hold a node hostage to
 # network latency inside an allocation -- gates whichever root accumulates seeds,
 # refreshes the shard stamps, and staffs mining across every declared stream.
+#
+# The stream split is 1 frontier-Triton to 2 frontier-twins. Triton already has
+# 10k mined rows and is the dialect the corpus is thickest in; the twins had
+# none at all, because until now nothing mined them -- the arena is 22% HIP and
+# 25% FlyDSL and both were being scored against training data that did not
+# exist. Streams are staffed in the order they appear here, and the first one
+# takes what it can, so the ordering is the priority.
 start frontier_pipeline \
     GPU_JOB_CAP=8 FRONTIER_FAMILIES="attention gemm quantization" \
     HIP_ROOT=data/pool_hip_frontier FLYDSL_ROOT=data/pool_flydsl \
     REG_HIP_ROOT=data/registry_hip_frontier \
     REG_FLYDSL_ROOT=data/registry_flydsl_frontier \
+    TWIN_OK_ROOT=data/frontier_twins_ok \
+    TWIN_DATA_ROOT=data/v5frontier_twins \
+    TWIN_SHARD_DIR=runs/shards_frontier_twins \
     KORE_QOS=amd-burst-qos \
-    DATAGEN_STREAMS="frontier:runs/shards_frontier:data/v5frontier:6:kore-mine-frontier pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
+    DATAGEN_STREAMS="frontier:runs/shards_frontier:data/v5frontier:1:kore-mine-frontier frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:2:kore-mine-frontiertwins pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
     bash "$REPO/scripts/keepalive.sh" frontier_pipeline -- \
     bash "$REPO/scripts/frontier_pipeline.sh"
 

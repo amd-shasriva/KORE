@@ -1,0 +1,126 @@
+"""A twin that is seeded and gated must also be mined.
+
+The twin pipeline has four stages -- materialize, gate, harvest, mine -- and
+only the first two were connected. The gate writes a verdict file and nothing
+else; promoting the passers into a resolvable task root and sharding them is
+the harvester's job, and the pipeline's harvest step was a comment followed by
+a bare ``:``. So 1,104 registry-HIP and 309 registry-FlyDSL twins reached a
+verdict and stopped there, no staffed shard set contained a single ``__hip`` or
+``__flydsl`` id, and the 22% of the arena that is HIP and the 25% that is
+FlyDSL were being scored against training data that was never produced.
+
+Seeding a twin nothing will mine is worse than not seeding it: it spends the
+teacher and a gate slot to produce a directory no stage reads.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+
+
+@pytest.fixture(scope="module")
+def pipeline() -> str:
+    return (SCRIPTS / "frontier_pipeline.sh").read_text()
+
+
+@pytest.fixture(scope="module")
+def harvest() -> str:
+    return (SCRIPTS / "hip_pool_harvest.sh").read_text()
+
+
+@pytest.fixture(scope="module")
+def loops() -> str:
+    return (SCRIPTS / "ensure_loops.sh").read_text()
+
+
+@pytest.fixture(scope="module")
+def staff() -> str:
+    return (SCRIPTS / "staff_datagen.sh").read_text()
+
+
+# ---- the harvest must actually run ----------------------------------------
+
+def test_pipeline_calls_the_harvester(pipeline):
+    assert "hip_pool_harvest.sh" in pipeline, \
+        "gate verdicts are never turned into promoted tasks"
+
+
+def test_harvest_step_is_not_a_no_op(pipeline):
+    """It was literally `:` under a comment saying harvest happened elsewhere."""
+    assert ": # harvest is owned by" not in pipeline
+
+
+def test_harvest_leaves_submission_to_staffing(pipeline):
+    """Two submitters means a stream gets queued twice and one must be killed."""
+    assert "NO_SUBMIT=1" in pipeline
+
+
+# ---- FlyDSL twins must be visible to it -----------------------------------
+
+def test_harvest_can_see_flydsl_twins(harvest):
+    """The glob matched only *__hip*, so a gated FlyDSL twin was skipped by the
+    promote loop and omitted from the id list -- invisible after gating."""
+    assert "TWIN_GLOBS" in harvest
+    assert "list_twins" in harvest
+
+
+def test_pipeline_harvests_all_three_suffixes(pipeline):
+    assert "'*__hip *__hipf *__flydsl'" in pipeline
+
+
+# ---- frontier twins must not be diluted by the pool -----------------------
+
+def test_frontier_twins_get_their_own_root(pipeline, harvest):
+    """data/pool_hip_ok holds 6,457 pool twins. Promoting the frontier ones
+    into it would make them a few percent of the shard set and mine the
+    launch-bound majority instead."""
+    for var in ("HIP_PROMOTED", "HIP_DATA_ROOT", "HIP_SHARD_DIR"):
+        assert var in harvest, f"{var} is not overridable"
+    assert "TWIN_OK_ROOT" in pipeline
+    assert "data/pool_hip_ok" not in pipeline.split("TWIN_OK_ROOT")[1][:400]
+
+
+def test_harvest_filters_to_the_selection(harvest, pipeline):
+    """The registry roots hold 740 twins seeded before they were narrowed to
+    the frontier 482; promoting those would put them straight back in."""
+    assert "HIP_TASK_LIST" in harvest
+    assert 'HIP_TASK_LIST="$FRONTIER_TASK_LIST"' in pipeline
+
+
+# ---- and something must mine them -----------------------------------------
+
+def test_a_stream_is_staffed_on_the_twins(loops, staff):
+    for src, name in ((loops, "ensure_loops.sh"), (staff, "staff_datagen.sh")):
+        assert "frontiertwins:runs/shards_frontier_twins" in src, \
+            f"{name} declares no twin mining stream"
+        want = _wanted(src, "frontiertwins")
+        assert int(want) > 0, f"{name} staffs the twin stream with {want} workers"
+
+
+def _wanted(src: str, name: str) -> str:
+    """The worker count a stream spec asks for, wherever it is quoted."""
+    for token in src.replace('"', " ").replace("\\", " ").split():
+        if token.startswith(name + ":"):
+            return token.split(":")[3]
+    raise AssertionError(f"stream {name} not declared")
+
+
+def test_staffing_default_matches_the_live_config(loops, staff):
+    """staff_datagen is also run by hand, and a stale default once staffed four
+    miners onto a stream that had just been retired."""
+    for name in ("frontier", "frontiertwins"):
+        a, b = _wanted(loops, name), _wanted(staff, name)
+        assert a == b, \
+            f"{name}: ensure_loops wants {a}, staff_datagen default is {b}"
+
+
+def test_twin_shards_are_kept_current(pipeline):
+    """A manifest older than the checkout makes every worker die on preflight,
+    which in the queue looks exactly like waiting a turn."""
+    refresh_block = pipeline.split("refresh_shards.py")[0]
+    assert "$TWIN_SHARD_DIR" in refresh_block[-400:], \
+        "the twin shard set is never refreshed against the current commit"

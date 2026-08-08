@@ -48,6 +48,33 @@ TWIN_SUFFIXES: dict[str, tuple[str, ...]] = {
 }
 
 
+def mark_exhausted(out_root: Path, selected: int, examined: int) -> None:
+    """Record whether a root still has anything to seed.
+
+    A sweep that selects nothing is not free. Deciding a pool task is
+    HIP-eligible means running its module to check that the weights can be
+    supplied from outside, so an empty sweep still pays that per task -- ~90s
+    of CPU to conclude there is no work -- and the pipeline restarts a finished
+    materializer every pass. The marker lets the caller skip a settled root;
+    it is removed as soon as there is work again, so it can never wedge one
+    shut.
+    """
+    marker = out_root / ".exhausted"
+    if selected:
+        marker.unlink(missing_ok=True)
+        return
+    out_root.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps({"examined": examined, "selected": 0,
+                    "at": _now()}) + "\n")
+
+
+def _now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def existing_twins(suffixes, data_dir: Path) -> set[str]:
     """Source task ids that already have a twin with one of ``suffixes``.
 

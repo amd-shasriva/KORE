@@ -23,7 +23,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kore.data.twins import (  # noqa: E402
-    TWIN_SUFFIXES, existing_twins, read_task_cfg)
+    TWIN_SUFFIXES, existing_twins, mark_exhausted, read_task_cfg)
 
 
 def _twin(data: Path, root: str, name: str) -> Path:
@@ -110,6 +110,40 @@ def test_reads_yaml_task_cfg(tmp_path):
     cfg = read_task_cfg(tmp_path)
     assert cfg["task_id"] == "flash_attn_decode_bf16"
     assert cfg["shapes"]["primary"]["heads"] == 32
+
+
+# ---- a finished root must say so, and must be able to reopen --------------
+
+def test_empty_sweep_marks_the_root_exhausted(tmp_path):
+    mark_exhausted(tmp_path, selected=0, examined=787)
+    assert (tmp_path / ".exhausted").is_file()
+
+
+def test_work_clears_the_marker(tmp_path):
+    """The marker must never wedge a root shut once its source grows."""
+    mark_exhausted(tmp_path, selected=0, examined=787)
+    mark_exhausted(tmp_path, selected=4, examined=787)
+    assert not (tmp_path / ".exhausted").exists()
+
+
+def test_marker_records_what_was_examined(tmp_path):
+    import json
+
+    mark_exhausted(tmp_path, selected=0, examined=787)
+    rec = json.loads((tmp_path / ".exhausted").read_text())
+    assert rec["examined"] == 787 and rec["selected"] == 0
+
+
+def test_pipeline_skips_exhausted_and_matches_roots_not_script_names():
+    """Two roots run the same script, so liveness must key on --out.
+
+    Matching the script name reports the registry materializer as the
+    pool-sourced one, and the pool root then never restarts at all.
+    """
+    src = (Path(__file__).resolve().parents[1]
+           / "scripts" / "frontier_pipeline.sh").read_text()
+    assert 'pgrep -f -- "--out $1"' in src, "liveness still keys on script name"
+    assert "root_exhausted" in src, "pipeline restarts settled roots every pass"
 
 
 # ---- the materializers must actually consult it ---------------------------

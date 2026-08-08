@@ -516,6 +516,13 @@ def main() -> int:
             print(f"  {tid}  family={spec.get('family')} dtype={spec.get('dtype')}")
         return 0
 
+    from kore.data.twins import mark_exhausted
+
+    mark_exhausted(out_root, len(selected), len(ids))
+    if not selected:
+        print("nothing left to seed for this root")
+        return 0
+
     # Local import: pulls credentials and network only on a real run, so --dry-run
     # stays usable without them.
     from kore.data.teacher import load_env_local, make_teacher

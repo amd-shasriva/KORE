@@ -58,10 +58,15 @@ fi
 #: which the supervisor owns, not this script. Sizing them to the cap instead left
 #: the arena unable to launch; sizing them below it left slots idle, which on a pool
 #: this contended is the more expensive mistake.
+#: The default must match what ensure_loops.sh configures, because this script
+#: is also run by hand -- and when it was left pointing at pool-HIP, a manual
+#: pass silently staffed four miners onto the stream that had just been retired,
+#: against shards whose ledger we were deliberately no longer growing.
 STREAMS="${DATAGEN_STREAMS:-\
-poolhip:runs/shards_hippool:data/v5hippool:4:kore-mine-poolhip+kore-factory \
-pooltriton:runs/shards_pooltriton:data/v5pooltriton:2:kore-mine-pooltriton \
-hipreg:runs/shards_hipreg:data/v5hip:1:kore-mine-hipreg}"
+frontier:runs/shards_frontier:data/v5frontier:4:kore-mine-frontier \
+pooltriton:runs/shards_pooltriton:data/v5pooltriton:1:kore-mine-pooltriton \
+poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory \
+hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg}"
 
 # Count by job name, which the scheduler knows for a job the moment it is
 # submitted. Counting by reading each job's log missed every pending job, because

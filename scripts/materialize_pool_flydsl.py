@@ -142,9 +142,10 @@ def _spec_of(task_dir: Path) -> dict:
 
 
 def _extract_code(reply: str) -> str:
-    import re
-    m = re.search(r"```[A-Za-z0-9_+.-]*[ \t]*\r?\n(.*?)```", reply, re.S)
-    return (m.group(1) if m else reply).strip()
+    """The kernel file, which is not always the first fenced block."""
+    from kore.data.twins import extract_code
+
+    return extract_code(reply, must_contain="flyc.jit")
 
 
 def _conventions() -> str:

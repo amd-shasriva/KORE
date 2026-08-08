@@ -288,6 +288,13 @@ def main() -> int:
             print(f"  {tid}  family={spec.get('family')} entry={spec.get('entry_name')}")
         return 0
 
+    from kore.data.twins import mark_exhausted
+
+    mark_exhausted(out_root, len(selected), len(ids))
+    if not selected:
+        print("nothing left to port for this root")
+        return 0
+
     from kore.data.teacher import load_env_local, make_teacher
 
     load_env_local()

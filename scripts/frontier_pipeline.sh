@@ -66,11 +66,35 @@ queued()     { squeue -u "${USER:-$(id -un)}" -h -n "$1" 2>/dev/null | wc -l; }
 
 #: A materializer is alive if its process is; it holds no allocation, so this is
 #: a plain pgrep rather than a queue question.
-materializer_alive() { pgrep -f "$1" >/dev/null 2>&1; }
+#:
+#: Matched on --out, not on the script name. Two of these roots run the same
+#: script against different sources, so a name match reports the registry
+#: materializer as the pool one and the pool root never restarts.
+materializer_alive() { pgrep -f -- "--out $1" >/dev/null 2>&1; }
+
+#: A root with nothing left to seed says so, and is left alone until the marker
+#: ages out. Restarting one is not free: deciding a pool task is HIP-eligible
+#: means running the module to see whether its weights can be supplied from
+#: outside, so a sweep that selects nothing still costs ~90s of CPU to find
+#: that out, and on a 5-minute loop that is a third of a core spent on a
+#: settled question. The pool-sourced HIP root reached this state at 4
+#: remaining tasks, with 783 of its 787 untwinned frontier-family tasks not
+#: functionalizable.
+#:
+#: It ages out rather than being permanent because the source roots grow.
+EXHAUSTED_TTL="${EXHAUSTED_TTL:-21600}"   # 6h
+
+root_exhausted() {
+    local marker="$REPO/$1/.exhausted"
+    [ -f "$marker" ] || return 1
+    local age=$(( $(date +%s) - $(stat -c %Y "$marker" 2>/dev/null || echo 0) ))
+    [ "$age" -lt "$EXHAUSTED_TTL" ]
+}
 
 start_materializer() {
     local script="$1" out="$2" limit="$3" log="$4"
-    materializer_alive "$script" && return 0
+    materializer_alive "$out" && return 0
+    root_exhausted "$out" && return 0
     say "materializer $script absent -> starting (out=$out, families=$FAMILIES)"
     # shellcheck disable=SC2086
     setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 \
@@ -91,7 +115,8 @@ while :; do
     start_materializer materialize_pool_flydsl.py "$FLYDSL_ROOT" 400 flydsl_materialize.log
     # Matched on its --source-root so it is distinguishable from the pool-sourced
     # HIP materializer, which runs the same script against a different root.
-    if ! pgrep -f "source-root kore/tasks" >/dev/null 2>&1; then
+    if ! pgrep -f "source-root kore/tasks" >/dev/null 2>&1 \
+            && ! root_exhausted "$REG_HIP_ROOT"; then
         say "registry-HIP materializer absent -> starting (out=$REG_HIP_ROOT)"
         setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 \
             "$PY" "$REPO/scripts/materialize_pool_hip.py" \

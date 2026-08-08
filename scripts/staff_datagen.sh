@@ -123,7 +123,14 @@ staffed_for() { _squeue -t R,PD -n "kore-mine-$1" -o "%i" | wc -l; }
 # mining is held to three and the remainder falls back to burst.
 # pick_qos lives in gpu_slots.sh so the gate can use it too -- it could not
 # reach this copy, was submitted to burst by default, and sat there for an hour.
-GENERAL_MINE_MAX="${GENERAL_MINE_MAX:-3}"
+#
+# Two miners, not three. general is 8 nodes for everyone who uses it, and both
+# arena arms have to live there as well, so three miners made five of the eight
+# mine and left the gate to fall back to burst -- where it waited behind 35
+# other jobs and never ran. A third miner buys a third more rows from tasks
+# that are already gated; the slot it costs is the only way any *new* seed
+# becomes mineable at all, and 1,500 of them were waiting on it.
+GENERAL_MINE_MAX="${GENERAL_MINE_MAX:-2}"
 
 # A shard manifest records the commit it was partitioned at, and the worker refuses
 # to mine a shard whose code has moved -- a deliberate guard, but it means every

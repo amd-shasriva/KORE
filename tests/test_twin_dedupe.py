@@ -205,6 +205,33 @@ def test_registry_streams_are_restricted_to_the_frontier():
         "registry materializers still take the whole registry"
 
 
+def test_flydsl_prompt_carries_the_real_api():
+    """The teacher was inventing symbols. Across 2,005 gated ports, 242 failures
+    were a name that does not exist -- fx.constexpr for fx.Constexpr 137 times
+    alone -- and 104 more called torch methods on FlyDSL values. Neither is a
+    reasoning failure; it is writing against an unseen API."""
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import materialize_pool_flydsl as F
+
+    spec = {"entry_name": "foo", "input_specs": [{"shape": [4]}],
+            "module_source": "m", "dtype": "bf16", "snr_threshold": 30}
+    prompt, _ = F._build_prompt(spec, "# triton")
+    assert "flyc:" in prompt and "fx:" in prompt, "API surface missing"
+    assert "not a torch tensor" in prompt, "torch-method confusion unaddressed"
+
+
+def test_api_surface_degrades_without_flydsl():
+    """A dry run on a box without FlyDSL must still build a prompt."""
+    import sys as _sys
+
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import materialize_pool_flydsl as F
+
+    assert F._api_surface("no_such_module_at_all") .startswith("(unavailable")
+
+
 def test_flydsl_gets_a_teacher_that_can_write_flydsl():
     """opus-5 writes HIP and cannot write FlyDSL: on the port prompt it runs to
     the token ceiling and returns zero characters, every call. The stream needs

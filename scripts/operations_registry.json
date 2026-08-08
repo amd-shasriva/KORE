@@ -218,6 +218,13 @@
       "replacement": "scripts/spur_supervise_datagen.py"
     },
     {
+      "path": "scripts/frontier_pipeline.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "production": true,
+      "role": "one unattended loop for every dialect: keeps the HIP and FlyDSL materializers alive on the login node (gateway-bound, so an allocation would idle a node on network waits), gates whichever root accumulates seeds under its own job name, refreshes shard stamps, and staffs mining across every declared stream"
+    },
+    {
       "path": "scripts/gpu_pick_hip.py",
       "classification": "diagnostic",
       "lifecycle": "active",

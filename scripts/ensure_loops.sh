@@ -77,11 +77,27 @@ start() {
 # Configuration lives here, not in the caller, so a cron-triggered restart brings
 # the loops back with the same settings a human start would give them. The cap is
 # the measured four concurrent jobs.
-start hip_pipeline \
-    GPU_JOB_CAP=8 HIP_SHARDS=7 SEED_ARGS="" \
+# One pipeline for every dialect, replacing the HIP-only loop.
+#
+# The old loop drove seed->gate->mine for HIP alone; everything else was a thing
+# somebody had to remember to start, which is how pool-Triton and registry-HIP
+# each died twice in a night and how FlyDSL sat at zero rows while 45 arena tasks
+# scored 1%. frontier_pipeline.sh keeps the HIP and FlyDSL materializers alive on
+# the login node -- they are gateway-bound and would hold a node hostage to
+# network latency inside an allocation -- gates whichever root accumulates seeds,
+# refreshes the shard stamps, and staffs mining across every declared stream.
+start frontier_pipeline \
+    GPU_JOB_CAP=8 FRONTIER_FAMILIES="attention gemm quantization" \
+    HIP_ROOT=data/pool_hip_frontier FLYDSL_ROOT=data/pool_flydsl \
+    KORE_QOS=amd-burst-qos \
     DATAGEN_STREAMS="frontier:runs/shards_frontier:data/v5frontier:6:kore-mine-frontier pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
-    HIP_ROOTS="" \
-    bash "$REPO/scripts/keepalive.sh" hip_pipeline -- bash "$REPO/scripts/hip_pipeline_loop.sh"
+    bash "$REPO/scripts/keepalive.sh" frontier_pipeline -- \
+    bash "$REPO/scripts/frontier_pipeline.sh"
+
+# hip_pipeline_loop.sh is superseded by frontier_pipeline.sh and no longer
+# started. It is kept in the tree because its seed/gate/harvest sequencing is
+# the thing frontier_pipeline generalises, and because pool-HIP can be revived
+# from it if the frontier set is ever exhausted.
 
 # Arenas go to amd-general-qos, mining stays on burst.
 #

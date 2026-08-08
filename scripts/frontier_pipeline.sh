@@ -1,0 +1,124 @@
+#!/bin/bash
+# Keep every frontier dialect moving from seed to training rows, unattended.
+#
+# The old hip_pipeline_loop drove exactly one dialect through one path: seed HIP,
+# gate HIP, mine HIP. Everything else was a separate thing somebody had to
+# remember to start, which is how pool-Triton and registry-HIP each died twice in
+# a night and how FlyDSL sat at zero rows while 45 arena tasks scored 1%.
+#
+# The three dialects do not actually need three pipelines. A twin is a task
+# directory whose seed is in a different language; verify_pool_hip_seeds already
+# gates ``*__hip``, ``*__hipf`` and ``*__flydsl`` on one path because the
+# candidate filename comes from the backend the task declares. So the stages are
+# shared and only the roots differ:
+#
+#   materialize   teacher writes a twin seed        (CPU + gateway, NO GPU slot)
+#   gate          gfx950 says it compiles and is    (GPU, one job per root)
+#                 numerically correct
+#   harvest       promote passers, re-partition     (CPU)
+#   mine          datagen optimizes the gated twin  (GPU, staff_datagen)
+#
+# Materialization deliberately runs on the login node. It is gateway-bound -- 8
+# workers at ~1 CPU-second per 5 minutes -- so putting it in an allocation would
+# hold a node hostage to network latency while the arena queues behind it.
+#
+# Everything here is idempotent: seeds skip what exists, the gate resumes, harvest
+# only promotes what passed, and datagen skips finished shards. Safe to restart at
+# any point, which is what keepalive does when it dies.
+#
+#   scripts/frontier_pipeline.sh
+set -uo pipefail
+
+REPO=/home/shasriva/Kore-RL/KORE
+PY=/home/shasriva/kore-venv/bin/python
+LOG="$REPO/runs/frontier_pipeline.log"
+GATE_EVERY="${GATE_EVERY:-30}"       # gate once this many new seeds have landed
+SLEEP="${FRONTIER_SLEEP:-300}"
+
+#: root | seed-glob | materializer | extra args. The materializers are the slow,
+#: gateway-bound half and are kept alive here rather than being run by hand.
+#: --families is the whole point: without it these regenerate the launch-bound
+#: bulk whose median baseline is 17us.
+FAMILIES="${FRONTIER_FAMILIES:-attention gemm quantization}"
+HIP_ROOT="${HIP_ROOT:-data/pool_hip_frontier}"
+FLYDSL_ROOT="${FLYDSL_ROOT:-data/pool_flydsl}"
+
+cd "$REPO" || exit 1
+[ -z "${SPUR_CONTROLLER_ADDR:-}" ] && [ -r /etc/profile.d/spur.sh ] && . /etc/profile.d/spur.sh
+# shellcheck disable=SC1091
+. "$REPO/scripts/gpu_slots.sh"
+
+say() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" | tee -a "$LOG"; }
+
+n_seeds()    { ls -d "$REPO/$1"/tasks/*__* 2>/dev/null | wc -l; }
+n_promoted() { ls -d "$REPO/data/pool_hip_ok"/tasks/*__* 2>/dev/null | wc -l; }
+queued()     { squeue -u "${USER:-$(id -un)}" -h -n "$1" 2>/dev/null | wc -l; }
+
+#: A materializer is alive if its process is; it holds no allocation, so this is
+#: a plain pgrep rather than a queue question.
+materializer_alive() { pgrep -f "$1" >/dev/null 2>&1; }
+
+start_materializer() {
+    local script="$1" out="$2" limit="$3" log="$4"
+    materializer_alive "$script" && return 0
+    say "materializer $script absent -> starting (out=$out, families=$FAMILIES)"
+    # shellcheck disable=SC2086
+    setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 \
+        "$PY" "$REPO/scripts/$script" \
+        --families $FAMILIES --limit "$limit" --workers 8 --out "$out" \
+        >> "$REPO/runs/$log" 2>&1 < /dev/null &
+    sleep 2
+}
+
+say "=== frontier pipeline start (pid $$) families='$FAMILIES' ==="
+declare -A LAST_GATED=()
+
+while :; do
+    purge_held | while read -r l; do say "$l"; done
+
+    # --- 1. keep both materializers alive (no GPU slot consumed) -------------
+    start_materializer materialize_pool_hip.py    "$HIP_ROOT"    600 hip_frontier_materialize.log
+    start_materializer materialize_pool_flydsl.py "$FLYDSL_ROOT" 400 flydsl_materialize.log
+
+    # --- 2. gate whichever root has accumulated enough new seeds ------------
+    # One gate job per root, named after it, so a slow HIP gate never blocks the
+    # FlyDSL one -- the mistake that left the functionalized root undecided for a
+    # night while the parameter-free root finished.
+    for root in "$HIP_ROOT" "$FLYDSL_ROOT"; do
+        [ -d "$REPO/$root/tasks" ] || continue
+        tag=$(basename "$root")
+        seeds=$(n_seeds "$root")
+        last=${LAST_GATED[$tag]:-0}
+        [ "$seeds" -eq 0 ] && continue
+        [ "$(queued "kore-gate-$tag")" -gt 0 ] && continue
+        if [ "$((seeds - last))" -ge "$GATE_EVERY" ]; then
+            have_slot || { say "  no slot for gate-$tag; next pass"; continue; }
+            say "gating $root: $seeds seed(s), $((seeds - last)) new"
+            # shellcheck disable=SC2086
+            GATE_ROOT="$root" sbatch $QOS_ARG --job-name="kore-gate-$tag" \
+                scripts/spur_gate_pool_hip.sbatch 2>&1 | tee -a "$LOG"
+            LAST_GATED[$tag]=$seeds
+            sleep 5
+        fi
+    done
+
+    # --- 3. harvest anything newly gated, then re-partition -----------------
+    # Passed twins land in data/pool_hip_ok regardless of dialect, because the
+    # gate writes there for whatever it admitted.
+    promoted=$(n_promoted)
+    if [ "$promoted" -gt 0 ] && [ ! -f "$REPO/runs/frontier_harvest.lock" ]; then
+        : # harvest is owned by hip_pool_harvest.sh; only re-partition below
+    fi
+
+    # Frontier registry shards are static (the 482 ids do not change), so only
+    # refresh their commit stamp -- a stale manifest kills every worker on the
+    # preflight check with NonZeroExitCode and reads as a queue problem.
+    for d in runs/shards_frontier runs/shards_hippool runs/shards_pooltriton; do
+        [ -d "$REPO/$d" ] && "$PY" "$REPO/scripts/refresh_shards.py" "$d" >> "$LOG" 2>&1
+    done
+
+    # --- 4. staff mining across every declared stream -----------------------
+    bash "$REPO/scripts/staff_datagen.sh" 2>&1 | tail -2 | tee -a "$LOG"
+
+    sleep "$SLEEP"
+done

@@ -37,6 +37,10 @@ GATE_EVERY="${GATE_EVERY:-30}"       # gate once this many new seeds have landed
 #: turns a seed into something mineable, so it is worth one of the eight shared
 #: nodes rather than a place in the burst queue behind 35 other jobs.
 GENERAL_GATE_MAX="${GENERAL_GATE_MAX:-1}"
+#: Gates in flight across every root. Matches the general share above: a gate
+#: beyond it can only land in burst, where it waits behind ~35 other jobs and
+#: holds one of my eight cap slots the entire time.
+MAX_GATES_IN_FLIGHT="${MAX_GATES_IN_FLIGHT:-1}"
 SLEEP="${FRONTIER_SLEEP:-300}"
 
 #: root | seed-glob | materializer | extra args. The materializers are the slow,
@@ -107,6 +111,14 @@ say() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" | tee -a "$LOG"; }
 n_seeds()    { ls -d "$REPO/$1"/tasks/*__* 2>/dev/null | wc -l; }
 n_promoted() { ls -d "$REPO/data/pool_hip_ok"/tasks/*__* 2>/dev/null | wc -l; }
 queued()     { squeue -u "${USER:-$(id -un)}" -h -n "$1" 2>/dev/null | wc -l; }
+
+#: Gates queued or running for any root. They compete with each other for the
+#: one general slot and with mining for the job cap, so the pipeline runs them
+#: one at a time rather than one per root.
+gates_in_flight() {
+    squeue -u "${USER:-$(id -un)}" -h -o '%j' 2>/dev/null \
+        | grep -c '^kore-gate-'
+}
 
 #: A materializer is alive if its process is; it holds no allocation, so this is
 #: a plain pgrep rather than a queue question.
@@ -221,6 +233,16 @@ while :; do
         last=${LAST_GATED[$tag]:-0}
         [ "$seeds" -eq 0 ] && continue
         [ "$(queued "kore-gate-$tag")" -gt 0 ] && continue
+        # Across all roots, not just this one. Only one gate can hold a general
+        # slot, so submitting a gate per root put three of them in burst -- a
+        # queue 35 deep that they never came out of -- and each still counted
+        # against the job cap. Four roots of gates plus two arenas filled all
+        # eight slots and mining could not be staffed at all. Gating is
+        # sequential work anyway; one in flight loses nothing.
+        if [ "$(gates_in_flight)" -ge "$MAX_GATES_IN_FLIGHT" ]; then
+            say "  gate in flight already; $tag waits its turn"
+            continue
+        fi
         if [ "$((seeds - last))" -ge "$GATE_EVERY" ]; then
             have_slot || { say "  no slot for gate-$tag; next pass"; continue; }
             say "gating $root: $seeds seed(s), $((seeds - last)) new"

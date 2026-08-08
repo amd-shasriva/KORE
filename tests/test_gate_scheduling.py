@@ -60,3 +60,17 @@ def test_mining_still_bounded_on_general(staff):
 
 def test_gate_share_is_reserved(pipeline):
     assert "GENERAL_GATE_MAX" in pipeline
+
+
+def test_only_one_gate_is_in_flight_across_roots(pipeline):
+    """A gate per root put three in burst, where they never ran and still held
+    three of the eight cap slots -- with two arenas that left nothing for
+    mining, so no miner could be staffed at all."""
+    assert "gates_in_flight" in pipeline
+    assert "MAX_GATES_IN_FLIGHT" in pipeline
+
+
+def test_in_flight_count_spans_every_root(pipeline):
+    """Counting only this root's own gate is what allowed four at once."""
+    body = pipeline.split("gates_in_flight()")[1][:300]
+    assert "'^kore-gate-'" in body, "the count is not across all gate jobs"

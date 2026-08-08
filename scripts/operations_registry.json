@@ -464,6 +464,13 @@
       "role": "partition seed provenance for datagen shard assignment"
     },
     {
+      "path": "scripts/select_frontier_tasks.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "side_effect_free": true,
+      "role": "rank mineable tasks by what a win is worth -- family x dtype x baseline x size -- so datagen spends GPU-hours on attention, MoE, fp8/mxfp4 and gemm against vendor baselines instead of on KernelBook modules whose median baseline is 17us"
+    },
+    {
       "path": "scripts/sft_finish_dynamic.sh",
       "classification": "deprecated",
       "lifecycle": "deprecated",

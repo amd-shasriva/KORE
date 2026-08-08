@@ -12,7 +12,6 @@ Prints ``wall_ms: X`` per iter + ``median_ms: X``.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import math
 import os
 import sys
@@ -33,10 +32,12 @@ def _load_candidate():
     if getattr(_load_candidate, "_mod", None) is not None:
         mod = _load_candidate._mod
     else:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernel.py")
-        spec = importlib.util.spec_from_file_location("candidate_kernel", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        # Dispatch on what this task staged. A HIP twin of this task has a
+        # kernel.hip and no kernel.py, so loading Python unconditionally
+        # failed in the loader before the kernel was ever compiled.
+        from kore.env.hip_toolchain import load_candidate_module
+
+        mod = load_candidate_module(os.path.dirname(os.path.abspath(__file__)))
         _load_candidate._mod = mod
     return mod.softmax
 

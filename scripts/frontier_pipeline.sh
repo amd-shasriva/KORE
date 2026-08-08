@@ -42,6 +42,16 @@ SLEEP="${FRONTIER_SLEEP:-300}"
 FAMILIES="${FRONTIER_FAMILIES:-attention gemm quantization}"
 HIP_ROOT="${HIP_ROOT:-data/pool_hip_frontier}"
 FLYDSL_ROOT="${FLYDSL_ROOT:-data/pool_flydsl}"
+#: HIP twins of the *registry's* frontier tasks -- flash attention, fused MoE,
+#: fp8 GEMM -- rather than of the pool. This is the only root whose difficulty
+#: comes from the task rather than from the dialect: primary scales run from
+#: 16.7M to 68.7B elements against the pool's uniform 1M, and the baselines are
+#: AITER and hipBLASLt rather than eager torch.
+#:
+#: It takes --source-root instead of --families, because the registry is already
+#: the curated set: select_frontier_tasks ranks it and everything above the
+#: histogram break is a frontier family by construction.
+REG_HIP_ROOT="${REG_HIP_ROOT:-data/registry_hip_frontier}"
 
 cd "$REPO" || exit 1
 [ -z "${SPUR_CONTROLLER_ADDR:-}" ] && [ -r /etc/profile.d/spur.sh ] && . /etc/profile.d/spur.sh
@@ -79,12 +89,22 @@ while :; do
     # --- 1. keep both materializers alive (no GPU slot consumed) -------------
     start_materializer materialize_pool_hip.py    "$HIP_ROOT"    600 hip_frontier_materialize.log
     start_materializer materialize_pool_flydsl.py "$FLYDSL_ROOT" 400 flydsl_materialize.log
+    # Matched on its --source-root so it is distinguishable from the pool-sourced
+    # HIP materializer, which runs the same script against a different root.
+    if ! pgrep -f "source-root kore/tasks" >/dev/null 2>&1; then
+        say "registry-HIP materializer absent -> starting (out=$REG_HIP_ROOT)"
+        setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 \
+            "$PY" "$REPO/scripts/materialize_pool_hip.py" \
+            --source-root kore/tasks --limit 500 --workers 8 --out "$REG_HIP_ROOT" \
+            >> "$REPO/runs/registry_hip_materialize.log" 2>&1 < /dev/null &
+        sleep 2
+    fi
 
     # --- 2. gate whichever root has accumulated enough new seeds ------------
     # One gate job per root, named after it, so a slow HIP gate never blocks the
     # FlyDSL one -- the mistake that left the functionalized root undecided for a
     # night while the parameter-free root finished.
-    for root in "$HIP_ROOT" "$FLYDSL_ROOT"; do
+    for root in "$REG_HIP_ROOT" "$HIP_ROOT" "$FLYDSL_ROOT"; do
         [ -d "$REPO/$root/tasks" ] || continue
         tag=$(basename "$root")
         seeds=$(n_seeds "$root")

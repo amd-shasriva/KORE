@@ -63,8 +63,8 @@ fi
 #: pass silently staffed four miners onto the stream that had just been retired,
 #: against shards whose ledger we were deliberately no longer growing.
 STREAMS="${DATAGEN_STREAMS:-\
-frontier:runs/shards_frontier:data/v5frontier:4:kore-mine-frontier \
-pooltriton:runs/shards_pooltriton:data/v5pooltriton:1:kore-mine-pooltriton \
+frontier:runs/shards_frontier:data/v5frontier:6:kore-mine-frontier \
+pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton \
 poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory \
 hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg}"
 

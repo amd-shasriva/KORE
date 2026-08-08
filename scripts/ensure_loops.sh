@@ -44,15 +44,21 @@ start() {
     sleep 2
 }
 
-# Registry-HIP is retired at 0 workers: all 171 of its tasks have produced
-# output, so it is complete on coverage and the staffing loop -- which only
-# compares staffed-against-wanted and cannot tell a finished stream from an
-# unstarted one -- kept refilling a slot that had nothing left to add. Its share
-# goes to pool-HIP, which is also 100% HIP-language and still has 6,010 of 6,457
-# tasks untouched. Pool-Triton drops to one worker: it is the translation-pair
-# source and only needs to keep producing, not to race.
+# Pool-HIP is retired at 0 workers, and its share goes to the frontier set.
 #
-# Slot budget: 5 mining (4 pool-HIP + 1 pool-Triton) and 2
+# It was mining breadth, not difficulty. Measured across its 6,457 gated tasks:
+# 86% have a baseline under 100us, median 17us, so they are launch-bound and no
+# amount of them teaches tiling, LDS staging or MFMA scheduling; attention is
+# 1.3% of the pool, quantization 0.2%, MoE one task. Its wins reported a median
+# 2.29x and a maximum of 3171x, which measures the torch baseline rather than
+# the kernel.
+#
+# scripts/select_frontier_tasks.py ranks by what a win is worth instead, and the
+# score histogram separates cleanly: 482 registry tasks -- 214 attention, 115
+# MoE, 94 quant/fp8, 52 gemm, in fp8_e4m3fn/int4_w4a16/mxfp4/bf16 against vendor
+# baselines -- of which 401 had never been mined at all.
+#
+# Slot budget: 5 mining (4 frontier + 1 pool-Triton) and 2
 # arenas -- the v4 run and the untuned-base baseline that makes it
 # interpretable. Wanting 7 mining left no room for the second arena, and the
 # staffing loop reclaimed the slot within a minute of it being freed by hand.
@@ -62,7 +68,7 @@ start() {
 # the measured four concurrent jobs.
 start hip_pipeline \
     GPU_JOB_CAP=8 HIP_SHARDS=7 SEED_ARGS="" \
-    DATAGEN_STREAMS="poolhip:runs/shards_hippool:data/v5hippool:4:kore-mine-poolhip+kore-factory pooltriton:runs/shards_pooltriton:data/v5pooltriton:1:kore-mine-pooltriton hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
+    DATAGEN_STREAMS="frontier:runs/shards_frontier:data/v5frontier:4:kore-mine-frontier pooltriton:runs/shards_pooltriton:data/v5pooltriton:1:kore-mine-pooltriton poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
     HIP_ROOTS="" \
     bash "$REPO/scripts/keepalive.sh" hip_pipeline -- bash "$REPO/scripts/hip_pipeline_loop.sh"
 

@@ -298,7 +298,15 @@ while :; do
         [ "$have_aka" = "0" ] && say "AKA COMPLETE (summary written)"
     elif [ "$AKA_AFTER_SFT" = "1" ] && ! sft_done; then
         :   # training still running; the arena waits for its slot
-    elif [ "$have_aka" = "0" ] && should_submit aka && have_slot; then
+    elif [ "$have_aka" = "0" ] && ! have_slot; then
+        # Said out loud, and checked before should_submit rather than after.
+        # should_submit records the attempt and advances the backoff clock, so
+        # asking it first spent a retry on a capacity problem it cannot fix --
+        # and then this branch fell through to nothing at all. The arm read as
+        # idle while it was actually locked out: v4 stayed dead for 50 minutes
+        # behind six miners and a gate holding all eight slots.
+        say "AKA absent but the job cap is full ($(gpu_used)/$GPU_JOB_CAP); waiting for a slot"
+    elif [ "$have_aka" = "0" ] && should_submit aka; then
         adopt_stray_ledger
         # Count across every shard ledger, not just the unsharded one, or the
         # progress line reads 0/402 for the whole run.

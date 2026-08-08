@@ -255,6 +255,13 @@ while :; do
         fi
     done
 
+    # A twin's driver.py is copied out of its source task once, when the seed is
+    # written, so a later fix to that driver never reaches twins already on
+    # disk. That is how 34 twins went on failing in a loader that had already
+    # been fixed. Cheap to re-check every pass; it only writes on drift.
+    "$PY" "$REPO/scripts/refresh_twin_drivers.py" 2>&1 \
+        | grep -v "^twin drivers: 0 stale" | tee -a "$LOG"
+
     # --- 3. harvest anything newly gated, then re-partition -----------------
     # Passed twins land in data/pool_hip_ok regardless of dialect, because the
     # gate writes there for whatever it admitted.

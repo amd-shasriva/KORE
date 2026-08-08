@@ -58,7 +58,18 @@ start() {
 # MoE, 94 quant/fp8, 52 gemm, in fp8_e4m3fn/int4_w4a16/mxfp4/bf16 against vendor
 # baselines -- of which 401 had never been mined at all.
 #
-# Slot budget: 5 mining (4 frontier + 1 pool-Triton) and 2
+# Pool-Triton is retired for the same reason and one more. Its own tasks are the
+# same launch-bound modules -- median baseline 16us, 92% under 100us, zero
+# attention and zero MoE across 6,064 rows -- and its second purpose no longer
+# holds: translation pairs exist only where a task won in BOTH backends, and
+# with pool-HIP stopped that overlap (109 tasks) cannot grow. Those pairs are
+# already banked; the next node-hour spent there buys Triton coverage of 16us
+# kernels.
+#
+# Its slot goes to frontier, which has Triton seeds for flash attention, MoE and
+# fp8 -- Triton data that is hard rather than merely new.
+#
+# Slot budget: 6 mining (all frontier, one per shard) and 2
 # arenas -- the v4 run and the untuned-base baseline that makes it
 # interpretable. Wanting 7 mining left no room for the second arena, and the
 # staffing loop reclaimed the slot within a minute of it being freed by hand.
@@ -68,7 +79,7 @@ start() {
 # the measured four concurrent jobs.
 start hip_pipeline \
     GPU_JOB_CAP=8 HIP_SHARDS=7 SEED_ARGS="" \
-    DATAGEN_STREAMS="frontier:runs/shards_frontier:data/v5frontier:4:kore-mine-frontier pooltriton:runs/shards_pooltriton:data/v5pooltriton:1:kore-mine-pooltriton poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
+    DATAGEN_STREAMS="frontier:runs/shards_frontier:data/v5frontier:6:kore-mine-frontier pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
     HIP_ROOTS="" \
     bash "$REPO/scripts/keepalive.sh" hip_pipeline -- bash "$REPO/scripts/hip_pipeline_loop.sh"
 

@@ -22,6 +22,7 @@ mistaken for a HIP one.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 
@@ -46,6 +47,31 @@ TWIN_SUFFIXES: dict[str, tuple[str, ...]] = {
     "hip": ("__hipf", "__hip"),
     "flydsl": ("__flydsl",),
 }
+
+
+def extract_code(reply: str, must_contain: str = "") -> str:
+    """The candidate file out of a teacher reply, not merely the first block.
+
+    Taking the first fenced block assumes the reply is one. It stopped being
+    one: after the FlyDSL prompt grew an API listing, the model began answering
+    with a short illustrative block -- an import line, a layout sketch -- before
+    the actual kernel, and the first-block rule handed back the sketch. The
+    reply was fine, 6k to 22k characters and never truncated, and 199 of 298
+    ports were still discarded for "no @flyc.jit launch wrapper".
+
+    So: among the fenced blocks, prefer the ones that contain the marker the
+    caller is going to check for anyway, and take the longest of those. A file
+    that defines the entry point is what was asked for, and it is essentially
+    always the longest block in the reply.
+    """
+    blocks = re.findall(r"```[A-Za-z0-9_+.-]*[ \t]*\r?\n(.*?)```", reply, re.S)
+    if not blocks:
+        return reply.strip()
+    if must_contain:
+        marked = [b for b in blocks if must_contain in b]
+        if marked:
+            return max(marked, key=len).strip()
+    return max(blocks, key=len).strip()
 
 
 def read_task_list(path: Path) -> set[str]:

@@ -205,6 +205,41 @@ def test_registry_streams_are_restricted_to_the_frontier():
         "registry materializers still take the whole registry"
 
 
+# ---- getting the file out of the reply ------------------------------------
+
+def test_picks_the_block_that_defines_the_kernel():
+    """The model answers with a sketch first and the file second; the
+    first-block rule handed back the sketch and 199 of 298 ports were thrown
+    away for not containing a launch wrapper they did contain."""
+    from kore.data.twins import extract_code
+
+    reply = ("Here is the layout:\n\n```python\nimport flydsl.expr as fx\n```\n\n"
+             "And the kernel:\n\n```python\n@flyc.jit\ndef entry(a):\n    return a\n```\n")
+    got = extract_code(reply, must_contain="flyc.jit")
+    assert "@flyc.jit" in got and "import flydsl.expr as fx" not in got
+
+
+def test_falls_back_to_the_longest_block():
+    from kore.data.twins import extract_code
+
+    reply = "```\nshort\n```\n```\nmuch much longer block here\n```\n"
+    assert extract_code(reply, must_contain="absent") == "much much longer block here"
+
+
+def test_unfenced_reply_is_returned_whole():
+    from kore.data.twins import extract_code
+
+    assert extract_code("  no fences here  ") == "no fences here"
+
+
+def test_both_materializers_use_their_own_marker():
+    root = Path(__file__).resolve().parents[1] / "scripts"
+    fly = (root / "materialize_pool_flydsl.py").read_text()
+    hip = (root / "materialize_pool_hip.py").read_text()
+    assert 'must_contain="flyc.jit"' in fly
+    assert 'must_contain="PYBIND11_MODULE"' in hip
+
+
 def test_flydsl_prompt_carries_the_real_api():
     """The teacher was inventing symbols. Across 2,005 gated ports, 242 failures
     were a name that does not exist -- fx.constexpr for fx.Constexpr 137 times

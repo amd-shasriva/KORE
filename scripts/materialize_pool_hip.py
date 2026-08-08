@@ -295,10 +295,10 @@ def _spec_of(task_dir: Path) -> dict:
 
 
 def _extract_code(text: str) -> str:
-    import re
+    """The kernel file, which is not always the first fenced block."""
+    from kore.data.twins import extract_code
 
-    m = re.search(r"```[A-Za-z0-9_+.-]*[ \t]*\r?\n(.*?)```", text, re.S)
-    return (m.group(1) if m else text).strip()
+    return extract_code(text, must_contain="PYBIND11_MODULE")
 
 
 #: reference.py for a functionalized twin. The oracle is rebuilt from the same

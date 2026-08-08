@@ -52,6 +52,12 @@ FLYDSL_ROOT="${FLYDSL_ROOT:-data/pool_flydsl}"
 #: the curated set: select_frontier_tasks ranks it and everything above the
 #: histogram break is a frontier family by construction.
 REG_HIP_ROOT="${REG_HIP_ROOT:-data/registry_hip_frontier}"
+#: The same twin, in the other dialect the arena scores. FlyDSL is 25% of the
+#: arena and could not read a registry task at all until its spec adapter was
+#: shared with the HIP path, so it had been porting only the pool. 480 of the
+#: 482 frontier registry tasks ship a working seed_triton.py, which is exactly
+#: what the port prompt needs.
+REG_FLYDSL_ROOT="${REG_FLYDSL_ROOT:-data/registry_flydsl_frontier}"
 
 #: The FlyDSL port is written by a different teacher than the HIP seeds.
 #:
@@ -122,6 +128,31 @@ start_materializer() {
     sleep 2
 }
 
+#: A twin of the *registry* rather than of the pool.
+#:
+#: These take --source-root instead of --families, because the registry is
+#: already the curated set: everything above the histogram break in
+#: select_frontier_tasks is a frontier family by construction. It is also the
+#: only source whose difficulty comes from the task rather than the dialect --
+#: primary scales from 16.7M to 68.7B elements against the pool's uniform 1M,
+#: and baselines of AITER and hipBLASLt rather than eager torch.
+#:
+#: Liveness keys on --out like the pool ones do. Matching "source-root
+#: kore/tasks" instead would have made the two registry dialects answer for
+#: each other, and whichever started second would never run.
+start_registry_materializer() {
+    local script="$1" out="$2" limit="$3" log="$4"
+    shift 4
+    materializer_alive "$out" && return 0
+    root_exhausted "$out" && return 0
+    say "registry materializer $script absent -> starting (out=$out)"
+    setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 "$@" \
+        "$PY" "$REPO/scripts/$script" \
+        --source-root kore/tasks --limit "$limit" --workers 8 --out "$out" \
+        >> "$REPO/runs/$log" 2>&1 < /dev/null &
+    sleep 2
+}
+
 say "=== frontier pipeline start (pid $$) families='$FAMILIES' ==="
 declare -A LAST_GATED=()
 
@@ -134,21 +165,16 @@ while :; do
         flydsl_materialize.log KORE_TEACHER_MODEL="$FLYDSL_TEACHER_MODEL"
     # Matched on its --source-root so it is distinguishable from the pool-sourced
     # HIP materializer, which runs the same script against a different root.
-    if ! pgrep -f "source-root kore/tasks" >/dev/null 2>&1 \
-            && ! root_exhausted "$REG_HIP_ROOT"; then
-        say "registry-HIP materializer absent -> starting (out=$REG_HIP_ROOT)"
-        setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 \
-            "$PY" "$REPO/scripts/materialize_pool_hip.py" \
-            --source-root kore/tasks --limit 500 --workers 8 --out "$REG_HIP_ROOT" \
-            >> "$REPO/runs/registry_hip_materialize.log" 2>&1 < /dev/null &
-        sleep 2
-    fi
+    start_registry_materializer materialize_pool_hip.py "$REG_HIP_ROOT" 500 \
+        registry_hip_materialize.log
+    start_registry_materializer materialize_pool_flydsl.py "$REG_FLYDSL_ROOT" 400 \
+        registry_flydsl_materialize.log KORE_TEACHER_MODEL="$FLYDSL_TEACHER_MODEL"
 
     # --- 2. gate whichever root has accumulated enough new seeds ------------
     # One gate job per root, named after it, so a slow HIP gate never blocks the
     # FlyDSL one -- the mistake that left the functionalized root undecided for a
     # night while the parameter-free root finished.
-    for root in "$REG_HIP_ROOT" "$HIP_ROOT" "$FLYDSL_ROOT"; do
+    for root in "$REG_HIP_ROOT" "$REG_FLYDSL_ROOT" "$HIP_ROOT" "$FLYDSL_ROOT"; do
         [ -d "$REPO/$root/tasks" ] || continue
         tag=$(basename "$root")
         seeds=$(n_seeds "$root")

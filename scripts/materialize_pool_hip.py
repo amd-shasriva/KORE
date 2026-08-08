@@ -287,63 +287,11 @@ def _read_task_cfg(task_dir: Path) -> dict:
     return read_task_cfg(task_dir)
 
 
-def _registry_spec(task_dir: Path) -> dict:
-    """Synthesize the pool's spec shape for a hand-authored registry task.
-
-    The two task kinds describe themselves differently. A pool task embeds a
-    JSON ``_SPEC`` whose ``module_source`` is a PyTorch nn.Module and whose
-    ``entry_class`` names it. A registry task's reference.py *is* the oracle --
-    plain Python defining ``ref_fn`` and ``get_inputs``, often importing AITER --
-    and its shapes live in task.yaml.
-
-    That difference is why the frontier set was unreachable: flash attention,
-    fused MoE and fp8 GEMM are all registry tasks, so the HIP and FlyDSL twin
-    paths could only ever see the external pool, whose median baseline is 17us.
-
-    ``entry_class`` is deliberately omitted. There is no nn.Module to
-    instantiate, so ``_functional_info`` must not run -- and it does not need
-    to: functionalization exists to turn a module's hidden parameters into
-    explicit arguments, and a registry task is already a pure function of its
-    declared inputs.
-    """
-    cfg = _read_task_cfg(task_dir)
-    source = (task_dir / "reference.py").read_text(errors="ignore")
-    shapes = (cfg.get("shapes") or {}).get("primary") or {}
-    dims = [v for v in shapes.values() if isinstance(v, int) and v > 0]
-    scale = 1
-    for d in dims:
-        scale *= d
-    targets = cfg.get("targets") or {}
-    return {
-        "module_source": source,
-        "entry_name": cfg.get("operation") or task_dir.name,
-        "dtype": cfg.get("dtype") or "fp32",
-        "snr_threshold": cfg.get("snr_threshold") or targets.get("snr_db") or 30,
-        "family": cfg.get("op_family") or cfg.get("taxonomy_family") or "registry",
-        "primary_scale": scale or "a larger size",
-        # One entry per declared dimension is wrong as an arity and right as a
-        # hint: the prompt only uses it for an example shape, and the true
-        # signature is visible in module_source, which is the whole reference.
-        "input_specs": [{"shape": [d for d in dims] or [1]}],
-        "registry_task": True,
-        "task_id": cfg.get("task_id") or task_dir.name,
-    }
-
-
 def _spec_of(task_dir: Path) -> dict:
-    """The spec for a task, whichever kind it is.
+    """The spec for a task, whichever kind it is. See kore.data.twins."""
+    from kore.data.twins import spec_of
 
-    Pool tasks carry an embedded JSON ``_SPEC``; registry tasks are adapted.
-    Falling back rather than branching on the source root keeps a mixed
-    --source-root working, and keeps the caller from having to know.
-    """
-    text = (task_dir / "reference.py").read_text(errors="ignore")
-    start = text.find('_SPEC = json.loads("')
-    if start < 0:
-        return _registry_spec(task_dir)
-    literal_start = text.index('"', start + len("_SPEC = json.loads"))
-    literal_end = text.index('")', literal_start)
-    return json.loads(json.loads(text[literal_start:literal_end + 1]))
+    return spec_of(task_dir)
 
 
 def _extract_code(text: str) -> str:

@@ -115,14 +115,17 @@ Return ONLY the complete contents of the .py file in a single ```python code blo
 
 
 def _spec_of(task_dir: Path) -> dict:
-    """The JSON spec embedded in a pool task's reference.py."""
-    text = (task_dir / "reference.py").read_text(errors="ignore")
-    start = text.find('_SPEC = json.loads("')
-    if start < 0:
-        raise ValueError("no _SPEC in reference.py")
-    literal_start = text.index('"', start + len("_SPEC = json.loads"))
-    literal_end = text.index('")', literal_start)
-    return json.loads(json.loads(text[literal_start:literal_end + 1]))
+    """The spec for a task, pool or registry. See kore.data.twins.
+
+    This used to raise on anything without an embedded ``_SPEC``, which is
+    every hand-authored registry task -- so while HIP twinned flash attention,
+    fused MoE and fp8 GEMM, FlyDSL could only ever port the pool, whose median
+    baseline is 17us. 480 of the 482 frontier registry tasks ship a working
+    seed_triton.py, which is exactly what this path needs to port from.
+    """
+    from kore.data.twins import spec_of
+
+    return spec_of(task_dir)
 
 
 def _extract_code(reply: str) -> str:

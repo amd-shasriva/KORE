@@ -121,24 +121,9 @@ staffed_for() { _squeue -t R,PD -n "kore-mine-$1" -o "%i" | wc -l; }
 # eval is the one thing whose progress has to be observable. Letting mining take
 # every slot that happens to be free would leave nothing for anyone else, so
 # mining is held to three and the remainder falls back to burst.
-GENERAL_QOS_CAP="${GENERAL_QOS_CAP:-8}"
+# pick_qos lives in gpu_slots.sh so the gate can use it too -- it could not
+# reach this copy, was submitted to burst by default, and sat there for an hour.
 GENERAL_MINE_MAX="${GENERAL_MINE_MAX:-3}"
-pick_qos() {
-    local used free mine
-    used=$(squeue -t R -h -o "%q %D" 2>/dev/null |
-           awk '$1=="amd-general-qos"{s+=$2} END{print s+0}')
-    free=$(( GENERAL_QOS_CAP - used ))
-    # Count queued as well as running: a submission that has not started yet
-    # still intends to occupy a slot, and ignoring it lets one pass overshoot
-    # the cap several times over before the first job appears as running.
-    mine=$(_squeue -t R,PD -o "%q %j" |
-           awk '$1=="amd-general-qos" && $2 ~ /^kore-mine-/ {n++} END{print n+0}')
-    if [ "$free" -gt 0 ] && [ "$mine" -lt "$GENERAL_MINE_MAX" ]; then
-        echo "--qos=amd-general-qos"
-    else
-        echo "$QOS_ARG"
-    fi
-}
 
 # A shard manifest records the commit it was partitioned at, and the worker refuses
 # to mine a shard whose code has moved -- a deliberate guard, but it means every
@@ -238,7 +223,7 @@ import json;print(json.load(open('$REPO/$dir/manifest.json')).get('n_shards',0))
         # One element per submission: a range would re-queue indices that are
         # already covered, and there is no way to express a gap in an array range.
         # shellcheck disable=SC2086
-        qos_arg="$(pick_qos)"
+        qos_arg="$(pick_qos kore-mine- "$GENERAL_MINE_MAX")"
         # shellcheck disable=SC2086
         out=$(sbatch $qos_arg --job-name="kore-mine-$name" --array="$idx-$idx" \
             scripts/spur_datagen_array.sbatch \

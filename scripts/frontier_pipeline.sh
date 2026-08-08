@@ -33,6 +33,10 @@ REPO=/home/shasriva/Kore-RL/KORE
 PY=/home/shasriva/kore-venv/bin/python
 LOG="$REPO/runs/frontier_pipeline.log"
 GATE_EVERY="${GATE_EVERY:-30}"       # gate once this many new seeds have landed
+#: How many gates may hold a general-QoS slot at once. Gating is the step that
+#: turns a seed into something mineable, so it is worth one of the eight shared
+#: nodes rather than a place in the burst queue behind 35 other jobs.
+GENERAL_GATE_MAX="${GENERAL_GATE_MAX:-1}"
 SLEEP="${FRONTIER_SLEEP:-300}"
 
 #: root | seed-glob | materializer | extra args. The materializers are the slow,
@@ -185,7 +189,8 @@ while :; do
             have_slot || { say "  no slot for gate-$tag; next pass"; continue; }
             say "gating $root: $seeds seed(s), $((seeds - last)) new"
             # shellcheck disable=SC2086
-            GATE_ROOT="$root" sbatch $QOS_ARG --job-name="kore-gate-$tag" \
+            GATE_ROOT="$root" sbatch "$(pick_qos kore-gate- "$GENERAL_GATE_MAX")" \
+                --job-name="kore-gate-$tag" \
                 scripts/spur_gate_pool_hip.sbatch 2>&1 | tee -a "$LOG"
             LAST_GATED[$tag]=$seeds
             sleep 5

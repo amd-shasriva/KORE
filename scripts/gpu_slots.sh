@@ -85,6 +85,39 @@ gpu_free() {
 # True when at least one slot is available.
 have_slot() { [ "$(gpu_free)" -gt 0 ]; }
 
+#: Which QoS to submit against, for one kind of job.
+#:
+#: general is a small shared pool -- 8 nodes across everyone using it -- and
+#: burst is large but heavily oversubscribed: 114 running against 35 pending
+#: when this was written. That is not a queue you wait in. A gate submitted to
+#: burst sat for an hour behind other people's jobs while 15 nodes stood idle
+#: and every other job I had was running happily on general.
+#:
+#: So take a general slot when the pool has room and I am not already holding
+#: my share, and fall back to burst otherwise. The share is per kind of job and
+#: passed in, because mining must not be able to spend the whole allowance: the
+#: gate is what turns seeds into mineable tasks, so starving it stops the next
+#: batch of training rows entirely, and mining a smaller set faster does not
+#: make up for that.
+GENERAL_QOS_CAP="${GENERAL_QOS_CAP:-8}"
+
+pick_qos() {
+    local prefix="$1" max="$2" used free mine
+    used=$(squeue -t R -h -o "%q %D" 2>/dev/null |
+           awk '$1=="amd-general-qos"{s+=$2} END{print s+0}')
+    free=$(( GENERAL_QOS_CAP - used ))
+    # Count queued as well as running: a submission that has not started yet
+    # still intends to occupy a slot, and ignoring it lets one pass overshoot
+    # the cap several times over before the first job appears as running.
+    mine=$(_squeue -t R,PD -o "%q %j" |
+           awk -v p="^$prefix" '$1=="amd-general-qos" && $2 ~ p {n++} END{print n+0}')
+    if [ "$free" -gt 0 ] && [ "$mine" -lt "$max" ]; then
+        echo "--qos=amd-general-qos"
+    else
+        echo "$QOS_ARG"
+    fi
+}
+
 # The node hold to submit against, when one exists.
 #
 # The arena is the one thing that must not lose its node. It cannot finish inside

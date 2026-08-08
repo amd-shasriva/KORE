@@ -141,8 +141,19 @@ materializer_alive() { pgrep -f -- "--out $1" >/dev/null 2>&1; }
 EXHAUSTED_TTL="${EXHAUSTED_TTL:-21600}"   # 6h
 
 root_exhausted() {
-    local marker="$REPO/$1/.exhausted"
+    local marker="$REPO/$1/.exhausted" tasks="$REPO/$1/tasks"
     [ -f "$marker" ] || return 1
+    # A marker older than the root it describes is answering a question about a
+    # different root. Twins get deleted -- a batch written against a broken
+    # prompt is worth less than the slot it occupies -- and after one such
+    # cleanup two registry streams sat idle holding a verdict recorded before
+    # the deletion, with hours left on the TTL and 480 tasks waiting.
+    # -nt, not stat: stat's %Y is whole seconds, and a cleanup that finishes in
+    # the same second the marker was written then compares equal and is missed.
+    if [ -d "$tasks" ] && [ "$tasks" -nt "$marker" ]; then
+        rm -f "$marker"
+        return 1
+    fi
     local age=$(( $(date +%s) - $(stat -c %Y "$marker" 2>/dev/null || echo 0) ))
     [ "$age" -lt "$EXHAUSTED_TTL" ]
 }

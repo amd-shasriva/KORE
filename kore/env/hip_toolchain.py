@@ -441,10 +441,62 @@ def load_hip_candidate(task_dir: str | os.PathLike, entry: str, *, gpu_target: A
     return getattr(module, entry)
 
 
+class HipCandidateModule:
+    """Lazily-compiled view of a staged HIP candidate.
+
+    Deferring the compile to first attribute access keeps the failure attributed
+    to the right tier: a compile error surfaces where the Triton path's import
+    error would, and the module object itself is cached so the compiled ``.so``
+    (and any static state in it) persists across the whole driver process.
+    """
+
+    def __init__(self, task_dir: str | os.PathLike, *, gpu_target: Any = None) -> None:
+        self._task_dir = task_dir
+        self._gpu_target = gpu_target
+        self._entries: dict = {}
+
+    def __getattr__(self, entry: str):
+        if entry.startswith("_"):
+            raise AttributeError(entry)
+        if entry not in self._entries:
+            self._entries[entry] = load_hip_candidate(
+                self._task_dir, entry, gpu_target=self._gpu_target)
+        return self._entries[entry]
+
+
+def load_candidate_module(task_dir: str | os.PathLike, *, gpu_target: Any = None):
+    """The candidate for a task, in whichever language it staged one.
+
+    Both driver families have to make this choice and only one of them knew how.
+    The generated-op driver checked for ``kernel.hip`` and fell back to
+    ``kernel.py``; the registry driver loaded ``kernel.py`` unconditionally. So a
+    HIP twin of a registry task -- which stages ``kernel.hip`` and nothing else --
+    failed on a missing file before the kernel was ever compiled, and reported
+    as ``compile_or_run_fail`` as though the seed were at fault. That is 306 of
+    the 331 frontier twins gated so far: flash attention, fused MoE and fp8 GEMM
+    were all being discarded for a filename.
+
+    FlyDSL needs no branch here -- its candidate is Python and stages as
+    ``kernel.py``, the same as Triton.
+    """
+    hip_path = os.path.join(os.fspath(task_dir), CANDIDATE_FILENAMES[HIP_BACKEND])
+    if os.path.isfile(hip_path):
+        return HipCandidateModule(task_dir, gpu_target=gpu_target)
+
+    import importlib.util  # noqa: PLC0415 - only the Python path needs it
+
+    path = os.path.join(os.fspath(task_dir), CANDIDATE_FILENAMES[TRITON_BACKEND])
+    spec = importlib.util.spec_from_file_location("candidate_kernel", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 __all__ = [
     "CANDIDATE_FILENAMES",
     "DEFAULT_MAX_JOBS",
     "HIP_BACKEND",
+    "HipCandidateModule",
     "HipToolchainError",
     "SOURCE_LANGUAGES",
     "STAGED_SUFFIXES",
@@ -462,6 +514,7 @@ __all__ = [
     "gpu_arch",
     "hipcc_version",
     "is_hip_backend",
+    "load_candidate_module",
     "load_hip_candidate",
     "normalize_backend",
     "probe_toolchain",

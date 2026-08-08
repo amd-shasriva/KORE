@@ -35,7 +35,6 @@ registry discovery never needs a GPU.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import math
 import os
@@ -1507,41 +1506,10 @@ def _load_candidate(task_dir: str, entry: str):
     # cold-cache timing, and the post-timing re-verification all reach the
     # candidate through this one function.
     if getattr(_load_candidate, "_mod", None) is None:
-        from kore.env.hip_toolchain import CANDIDATE_FILENAMES, HIP_BACKEND
+        from kore.env.hip_toolchain import load_candidate_module
 
-        hip_path = os.path.join(task_dir, CANDIDATE_FILENAMES[HIP_BACKEND])
-        if os.path.isfile(hip_path):
-            _load_candidate._mod = _HipModule(task_dir)
-        else:
-            path = os.path.join(task_dir, "kernel.py")
-            spec = importlib.util.spec_from_file_location("candidate_kernel", path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            _load_candidate._mod = mod
+        _load_candidate._mod = load_candidate_module(task_dir)
     return getattr(_load_candidate._mod, entry)
-
-
-class _HipModule:
-    """Lazily-compiled view of a staged HIP candidate.
-
-    Deferring the compile to first attribute access keeps the failure attributed
-    to the right tier: a compile error surfaces where the Triton path's import
-    error would, and the module object itself is cached so the compiled ``.so``
-    (and any static state in it) persists across the whole driver process.
-    """
-
-    def __init__(self, task_dir: str) -> None:
-        self._task_dir = task_dir
-        self._entries: dict = {}
-
-    def __getattr__(self, entry: str):
-        if entry.startswith("_"):
-            raise AttributeError(entry)
-        if entry not in self._entries:
-            from kore.env.hip_toolchain import load_hip_candidate
-
-            self._entries[entry] = load_hip_candidate(self._task_dir, entry)
-        return self._entries[entry]
 
 
 # Families whose inputs are plain float tensors, so the generic adversarial fills

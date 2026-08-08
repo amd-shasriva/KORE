@@ -31,7 +31,21 @@ log = get_logger("data.teacher")
 _MAX_RETRIES = 8          # total attempts = _MAX_RETRIES
 _BACKOFF_BASE = 1.0       # seconds; delay = _BACKOFF_BASE * 2**attempt
 _BACKOFF_CAP = 60.0       # seconds; never wait longer than this
-_REQUEST_TIMEOUT = 180.0  # per-request wall timeout (seconds)
+
+#: Per-request wall timeout. This is a generation deadline, not a liveness
+#: check: the teacher is a frontier model writing a whole kernel, so the reply
+#: is thousands of tokens and the call is minutes long by design. Measured
+#: against claude-opus-5 through the AMD gateway, a HIP seed for a small pool
+#: task took 139s -- already most of the way through the former 180s ceiling --
+#: and a FlyDSL port, whose prompt is 4x larger and whose output is a ~255-line
+#: MLIR-builder kernel rather than a ~30-line one, never finished inside it. A
+#: FlyDSL sweep therefore returned nothing at all: 8 workers spent 42 minutes
+#: timing out, retrying, and timing out again, and wrote zero seeds.
+#:
+#: Sized so the slowest dialect fits with headroom rather than so a fast one
+#: fails early. A call that is genuinely wedged still ends -- the retry ladder
+#: above bounds the total.
+_REQUEST_TIMEOUT = float(os.environ.get("KORE_TEACHER_TIMEOUT", 600.0))
 
 
 def _retry_call(fn: Callable[[], Any], *, what: str, stats: Optional[dict] = None):
@@ -280,8 +294,14 @@ class ClaudeTeacher:
         # AzureOpenAI-backed gateway. The former 2023-10-16 default is invalid.
         version = os.environ.get("AMD_LLM_API_VERSION", "2023-06-01")
         # AMD gateway auth is via the Ocp-Apim header; the SDK api_key is a dummy.
+        # max_retries=0 because _retry_call is already the retry layer. The SDK
+        # defaults to retrying twice inside a single generate(), silently, so
+        # one of our attempts was really three requests and one timeout cost
+        # 3 x _REQUEST_TIMEOUT before we ever saw it -- nine minutes of nothing,
+        # eight times over. Retrying in one place keeps the ladder in the logs
+        # and keeps its documented bound true.
         self.client = anthropic.Anthropic(
-            api_key="dummy", base_url=base_url,
+            api_key="dummy", base_url=base_url, max_retries=0,
             default_headers={
                 "Ocp-Apim-Subscription-Key": api_key,
                 "user": user,

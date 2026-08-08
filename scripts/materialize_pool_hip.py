@@ -281,18 +281,10 @@ def _seed_parallel(selected, teacher, done_path: Path, out_root: Path, args) -> 
 
 
 def _read_task_cfg(task_dir: Path) -> dict:
-    """task.yaml, whichever dialect of it this task speaks.
+    """task.yaml, whichever dialect of it this task speaks."""
+    from kore.data.twins import read_task_cfg
 
-    Generated pool tasks write JSON; hand-authored registry tasks write real
-    YAML with nested shape maps and comments. json.loads on the latter raises,
-    which is what stopped the twin path at the registry boundary.
-    """
-    text = (task_dir / "task.yaml").read_text(errors="ignore")
-    if text.lstrip().startswith("{"):
-        return json.loads(text)
-    import yaml  # noqa: PLC0415 - only registry tasks need it
-
-    return yaml.safe_load(text) or {}
+    return read_task_cfg(task_dir)
 
 
 def _registry_spec(task_dir: Path) -> dict:
@@ -443,6 +435,10 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=8,
                     help="parallel teacher calls; the work is remote latency, "
                          "so this is the difference between 19h and ~2h")
+    ap.add_argument("--reseed-existing", action="store_true",
+                    help="also seed tasks that already have a HIP twin in "
+                         "another output root. Off by default: re-seeding one "
+                         "spends a teacher call to rewrite a file that exists")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -464,6 +460,16 @@ def main() -> int:
                 attempted.add(json.loads(line)["task_id"])
             except Exception:  # noqa: BLE001 - torn line after a kill
                 continue
+
+    if not args.reseed_existing:
+        from kore.data.twins import TWIN_SUFFIXES, existing_twins
+
+        cross = existing_twins(TWIN_SUFFIXES["hip"], REPO / "data")
+        fresh = cross - attempted
+        if fresh:
+            print(f"skipping {len(fresh)} task(s) already twinned in another "
+                  f"output root")
+        attempted |= cross
 
     ids = sorted(p.name for p in POOL.glob("*/") if (p / "task.yaml").is_file())
     ids = [t for t in ids if t not in attempted][args.offset:]

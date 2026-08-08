@@ -53,6 +53,20 @@ FLYDSL_ROOT="${FLYDSL_ROOT:-data/pool_flydsl}"
 #: histogram break is a frontier family by construction.
 REG_HIP_ROOT="${REG_HIP_ROOT:-data/registry_hip_frontier}"
 
+#: The FlyDSL port is written by a different teacher than the HIP seeds.
+#:
+#: .env.local points KORE_TEACHER_MODEL at claude-opus-5, which writes HIP fine
+#: -- 248 registry seeds, 4% truncated -- and cannot write FlyDSL at all. On the
+#: port prompt it runs to the token ceiling and returns no text whatsoever: 439s
+#: to consume 32,768 output tokens and hand back zero characters, on every
+#: single call. That is why this root had one seed and 14 of 14 truncations.
+#:
+#: Measured on the same prompt and task, claude-opus-4.8 returns a valid kernel
+#: -- @flyc.jit present, entry point defined -- in 36s and 3,417 tokens, and
+#: sonnet-4.5 in 42s. The failure is specific to opus-5 on this prompt, so only
+#: this stream moves.
+FLYDSL_TEACHER_MODEL="${FLYDSL_TEACHER_MODEL:-claude-opus-4.8}"
+
 cd "$REPO" || exit 1
 [ -z "${SPUR_CONTROLLER_ADDR:-}" ] && [ -r /etc/profile.d/spur.sh ] && . /etc/profile.d/spur.sh
 # shellcheck disable=SC1091
@@ -91,13 +105,17 @@ root_exhausted() {
     [ "$age" -lt "$EXHAUSTED_TTL" ]
 }
 
+#: Trailing KEY=VALUE arguments are passed to the materializer's environment.
+#: load_env_local uses setdefault, so anything set here beats .env.local -- which
+#: is how a per-stream teacher is chosen without editing a secrets file.
 start_materializer() {
     local script="$1" out="$2" limit="$3" log="$4"
+    shift 4
     materializer_alive "$out" && return 0
     root_exhausted "$out" && return 0
     say "materializer $script absent -> starting (out=$out, families=$FAMILIES)"
     # shellcheck disable=SC2086
-    setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 \
+    setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 "$@" \
         "$PY" "$REPO/scripts/$script" \
         --families $FAMILIES --limit "$limit" --workers 8 --out "$out" \
         >> "$REPO/runs/$log" 2>&1 < /dev/null &
@@ -112,7 +130,8 @@ while :; do
 
     # --- 1. keep both materializers alive (no GPU slot consumed) -------------
     start_materializer materialize_pool_hip.py    "$HIP_ROOT"    600 hip_frontier_materialize.log
-    start_materializer materialize_pool_flydsl.py "$FLYDSL_ROOT" 400 flydsl_materialize.log
+    start_materializer materialize_pool_flydsl.py "$FLYDSL_ROOT" 400 \
+        flydsl_materialize.log KORE_TEACHER_MODEL="$FLYDSL_TEACHER_MODEL"
     # Matched on its --source-root so it is distinguishable from the pool-sourced
     # HIP materializer, which runs the same script against a different root.
     if ! pgrep -f "source-root kore/tasks" >/dev/null 2>&1 \

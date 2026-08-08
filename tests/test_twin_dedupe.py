@@ -134,6 +134,23 @@ def test_marker_records_what_was_examined(tmp_path):
     assert rec["examined"] == 787 and rec["selected"] == 0
 
 
+def test_flydsl_gets_a_teacher_that_can_write_flydsl():
+    """opus-5 writes HIP and cannot write FlyDSL: on the port prompt it runs to
+    the token ceiling and returns zero characters, every call. The stream needs
+    its own model, and it must reach the process, which only works because
+    load_env_local defers to an already-set variable."""
+    src = (Path(__file__).resolve().parents[1]
+           / "scripts" / "frontier_pipeline.sh").read_text()
+    assert "FLYDSL_TEACHER_MODEL" in src
+    assert 'KORE_TEACHER_MODEL="$FLYDSL_TEACHER_MODEL"' in src, \
+        "the per-stream model never reaches the materializer"
+
+    teacher = (Path(__file__).resolve().parents[1]
+               / "kore" / "data" / "teacher.py").read_text()
+    assert "os.environ.setdefault" in teacher, \
+        "load_env_local would overwrite the per-stream model with .env.local"
+
+
 def test_pipeline_skips_exhausted_and_matches_roots_not_script_names():
     """Two roots run the same script, so liveness must key on --out.
 

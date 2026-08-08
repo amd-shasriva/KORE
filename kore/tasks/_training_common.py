@@ -42,7 +42,6 @@ CPU oracle / finite-difference sanity check) never needs a GPU.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import math
 import os
 
@@ -157,12 +156,18 @@ def _expected_grad_dtypes(ref, inputs, refs):
 def _load_candidate(task_dir: str, entry: str):
     # Cache the module so a stateful kernel's globals persist from the bench timing
     # loop into the post-timing re-verification (anti invocation-count timing hack).
+    #
+    # The candidate is not always Python. This loaded kernel.py unconditionally,
+    # so a HIP twin of a registry task -- which stages kernel.hip and nothing
+    # else -- died on a missing file before anything was compiled, and was
+    # recorded as compile_or_run_fail as though the seed were wrong. It was 306
+    # of the first 331 frontier twins gated: flash attention, fused MoE and fp8
+    # GEMM discarded over a filename. The dispatch is shared with the
+    # generated-op driver, which had it all along.
     if getattr(_load_candidate, "_mod", None) is None:
-        path = os.path.join(task_dir, "kernel.py")
-        spec = importlib.util.spec_from_file_location("candidate_kernel", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _load_candidate._mod = mod
+        from kore.env.hip_toolchain import load_candidate_module
+
+        _load_candidate._mod = load_candidate_module(task_dir)
     return getattr(_load_candidate._mod, entry)
 
 

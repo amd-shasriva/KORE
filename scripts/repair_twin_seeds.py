@@ -164,17 +164,28 @@ def drop_verdicts(gate: Path, task_ids: set) -> int:
     return dropped
 
 
+#: Built once. Introspecting the package costs an import and ~15k characters,
+#: and this is called on every repair across eight workers -- and the sys.path
+#: insert it needs would stack one duplicate entry per call.
+_API_BLOCK: dict = {}
+
+
 def _api_block(dialect: str) -> str:
     if dialect != "__flydsl":
         return ""
-    sys.path.insert(0, str(REPO / "scripts"))
-    from materialize_pool_flydsl import _api_surface
+    if "flydsl" not in _API_BLOCK:
+        scripts = str(REPO / "scripts")
+        if scripts not in sys.path:
+            sys.path.insert(0, scripts)
+        from materialize_pool_flydsl import _api_surface
 
-    return ("These are the ONLY symbols the FlyDSL modules export, with exact "
+        _API_BLOCK["flydsl"] = (
+            "These are the ONLY symbols the FlyDSL modules export, with exact "
             "signatures. Take each from the module it is listed under and pass "
             "exactly the arguments shown.\n\n"
             f"flyc: {_api_surface('flydsl.compiler')}\n\n"
             f"fx: {_api_surface('flydsl.expr')}\n")
+    return _API_BLOCK["flydsl"]
 
 
 def repair_one(item, teacher, root: Path) -> dict:

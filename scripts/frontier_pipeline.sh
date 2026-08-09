@@ -74,7 +74,7 @@ REPAIR_ROOTS="${REPAIR_ROOTS:-$REG_HIP_ROOT}"
 #: gate holds one of the eight shared general nodes to produce passers that sit
 #: unconsumed. The already-gated FlyDSL set stays promoted and sharded by the
 #: harvest, so resuming it later costs nothing.
-GATE_ROOTS="${GATE_ROOTS:-$REG_HIP_ROOT $HIP_ROOT}"
+GATE_ROOTS="${GATE_ROOTS:-$REG_HIP_ROOT $REG_FLYDSL_ROOT $FLYDSL_ROOT}"
 SLEEP="${FRONTIER_SLEEP:-300}"
 
 #: root | seed-glob | materializer | extra args. The materializers are the slow,

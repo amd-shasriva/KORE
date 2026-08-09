@@ -94,8 +94,13 @@ def test_gate_bookkeeping_is_on_disk_not_in_memory(pipeline):
 
 
 def test_gate_only_spends_slots_on_dialects_being_mined(pipeline):
-    """A gate on a paused dialect holds one of eight shared general nodes to
-    produce passers nothing will read. FlyDSL mining is paused, so FlyDSL
-    gating is too -- while the harvest keeps its existing passers promoted."""
-    assert 'GATE_ROOTS="${GATE_ROOTS:-$REG_HIP_ROOT $HIP_ROOT}"' in pipeline
+    """A gate on a dialect nothing is mining holds one of eight shared general
+    nodes to produce passers nothing will read. Gating must track mining, in
+    both directions -- it was scoped down when FlyDSL paused and has to come
+    back when FlyDSL resumes, or its twin set silently stops growing."""
+    assert "GATE_ROOTS=" in pipeline
     assert "for root in $GATE_ROOTS; do" in pipeline
+    import re
+    roots = re.search(r'GATE_ROOTS="\$\{GATE_ROOTS:-([^}]*)\}"', pipeline).group(1)
+    assert "REG_HIP_ROOT" in roots and "FLYDSL_ROOT" in roots, \
+        f"gating does not cover the dialects being mined: {roots}"

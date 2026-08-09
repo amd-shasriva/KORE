@@ -118,15 +118,14 @@ def test_staffing_default_matches_the_live_config(loops, staff):
             f"{name}: ensure_loops wants {a}, staff_datagen default is {b}"
 
 
-def test_pool_flydsl_passers_are_still_harvested_while_mining_is_paused(
-        pipeline, loops, staff):
-    """FlyDSL mining is paused, not abandoned. Repair rescued 121 HIP kernels
-    and zero FlyDSL over ~9,500 attempts, so the workers moved to HIP -- but the
-    gate keeps running and its passers must keep being promoted, or the set has
-    to be rebuilt from nothing when FlyDSL is picked up again."""
+def test_pool_flydsl_passers_are_harvested_and_mined(pipeline, loops, staff):
+    """FlyDSL is 25% of the arena and 0.6% of the corpus, so its gated twins
+    must be both promoted and worked. Repair stays off it -- 121 HIP kernels
+    rescued against zero FlyDSL -- but mining a kernel that already passes is a
+    different question from trying to fix one that does not."""
     assert "POOL_FLYDSL_OK_ROOT" in pipeline, "pool FlyDSL passers are not promoted"
     assert _wanted(loops, "poolflydsl") == _wanted(staff, "poolflydsl")
-    assert int(_wanted(loops, "poolflydsl")) == 0, "FlyDSL mining is meant to be paused"
+    assert int(_wanted(loops, "poolflydsl")) > 0, "FlyDSL gated twins are not mined"
 
 
 def test_pool_flydsl_is_not_pooled_into_the_frontier_set(pipeline):

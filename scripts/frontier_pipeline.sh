@@ -127,6 +127,16 @@ n_seeds()    { ls -d "$REPO/$1"/tasks/*__* 2>/dev/null | wc -l; }
 n_promoted() { ls -d "$REPO/data/pool_hip_ok"/tasks/*__* 2>/dev/null | wc -l; }
 queued()     { squeue -u "${USER:-$(id -un)}" -h -n "$1" 2>/dev/null | wc -l; }
 
+#: How many of a root's twins already have a verdict. The gate resumes from this
+#: file, so seeds minus verdicts is exactly the work it would do.
+n_verdicts() {
+    local f="$REPO/runs/$(basename "$1")_gate.json"
+    [ -f "$f" ] || { echo 0; return; }
+    "$PY" -c 'import json,sys
+try: print(len(json.load(open(sys.argv[1])).get("rows", [])))
+except Exception: print(0)' "$f" 2>/dev/null || echo 0
+}
+
 #: Gates queued or running for any root. They compete with each other for the
 #: one general slot and with mining for the job cap, so the pipeline runs them
 #: one at a time rather than one per root.
@@ -232,7 +242,6 @@ start_registry_materializer() {
 }
 
 say "=== frontier pipeline start (pid $$) families='$FAMILIES' ==="
-declare -A LAST_GATED=()
 
 while :; do
     purge_held | while read -r l; do say "$l"; done
@@ -275,7 +284,14 @@ while :; do
         [ -d "$REPO/$root/tasks" ] || continue
         tag=$(basename "$root")
         seeds=$(n_seeds "$root")
-        last=${LAST_GATED[$tag]:-0}
+        # Ungated work is seeds minus verdicts, not seeds minus what this loop
+        # remembers gating. Two things broke the remembered version. It is held
+        # in memory, so a restart re-gated everything; and a repaired kernel
+        # replaces a seed in place, leaving the seed count unchanged, so 628
+        # repairs produced no gate at all and the whole repair loop was a no-op.
+        # Verdicts are on disk and the repair pass deletes the ones it
+        # invalidates, which makes this the same question in both cases.
+        ungated=$(( seeds - $(n_verdicts "$root") ))
         [ "$seeds" -eq 0 ] && continue
         [ "$(queued "kore-gate-$tag")" -gt 0 ] && continue
         # Across all roots, not just this one. Only one gate can hold a general
@@ -288,14 +304,13 @@ while :; do
             say "  gate in flight already; $tag waits its turn"
             continue
         fi
-        if [ "$((seeds - last))" -ge "$GATE_EVERY" ]; then
+        if [ "$ungated" -ge "$GATE_EVERY" ]; then
             have_slot || { say "  no slot for gate-$tag; next pass"; continue; }
-            say "gating $root: $seeds seed(s), $((seeds - last)) new"
+            say "gating $root: $seeds seed(s), $ungated without a verdict"
             # shellcheck disable=SC2086
             GATE_ROOT="$root" sbatch "$(pick_qos kore-gate- "$GENERAL_GATE_MAX")" \
                 --job-name="kore-gate-$tag" \
                 scripts/spur_gate_pool_hip.sbatch 2>&1 | tee -a "$LOG"
-            LAST_GATED[$tag]=$seeds
             sleep 5
         fi
     done

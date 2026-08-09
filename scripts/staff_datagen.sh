@@ -64,9 +64,9 @@ fi
 #: against shards whose ledger we were deliberately no longer growing.
 STREAMS="${DATAGEN_STREAMS:-\
 frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:3:kore-mine-frontiertwins \
-hipreg:runs/shards_hipreg:data/v5hip:2:kore-mine-hipreg \
-poolhip:runs/shards_hippool:data/v5hippool:4:kore-mine-poolhip+kore-factory \
-poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:0:kore-mine-poolflydsl \
+poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:3:kore-mine-poolflydsl \
+hipreg:runs/shards_hipreg:data/v5hip:3:kore-mine-hipreg \
+poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory \
 frontier:runs/shards_frontier:data/v5frontier:0:kore-mine-frontier \
 pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton}"
 
@@ -160,7 +160,7 @@ staffed_for() { _squeue -t R,PD -n "kore-mine-$1" -o "%i" | wc -l; }
 # other jobs and never ran. A third miner buys a third more rows from tasks
 # that are already gated; the slot it costs is the only way any *new* seed
 # becomes mineable at all, and 1,500 of them were waiting on it.
-GENERAL_MINE_MAX="${GENERAL_MINE_MAX:-4}"
+GENERAL_MINE_MAX="${GENERAL_MINE_MAX:-5}"
 
 # A shard manifest records the commit it was partitioned at, and the worker refuses
 # to mine a shard whose code has moved -- a deliberate guard, but it means every

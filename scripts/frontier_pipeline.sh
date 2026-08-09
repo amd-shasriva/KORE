@@ -41,6 +41,13 @@ GENERAL_GATE_MAX="${GENERAL_GATE_MAX:-1}"
 #: beyond it can only land in burst, where it waits behind ~35 other jobs and
 #: holds one of my eight cap slots the entire time.
 MAX_GATES_IN_FLIGHT="${MAX_GATES_IN_FLIGHT:-1}"
+
+#: How many failing twins to hand back to the teacher per repair pass, and how
+#: many times one task may be retried before it is written off. Bounded because
+#: a kernel that cannot be fixed would otherwise cost a teacher call every pass
+#: forever.
+REPAIR_LIMIT="${REPAIR_LIMIT:-150}"
+REPAIR_MAX_ATTEMPTS="${REPAIR_MAX_ATTEMPTS:-2}"
 SLEEP="${FRONTIER_SLEEP:-300}"
 
 #: root | seed-glob | materializer | extra args. The materializers are the slow,
@@ -240,6 +247,25 @@ while :; do
         registry_hip_materialize.log
     start_registry_materializer materialize_pool_flydsl.py "$REG_FLYDSL_ROOT" 400 \
         registry_flydsl_materialize.log KORE_TEACHER_MODEL="$FLYDSL_TEACHER_MODEL"
+
+    # --- 1b. show failing twins their own error ------------------------------
+    # Seeding is one-shot and the gate's verdict was a dead end: a kernel that
+    # failed was discarded with the reason unread. For FlyDSL that is nearly all
+    # of the work -- 173 of 3,974 ports passed, and 3,109 of the failures crash
+    # before producing a number, on API misuse the gate names in one line. This
+    # hands that line back to the teacher. Teacher-bound like the materializers,
+    # so it holds no allocation; the repaired kernels are re-gated on a later
+    # pass because the pass drops their stale verdicts.
+    for spec in "$FLYDSL_ROOT" "$REG_FLYDSL_ROOT" "$REG_HIP_ROOT"; do
+        [ -d "$REPO/$spec/tasks" ] || continue
+        pgrep -f -- "repair_twin_seeds.py --root $spec" >/dev/null 2>&1 && continue
+        setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 \
+            KORE_TEACHER_MODEL="$FLYDSL_TEACHER_MODEL" \
+            "$PY" "$REPO/scripts/repair_twin_seeds.py" --root "$spec" \
+            --limit "$REPAIR_LIMIT" --workers 8 --max-attempts "$REPAIR_MAX_ATTEMPTS" \
+            >> "$REPO/runs/repair_$(basename "$spec").log" 2>&1 < /dev/null &
+        sleep 2
+    done
 
     # --- 2. gate whichever root has accumulated enough new seeds ------------
     # One gate job per root, named after it, so a slow HIP gate never blocks the

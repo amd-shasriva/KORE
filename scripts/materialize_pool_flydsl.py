@@ -102,9 +102,12 @@ and fails the rest.
 from `kernels.*` -- those helper modules are not on the path here. If you need a \
 helper, define it in the file.
 
-3a. These are the ONLY names those two modules export. If what you want is not \
-in this list it does not exist -- build it out of what is here rather than \
-guessing a name, and match the capitalisation exactly.
+3a. These are the ONLY symbols those two modules export, with their exact \
+signatures. If what you want is not in this list it does not exist -- build it \
+out of what is here rather than guessing. Match the capitalisation, take the \
+symbol from the module it is actually listed under (they are not \
+interchangeable: `from_torch_tensor` is on flyc, not fx), and pass exactly the \
+arguments the signature shows.
 
 flyc: {flyc_api}
 
@@ -172,21 +175,23 @@ def _conventions() -> str:
 
 
 def _api_surface(module: str) -> str:
-    """Every public name a FlyDSL module exports, as a flat list.
+    """Every public symbol a FlyDSL module exports, with its signature.
 
-    The teacher was inventing the API. Measured across 2,005 gated ports, 242
-    failures were a name that does not exist -- ``fx.constexpr`` for
-    ``fx.Constexpr`` 137 times on its own, then ``fx.empty`` and ``fx.maximum``
-    -- and another 104 called torch methods on FlyDSL values. None of that is a
-    reasoning failure; it is a model writing against an API it has never seen,
-    from a guide that documents conventions rather than symbols.
+    The teacher is writing against an API it has never seen. Names alone fixed
+    the first layer -- ``fx.constexpr`` for ``fx.Constexpr``, 137 times -- and
+    exposed the next one: of 3,109 ports that crashed at runtime, 313 called
+    ``fx.from_torch_tensor`` when it lives on ``flyc``, 145 passed two arguments
+    to ``as_numeric(obj)``, 64 called ``Vector.load()`` with three missing, and
+    197 more were simply "too many positional arguments". Every one of those is
+    answered by the signature and by nothing else, because a name list says
+    which symbols exist and not which module owns them or how they are called.
 
-    Listing the names costs a few thousand characters of prompt and removes the
-    entire class. It is read from the installed package, so it cannot drift from
-    the FlyDSL the gate actually compiles against.
+    Read from the installed package, so it cannot drift from the FlyDSL the
+    gate compiles against.
     """
     try:
         import importlib  # noqa: PLC0415 - only needed when a prompt is built
+        import inspect
         import sys
 
         if str(FLYDSL_REPO / "python") not in sys.path:
@@ -194,7 +199,18 @@ def _api_surface(module: str) -> str:
         mod = importlib.import_module(module)
     except Exception:  # noqa: BLE001 - a dry-run without FlyDSL still builds
         return "(unavailable -- follow the example and the guide above)"
-    return ", ".join(sorted(n for n in dir(mod) if not n.startswith("_")))
+
+    out = []
+    for name in sorted(n for n in dir(mod) if not n.startswith("_")):
+        obj = getattr(mod, name, None)
+        if not callable(obj):
+            out.append(name)
+            continue
+        try:
+            out.append(f"{name}{inspect.signature(obj)}")
+        except (TypeError, ValueError):  # builtins and C types have none
+            out.append(name)
+    return ", ".join(out)
 
 
 def _build_prompt(spec: dict, triton_source: str) -> tuple[str, str]:

@@ -51,10 +51,19 @@ _squeue() { squeue -u "$KORE_USER" -h "$@" 2>/dev/null; }
 # `scontrol release` un-holds the job so it queues again. Only a job this has
 # already failed to rescue is cancelled, so a genuinely broken submission still
 # cannot accumulate.
+#: Reasons that mean the job is stuck rather than merely waiting its turn.
+#:
+#: "hold" alone missed JobLaunchFailure, which is the state a job sits in
+#: between the launch failing on a node and the scheduler giving up on it. A
+#: gate wedged there held one of the eight shared general-QoS nodes while doing
+#: nothing, and because the reason never contained the word "hold" nothing here
+#: looked at it. Waiting for it to age into JobHoldMaxRequeue works eventually
+#: and costs a general slot the whole time.
+_STUCK_REASON="${_STUCK_REASON:-hold|launchfail|joblaunchfailure}"
 _HOLD_STATE="${_HOLD_STATE:-/tmp/kore_held_seen}"
 purge_held() {
     local n_rel=0 n_kill=0 j seen
-    for j in $(_squeue -t PD -o "%i %R" | grep -i "hold" | awk '{print $1}'); do
+    for j in $(_squeue -t PD -o "%i %R" | grep -iE "$_STUCK_REASON" | awk '{print $1}'); do
         seen=$(grep -c "^$j\$" "$_HOLD_STATE" 2>/dev/null || echo 0)
         if [ "$seen" -ge 3 ]; then
             scancel "$j" 2>/dev/null && n_kill=$((n_kill + 1))

@@ -31,6 +31,28 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 
+def shape_arg(cfg: dict) -> list:
+    """``--shape`` for this task, or nothing if it does not name its dimensions.
+
+    The driver defaults to ``--shape default``, and for a generated pool op that
+    resolves to ``{"M": 4096, "N": 8192}`` -- which is right, because the pool is
+    M/N shaped. A registry task is not. Its reference asks for the dimensions it
+    was authored with, ``shape["B"]``, ``shape["H"]``, ``shape["HKV"]``, and the
+    GEMM default has none of them, so ``get_inputs`` raises KeyError before the
+    candidate is ever called.
+
+    That is why the pool twins gate at 96.5% and the registry ones did not:
+    ``KeyError: 'B'`` and its siblings were 284 of ~451 registry FlyDSL failures,
+    recorded against the kernel as though the teacher had written it wrong. The
+    shape is in the task's own task.yaml; the gate simply was not passing it.
+    """
+    primary = ((cfg.get("shapes") or {}).get("primary")) or {}
+    dims = {k: v for k, v in primary.items() if isinstance(v, int)}
+    if not dims:
+        return []
+    return ["--shape", ",".join(f"{k}={v}" for k, v in dims.items())]
+
+
 def verify_one(task_dir: Path, timeout: int, gpu: int | None = None) -> dict:
     """Compile and check one seed, returning a verdict row."""
     cfg = json.loads((task_dir / "task.yaml").read_text())
@@ -88,7 +110,7 @@ def verify_one(task_dir: Path, timeout: int, gpu: int | None = None) -> dict:
     t0 = time.time()
     try:
         proc = subprocess.run(
-            [sys.executable, "driver.py", "--impl", "candidate"],
+            [sys.executable, "driver.py", "--impl", "candidate", *shape_arg(cfg)],
             cwd=str(task_dir), capture_output=True, text=True,
             timeout=timeout, env=env)
     except subprocess.TimeoutExpired:

@@ -64,9 +64,9 @@ fi
 #: against shards whose ledger we were deliberately no longer growing.
 STREAMS="${DATAGEN_STREAMS:-\
 frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:3:kore-mine-frontiertwins \
-poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:2:kore-mine-poolflydsl \
-hipreg:runs/shards_hipreg:data/v5hip:2:kore-mine-hipreg \
-poolhip:runs/shards_hippool:data/v5hippool:3:kore-mine-poolhip+kore-factory \
+poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:4:kore-mine-poolflydsl \
+hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg \
+poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory \
 frontier:runs/shards_frontier:data/v5frontier:0:kore-mine-frontier \
 pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton}"
 

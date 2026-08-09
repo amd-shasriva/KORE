@@ -63,11 +63,11 @@ fi
 #: pass silently staffed four miners onto the stream that had just been retired,
 #: against shards whose ledger we were deliberately no longer growing.
 STREAMS="${DATAGEN_STREAMS:-\
-frontier:runs/shards_frontier:data/v5frontier:1:kore-mine-frontier \
+frontier:runs/shards_frontier:data/v5frontier:2:kore-mine-frontier \
 frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:2:kore-mine-frontiertwins \
 poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:1:kore-mine-poolflydsl \
 pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton \
-poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory \
+poolhip:runs/shards_hippool:data/v5hippool:1:kore-mine-poolhip+kore-factory \
 hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg}"
 
 #: Arena arms this script must not crowd out.
@@ -83,14 +83,42 @@ hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg}"
 #:
 #: The hold-back counts only the arms that are *absent*, so a running arena
 #: costs nothing here and the slots go to mining as before.
-ARENA_JOB_NAMES="${ARENA_JOB_NAMES:-kore-aka kore-aka-base}"
+#:
+#: An arm that has *finished* is not absent, it is done, and holding a slot for
+#: it would idle one of eight forever. Completion is the summary file, which is
+#: the same signal the supervisor stops on.
+ARENA_JOB_NAMES="${ARENA_JOB_NAMES:-kore-aka:runs/aka_full_v4/results_v4.json \
+kore-aka-base:runs/aka_base/results_base.json}"
 
 arena_reserve() {
-    local n=0 j
-    for j in $ARENA_JOB_NAMES; do
-        [ "$(_squeue -t R,PD -n "$j" -o '%i' | wc -l)" -eq 0 ] && n=$(( n + 1 ))
+    local n=0 spec name done_marker
+    for spec in $ARENA_JOB_NAMES; do
+        name="${spec%%:*}"; done_marker="${spec#*:}"
+        [ "$name" = "$done_marker" ] && done_marker=""
+        [ -n "$done_marker" ] && [ -f "$REPO/$done_marker" ] && continue
+        [ "$(_squeue -t R,PD -n "$name" -o '%i' | wc -l)" -eq 0 ] && n=$(( n + 1 ))
     done
     echo "$n"
+}
+
+#: The gate needs a slot too, and it is the only route by which a new seed
+#: becomes mineable at all. Mining will otherwise expand to the cap and the gate
+#: waits behind it -- which is how 1,500 seeds sat ungated. Held only while
+#: there is something to gate and no gate already in flight, so a caught-up
+#: pipeline still gives every slot to mining.
+GATE_JOB_PREFIX="${GATE_JOB_PREFIX:-kore-gate-}"
+
+gate_reserve() {
+    [ "$(_squeue -t R,PD -o '%j' | grep -c "^$GATE_JOB_PREFIX")" -gt 0 ] && { echo 0; return; }
+    local root
+    for root in ${GATE_ROOTS:-data/registry_hip_frontier data/registry_flydsl_frontier data/pool_flydsl}; do
+        [ -d "$REPO/$root/tasks" ] || continue
+        # Anything seeded but not yet in this root's verdicts is gateable.
+        if [ "$(ls "$REPO/$root"/tasks 2>/dev/null | wc -l)" -gt 0 ]; then
+            echo 1; return
+        fi
+    done
+    echo 0
 }
 
 # Count by job name, which the scheduler knows for a job the moment it is
@@ -205,10 +233,10 @@ import json;print(json.load(open('$REPO/$dir/manifest.json')).get('n_shards',0))
         have=$(( have + $(_squeue -t R,PD -n "$extra" -o "%i" | wc -l) ))
     done
     free=$(gpu_free)
-    reserve=$(arena_reserve)
+    reserve=$(( $(arena_reserve) + $(gate_reserve) ))
     if [ "$reserve" -gt 0 ]; then
         free=$(( free - reserve )); [ "$free" -lt 0 ] && free=0
-        say "$name: holding $reserve slot(s) for absent arena arm(s); $free usable"
+        say "$name: holding $reserve slot(s) for the arena/gate; $free usable"
     fi
     need=$(( want - have )); [ "$want" -gt "$nsh" ] && need=$(( nsh - have ))
     [ "$need" -gt "$free" ] && need=$free

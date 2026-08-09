@@ -118,7 +118,7 @@ while :; do
             # Not in the queue: finished, preempted, or the controller is down.
             # Those must not be conflated -- resubmitting during a controller
             # outage just burns attempts.
-            if ! squeue -u "$USER" -h -o '%i' >/dev/null 2>&1; then
+            if ! squeue -u "${USER:-${LOGNAME:-$(id -un)}}" -h -o '%i' >/dev/null 2>&1; then
                 log "controller unreachable; waiting rather than resubmitting"
                 sleep "$POLL_SECS"
                 continue

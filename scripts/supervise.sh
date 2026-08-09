@@ -85,7 +85,7 @@ say() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" | tee -a "$LOG"; }
 # on success so callers can inspect it without a second round trip.
 queue() {
     local out
-    out="$(squeue -u "$USER" 2>&1)"
+    out="$(squeue -u "${USER:-${LOGNAME:-$(id -un)}}" 2>&1)"
     if echo "$out" | grep -q JOBID; then printf '%s' "$out"; return 0; fi
     return 1
 }

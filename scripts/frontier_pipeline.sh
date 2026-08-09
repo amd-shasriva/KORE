@@ -59,6 +59,15 @@ REPAIR_LIMIT="${REPAIR_LIMIT:-150}"
 #: rescued into HIP or FlyDSL is the scarcest row available, while a fourth
 #: attempt at an elementwise op is not.
 REPAIR_MAX_ATTEMPTS="${REPAIR_MAX_ATTEMPTS:-4}"
+
+#: Which roots the repair budget goes to.
+#:
+#: Measured over roughly 9,500 repairs: 121 HIP kernels rescued from failure to
+#: passing, and zero FlyDSL. The model can act on a HIP error and cannot act on
+#: a FlyDSL one -- it does not know the language well enough for the message to
+#: mean anything. So the FlyDSL roots come out and the whole budget goes to HIP,
+#: where a repair converts into a gated, mineable task about a fifth of the time.
+REPAIR_ROOTS="${REPAIR_ROOTS:-$REG_HIP_ROOT}"
 SLEEP="${FRONTIER_SLEEP:-300}"
 
 #: root | seed-glob | materializer | extra args. The materializers are the slow,
@@ -276,7 +285,7 @@ while :; do
     # hands that line back to the teacher. Teacher-bound like the materializers,
     # so it holds no allocation; the repaired kernels are re-gated on a later
     # pass because the pass drops their stale verdicts.
-    for spec in "$FLYDSL_ROOT" "$REG_FLYDSL_ROOT" "$REG_HIP_ROOT"; do
+    for spec in $REPAIR_ROOTS; do
         [ -d "$REPO/$spec/tasks" ] || continue
         pgrep -f -- "repair_twin_seeds.py --root $spec" >/dev/null 2>&1 && continue
         setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 \

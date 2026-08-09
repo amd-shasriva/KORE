@@ -118,13 +118,15 @@ def test_staffing_default_matches_the_live_config(loops, staff):
             f"{name}: ensure_loops wants {a}, staff_datagen default is {b}"
 
 
-def test_pool_flydsl_passers_are_harvested_too(pipeline, loops, staff):
-    """FlyDSL is a quarter of the arena and the registry set yields almost
-    nothing -- 3 passes against 172 from the pool. Leaving the pool's passers
-    ungathered repeats the original bug on the only dialect that is short."""
+def test_pool_flydsl_passers_are_still_harvested_while_mining_is_paused(
+        pipeline, loops, staff):
+    """FlyDSL mining is paused, not abandoned. Repair rescued 121 HIP kernels
+    and zero FlyDSL over ~9,500 attempts, so the workers moved to HIP -- but the
+    gate keeps running and its passers must keep being promoted, or the set has
+    to be rebuilt from nothing when FlyDSL is picked up again."""
     assert "POOL_FLYDSL_OK_ROOT" in pipeline, "pool FlyDSL passers are not promoted"
     assert _wanted(loops, "poolflydsl") == _wanted(staff, "poolflydsl")
-    assert int(_wanted(loops, "poolflydsl")) > 0, "declared but staffed with nobody"
+    assert int(_wanted(loops, "poolflydsl")) == 0, "FlyDSL mining is meant to be paused"
 
 
 def test_pool_flydsl_is_not_pooled_into_the_frontier_set(pipeline):
@@ -182,13 +184,20 @@ def test_every_worker_goes_to_hip_or_flydsl(loops, staff):
 
 def test_frontier_difficulty_twins_are_staffed_first(loops, staff):
     """Streams are staffed in declaration order, so order is priority. The
-    frontier twins are the only HIP/FlyDSL set whose difficulty comes from the
-    task rather than the dialect."""
+    frontier twins are the only HIP set whose difficulty comes from the task
+    rather than the dialect."""
     for src, name in ((loops, "ensure_loops.sh"), (staff, "staff_datagen.sh")):
         order = [s for s, _ in _stream_wants(src)]
         assert order[0] == "frontiertwins", f"{name} staffs {order[0]} first"
-        assert order.index("poolflydsl") < order.index("poolhip"), \
-            f"{name} prefers launch-bound HIP over the scarcer FlyDSL"
+
+
+def test_repair_budget_follows_the_dialect_it_can_actually_fix(loops):
+    """Across ~9,500 repairs: 121 HIP kernels went from failing to passing and
+    zero FlyDSL did. Spending half the teacher budget on FlyDSL bought nothing."""
+    pipeline = (SCRIPTS / "frontier_pipeline.sh").read_text()
+    assert "REPAIR_ROOTS" in pipeline
+    block = pipeline.split("--- 1b")[1].split("--- 2.")[0]
+    assert "$REPAIR_ROOTS" in block, "repair still walks a hardcoded root list"
 
 
 def test_lowest_value_stream_is_still_last(loops):

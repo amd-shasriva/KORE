@@ -47,7 +47,12 @@ MAX_GATES_IN_FLIGHT="${MAX_GATES_IN_FLIGHT:-1}"
 #: a kernel that cannot be fixed would otherwise cost a teacher call every pass
 #: forever.
 REPAIR_LIMIT="${REPAIR_LIMIT:-150}"
-REPAIR_MAX_ATTEMPTS="${REPAIR_MAX_ATTEMPTS:-2}"
+#: Frontier twins are worth more attempts than the default. 364 of the 482
+#: frontier tasks have no working twin in either dialect, and the corpus is
+#: 11,884 Triton rows against 738 HIP and 229 FlyDSL -- so a frontier task
+#: rescued into HIP or FlyDSL is the scarcest row available, while a fourth
+#: attempt at an elementwise op is not.
+REPAIR_MAX_ATTEMPTS="${REPAIR_MAX_ATTEMPTS:-4}"
 SLEEP="${FRONTIER_SLEEP:-300}"
 
 #: root | seed-glob | materializer | extra args. The materializers are the slow,
@@ -271,6 +276,7 @@ while :; do
         setsid nohup env PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 \
             KORE_TEACHER_MODEL="$FLYDSL_TEACHER_MODEL" \
             "$PY" "$REPO/scripts/repair_twin_seeds.py" --root "$spec" \
+            --task-list "$FRONTIER_TASK_LIST" \
             --limit "$REPAIR_LIMIT" --workers 8 --max-attempts "$REPAIR_MAX_ATTEMPTS" \
             >> "$REPO/runs/repair_$(basename "$spec").log" 2>&1 < /dev/null &
         sleep 2

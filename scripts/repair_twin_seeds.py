@@ -83,6 +83,16 @@ Return ONLY the complete corrected file, in a single ```{lang} code block.
 """
 
 
+#: Strips a twin's dialect suffix to recover the id of the task it was twinned
+#: from, which is what a selection file names. Longest first, so ``x__hipf`` is
+#: x twinned functionally and not ``x_`` twinned as ``__hip``.
+TWIN_SUFFIX = re.compile("(" + "|".join(sorted(DIALECTS, key=len, reverse=True)) + ")$")
+
+
+def source_id(task_id: str) -> str:
+    return TWIN_SUFFIX.sub("", task_id)
+
+
 def _suffix(task_id: str):
     for suffix, meta in DIALECTS.items():
         if task_id.endswith(suffix):
@@ -227,6 +237,14 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--max-attempts", type=int, default=2,
                     help="repairs per task before giving up on it")
+    ap.add_argument("--task-list", default="",
+                    help="file of source task ids to repair first. Repair budget "
+                         "is finite and the roots are not uniform: the registry "
+                         "HIP root holds 1,132 twins of which 482 are frontier, "
+                         "so untargeted repair spends most of itself on "
+                         "generated elementwise ops")
+    ap.add_argument("--task-list-only", action="store_true",
+                    help="repair nothing outside --task-list")
     ap.add_argument("--teacher", default="claude")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -235,9 +253,15 @@ def main() -> int:
     gate = Path(args.gate) if args.gate else REPO / "runs" / f"{root.name}_gate.json"
     ledger = root / "repair_attempts.jsonl"
 
+    wanted: set = set()
+    if args.task_list and Path(args.task_list).is_file():
+        from kore.data.twins import read_task_list
+
+        wanted = read_task_list(Path(args.task_list))
+
     attempts = load_attempts(ledger)
-    selected = []
-    skipped_spent = skipped_blank = 0
+    preferred, rest = [], []
+    skipped_spent = skipped_blank = skipped_off = 0
     for row in failing_rows(gate):
         tid = row["task_id"]
         if attempts.get(tid, 0) >= args.max_attempts:
@@ -247,13 +271,27 @@ def main() -> int:
         if not _diagnosable(text):
             skipped_blank += 1
             continue
-        selected.append((tid, text))
-        if len(selected) >= args.limit:
-            break
+        # A twin's id is its source id plus a dialect suffix.
+        on_list = bool(wanted) and source_id(tid) in wanted
+        if wanted and not on_list:
+            if args.task_list_only:
+                skipped_off += 1
+                continue
+            rest.append((tid, text))
+        else:
+            preferred.append((tid, text))
+
+    # Frontier first, then whatever budget is left. 364 of the 482 frontier
+    # tasks have no working twin in either dialect, and a rescued one is worth
+    # more than a rescued elementwise op that the corpus already has 11,884
+    # rows of.
+    selected = (preferred + rest)[: args.limit]
 
     print(f"repairable: {len(selected)}"
+          + (f" ({len(preferred)} on the task list)" if wanted else "")
           + (f"; {skipped_spent} already at --max-attempts" if skipped_spent else "")
-          + (f"; {skipped_blank} with no diagnosable error" if skipped_blank else ""))
+          + (f"; {skipped_blank} with no diagnosable error" if skipped_blank else "")
+          + (f"; {skipped_off} off the task list" if skipped_off else ""))
     if args.dry_run:
         for tid, text in selected[:5]:
             first = next((l for l in text.splitlines() if l.strip()), "")

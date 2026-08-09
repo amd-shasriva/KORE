@@ -171,3 +171,53 @@ def test_repair_covers_both_dialects():
     src = (REPO / "scripts" / "frontier_pipeline.sh").read_text()
     block = src.split("--- 1b")[1].split("--- 2.")[0]
     assert "FLYDSL_ROOT" in block and "REG_HIP_ROOT" in block
+
+
+# ---- repair budget must go to the tasks that matter ------------------------
+
+def test_frontier_tasks_are_repaired_first(tmp_path, monkeypatch):
+    """The registry HIP root holds 1,132 twins of which 482 are frontier, and
+    364 of those frontier tasks have no working twin in any dialect. Untargeted
+    repair spends most of its budget on generated elementwise ops the corpus
+    already has 11,884 rows of."""
+    src = (REPO / "scripts" / "repair_twin_seeds.py").read_text()
+    assert "--task-list" in src, "repair cannot be pointed at the frontier set"
+    assert "preferred + rest" in src, "the list does not actually reorder the work"
+
+
+def test_task_list_only_can_exclude_the_rest():
+    src = (REPO / "scripts" / "repair_twin_seeds.py").read_text()
+    assert "--task-list-only" in src
+
+
+def test_pipeline_points_repair_at_the_frontier_list():
+    src = (REPO / "scripts" / "frontier_pipeline.sh").read_text()
+    block = src.split("--- 1b")[1].split("--- 2.")[0]
+    assert "FRONTIER_TASK_LIST" in block, \
+        "repair runs untargeted while frontier twins are what is missing"
+
+
+@pytest.mark.parametrize("twin,source", [
+    ("flash_attn_decode_bf16__hip", "flash_attn_decode_bf16"),
+    ("kbk_x__hipf", "kbk_x"),
+    ("rope_bf16__flydsl", "rope_bf16"),
+    ("no_suffix", "no_suffix"),
+])
+def test_source_id_recovers_the_task_a_twin_came_from(twin, source):
+    """A selection file names source tasks; a verdict names twins. Getting this
+    wrong silently matches nothing and the frontier list has no effect."""
+    assert R.source_id(twin) == source
+
+
+def test_frontier_rows_sort_ahead_of_the_rest(tmp_path):
+    gate = tmp_path / "g.json"
+    rows = [{"task_id": f"gen_easy_{i}__hip", "status": "incorrect",
+             "error": "TypeError: boom"} for i in range(5)]
+    rows.append({"task_id": "flash_attn_decode_bf16__hip", "status": "incorrect",
+                 "error": "TypeError: boom"})
+    gate.write_text(json.dumps({"rows": rows}))
+    wanted = {"flash_attn_decode_bf16"}
+    failing = R.failing_rows(gate)
+    pref = [r["task_id"] for r in failing if R.source_id(r["task_id"]) in wanted]
+    rest = [r["task_id"] for r in failing if R.source_id(r["task_id"]) not in wanted]
+    assert (pref + rest)[0] == "flash_attn_decode_bf16__hip"

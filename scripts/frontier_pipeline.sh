@@ -87,6 +87,14 @@ TWIN_DATA_ROOT="${TWIN_DATA_ROOT:-data/v5frontier_twins}"
 TWIN_SHARD_DIR="${TWIN_SHARD_DIR:-runs/shards_frontier_twins}"
 TWIN_SHARDS="${TWIN_SHARDS:-3}"
 
+#: The pool-sourced FlyDSL twins, promoted and mined separately from the
+#: frontier set so difficulty is not silently mixed. Currently the only FlyDSL
+#: signal that clears the gate in quantity.
+POOL_FLYDSL_OK_ROOT="${POOL_FLYDSL_OK_ROOT:-data/pool_flydsl_ok}"
+POOL_FLYDSL_DATA_ROOT="${POOL_FLYDSL_DATA_ROOT:-data/v5pool_flydsl}"
+POOL_FLYDSL_SHARD_DIR="${POOL_FLYDSL_SHARD_DIR:-runs/shards_pool_flydsl}"
+POOL_FLYDSL_SHARDS="${POOL_FLYDSL_SHARDS:-2}"
+
 #: The FlyDSL port is written by a different teacher than the HIP seeds.
 #:
 #: .env.local points KORE_TEACHER_MODEL at claude-opus-5, which writes HIP fine
@@ -297,11 +305,34 @@ while :; do
         bash "$REPO/scripts/hip_pool_harvest.sh" "$TWIN_SHARDS" 2>&1 \
         | grep -E "promoted|PARTITION|nothing to do" | tee -a "$LOG"
 
+    # The pool-sourced FlyDSL twins, kept separate from the frontier set.
+    #
+    # They are the launch-bound half of the corpus and do not belong in a set
+    # named for its difficulty. They are also, right now, the only FlyDSL
+    # signal there is: 172 of them clear the gate against 3 from the registry,
+    # and FlyDSL is a quarter of the arena. Leaving them unharvested was the
+    # same mistake as before -- gated twins that no stage reads -- so they get
+    # their own promoted root, shard set and stream, and the mixture can weight
+    # them later rather than being silently deprived of them now.
+    #
+    # No task list: these ids are the external pool's and were already narrowed
+    # by --families when they were seeded; frontier_tasks.txt is registry ids
+    # and would reject every one of them.
+    HIP_ROOTS="$FLYDSL_ROOT" \
+    HIP_PROMOTED="$REPO/$POOL_FLYDSL_OK_ROOT" \
+    HIP_DATA_ROOT="$REPO/$POOL_FLYDSL_DATA_ROOT" \
+    HIP_SHARD_DIR="$REPO/$POOL_FLYDSL_SHARD_DIR" \
+    HIP_TASK_IDS_OUT="$REPO/runs/pool_flydsl_tasks.txt" \
+    HIP_TWIN_GLOBS='*__flydsl' \
+    NO_SUBMIT=1 \
+        bash "$REPO/scripts/hip_pool_harvest.sh" "$POOL_FLYDSL_SHARDS" 2>&1 \
+        | grep -E "promoted|PARTITION|nothing to do" | tee -a "$LOG"
+
     # Frontier registry shards are static (the 482 ids do not change), so only
     # refresh their commit stamp -- a stale manifest kills every worker on the
     # preflight check with NonZeroExitCode and reads as a queue problem.
-    for d in runs/shards_frontier "$TWIN_SHARD_DIR" runs/shards_hippool \
-             runs/shards_pooltriton; do
+    for d in runs/shards_frontier "$TWIN_SHARD_DIR" "$POOL_FLYDSL_SHARD_DIR" \
+             runs/shards_hippool runs/shards_pooltriton; do
         [ -d "$REPO/$d" ] && "$PY" "$REPO/scripts/refresh_shards.py" "$d" >> "$LOG" 2>&1
     done
 

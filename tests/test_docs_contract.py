@@ -76,7 +76,11 @@ DOCS = sorted(
     )
     # runs/ holds gitignored trainer output, including TRL's auto-generated model
     # cards. They are not project documentation and nobody maintains them.
-    and path.relative_to(REPO_ROOT).parts[0] != "runs"
+    # repos/ is the same category for a different reason: gitignored clones of
+    # other people's projects, checked out to read or build against. Auditing
+    # FlagGems' own install guide for paths in this tree fails on tests/test_abs.py
+    # -- theirs, not ours -- and there is nothing here to fix when it does.
+    and path.relative_to(REPO_ROOT).parts[0] not in {"runs", "repos"}
 )
 
 
@@ -250,10 +254,12 @@ def test_absent_path_allowlist_has_no_dead_entries():
         for token in ABSENT_PATHS
         if (REPO_ROOT / token).exists()
         # These legitimately come and go: `reassemble.sh` materializes the
-        # cluster corpora locally, the run writes its own sinks, and the launch
-        # command writes its own resolved config.
+        # cluster corpora locally, the run writes its own sinks, the launch
+        # command writes its own resolved config, and repos/ is where somebody
+        # else's project gets cloned when it is needed to build against.
         and not token.startswith((
-            "data/b05factory/", "data/full14b/", "configs/sft_14b_full.resolved"))
+            "data/b05factory/", "data/full14b/", "configs/sft_14b_full.resolved",
+            "repos/"))
     ]
     assert not stale, f"ABSENT_PATHS entries that now resolve: {stale}"
 

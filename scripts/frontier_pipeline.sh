@@ -37,10 +37,16 @@ GATE_EVERY="${GATE_EVERY:-30}"       # gate once this many new seeds have landed
 #: turns a seed into something mineable, so it is worth one of the eight shared
 #: nodes rather than a place in the burst queue behind 35 other jobs.
 GENERAL_GATE_MAX="${GENERAL_GATE_MAX:-1}"
-#: Gates in flight across every root. Matches the general share above: a gate
-#: beyond it can only land in burst, where it waits behind ~35 other jobs and
-#: holds one of my eight cap slots the entire time.
-MAX_GATES_IN_FLIGHT="${MAX_GATES_IN_FLIGHT:-1}"
+#: Gates in flight across every root.
+#:
+#: One was right while the cap was 8 and a second gate could only sit in burst
+#: holding a slot. The cap is 10 now and the backlog changed shape: the repair
+#: loop has rewritten 9,466 kernels, and every one of them needs a verdict
+#: before it can be mined. Serialised at one gate that queue drains a root at a
+#: time -- 1,034 tasks were waiting behind a single running gate. The second
+#: gate takes a burst slot rather than a general one, so it costs nothing that
+#: mining or the arena wanted.
+MAX_GATES_IN_FLIGHT="${MAX_GATES_IN_FLIGHT:-2}"
 
 #: How many failing twins to hand back to the teacher per repair pass, and how
 #: many times one task may be retried before it is written off. Bounded because

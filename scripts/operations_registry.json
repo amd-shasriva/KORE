@@ -118,6 +118,12 @@
       "note": "builds the HipKittens knowledge SFT slice from a read-only MIT-licensed checkout; decontaminates against the held-out eval and dedups against the existing mixture before writing, and writes only --out/--report"
     },
     {
+      "path": "scripts/build_modality_slices.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "split a mixture into per-dialect slices for reporting"
+    },
+    {
       "path": "scripts/build_replay_slice.py",
       "classification": "active",
       "lifecycle": "active",
@@ -143,6 +149,12 @@
       "lifecycle": "active",
       "deletes_artifacts": false,
       "note": "builds the v3 SFT mixture from step-centric AMD trajectories, recovered rows and the v2 base; never mutates its inputs"
+    },
+    {
+      "path": "scripts/build_sft_v5_mixture.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "assemble the v5 SFT mixture from the mined rows"
     },
     {
       "path": "scripts/build_supplementary_shard.py",
@@ -201,6 +213,12 @@
       "role": "SPUR-compatible additive wins worker"
     },
     {
+      "path": "scripts/ensure_loops.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "start any unattended loop that is not running; idempotent, driven by cron"
+    },
+    {
       "path": "scripts/eval_bakeoff_multi.py",
       "classification": "diagnostic",
       "lifecycle": "active"
@@ -231,15 +249,40 @@
       "site_specific": true
     },
     {
+      "path": "scripts/gpu_slots.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "shared job-cap, QoS choice and reservation helpers, sourced by the loops"
+    },
+    {
       "path": "scripts/grpo_smoke.py",
       "classification": "diagnostic",
       "lifecycle": "active"
+    },
+    {
+      "path": "scripts/hip_pipeline_loop.sh",
+      "classification": "diagnostic",
+      "lifecycle": "superseded",
+      "role": "single-dialect predecessor of frontier_pipeline.sh; kept for reference, not started",
+      "replacement": "scripts/frontier_pipeline.sh"
+    },
+    {
+      "path": "scripts/hip_pool_harvest.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "promote gate-passed twins into a resolvable task root and shard them"
     },
     {
       "path": "scripts/hold_arena_nodes.sh",
       "classification": "active",
       "lifecycle": "active",
       "role": "reserve only the nodes our own arena arms already occupy, so an 8h wall-clock rollover gets the same machine back instead of losing it to another tenant on a cluster with zero idle nodes; never reserves a node we are not running on, and a lapsed hold degrades to ordinary scheduling"
+    },
+    {
+      "path": "scripts/keepalive.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "restart a long-running unattended command whenever it stops"
     },
     {
       "path": "scripts/kore_monitor.py",
@@ -292,6 +335,18 @@
       "role": "produce the profiling_reward_evidence_path receipt by running KoreEnv.collect_kernel_trace on real tasks"
     },
     {
+      "path": "scripts/materialize_pool_flydsl.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "teacher-written FlyDSL port of a task's working Triton kernel"
+    },
+    {
+      "path": "scripts/materialize_pool_hip.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "teacher-written HIP twin of a pool or registry task"
+    },
+    {
       "path": "scripts/merge_datagen_roots.py",
       "classification": "destructive",
       "lifecycle": "active",
@@ -315,6 +370,12 @@
       "classification": "active",
       "lifecycle": "active",
       "role": "gzip and split the v4 SFT mixture into <100MB release parts with a reassembled-stream checksum"
+    },
+    {
+      "path": "scripts/partition_any_tasks.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "shard an arbitrary task-id list for the datagen array"
     },
     {
       "path": "scripts/pilot_agentic_throughput.py",
@@ -351,6 +412,12 @@
       "role": "measure WHY hip_gemm is not timing-admissible: times the hipBLASLt baseline solo and interleaved with the seed at each candidate shape, and judges both with the environment's own unmodified 3% publication admission gate"
     },
     {
+      "path": "scripts/probe_hip_toolchain.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "report hipcc / ROCm availability on a node"
+    },
+    {
       "path": "scripts/probe_multinode.sbatch",
       "classification": "diagnostic",
       "lifecycle": "active",
@@ -380,6 +447,24 @@
       "classification": "destructive",
       "lifecycle": "active",
       "role": "move held-out/eval-leaked win/repair/groups shards to _quarantine (dry-run default, --apply to move)"
+    },
+    {
+      "path": "scripts/refresh_shards.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "re-partition a shard set whose manifest predates the checkout"
+    },
+    {
+      "path": "scripts/refresh_twin_drivers.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "re-copy a twin's driver.py when it drifts from the task it was twinned from"
+    },
+    {
+      "path": "scripts/repair_twin_seeds.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "hand a failing twin its own gate error and take the teacher's revision"
     },
     {
       "path": "scripts/report_pool_gate_ab.py",
@@ -535,6 +620,12 @@
       "note": "compute-node launcher for audit_decontamination.py"
     },
     {
+      "path": "scripts/spur_build_flydsl.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "build the FlyDSL toolchain on a GPU node"
+    },
+    {
       "path": "scripts/spur_build_mixture_1node.sbatch",
       "classification": "active",
       "lifecycle": "active",
@@ -586,6 +677,12 @@
       "deletes_artifacts": false,
       "production": false,
       "note": "one-node launcher for run_evolve_agent.py; refuses to start without a visible GPU or with <20G free on the shared /home. Takes ONE node under the QoS cap. production=false until it has been run on gfx950"
+    },
+    {
+      "path": "scripts/spur_gate_pool_hip.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "GPU job wrapping the twin gate"
     },
     {
       "path": "scripts/spur_gpu_smoke.sbatch",
@@ -683,6 +780,12 @@
       "role": "resolve a shipped sft/dpo/grpo config into the launch config a SPUR job runs (model_id handoff, output_dir, grpo co-evolution data root)"
     },
     {
+      "path": "scripts/spur_seed_hip.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "role": "batch HIP seeding; superseded by the login-node materializer"
+    },
+    {
       "path": "scripts/spur_sft_1node.sbatch",
       "classification": "active",
       "lifecycle": "active",
@@ -734,6 +837,18 @@
       "lifecycle": "active",
       "deletes_artifacts": false,
       "note": "one-node gfx950 launcher for verify_spec_tasks_e2e.py plus the CK probe"
+    },
+    {
+      "path": "scripts/staff_datagen.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "keep every mining stream staffed within the job cap"
+    },
+    {
+      "path": "scripts/supervise.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "keep one arena arm submitted and resumed across its 8h allocations"
     },
     {
       "path": "scripts/test_amd_gateway.py",
@@ -795,6 +910,12 @@
       "lifecycle": "active",
       "deletes_artifacts": false,
       "role": "feed each task its own declared seed through the real KoreEnv and report compile/correctness/timing-eligibility; proves a task is runnable before it is claimed as coverage"
+    },
+    {
+      "path": "scripts/verify_pool_hip_seeds.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "role": "gate: compile and SNR-check a twin's seed on real gfx950"
     },
     {
       "path": "scripts/verify_spec_tasks_e2e.py",

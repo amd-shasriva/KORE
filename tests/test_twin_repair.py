@@ -167,10 +167,15 @@ def test_repair_holds_no_gpu_slot():
     assert "sbatch" not in block, "repair takes an allocation"
 
 
-def test_repair_covers_both_dialects():
+def test_repair_goes_where_it_works():
+    """It covered both dialects until the numbers came in: ~9,500 repairs
+    rescued 121 HIP kernels and zero FlyDSL ones. The model can act on a HIP
+    error; it cannot act on a FlyDSL one, because it does not know the language
+    well enough for the message to mean anything."""
     src = (REPO / "scripts" / "frontier_pipeline.sh").read_text()
+    assert 'REPAIR_ROOTS="${REPAIR_ROOTS:-$REG_HIP_ROOT}"' in src
     block = src.split("--- 1b")[1].split("--- 2.")[0]
-    assert "FLYDSL_ROOT" in block and "REG_HIP_ROOT" in block
+    assert "$REPAIR_ROOTS" in block, "repair still walks a hardcoded root list"
 
 
 # ---- repair budget must go to the tasks that matter ------------------------

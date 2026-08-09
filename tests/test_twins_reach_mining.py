@@ -118,6 +118,28 @@ def test_staffing_default_matches_the_live_config(loops, staff):
             f"{name}: ensure_loops wants {a}, staff_datagen default is {b}"
 
 
+def test_pool_flydsl_passers_are_harvested_too(pipeline, loops, staff):
+    """FlyDSL is a quarter of the arena and the registry set yields almost
+    nothing -- 3 passes against 172 from the pool. Leaving the pool's passers
+    ungathered repeats the original bug on the only dialect that is short."""
+    assert "POOL_FLYDSL_OK_ROOT" in pipeline, "pool FlyDSL passers are not promoted"
+    assert _wanted(loops, "poolflydsl") == _wanted(staff, "poolflydsl")
+    assert int(_wanted(loops, "poolflydsl")) > 0, "declared but staffed with nobody"
+
+
+def test_pool_flydsl_is_not_pooled_into_the_frontier_set(pipeline):
+    """Difficulty must not be silently mixed: the frontier set is named for it."""
+    block = pipeline.split("POOL_FLYDSL_OK_ROOT=")[1][:600]
+    assert "TWIN_OK_ROOT" not in block
+
+
+def test_pool_flydsl_harvest_skips_the_registry_task_list(pipeline):
+    """frontier_tasks.txt holds registry ids; applying it to pool twins would
+    filter out every one of them and silently harvest nothing."""
+    seg = pipeline.split('HIP_PROMOTED="$REPO/$POOL_FLYDSL_OK_ROOT"')[1].split("hip_pool_harvest.sh")[0]
+    assert "HIP_TASK_LIST" not in seg
+
+
 def test_twin_shards_are_kept_current(pipeline):
     """A manifest older than the checkout makes every worker die on preflight,
     which in the queue looks exactly like waiting a turn."""

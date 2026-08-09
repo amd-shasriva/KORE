@@ -65,6 +65,7 @@ fi
 STREAMS="${DATAGEN_STREAMS:-\
 frontier:runs/shards_frontier:data/v5frontier:1:kore-mine-frontier \
 frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:2:kore-mine-frontiertwins \
+poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:1:kore-mine-poolflydsl \
 pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton \
 poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory \
 hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg}"

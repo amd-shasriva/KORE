@@ -94,7 +94,7 @@ start() {
 # exist. Streams are staffed in the order they appear here, and the first one
 # takes what it can, so the ordering is the priority.
 start frontier_pipeline \
-    GPU_JOB_CAP=8 FRONTIER_FAMILIES="attention gemm quantization" \
+    GPU_JOB_CAP=10 FRONTIER_FAMILIES="attention gemm quantization" \
     HIP_ROOT=data/pool_hip_frontier FLYDSL_ROOT=data/pool_flydsl \
     REG_HIP_ROOT=data/registry_hip_frontier \
     REG_FLYDSL_ROOT=data/registry_flydsl_frontier \
@@ -102,7 +102,7 @@ start frontier_pipeline \
     TWIN_DATA_ROOT=data/v5frontier_twins \
     TWIN_SHARD_DIR=runs/shards_frontier_twins \
     KORE_QOS=amd-burst-qos \
-    DATAGEN_STREAMS="poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:1:kore-mine-poolflydsl frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:2:kore-mine-frontiertwins frontier:runs/shards_frontier:data/v5frontier:1:kore-mine-frontier pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton poolhip:runs/shards_hippool:data/v5hippool:1:kore-mine-poolhip+kore-factory hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
+    DATAGEN_STREAMS="frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:3:kore-mine-frontiertwins poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:2:kore-mine-poolflydsl hipreg:runs/shards_hipreg:data/v5hip:2:kore-mine-hipreg poolhip:runs/shards_hippool:data/v5hippool:3:kore-mine-poolhip+kore-factory frontier:runs/shards_frontier:data/v5frontier:0:kore-mine-frontier pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton" \
     bash "$REPO/scripts/keepalive.sh" frontier_pipeline -- \
     bash "$REPO/scripts/frontier_pipeline.sh"
 
@@ -120,7 +120,7 @@ start frontier_pipeline \
 # one-node arena fits there now and starts immediately. Mining is throughput
 # work that can afford to queue; the eval is not.
 start supervise \
-    GPU_JOB_CAP=8 AKA_AFTER_SFT=1 AKA_ARM=v4 AKA_TASK_CONCURRENCY=12 \
+    GPU_JOB_CAP=10 AKA_AFTER_SFT=1 AKA_ARM=v4 AKA_TASK_CONCURRENCY=12 \
     AKA_JOB_NAME=kore-aka KORE_QOS=amd-general-qos \
     AKA_MODEL=/shared_nfs/shasriva/kore/runs/sft_v4 \
     bash "$REPO/scripts/keepalive.sh" supervise -- bash "$REPO/scripts/supervise.sh"
@@ -133,7 +133,7 @@ start supervise \
 # DATAGEN_SHARDS stays unset so this instance never staffs mining, and SFT is
 # already complete, so in practice it supervises exactly one thing.
 start supervise_base \
-    GPU_JOB_CAP=8 AKA_AFTER_SFT=1 AKA_ARM=base AKA_TASK_CONCURRENCY=12 \
+    GPU_JOB_CAP=10 AKA_AFTER_SFT=1 AKA_ARM=base AKA_TASK_CONCURRENCY=12 \
     AKA_JOB_NAME=kore-aka-base KORE_QOS=amd-general-qos \
     AKA_OUT="$REPO/runs/aka_base" \
     SUPERVISE_LOG="$REPO/runs/supervise_base.log" \

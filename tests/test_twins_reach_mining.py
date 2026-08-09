@@ -148,22 +148,50 @@ def test_twin_shards_are_kept_current(pipeline):
         "the twin shard set is never refreshed against the current commit"
 
 
-def test_the_dialect_with_no_data_is_staffed_first(loops, staff):
-    """Streams are staffed in declaration order and general QoS has room for two
-    miners, so order is priority. FlyDSL is 25% of the arena and had produced
-    zero rows ever while its miner sat 8 hours in the burst queue behind streams
-    that already had 11,879 and 794 rows."""
+#: The dialects the arena scores that the corpus is short of. Triton is not one
+#: of them: 11,884 Triton rows against 738 HIP and 229 FlyDSL, so a marginal
+#: Triton row is worth close to nothing and a slot spent on it is a slot not
+#: spent on the two dialects that are 47% of the arena between them.
+HIP_FLYDSL_STREAMS = ("frontiertwins", "poolflydsl", "hipreg", "poolhip")
+TRITON_STREAMS = ("frontier", "pooltriton")
+
+
+def _stream_wants(src):
+    return [(t.split(":")[0], int(t.split(":")[3]))
+            for t in src.replace('"', " ").replace("\\", " ").split()
+            if ":runs/shards" in t]
+
+
+def test_no_triton_is_mined(loops, staff):
+    """Triton mining is switched off outright, not merely deprioritised."""
     for src, name in ((loops, "ensure_loops.sh"), (staff, "staff_datagen.sh")):
-        specs = [t.split(":")[0] for t in
-                 src.replace('"', " ").replace("\\", " ").split()
-                 if ":runs/shards" in t]
-        assert specs[0] == "poolflydsl", f"{name} staffs {specs[0]} before FlyDSL"
-        assert specs.index("frontiertwins") < specs.index("frontier"), \
-            f"{name} prefers Triton over its own frontier twins"
+        wants = dict(_stream_wants(src))
+        for stream in TRITON_STREAMS:
+            assert wants.get(stream, 0) == 0, \
+                f"{name} still staffs {stream} with {wants[stream]} worker(s)"
+
+
+def test_every_worker_goes_to_hip_or_flydsl(loops, staff):
+    for src, name in ((loops, "ensure_loops.sh"), (staff, "staff_datagen.sh")):
+        wants = dict(_stream_wants(src))
+        staffed = {s for s, w in wants.items() if w > 0}
+        assert staffed, f"{name} staffs nothing at all"
+        assert staffed <= set(HIP_FLYDSL_STREAMS), \
+            f"{name} staffs a non-HIP/FlyDSL stream: {staffed - set(HIP_FLYDSL_STREAMS)}"
+
+
+def test_frontier_difficulty_twins_are_staffed_first(loops, staff):
+    """Streams are staffed in declaration order, so order is priority. The
+    frontier twins are the only HIP/FlyDSL set whose difficulty comes from the
+    task rather than the dialect."""
+    for src, name in ((loops, "ensure_loops.sh"), (staff, "staff_datagen.sh")):
+        order = [s for s, _ in _stream_wants(src)]
+        assert order[0] == "frontiertwins", f"{name} staffs {order[0]} first"
+        assert order.index("poolflydsl") < order.index("poolhip"), \
+            f"{name} prefers launch-bound HIP over the scarcer FlyDSL"
 
 
 def test_lowest_value_stream_is_still_last(loops):
-    specs = [t.split(":")[0] for t in
-             loops.replace('"', " ").replace("\\", " ").split() if ":runs/shards" in t]
-    assert specs.index("poolhip") > specs.index("frontiertwins"), \
+    order = [s for s, _ in _stream_wants(loops)]
+    assert order.index("poolhip") > order.index("frontiertwins"), \
         "launch-bound pool HIP would take a slot before the frontier twins"

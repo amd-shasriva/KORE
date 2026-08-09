@@ -102,7 +102,7 @@ start frontier_pipeline \
     TWIN_DATA_ROOT=data/v5frontier_twins \
     TWIN_SHARD_DIR=runs/shards_frontier_twins \
     KORE_QOS=amd-burst-qos \
-    DATAGEN_STREAMS="frontier:runs/shards_frontier:data/v5frontier:1:kore-mine-frontier frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:2:kore-mine-frontiertwins poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:1:kore-mine-poolflydsl pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
+    DATAGEN_STREAMS="frontier:runs/shards_frontier:data/v5frontier:2:kore-mine-frontier frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:2:kore-mine-frontiertwins poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:1:kore-mine-poolflydsl pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton poolhip:runs/shards_hippool:data/v5hippool:1:kore-mine-poolhip+kore-factory hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg" \
     bash "$REPO/scripts/keepalive.sh" frontier_pipeline -- \
     bash "$REPO/scripts/frontier_pipeline.sh"
 

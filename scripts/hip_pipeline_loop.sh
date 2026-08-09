@@ -59,7 +59,7 @@ n_seeds() {
     echo "$n"
 }
 n_promoted() { ls -d "$PROMOTED"/tasks/*__hip* 2>/dev/null | wc -l; }
-queued() { squeue -u "$USER" -h -n "$1" 2>/dev/null | wc -l; }
+queued() { squeue -u "${USER:-${LOGNAME:-$(id -un)}}" -h -n "$1" 2>/dev/null | wc -l; }
 
 say "=== hip pipeline loop start (pid $$) ==="
 say "roots: $ROOTS"

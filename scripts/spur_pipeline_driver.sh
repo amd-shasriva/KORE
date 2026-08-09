@@ -87,7 +87,7 @@ PY
 # Prints the listing and returns 0 on success; returns 2 if unreachable.
 squeue_snapshot() {
   local out rc
-  out="$(squeue -u "$USER" -h -o "$1" 2>&1)"; rc=$?
+  out="$(squeue -u "${USER:-${LOGNAME:-$(id -un)}}" -h -o "$1" 2>&1)"; rc=$?
   if [ "$rc" -ne 0 ] || printf '%s' "$out" \
        | grep -qiE 'failed to connect|transport error|connection refused|^error:'; then
     return 2
@@ -118,7 +118,7 @@ submit_until_accepted() {
     job="$(sbatch "$@" 2>&1 | grep -oE '[0-9]+$')"
     if [ -z "$job" ]; then [ $((attempt % 10)) -eq 1 ] && log "  $name: submit produced no job id (attempt $attempt)"; sleep 60; continue; fi
     sleep 25
-    state="$(squeue -u "$USER" -h -j "$job" -o '%T %R' 2>/dev/null)"
+    state="$(squeue -u "${USER:-${LOGNAME:-$(id -un)}}" -h -j "$job" -o '%T %R' 2>/dev/null)"
     case "$state" in
       RUNNING*)            log "  $name: job $job RUNNING"; echo "$job"; return 0 ;;
       *JobHoldMaxRequeue*) scancel "$job" 2>/dev/null

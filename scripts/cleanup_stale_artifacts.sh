@@ -22,7 +22,7 @@ avail_g() { df -k "$1" 2>/dev/null | tail -1 | awk '{printf "%.1f", $4/1024/1024
 echo "BEFORE  /home $(avail_g /home)G   /shared_nfs $(avail_g /shared_nfs)G"
 
 # Job ids that are still queued or running; their logs are off limits.
-LIVE=$(squeue -u "$USER" -h -o "%i" 2>/dev/null | tr '\n' ' ')
+LIVE=$(squeue -u "${USER:-${LOGNAME:-$(id -un)}}" -h -o "%i" 2>/dev/null | tr '\n' ' ')
 echo "live jobs (logs preserved): ${LIVE:-none}"
 
 rm_if() {   # rm_if <path...>  -- honours DRY_RUN and reports what it did

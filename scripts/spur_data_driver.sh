@@ -35,7 +35,7 @@ log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 # and submit duplicates on top of live work.
 squeue_snapshot() {
   local out rc
-  out="$(squeue -u "$USER" -h -o "$1" 2>&1)"; rc=$?
+  out="$(squeue -u "${USER:-${LOGNAME:-$(id -un)}}" -h -o "$1" 2>&1)"; rc=$?
   if [ "$rc" -ne 0 ] || printf '%s' "$out" \
        | grep -qiE 'failed to connect|transport error|connection refused|^error:'; then
     return 2

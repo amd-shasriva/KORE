@@ -31,6 +31,11 @@ def supervise() -> str:
     return (SCRIPTS / "supervise.sh").read_text()
 
 
+@pytest.fixture(scope="module")
+def slots() -> str:
+    return (SCRIPTS / "gpu_slots.sh").read_text()
+
+
 def test_staffing_holds_back_slots_for_absent_arena_arms(staff):
     assert "arena_reserve" in staff, "staffing does not reserve for the arena"
     assert "free=$(( free - reserve ))" in staff, \
@@ -82,3 +87,22 @@ def test_slot_check_precedes_should_submit(supervise):
     blocked = supervise.index('! have_slot')
     submit = supervise.index('should_submit aka;')
     assert blocked < submit, "capacity is still checked after the backoff clock"
+
+
+def test_stuck_jobs_include_launch_failure(slots):
+    """A job in JobLaunchFailure is stuck, not waiting: it holds one of the
+    eight shared general nodes and does nothing. The reason never contains the
+    word "hold", so the recovery pass walked straight past it."""
+    assert "_STUCK_REASON" in slots
+    assert "joblaunchfailure" in slots.lower()
+    body = slots.split("purge_held()")[1].split("\n}")[0]
+    assert 'grep -iE "$_STUCK_REASON"' in body, "recovery still matches only 'hold'"
+
+
+def test_normal_queue_reasons_are_not_purged(slots):
+    """Resources and Priority mean the job is simply waiting its turn; killing
+    those would cancel healthy work every pass."""
+    import re
+    reason = re.search(r'_STUCK_REASON="\$\{_STUCK_REASON:-([^}]*)\}"', slots).group(1)
+    for benign in ("Resources", "Priority", "None"):
+        assert not re.search(reason, benign, re.I), f"{benign} would be purged"

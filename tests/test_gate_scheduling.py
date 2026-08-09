@@ -74,3 +74,20 @@ def test_in_flight_count_spans_every_root(pipeline):
     """Counting only this root's own gate is what allowed four at once."""
     body = pipeline.split("gates_in_flight()")[1][:300]
     assert "'^kore-gate-'" in body, "the count is not across all gate jobs"
+
+
+# ---- the gate must notice work that is not a new directory ----------------
+
+def test_gate_triggers_on_ungated_verdicts_not_new_seeds(pipeline):
+    """A repair replaces a seed in place, so the seed count does not move. The
+    old trigger was seeds-minus-remembered, and 628 repaired kernels produced
+    no gate at all -- the entire repair loop was a no-op."""
+    assert "n_verdicts" in pipeline, "gate cannot see what is already decided"
+    assert 'ungated=$(( seeds - $(n_verdicts "$root") ))' in pipeline
+    assert '"$ungated" -ge "$GATE_EVERY"' in pipeline
+
+
+def test_gate_bookkeeping_is_on_disk_not_in_memory(pipeline):
+    """LAST_GATED lived in the loop's memory, so every restart re-gated
+    everything and every repair was invisible."""
+    assert "LAST_GATED" not in pipeline

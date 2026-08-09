@@ -105,7 +105,7 @@ TWIN_SHARDS="${TWIN_SHARDS:-3}"
 POOL_FLYDSL_OK_ROOT="${POOL_FLYDSL_OK_ROOT:-data/pool_flydsl_ok}"
 POOL_FLYDSL_DATA_ROOT="${POOL_FLYDSL_DATA_ROOT:-data/v5pool_flydsl}"
 POOL_FLYDSL_SHARD_DIR="${POOL_FLYDSL_SHARD_DIR:-runs/shards_pool_flydsl}"
-POOL_FLYDSL_SHARDS="${POOL_FLYDSL_SHARDS:-2}"
+POOL_FLYDSL_SHARDS="${POOL_FLYDSL_SHARDS:-4}"
 
 #: The FlyDSL port is written by a different teacher than the HIP seeds.
 #:

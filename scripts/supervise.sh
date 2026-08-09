@@ -71,6 +71,12 @@ DATAGEN_ROOT="${DATAGEN_ROOT:-$REPO/data/v5pool}"
 DATAGEN_N="${DATAGEN_N:-8}"
 DATAGEN_TARGET="${DATAGEN_TARGET:-3}"
 
+#: Wall clock for an arena submission. Long on purpose: the partition allows
+#: unlimited, the nodes are reserved for days, and the arena batches 12 rollouts
+#: per shard -- so a short limit does not bound cost, it just discards whatever
+#: was in flight when it fires.
+AKA_TIME_LIMIT="${AKA_TIME_LIMIT:-3-23:00:00}"
+
 # Per-instance, because two supervisors run at once (one arm each). Sharing one
 # file is how the duplicated pipeline loops hid for hours: four writers, one log,
 # and no way to tell which line came from which process.
@@ -313,7 +319,8 @@ while :; do
         scored=$(cat "$AKA_OUT"/results_"${AKA_ARM}"*.partial.jsonl 2>/dev/null | wc -l)
         say "AKA absent from queue -> submitting full arena (all types, no limit; $scored/402 already scored)"
         # shellcheck disable=SC2046,SC2086
-        sbatch $QOS_ARG $(res_arg) --job-name="$AKA_JOB_NAME" \
+        sbatch $QOS_ARG $(res_arg) --time="$AKA_TIME_LIMIT" \
+            --job-name="$AKA_JOB_NAME" \
             scripts/spur_aka_1node.sbatch run - "$AKA_MODEL" 0 "$AKA_ARM" "$AKA_OUT" 2>&1 | tee -a "$LOG"
         note_submission aka
     fi

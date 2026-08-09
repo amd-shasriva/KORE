@@ -13,7 +13,13 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:mi355x:8
 #SBATCH --cpus-per-task=32
-#SBATCH --time=08:00:00
+# The partition's MaxTime is UNLIMITED and the nodes are held by reservation for
+# days, so an 8h limit bought nothing and cost a great deal: the arena runs 12
+# agentic rollouts concurrently per shard, and the wall clock cut those batches
+# in half. Every restart threw away twelve nearly-finished rollouts per shard,
+# reloaded a 30B model across 16 checkpoint shards, and depended on the
+# supervisor noticing and resubmitting -- which is how v4 lost eight hours.
+#SBATCH --time=3-23:00:00
 #SBATCH --exclusive
 #SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/aka-%j.out
 #SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/aka-%j.err

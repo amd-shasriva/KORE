@@ -146,3 +146,24 @@ def test_twin_shards_are_kept_current(pipeline):
     refresh_block = pipeline.split("refresh_shards.py")[0]
     assert "$TWIN_SHARD_DIR" in refresh_block[-400:], \
         "the twin shard set is never refreshed against the current commit"
+
+
+def test_the_dialect_with_no_data_is_staffed_first(loops, staff):
+    """Streams are staffed in declaration order and general QoS has room for two
+    miners, so order is priority. FlyDSL is 25% of the arena and had produced
+    zero rows ever while its miner sat 8 hours in the burst queue behind streams
+    that already had 11,879 and 794 rows."""
+    for src, name in ((loops, "ensure_loops.sh"), (staff, "staff_datagen.sh")):
+        specs = [t.split(":")[0] for t in
+                 src.replace('"', " ").replace("\\", " ").split()
+                 if ":runs/shards" in t]
+        assert specs[0] == "poolflydsl", f"{name} staffs {specs[0]} before FlyDSL"
+        assert specs.index("frontiertwins") < specs.index("frontier"), \
+            f"{name} prefers Triton over its own frontier twins"
+
+
+def test_lowest_value_stream_is_still_last(loops):
+    specs = [t.split(":")[0] for t in
+             loops.replace('"', " ").replace("\\", " ").split() if ":runs/shards" in t]
+    assert specs.index("poolhip") > specs.index("frontiertwins"), \
+        "launch-bound pool HIP would take a slot before the frontier twins"

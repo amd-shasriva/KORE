@@ -91,3 +91,11 @@ def test_gate_bookkeeping_is_on_disk_not_in_memory(pipeline):
     """LAST_GATED lived in the loop's memory, so every restart re-gated
     everything and every repair was invisible."""
     assert "LAST_GATED" not in pipeline
+
+
+def test_gate_only_spends_slots_on_dialects_being_mined(pipeline):
+    """A gate on a paused dialect holds one of eight shared general nodes to
+    produce passers nothing will read. FlyDSL mining is paused, so FlyDSL
+    gating is too -- while the harvest keeps its existing passers promoted."""
+    assert 'GATE_ROOTS="${GATE_ROOTS:-$REG_HIP_ROOT $HIP_ROOT}"' in pipeline
+    assert "for root in $GATE_ROOTS; do" in pipeline

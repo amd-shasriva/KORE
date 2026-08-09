@@ -68,6 +68,13 @@ REPAIR_MAX_ATTEMPTS="${REPAIR_MAX_ATTEMPTS:-4}"
 #: mean anything. So the FlyDSL roots come out and the whole budget goes to HIP,
 #: where a repair converts into a gated, mineable task about a fifth of the time.
 REPAIR_ROOTS="${REPAIR_ROOTS:-$REG_HIP_ROOT}"
+
+#: Which roots the gate spends GPU slots on. Gating a root nothing is mining
+#: buys a verdict that will not be read: FlyDSL mining is paused, so a FlyDSL
+#: gate holds one of the eight shared general nodes to produce passers that sit
+#: unconsumed. The already-gated FlyDSL set stays promoted and sharded by the
+#: harvest, so resuming it later costs nothing.
+GATE_ROOTS="${GATE_ROOTS:-$REG_HIP_ROOT $HIP_ROOT}"
 SLEEP="${FRONTIER_SLEEP:-300}"
 
 #: root | seed-glob | materializer | extra args. The materializers are the slow,
@@ -301,7 +308,7 @@ while :; do
     # One gate job per root, named after it, so a slow HIP gate never blocks the
     # FlyDSL one -- the mistake that left the functionalized root undecided for a
     # night while the parameter-free root finished.
-    for root in "$REG_HIP_ROOT" "$REG_FLYDSL_ROOT" "$HIP_ROOT" "$FLYDSL_ROOT"; do
+    for root in $GATE_ROOTS; do
         [ -d "$REPO/$root/tasks" ] || continue
         tag=$(basename "$root")
         seeds=$(n_seeds "$root")

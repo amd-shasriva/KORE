@@ -57,21 +57,29 @@ def node_states() -> dict[str, tuple[str, int]]:
     every summary view. A node is only worth claiming when nothing at all is
     allocated on it.
     """
-    out = sh(["sinfo", "-h", "-N", "-o", "%N %T %C"])
+    out = sh(["sinfo", "-h", "-N", "-o", "%N %T"])
     states: dict[str, tuple[str, int]] = {}
     for line in out.splitlines():
         p = line.split()
         if len(p) < 2 or not NODE_RE.match(p[0]):
             continue
-        state = p[1].lower().rstrip("*~#$@+")
-        alloc = 0
-        if len(p) >= 3 and "/" in p[2]:
-            try:
-                alloc = int(p[2].split("/")[0])
-            except ValueError:
-                alloc = 0
-        states[p[0]] = (state, alloc)
+        states[p[0]] = (p[1].lower().rstrip("*~#$@+"), -1)
     return states
+
+
+def cpus_allocated(node: str) -> int:
+    """Allocated CPUs on one node, or -1 when it cannot be read.
+
+    Has to come from ``scontrol show node``: this scheduler answers "?" for
+    sinfo's %C, so the obvious cheap version of this check silently passed
+    every node and claimed one running somebody else's single-CPU job.
+
+    Unknown counts as busy. Spending a hold slot on a node we cannot use costs
+    more than skipping a node we could have.
+    """
+    out = sh(["scontrol", "show", "node", node], timeout=30)
+    m = re.search(r"CPUAlloc=(\d+)", out)
+    return int(m.group(1)) if m else -1
 
 
 def reserved_all() -> set[str]:
@@ -146,14 +154,18 @@ def main() -> int:
             # Dead nodes first: nobody else can take them, so they are ours for
             # the cost of a reserve plus a resume. Idle nodes second, and only
             # because we may win the race; usually we will not.
-            # Only nodes with nothing allocated: --exclusive needs all of it.
-            dead = [n for n, (s, a) in states.items()
-                    if s.startswith(DEAD_STATES) and a == 0 and n not in taken]
-            idle = [n for n, (s, a) in states.items()
-                    if s.startswith("idle") and a == 0 and n not in taken]
+            dead = [n for n, (s, _) in states.items()
+                    if s.startswith(DEAD_STATES) and n not in taken]
+            idle = [n for n, (s, _) in states.items()
+                    if s.startswith("idle") and n not in taken]
             for node in dead + idle:
                 if room <= 0:
                     break
+                # --exclusive needs the whole node, so anything allocated at
+                # all disqualifies it. Checked per candidate rather than for
+                # the cluster, because it costs a scontrol call each.
+                if cpus_allocated(node) != 0:
+                    continue
                 if not add_to_reservation(args.reservation, node):
                     continue
                 room -= 1
@@ -171,8 +183,8 @@ def main() -> int:
         # the staffing pass is not cheap and calling it every poll would spend
         # more time partitioning shards than mining them.
         free_held = [n for n in reservation_nodes(args.reservation)
-                     if states.get(n, ("", 1))[0].startswith("idle")
-                     and states.get(n, ("", 1))[1] == 0]
+                     if states.get(n, ("", -1))[0].startswith(("idle", "resv"))
+                     and cpus_allocated(n) == 0]
         if grabbed or free_held:
             running, pending = my_jobs(user)
             log(f"grabbed={len(grabbed)} free_held={len(free_held)} "

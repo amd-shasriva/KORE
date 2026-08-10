@@ -78,3 +78,14 @@ def test_the_rest_of_the_run_is_unchanged():
     """Same attempts, same feedback, same scorer -- only the model differs."""
     assert "_attempt_task(task, ws, dst_rel, prompt, policy, args," in SRC
     assert "reply = policy(prompt) if feedback is None else policy(prompt, feedback)" in SRC
+
+
+def test_the_arm_runs_the_model_it_is_labelled_with():
+    """ClaudeTeacher resolves os.environ.get("KORE_TEACHER_MODEL", model), so
+    .env.local silently wins over the constructor argument. Right for datagen,
+    wrong for a benchmark arm: a ledger row naming claude-opus-4.8 while the
+    gateway served claude-opus-5 is worse than no row at all."""
+    block = SRC.split("def _api_generate")[1].split("\ndef ")[0]
+    assert 'os.environ["KORE_TEACHER_MODEL"] = args.model' in block, \
+        "the env default can override the requested model"
+    assert "refusing to run" in block, "no check that the model actually resolved"

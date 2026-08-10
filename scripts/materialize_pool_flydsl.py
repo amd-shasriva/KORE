@@ -180,6 +180,9 @@ MAX_API_CHARS = 24000
 #: Methods per class. Enough to convey arity and naming without enumerating
 #: every operator on every numeric type.
 MAX_METHODS_PER_CLASS = 12
+#: Share of the budget for module-level names; the rest is reserved for
+#: methods so they cannot be crowded out by generated type names.
+NAME_SHARE = 0.55
 
 
 def _api_surface(module: str) -> str:
@@ -269,13 +272,21 @@ def _api_surface(module: str) -> str:
                 ctx.__exit__(None, None, None)
             except Exception:  # noqa: BLE001
                 pass
-    listing = ", ".join(out)
-    room = MAX_API_CHARS - len(listing)
-    if room > 0 and methods:
-        extra = ", ".join(methods)
-        listing += ", " + (extra if len(extra) <= room
-                           else extra[:room].rsplit(", ", 1)[0] + ", ...")
-    return listing
+    # Split the budget rather than letting names run first. flydsl.expr
+    # exports 10,634 module-level symbols -- mostly generated numeric types --
+    # and appending methods after them meant the whole method list was
+    # truncated away, which is the one thing this function was changed to add.
+    # Vector.load stayed invisible while 10k type names filled the prompt.
+    def clip(parts: list[str], budget: int) -> str:
+        text = ", ".join(parts)
+        if len(text) <= budget:
+            return text
+        return text[:budget].rsplit(", ", 1)[0] + ", ..."
+
+    names = clip(out, int(MAX_API_CHARS * NAME_SHARE))
+    if not methods:
+        return names
+    return names + "\n  methods: " + clip(methods, MAX_API_CHARS - len(names))
 
 
 def _build_prompt(spec: dict, triton_source: str) -> tuple[str, str]:

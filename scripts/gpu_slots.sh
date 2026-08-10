@@ -151,3 +151,53 @@ res_arg() {
         echo "--reservation=${KORE_RESERVATION}"
     fi
 }
+
+# A second hold, for mining rather than the arena.
+#
+# general is 8 nodes for the entire cluster and burst is not a queue you wait
+# in -- four miners sat in it for eight hours, one of them submitted at 16:05,
+# while 18 nodes stood idle and unreserved. Neither pool could be persuaded to
+# give up another slot, so the only remaining capacity was the kind everyone
+# else here already takes: nodes held by name. Reserved nodes are ours until
+# the hold expires, which makes them the one place a submission is certain to
+# land.
+#
+# Kept separate from KORE_RESERVATION on purpose. That hold exists so an arena
+# arm gets its own node back between allocations, and mining must never be able
+# to take those nodes.
+KORE_MINE_RESERVATION="${KORE_MINE_RESERVATION:-kore_mine}"
+
+#: Comma-separated nodes in a reservation, empty if it does not exist.
+_resv_nodes() {
+    scontrol show reservation 2>/dev/null | tr '\n' ' ' |
+        sed 's/ReservationName=/\n/g' |
+        awk -v r="$1" '$1==r {
+            for (i = 1; i <= NF; i++)
+                if ($i ~ /^Nodes=/) { sub(/^Nodes=/, "", $i); print $i; exit }
+        }'
+}
+
+#: How many nodes in the mining hold are idle right now.
+#:
+#: Counted by asking each node, not by counting my own jobs against it: a node
+#: can report IDLE and still refuse to launch anything, and one did -- m2m-005
+#: took two submissions straight to JobLaunchFailure. Reading the node state is
+#: what lets a dead node be swapped out instead of silently eating every
+#: submission the loop makes.
+mine_res_free() {
+    local nodes n free=0
+    nodes=$(_resv_nodes "$KORE_MINE_RESERVATION")
+    [ -z "$nodes" ] && { echo 0; return 0; }
+    for n in $(echo "$nodes" | tr ',' ' '); do
+        scontrol show node "$n" 2>/dev/null | grep -q 'State=IDLE' &&
+            free=$(( free + 1 ))
+    done
+    echo "$free"
+}
+
+#: sbatch arguments that put a job on the mining hold, empty when it is full.
+mine_res_arg() {
+    [ "$(mine_res_free)" -gt 0 ] &&
+        echo "--reservation=$KORE_MINE_RESERVATION --qos=$KORE_QOS"
+    return 0
+}

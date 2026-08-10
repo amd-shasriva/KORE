@@ -333,10 +333,23 @@ while :; do
             continue
         fi
         if [ "$ungated" -ge "$GATE_EVERY" ]; then
-            have_slot || { say "  no slot for gate-$tag; next pass"; continue; }
+            # An idle node on the hold is a slot even when the cap says there is
+            # none: the cap counts jobs, and four miners wedged in burst spent
+            # the whole allowance without running. A gate blocked on that is
+            # worse than a miner blocked on it -- gating is what turns seeds
+            # into mineable tasks at all -- and one sat pending for five hours
+            # while a node I hold stood idle.
+            have_slot || [ "$(mine_res_free)" -gt 0 ] || {
+                say "  no slot for gate-$tag; next pass"; continue; }
             say "gating $root: $seeds seed(s), $ungated without a verdict"
+            gate_qos="$(pick_qos kore-gate- "$GENERAL_GATE_MAX")"
+            case "$gate_qos" in
+                *amd-general-qos*) ;;
+                *) gate_res="$(mine_res_arg)"
+                   [ -n "$gate_res" ] && gate_qos="$gate_res" ;;
+            esac
             # shellcheck disable=SC2086
-            GATE_ROOT="$root" sbatch "$(pick_qos kore-gate- "$GENERAL_GATE_MAX")" \
+            GATE_ROOT="$root" sbatch $gate_qos \
                 --job-name="kore-gate-$tag" \
                 scripts/spur_gate_pool_hip.sbatch 2>&1 | tee -a "$LOG"
             sleep 5

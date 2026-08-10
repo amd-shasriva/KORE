@@ -62,6 +62,27 @@ fi
 #: is also run by hand -- and when it was left pointing at pool-HIP, a manual
 #: pass silently staffed four miners onto the stream that had just been retired,
 #: against shards whose ledger we were deliberately no longer growing.
+#: hardpool is the second HIP stream, and it is where token parity comes from.
+#:
+#: frontiertwins is the best data there is -- vendor baselines, fp8 and bf16,
+#: attention and MoE -- and it is also nearly finite: 250 tasks at ~103k tokens
+#: each is a ceiling around 25M, against a Triton side of 370M. Mining it
+#: harder does not close that; there is nothing left to mine.
+#:
+#: The pool does have the volume, and the reason it was retired was never the
+#: pool as such -- it was mining all 6,457 of it, where the median baseline is
+#: 17us and a kernel that finishes in 17us has no tiling or MFMA scheduling to
+#: demonstrate. select_frontier_tasks already scores those tasks; it was only
+#: ever asked for its registry half. Asking for the pool half at --min-score 2
+#: keeps attention, MoE, quant and GEMM at a million elements or more -- 1,857
+#: tasks, all already gated, none of them yet mined -- and drops the
+#: launch-bound remainder. At the 152k tokens/task the earlier pool-HIP mining
+#: actually produced, that is ~283M tokens, which is what parity needs.
+#:
+#: 2 miners stay on frontier and 4 go here: frontier is the higher-value data
+#: per task and must not stall, but it cannot absorb more than a couple of
+#: workers without them fighting over the same 250 tasks.
+#:
 #: hipreg and poolflydsl are retired to 0, measured against the frontier list:
 #:
 #:   frontiertwins  224 tasks  185 HIP + 39 FlyDSL  100% frontier
@@ -79,7 +100,8 @@ fi
 #: Both stay listed at 0 rather than being deleted so their ledgers survive and
 #: either can be revived by changing one number.
 STREAMS="${DATAGEN_STREAMS:-\
-frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:5:kore-mine-frontiertwins \
+frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:2:kore-mine-frontiertwins \
+hardpool:runs/shards_hardpool:data/v5hardpool:4:kore-mine-hardpool \
 poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:0:kore-mine-poolflydsl \
 hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg \
 poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory \
@@ -237,6 +259,10 @@ for spec in $STREAMS; do
     IFS=: read -r name dir root want names <<< "$spec"
     names="${names//+/ }"
     [ -d "$REPO/$dir" ] || { say "$name: no shard dir $dir; skipping"; continue; }
+    # A retired stream still had its manifest rebuilt on every commit, which
+    # re-partitioned 13,570 pool-Triton tasks and 6,457 pool-HIP ones each pass
+    # to keep shards nobody was going to mine current.
+    [ "$want" -le 0 ] && continue
     refresh_if_stale "$dir"
 
     nsh=$("${KORE_PY:-/home/shasriva/kore-venv/bin/python}" -c "

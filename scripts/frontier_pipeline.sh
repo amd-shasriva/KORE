@@ -141,6 +141,12 @@ POOL_FLYDSL_DATA_ROOT="${POOL_FLYDSL_DATA_ROOT:-data/v5pool_flydsl}"
 POOL_FLYDSL_SHARD_DIR="${POOL_FLYDSL_SHARD_DIR:-runs/shards_pool_flydsl}"
 POOL_FLYDSL_SHARDS="${POOL_FLYDSL_SHARDS:-4}"
 
+#: The hard half of the external pool, already gated, selected by the same
+#: scorer that picks the registry frontier. It is a static set -- the ids come
+#: from data/pool_hip_ok, which the retired pool sweep already filled -- so it
+#: needs its commit stamp kept fresh and nothing else.
+HARDPOOL_SHARD_DIR="${HARDPOOL_SHARD_DIR:-runs/shards_hardpool}"
+
 #: The FlyDSL port is written by a different teacher than the HIP seeds.
 #:
 #: .env.local points KORE_TEACHER_MODEL at claude-opus-5, which writes HIP fine
@@ -428,8 +434,7 @@ while :; do
     # Frontier registry shards are static (the 482 ids do not change), so only
     # refresh their commit stamp -- a stale manifest kills every worker on the
     # preflight check with NonZeroExitCode and reads as a queue problem.
-    for d in runs/shards_frontier "$TWIN_SHARD_DIR" "$POOL_FLYDSL_SHARD_DIR" \
-             runs/shards_hippool runs/shards_pooltriton; do
+    for d in "$TWIN_SHARD_DIR" "$HARDPOOL_SHARD_DIR"; do
         [ -d "$REPO/$d" ] && "$PY" "$REPO/scripts/refresh_shards.py" "$d" >> "$LOG" 2>&1
     done
 

@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
-"""What the mined win-groups would add to a mixture, in trainable tokens.
+"""What the mined corpus would add to a mixture, in trainable tokens.
 
-A mined record is not a training row. It is a win group: one task, a handful of
-ranked candidates, and the counters the gate measured. Only the kernel source
-inside those candidates reaches the model, and the record around it -- shapes,
-wall times, hardware counters, the parent's counters -- is several times larger
-than the code. Sizing the next mixture from file bytes therefore overstates it
-badly, which is how the mined roots looked like 1.5B tokens against a v4
-mixture that is 540M in total.
+Counts both record types the miner writes, because both reach the model and an
+earlier version of this script counted only one:
 
-Two figures, because the build has latitude between them. The floor counts the
-best candidate only, as a single-turn example. The ceiling counts every
-candidate, which is what a step-centric build emits when it turns an episode
-into one row per revision -- the shape v4 used for its 34,806 AMD-native rows.
-The truth is in between and depends on the builder, so both are printed rather
-than one being passed off as the answer.
+``ranked_group``
+    A win group: one task, several ranked candidates, and the counters the gate
+    measured. Only the kernel source inside the candidates is trainable; the
+    shapes, wall times and hardware counters wrapped around it are several
+    times larger than the code, which is why sizing this from file bytes
+    overstates it badly.
+
+``repair`` / ``win``
+    A conversation -- parent kernel, the error it produced, the fix -- carried
+    in ``messages``. This is the shape v4 weighted at 2.0 in its loss, so it is
+    emphatically training data.
+
+Missing the second kind understated the corpus threefold: HIP read as 59.1M
+when it was 182.5M, and the parity plan was built on the wrong number. The
+error was easy to make because the base pass writes repair records first and
+groups only afterwards, so a freshly started stream shows nothing but repair
+and scores as zero.
+
+Two figures for the group half, because the build has latitude between them:
+the floor counts the best candidate only, the ceiling counts every candidate,
+which is what a step-centric build emits when it turns an episode into one row
+per revision. Repair rows are counted once either way -- there is no expansion
+choice to make about a conversation.
 """
 
 from __future__ import annotations
@@ -25,10 +37,12 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-#: Prompt the row carries in addition to the code. The v4 kernel rows average
-#: well above the code alone because each one restates the task, the reference
-#: and the arch; 2k chars is the observed floor for that preamble.
+#: Prompt the row carries in addition to the code, for group records. The v4
+#: kernel rows average well above the code alone because each restates the
+#: task, the reference and the arch.
 PROMPT_CHARS = 2000
+
+SKIP = ("seed_attempts", "repair_attempts", "events", "telemetry", "manifest")
 
 
 def dialect_of(task_id: str, root: str) -> str:
@@ -50,25 +64,28 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default="data")
     ap.add_argument("--roots", nargs="*", default=[
-        "v5frontier_twins", "v5hippool", "v5hip", "v5pool_flydsl",
-        "v5frontier", "v5pooltriton", "v5pool", "hipwave1", "hip_pool",
+        "v5frontierhip", "v5frontier_twins", "v5hardpool", "v5hip", "v5hippool",
+        "v5pool_flydsl", "v5frontier", "v5pooltriton", "v5pool", "hipwave1",
+        "hip_pool",
     ])
     ap.add_argument("--chars-per-token", type=float, default=4.0)
+    ap.add_argument("--by-root", action="store_true")
     args = ap.parse_args()
 
+    cpt = args.chars_per_token
     floor: dict[str, int] = defaultdict(int)
     ceil: dict[str, int] = defaultdict(int)
-    recs: dict[str, int] = defaultdict(int)
-    cands: dict[str, int] = defaultdict(int)
+    repair: dict[str, int] = defaultdict(int)
+    groups: dict[str, int] = defaultdict(int)
+    convos: dict[str, int] = defaultdict(int)
+    per_root: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
 
     for root in args.roots:
         base = Path(args.data_dir) / root
         if not base.is_dir():
             continue
         for path in base.glob("**/*.jsonl"):
-            s = str(path)
-            if any(k in s for k in ("seed_attempts", "repair_attempts",
-                                    "events", "telemetry", "manifest")):
+            if any(k in str(path) for k in SKIP):
                 continue
             with path.open("r", errors="ignore") as fh:
                 for line in fh:
@@ -78,29 +95,54 @@ def main() -> int:
                         row = json.loads(line)
                     except Exception:
                         continue
-                    tid = str(row.get("task_id") or "")
-                    d = dialect_of(tid, root)
-                    cs = row.get("candidates")
-                    if not isinstance(cs, list) or not cs:
-                        continue
-                    srcs = [c.get("source") for c in cs
-                            if isinstance(c, dict) and isinstance(c.get("source"), str)]
-                    if not srcs:
-                        continue
-                    recs[d] += 1
-                    cands[d] += len(srcs)
-                    floor[d] += max(len(x) for x in srcs) + PROMPT_CHARS
-                    ceil[d] += sum(len(x) for x in srcs) + PROMPT_CHARS * len(srcs)
+                    kind = row.get("type")
+                    d = dialect_of(str(row.get("task_id") or ""), root)
 
-    cpt = args.chars_per_token
-    print(f"\n{'dialect':<10}{'groups':>9}{'candidates':>12}"
-          f"{'floor tokens':>15}{'ceiling tokens':>16}")
-    print("-" * 62)
+                    if kind == "ranked_group":
+                        srcs = [c.get("source") for c in (row.get("candidates") or [])
+                                if isinstance(c, dict) and isinstance(c.get("source"), str)]
+                        if not srcs:
+                            continue
+                        groups[d] += 1
+                        floor[d] += max(len(x) for x in srcs) + PROMPT_CHARS
+                        ceil[d] += sum(len(x) for x in srcs) + PROMPT_CHARS * len(srcs)
+                        per_root[root][d] += (sum(len(x) for x in srcs)
+                                              + PROMPT_CHARS * len(srcs)) / cpt
+                    elif kind in ("repair", "win"):
+                        msgs = row.get("messages")
+                        if not isinstance(msgs, list):
+                            continue
+                        n = sum(len(m.get("content", "")) for m in msgs
+                                if isinstance(m, dict))
+                        if not n:
+                            continue
+                        convos[d] += 1
+                        repair[d] += n
+                        per_root[root][d] += n / cpt
+
+    print(f"\n{'dialect':<10}{'groups':>8}{'convos':>9}"
+          f"{'group floor':>14}{'group ceiling':>15}{'conversations':>15}"
+          f"{'TOTAL (ceil)':>14}")
+    print("-" * 85)
+    tot = {}
     for d in ("Triton", "HIP", "FlyDSL"):
-        print(f"{d:<10}{recs[d]:>9,}{cands[d]:>12,}"
-              f"{floor[d]/cpt:>15,.0f}{ceil[d]/cpt:>16,.0f}")
-    print(f"{'TOTAL':<10}{sum(recs.values()):>9,}{sum(cands.values()):>12,}"
-          f"{sum(floor.values())/cpt:>15,.0f}{sum(ceil.values())/cpt:>16,.0f}")
+        total = (ceil[d] + repair[d]) / cpt
+        tot[d] = total
+        print(f"{d:<10}{groups[d]:>8,}{convos[d]:>9,}"
+              f"{floor[d]/cpt:>14,.0f}{ceil[d]/cpt:>15,.0f}"
+              f"{repair[d]/cpt:>15,.0f}{total:>14,.0f}")
+
+    tri = tot.get("Triton", 0) or 1
+    print("\nparity of mined data against mined Triton:")
+    for d in ("HIP", "FlyDSL"):
+        print(f"  {d:<8}{100*tot[d]/tri:>7.1f}%")
+
+    if args.by_root:
+        print("\nby root (ceiling tokens):")
+        for root in sorted(per_root, key=lambda r: -sum(per_root[r].values())):
+            v = per_root[root]
+            print(f"  {root:<22}" + "  ".join(
+                f"{k}={v[k]/1e6:>7.2f}M" for k in ("Triton", "HIP", "FlyDSL")))
     return 0
 
 

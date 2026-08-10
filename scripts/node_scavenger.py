@@ -43,13 +43,18 @@ DEAD_STATES = ("drain", "down", "fail")
 #: under account 'amd-general'" -- and the same is true of collectives,
 #: aifw-dev, silo-tiger, infiniai and hyperloom.
 #:
-#: This matters for claiming, not just for submitting. Each pool has its own
-#: dedicated capacity and, in the cluster owner's words, "burst/general/primus
-#: pools don't automatically use unrelated idle capacity". A node sitting idle
-#: in another pool is not capacity we can take, which is why every probe
-#: pinned to one came back Reason=None and never started. Six of the eight
-#: nodes this reservation was holding were running other pools' jobs, chosen
-#: purely because they freed soonest.
+#: This governs what we may *submit* under. It deliberately does NOT govern
+#: which nodes we may claim, and an earlier version of this file had that
+#: wrong: it refused to hold any node whose current job belonged to another
+#: pool, on the theory that pools own nodes.
+#:
+#: They do not. Measured on the live cluster, single nodes host jobs from two
+#: pools at once -- m2m-012 runs burst alongside aifw-aim, m2m-030 runs spur
+#: alongside burst, m2m-238 runs burst alongside aac. A burst job and a
+#: foreign-pool job coexist on the same hardware, so the pool of whatever
+#: happens to be running there says nothing about whether we can use it next.
+#: Filtering on it threw away a node 25 minutes from freeing in favour of
+#: nodes 28 hours out.
 USABLE_QOS = ("amd-burst-qos", "amd-general-qos")
 
 
@@ -233,9 +238,6 @@ def main() -> int:
                                 if n in held and cpus_allocated(n) > 0
                                 and n in running_nodes(user)}
                 evictable = [n for n in held if n not in mine_running]
-                # Foreign-pool nodes go first: we may not be able to run on
-                # them even once their current job ends.
-                evictable.sort(key=lambda n: pool_seen.get(n) in USABLE_QOS)
                 if evictable:
                     drop = evictable[0]
                     if subprocess.run(
@@ -250,14 +252,10 @@ def main() -> int:
             # Dead nodes first: nobody else can take them, so they are ours for
             # the cost of a reserve plus a resume. Idle nodes second, and only
             # because we may win the race; usually we will not.
-            # Only nodes belonging to a pool we may submit under. Without
-            # this the scavenger spends the hold on other pools' capacity.
-            def ours(n: str) -> bool:
-                return pool_seen.get(n) in USABLE_QOS
             dead = [n for n, (s, _) in states.items()
-                    if s.startswith(DEAD_STATES) and n not in taken and ours(n)]
+                    if s.startswith(DEAD_STATES) and n not in taken]
             idle = [n for n, (s, _) in states.items()
-                    if s.startswith("idle") and n not in taken and ours(n)]
+                    if s.startswith("idle") and n not in taken]
             for node in dead + idle:
                 if room <= 0:
                     break

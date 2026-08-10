@@ -28,16 +28,40 @@ from collections import defaultdict
 from pathlib import Path
 
 TASK_ID = re.compile(rb'"task_id"\s*:\s*"([^"]*)"')
-SKIP_PARTS = ("_quarantine", ".bak", "telemetry", "ledger_backup")
+
+#: Paths that are not training data. Quarantined rows are excluded from the
+#: mixture by definition, and the rest are bookkeeping the pipeline writes
+#: beside the corpus -- seed_attempts and repair_attempts are per-attempt
+#: ledgers, events/telemetry are logs. Counting them inflated pool_flydsl by
+#: 94k "Triton" tokens that were really its own seeding ledger.
+SKIP_PARTS = (
+    "_quarantine", ".bak", "telemetry", "ledger_backup",
+    "seed_attempts", "repair_attempts", "events", "manifest", "verdict",
+)
 
 
-def dialect_of(task_id: bytes) -> str:
+def dialect_of(task_id: bytes, root: str = "") -> str:
+    """Dialect of a row, from the twin suffix and then from its root.
+
+    The suffix is authoritative where it exists, but two conventions predate
+    it. The generated HIP set ids itself ``hip_abs_fp16`` with no suffix at
+    all, and the early HIP pools keep the *source* id on the twin. Both were
+    being counted as Triton, which moved 20M HIP tokens onto the wrong side of
+    the comparison the mining plan is steered by.
+    """
     if task_id.endswith(b"__hip") or task_id.endswith(b"__hipf"):
         return "HIP"
     if task_id.endswith(b"__flydsl"):
         return "FlyDSL"
     if task_id.endswith(b"__triton"):
         return "Triton"
+    if task_id.startswith(b"hip_"):
+        return "HIP"
+    low = root.lower()
+    if "flydsl" in low:
+        return "FlyDSL"
+    if "hip" in low:
+        return "HIP"
     return "Triton"
 
 
@@ -62,7 +86,7 @@ def main() -> int:
         # The filename is the task id for the per-task layouts, which lets a
         # whole file be classified once instead of per line.
         stem = path.stem.encode()
-        file_dialect = dialect_of(stem) if b"__" in stem else None
+        file_dialect = dialect_of(stem, root) if b"__" in stem else None
         try:
             with path.open("rb") as fh:
                 for line in fh:
@@ -72,7 +96,7 @@ def main() -> int:
                         d = file_dialect
                     else:
                         m = TASK_ID.search(line)
-                        d = dialect_of(m.group(1)) if m else "Triton"
+                        d = dialect_of(m.group(1) if m else b"", root)
                     chars[d] += len(line)
                     rows[d] += 1
                     per_root[root][d] += len(line)

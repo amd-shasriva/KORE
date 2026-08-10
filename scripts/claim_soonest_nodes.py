@@ -29,6 +29,15 @@ import subprocess
 
 NODE_RE = re.compile(r"^crsuse2-m2m-\d+$")
 
+#: The only QoS this account may submit under. Each pool has dedicated
+#: capacity and, per the cluster owner, "burst/general/primus pools don't
+#: automatically use unrelated idle capacity" -- so a node whose job belongs to
+#: another pool is not capacity we can inherit, however soon it frees.
+#: Ranking purely by time-to-free had this reservation holding six nodes out of
+#: eight from primus, silo-tiger, aifw-dev and infiniai, none of which we may
+#: submit under.
+USABLE_QOS = ("amd-burst-qos", "amd-general-qos")
+
 
 def _run(cmd: list[str]) -> str:
     try:
@@ -98,14 +107,17 @@ def reservation_nodes(name: str) -> list[str]:
 
 def running() -> list[tuple[int | None, str, str, str]]:
     """(remaining_seconds, node, user, jobid) for every running job."""
-    out = _run(["squeue", "-t", "R", "-h", "-o", "%i|%u|%N|%M|%l"])
+    out = _run(["squeue", "-t", "R", "-h", "-o", "%i|%u|%N|%M|%l|%q"])
     rows = []
     for line in out.splitlines():
         f = line.split("|")
-        if len(f) < 5:
+        if len(f) < 6:
             continue
-        jid, user, node, used, lim = f[:5]
+        jid, user, node, used, lim, qos = f[:6]
         if not NODE_RE.match(node or ""):
+            continue
+        # A node we cannot submit against is not a candidate at any price.
+        if qos not in USABLE_QOS and user != getpass.getuser():
             continue
         used_s, lim_s = parse_duration(used), parse_duration(lim)
         rem = None if (used_s is None or lim_s is None) else max(lim_s - used_s, 0)

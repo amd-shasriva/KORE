@@ -38,6 +38,31 @@ import time
 NODE_RE = re.compile(r"^crsuse2-m2m-\d+$")
 DEAD_STATES = ("drain", "down", "fail")
 
+#: The only QoS this account may submit under. amd-primus-qos refuses us
+#: outright -- "QOS 'amd-primus-qos' is not permitted for user 'shasriva'
+#: under account 'amd-general'" -- and the same is true of collectives,
+#: aifw-dev, silo-tiger, infiniai and hyperloom.
+#:
+#: This matters for claiming, not just for submitting. Each pool has its own
+#: dedicated capacity and, in the cluster owner's words, "burst/general/primus
+#: pools don't automatically use unrelated idle capacity". A node sitting idle
+#: in another pool is not capacity we can take, which is why every probe
+#: pinned to one came back Reason=None and never started. Six of the eight
+#: nodes this reservation was holding were running other pools' jobs, chosen
+#: purely because they freed soonest.
+USABLE_QOS = ("amd-burst-qos", "amd-general-qos")
+
+
+def node_pools() -> dict[str, str]:
+    """Node -> QoS of the job on it now, which is the pool it belongs to."""
+    out = sh(["squeue", "-t", "R", "-h", "-o", "%N %q"])
+    pools: dict[str, str] = {}
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) >= 2 and NODE_RE.match(p[0]):
+            pools[p[0]] = p[1]
+    return pools
+
 
 def sh(cmd: list[str], timeout: int = 60) -> str:
     try:
@@ -154,6 +179,9 @@ def main() -> int:
         f"poll={args.poll}s")
     last_rebind = 0.0
     last_staff = 0.0
+    # node -> the pool we last saw running on it; an idle node keeps its
+    # last known pool, which is the only way to tell whose idle capacity it is.
+    pool_seen: dict[str, str] = {}
 
     while True:
         # One sinfo and one scontrol per poll in the common case. The first
@@ -163,6 +191,7 @@ def main() -> int:
         # at the thing we depend on. The expensive per-node checks now happen
         # only when the cheap pass says there is something worth checking.
         states = node_states()
+        pool_seen.update(node_pools())
         resv_text = sh(["scontrol", "show", "reservation"])
         # Tell "the scheduler did not answer" apart from "the reservation is
         # not there". Both look like an empty string, and conflating them cost
@@ -195,15 +224,20 @@ def main() -> int:
         # somebody else's job, whenever the second is not running work of ours.
         if room <= 0:
             usable_now = [n for n, (s, _) in states.items()
-                          if n not in taken and s.startswith(("idle",) + DEAD_STATES)
+                          if n not in taken
+                          and s.startswith(("idle",) + DEAD_STATES)
+                          and pool_seen.get(n) in USABLE_QOS
                           and cpus_allocated(n) == 0]
             if usable_now:
                 mine_running = {n for n, (s, _) in states.items()
                                 if n in held and cpus_allocated(n) > 0
                                 and n in running_nodes(user)}
                 evictable = [n for n in held if n not in mine_running]
+                # Foreign-pool nodes go first: we may not be able to run on
+                # them even once their current job ends.
+                evictable.sort(key=lambda n: pool_seen.get(n) in USABLE_QOS)
                 if evictable:
-                    drop = evictable[-1]
+                    drop = evictable[0]
                     if subprocess.run(
                             ["scontrol", "update-reservation", "--name",
                              args.reservation, "--remove-nodes", drop],
@@ -216,10 +250,14 @@ def main() -> int:
             # Dead nodes first: nobody else can take them, so they are ours for
             # the cost of a reserve plus a resume. Idle nodes second, and only
             # because we may win the race; usually we will not.
+            # Only nodes belonging to a pool we may submit under. Without
+            # this the scavenger spends the hold on other pools' capacity.
+            def ours(n: str) -> bool:
+                return pool_seen.get(n) in USABLE_QOS
             dead = [n for n, (s, _) in states.items()
-                    if s.startswith(DEAD_STATES) and n not in taken]
+                    if s.startswith(DEAD_STATES) and n not in taken and ours(n)]
             idle = [n for n, (s, _) in states.items()
-                    if s.startswith("idle") and n not in taken]
+                    if s.startswith("idle") and n not in taken and ours(n)]
             for node in dead + idle:
                 if room <= 0:
                     break

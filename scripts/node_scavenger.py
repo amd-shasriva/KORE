@@ -47,13 +47,30 @@ def sh(cmd: list[str], timeout: int = 60) -> str:
         return ""
 
 
-def node_states() -> dict[str, str]:
-    out = sh(["sinfo", "-h", "-N", "-o", "%N %T"])
-    states: dict[str, str] = {}
+def node_states() -> dict[str, tuple[str, int]]:
+    """(state, allocated_cpus) per node.
+
+    State alone is not enough to know a node is takeable. m2m-012 reported
+    State=IDLE with CPUAlloc=1 -- a one-CPU job someone else was running -- and
+    every miner here asks for --exclusive, which needs the whole node. The
+    scheduler answered Reason=Resources against a node that looked free in
+    every summary view. A node is only worth claiming when nothing at all is
+    allocated on it.
+    """
+    out = sh(["sinfo", "-h", "-N", "-o", "%N %T %C"])
+    states: dict[str, tuple[str, int]] = {}
     for line in out.splitlines():
         p = line.split()
-        if len(p) >= 2 and NODE_RE.match(p[0]):
-            states[p[0]] = p[1].lower().rstrip("*~#$@+")
+        if len(p) < 2 or not NODE_RE.match(p[0]):
+            continue
+        state = p[1].lower().rstrip("*~#$@+")
+        alloc = 0
+        if len(p) >= 3 and "/" in p[2]:
+            try:
+                alloc = int(p[2].split("/")[0])
+            except ValueError:
+                alloc = 0
+        states[p[0]] = (state, alloc)
     return states
 
 
@@ -129,10 +146,11 @@ def main() -> int:
             # Dead nodes first: nobody else can take them, so they are ours for
             # the cost of a reserve plus a resume. Idle nodes second, and only
             # because we may win the race; usually we will not.
-            dead = [n for n, s in states.items()
-                    if s.startswith(DEAD_STATES) and n not in taken]
-            idle = [n for n, s in states.items()
-                    if s.startswith("idle") and n not in taken]
+            # Only nodes with nothing allocated: --exclusive needs all of it.
+            dead = [n for n, (s, a) in states.items()
+                    if s.startswith(DEAD_STATES) and a == 0 and n not in taken]
+            idle = [n for n, (s, a) in states.items()
+                    if s.startswith("idle") and a == 0 and n not in taken]
             for node in dead + idle:
                 if room <= 0:
                     break
@@ -142,9 +160,9 @@ def main() -> int:
                 grabbed.append(node)
                 # Reserve first, resume second. The other order publishes the
                 # node to every queued job on the cluster.
-                if states[node].startswith(DEAD_STATES):
+                if states[node][0].startswith(DEAD_STATES):
                     ok = resume(node)
-                    log(f"claimed dead node {node} ({states[node]}) "
+                    log(f"claimed dead node {node} ({states[node][0]}) "
                         f"-> resume {'ok' if ok else 'FAILED'}")
                 else:
                     log(f"claimed idle node {node}")
@@ -153,7 +171,8 @@ def main() -> int:
         # the staffing pass is not cheap and calling it every poll would spend
         # more time partitioning shards than mining them.
         free_held = [n for n in reservation_nodes(args.reservation)
-                     if states.get(n, "").startswith("idle")]
+                     if states.get(n, ("", 1))[0].startswith("idle")
+                     and states.get(n, ("", 1))[1] == 0]
         if grabbed or free_held:
             running, pending = my_jobs(user)
             log(f"grabbed={len(grabbed)} free_held={len(free_held)} "

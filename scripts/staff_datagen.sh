@@ -161,7 +161,7 @@ staffed_for() { _squeue -t R,PD -n "kore-mine-$1" -o "%i" | wc -l; }
 # other jobs and never ran. A third miner buys a third more rows from tasks
 # that are already gated; the slot it costs is the only way any *new* seed
 # becomes mineable at all, and 1,500 of them were waiting on it.
-GENERAL_MINE_MAX="${GENERAL_MINE_MAX:-5}"
+GENERAL_MINE_MAX="${GENERAL_MINE_MAX:-4}"
 
 # A shard manifest records the commit it was partitioned at, and the worker refuses
 # to mine a shard whose code has moved -- a deliberate guard, but it means every

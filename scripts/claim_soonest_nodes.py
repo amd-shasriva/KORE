@@ -29,13 +29,11 @@ import subprocess
 
 NODE_RE = re.compile(r"^crsuse2-m2m-\d+$")
 
-#: The only QoS this account may submit under. Each pool has dedicated
-#: capacity and, per the cluster owner, "burst/general/primus pools don't
-#: automatically use unrelated idle capacity" -- so a node whose job belongs to
-#: another pool is not capacity we can inherit, however soon it frees.
-#: Ranking purely by time-to-free had this reservation holding six nodes out of
-#: eight from primus, silo-tiger, aifw-dev and infiniai, none of which we may
-#: submit under.
+#: Recorded for reference: this account may submit only under these two. It is
+#: not a filter on which nodes to claim -- nodes are not partitioned by pool.
+#: m2m-012 runs burst alongside aifw-aim and m2m-238 runs burst alongside aac,
+#: so the pool of the job currently on a node says nothing about whether we can
+#: use that node next. Filtering on it cost us a node 25 minutes from freeing.
 USABLE_QOS = ("amd-burst-qos", "amd-general-qos")
 
 
@@ -115,9 +113,6 @@ def running() -> list[tuple[int | None, str, str, str]]:
             continue
         jid, user, node, used, lim, qos = f[:6]
         if not NODE_RE.match(node or ""):
-            continue
-        # A node we cannot submit against is not a candidate at any price.
-        if qos not in USABLE_QOS and user != getpass.getuser():
             continue
         used_s, lim_s = parse_duration(used), parse_duration(lim)
         rem = None if (used_s is None or lim_s is None) else max(lim_s - used_s, 0)

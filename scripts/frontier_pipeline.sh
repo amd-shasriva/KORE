@@ -147,6 +147,12 @@ POOL_FLYDSL_SHARDS="${POOL_FLYDSL_SHARDS:-4}"
 #: needs its commit stamp kept fresh and nothing else.
 HARDPOOL_SHARD_DIR="${HARDPOOL_SHARD_DIR:-runs/shards_hardpool}"
 
+#: Nodes the mining hold should carry. Six, because the job cap is eight and
+#: the two arena arms hold their own nodes under kore_hold. Claiming more would
+#: idle nodes nobody else can then use, which is the thing the holds on this
+#: cluster are already too good at.
+MINE_HOLD_NODES="${MINE_HOLD_NODES:-6}"
+
 #: The FlyDSL port is written by a different teacher than the HIP seeds.
 #:
 #: .env.local points KORE_TEACHER_MODEL at claude-opus-5, which writes HIP fine
@@ -290,6 +296,16 @@ say "=== frontier pipeline start (pid $$) families='$FAMILIES' ==="
 
 while :; do
     purge_held | while read -r l; do say "$l"; done
+
+    # Keep the mining hold pointed at nodes that are about to free. The cluster
+    # runs at 137 allocated and 2 idle, and both of those idle nodes take a
+    # five-minute hello-world straight to JobLaunchFailure -- so new capacity
+    # only ever arrives as somebody else's job ends, and the only way to be
+    # first to it is to have claimed the node beforehand. Picking without
+    # checking the clock is how this hold came to sit on two nodes with 26 days
+    # left while nodes freeing in two hours went elsewhere.
+    "$PY" "$REPO/scripts/claim_soonest_nodes.py" --want "$MINE_HOLD_NODES" \
+        2>&1 | grep -E 'claimed|released' | while read -r l; do say "  $l"; done
 
     # --- 1. keep both materializers alive (no GPU slot consumed) -------------
     if [ "$POOL_STREAMS" = "1" ]; then

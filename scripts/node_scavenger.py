@@ -82,16 +82,9 @@ def cpus_allocated(node: str) -> int:
     return int(m.group(1)) if m else -1
 
 
-def reserved_all() -> set[str]:
-    out = sh(["scontrol", "show", "reservation"])
-    nodes: set[str] = set()
-    for m in re.finditer(r"Nodes=(\S+)", out):
-        nodes.update(n for n in m.group(1).split(",") if n)
-    return nodes
-
-
-def reservation_nodes(name: str) -> list[str]:
-    out = sh(["scontrol", "show", "reservation"]).replace("\n", " ")
+def reservation_block(text: str, name: str) -> list[str]:
+    """Nodes of one reservation, parsed from an already-fetched dump."""
+    out = text.replace("\n", " ")
     for block in out.split("ReservationName=")[1:]:
         if block.split()[0] != name:
             continue
@@ -129,7 +122,8 @@ def main() -> int:
     ap.add_argument("--reservation", default="kore_mine")
     ap.add_argument("--max-hold", type=int, default=8,
                     help="never hold more nodes than we can run jobs on")
-    ap.add_argument("--poll", type=float, default=15.0)
+    ap.add_argument("--poll", type=float, default=1.0,
+                    help="seconds between polls; one sinfo + one scontrol each")
     ap.add_argument("--staff-cmd", default="bash scripts/staff_datagen.sh")
     ap.add_argument("--once", action="store_true")
     args = ap.parse_args()
@@ -139,14 +133,22 @@ def main() -> int:
         f"poll={args.poll}s")
 
     while True:
+        # One sinfo and one scontrol per poll in the common case. The first
+        # version read every reservation twice and then asked scontrol for the
+        # CPU count of every held node on every pass -- about ten calls a
+        # second at a one-second interval, which is a denial of service aimed
+        # at the thing we depend on. The expensive per-node checks now happen
+        # only when the cheap pass says there is something worth checking.
         states = node_states()
-        held = reservation_nodes(args.reservation)
+        resv_text = sh(["scontrol", "show", "reservation"])
+        held = reservation_block(resv_text, args.reservation)
         if not held and not args.once:
             log(f"reservation {args.reservation} is gone; waiting")
             time.sleep(args.poll)
             continue
 
-        taken = reserved_all()
+        taken = {n for m in re.finditer(r"Nodes=(\S+)", resv_text)
+                 for n in m.group(1).split(",") if n}
         room = args.max_hold - len(held)
         grabbed: list[str] = []
 
@@ -182,9 +184,11 @@ def main() -> int:
         # Staff only when something changed or a held node is sitting free --
         # the staffing pass is not cheap and calling it every poll would spend
         # more time partitioning shards than mining them.
-        free_held = [n for n in reservation_nodes(args.reservation)
-                     if states.get(n, ("", -1))[0].startswith(("idle", "resv"))
-                     and cpus_allocated(n) == 0]
+        # Held nodes worth a closer look: anything not plainly running
+        # something. Only these cost a scontrol call.
+        maybe_free = [n for n in reservation_block(resv_text, args.reservation)
+                      if states.get(n, ("", -1))[0].startswith(("idle", "resv"))]
+        free_held = [n for n in maybe_free if cpus_allocated(n) == 0]
         if grabbed or free_held:
             running, pending = my_jobs(user)
             log(f"grabbed={len(grabbed)} free_held={len(free_held)} "

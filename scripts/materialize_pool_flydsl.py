@@ -200,16 +200,56 @@ def _api_surface(module: str) -> str:
     except Exception:  # noqa: BLE001 - a dry-run without FlyDSL still builds
         return "(unavailable -- follow the example and the guide above)"
 
-    out = []
-    for name in sorted(n for n in dir(mod) if not n.startswith("_")):
-        obj = getattr(mod, name, None)
+    # Resolve inside an MLIR context. Half of flydsl.expr is lazy class
+    # attributes that build IR types on first access, so plain introspection
+    # raises "An MLIR function requires a Context but none was provided" --
+    # the same error five of the generated kernels died on -- and the listing
+    # silently came back short.
+    ctx = None
+    try:
+        from flydsl._mlir import ir  # noqa: PLC0415 - optional at prompt time
+        ctx = ir.Context()
+        ctx.__enter__()
+    except Exception:  # noqa: BLE001 - fall back to context-free listing
+        ctx = None
+
+    def describe(name: str, obj) -> str:
         if not callable(obj):
-            out.append(name)
-            continue
+            return name
         try:
-            out.append(f"{name}{inspect.signature(obj)}")
+            return f"{name}{inspect.signature(obj)}"
         except (TypeError, ValueError):  # builtins and C types have none
-            out.append(name)
+            return name
+
+    out = []
+    try:
+        for name in sorted(n for n in dir(mod) if not n.startswith("_")):
+            try:
+                obj = getattr(mod, name)
+            except Exception:  # noqa: BLE001 - a lazy attribute that will not build
+                out.append(name)
+                continue
+            out.append(describe(name, obj))
+            # Methods, not just the constructor. A class was emitted as
+            # `Vector(...)` and its methods were invisible, so the teacher had
+            # nothing to go on for `Vector.load()` -- and 124 of 394 failures
+            # in the last gate were "too many positional arguments", the exact
+            # error you get from guessing a method's arity.
+            if not inspect.isclass(obj):
+                continue
+            for attr in sorted(a for a in dir(obj) if not a.startswith("_")):
+                try:
+                    member = getattr(obj, attr)
+                except Exception:  # noqa: BLE001
+                    continue
+                if callable(member):
+                    out.append(f"{name}.{describe(attr, member)}")
+    finally:
+        if ctx is not None:
+            try:
+                ctx.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
     return ", ".join(out)
 
 

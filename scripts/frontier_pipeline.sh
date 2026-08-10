@@ -356,12 +356,11 @@ while :; do
             have_slot || [ "$(mine_res_free)" -gt 0 ] || {
                 say "  no slot for gate-$tag; next pass"; continue; }
             say "gating $root: $seeds seed(s), $ungated without a verdict"
-            gate_qos="$(pick_qos kore-gate- "$GENERAL_GATE_MAX")"
-            case "$gate_qos" in
-                *amd-general-qos*) ;;
-                *) gate_res="$(mine_res_arg)"
-                   [ -n "$gate_res" ] && gate_qos="$gate_res" ;;
-            esac
+            # The hold first: a free general slot on this cluster is usually a
+            # node that cannot launch, and a gate that wedges there stops the
+            # supply of mineable tasks entirely.
+            gate_qos="$(mine_res_arg)"
+            [ -z "$gate_qos" ] && gate_qos="$(pick_qos kore-gate- "$GENERAL_GATE_MAX")"
             # shellcheck disable=SC2086
             GATE_ROOT="$root" sbatch $gate_qos \
                 --job-name="kore-gate-$tag" \

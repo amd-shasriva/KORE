@@ -285,16 +285,18 @@ import json;print(json.load(open('$REPO/$dir/manifest.json')).get('n_shards',0))
     for idx in $picked; do
         # One element per submission: a range would re-queue indices that are
         # already covered, and there is no way to express a gap in an array range.
-        # general first, then the hold, then burst. general is shared and
-        # use-it-or-lose-it, so leaving a free slot there hands it to someone
-        # else; the hold cannot be taken by anyone until it expires, which
-        # makes it the better thing to fall back to. Burst stays last because a
-        # miner sent there may never start.
-        qos_arg="$(pick_qos kore-mine- "$GENERAL_MINE_MAX")"
-        case "$qos_arg" in
-            *amd-general-qos*) ;;
-            *) res="$(mine_res_arg)"; [ -n "$res" ] && qos_arg="$res" ;;
-        esac
+        # The hold first, then general, then burst.
+        #
+        # This was the other way round on the theory that general is shared and
+        # use-it-or-lose-it. The theory was wrong about what a free general slot
+        # is: on this cluster a node sits idle precisely because it cannot
+        # launch -- 36 burst jobs were queued against 18 free nodes, so anything
+        # healthy is taken within seconds and the remainder is broken. Sending a
+        # job to "free" general capacity put it on one of those, and it burned
+        # three submissions in a row on JobLaunchFailure while a node I hold sat
+        # idle. Reserved nodes are the ones already proven to launch.
+        qos_arg="$(mine_res_arg)"
+        [ -z "$qos_arg" ] && qos_arg="$(pick_qos kore-mine- "$GENERAL_MINE_MAX")"
         # shellcheck disable=SC2086
         out=$(sbatch $qos_arg --job-name="kore-mine-$name" --array="$idx-$idx" \
             scripts/spur_datagen_array.sbatch \

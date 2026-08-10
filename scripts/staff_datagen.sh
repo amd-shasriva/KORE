@@ -99,9 +99,25 @@ fi
 #:
 #: Both stay listed at 0 rather than being deleted so their ledgers survive and
 #: either can be revived by changing one number.
+#: Two balanced streams, three miners, and the arena is the fourth job.
+#:
+#: frontierhip merges both HIP sources -- the 211 registry frontier twins and
+#: the 1,857 hard pool tasks -- and interleaves them across attention, MoE,
+#: quant and GEMM so any prefix is balanced. Mining them as separate streams
+#: gave 45% attention on one and 94% GEMM on the other, because that is what
+#: each source happens to hold.
+#:
+#: frontiertriton finishes the registry frontier in Triton: 128 of its 482
+#: tasks are mined, and triton2triton is 38% of the arena with a 15-point gap
+#: to Opus, so the remaining 354 are worth one miner until they run out.
+#:
+#: frontiertwins and hardpool go to 0 because their tasks are inside
+#: frontierhip now; mining both would double-cover them.
 STREAMS="${DATAGEN_STREAMS:-\
-frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:2:kore-mine-frontiertwins \
-hardpool:runs/shards_hardpool:data/v5hardpool:4:kore-mine-hardpool \
+frontierhip:runs/shards_frontierhip:data/v5frontierhip:2:kore-mine-frontierhip \
+frontiertriton:runs/shards_frontiertriton:data/v5frontier:1:kore-mine-frontiertriton \
+frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:0:kore-mine-frontiertwins \
+hardpool:runs/shards_hardpool:data/v5hardpool:0:kore-mine-hardpool \
 poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:0:kore-mine-poolflydsl \
 hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg \
 poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory \

@@ -88,7 +88,8 @@ pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton}"
 #: it would idle one of eight forever. Completion is the summary file, which is
 #: the same signal the supervisor stops on.
 ARENA_JOB_NAMES="${ARENA_JOB_NAMES:-kore-aka:runs/aka_full_v4/results_v4.json \
-kore-aka-base:runs/aka_base/results_base.json}"
+kore-aka-base:runs/aka_base/results_base.json \
+kore-aka-opus:runs/aka_opus/results_opus.json}"
 
 arena_reserve() {
     local n=0 spec name done_marker

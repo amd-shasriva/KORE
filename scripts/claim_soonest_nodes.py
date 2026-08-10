@@ -61,6 +61,13 @@ def reserved_nodes() -> set[str]:
     return {n for n in nodes if n}
 
 
+def idle_nodes() -> set[str]:
+    """Nodes the scheduler calls idle, which on a full cluster means broken."""
+    out = _run(["sinfo", "-h", "-N", "-o", "%N %T"])
+    return {ln.split()[0] for ln in out.splitlines()
+            if len(ln.split()) > 1 and ln.split()[1].startswith("idle")}
+
+
 def reservation_nodes(name: str) -> list[str]:
     out = _run(["scontrol", "show", "reservation"]).replace("\n", " ")
     for block in out.split("ReservationName=")[1:]:
@@ -114,14 +121,24 @@ def main() -> int:
     )
 
     taken = reserved_nodes()
-    candidates = sorted(
-        ((r, n) for r, n, u, _ in rows
-         if u != me and n not in taken and r is not None),
-        key=lambda t: t[0],
-    )
+    idle = idle_nodes()
+    # A node sitting idle on a full cluster is idle because it cannot launch --
+    # three of them took a five-minute hello-world straight to
+    # JobLaunchFailure. Claiming one buys a slot that never starts a job.
+    fresh = [(r, n) for r, n, u, _ in rows
+             if u != me and n not in taken and r is not None
+             and r > 0 and n not in idle]
+
+    # Rank what we already hold against what is available in one list. Ranking
+    # only the fresh candidates and swapping blind is worse than not swapping:
+    # the first version of this proposed trading four nodes that free in 2-4h
+    # for four that free in 7-9h.
+    pool = fresh + [(rem_by_node[n], n) for n in swappable
+                    if rem_by_node.get(n) is not None and n not in idle]
+    pool.sort(key=lambda t: t[0])
 
     slots = max(args.want - len(keep), 0)
-    want_nodes = [n for _, n in candidates[:slots]]
+    want_nodes = [n for _, n in pool[:slots]]
 
     def hours(n: str) -> str:
         r = rem_by_node.get(n)
@@ -133,13 +150,7 @@ def main() -> int:
         print(f"  keep    {n:<20} (ours)")
 
     add = [n for n in want_nodes if n not in held]
-    drop = [n for n in swappable
-            if n not in want_nodes and len(held) - 0 > 0]
-    # Only drop a node when something strictly sooner is available to replace it.
-    best_new = (rem_by_node.get(add[0]) if add else None)
-    drop = [n for n in drop
-            if best_new is not None
-            and (rem_by_node.get(n) is None or rem_by_node.get(n) > best_new)]
+    drop = [n for n in swappable if n not in want_nodes]
 
     for n in add:
         print(f"  claim   {n:<20} frees in {hours(n)}")

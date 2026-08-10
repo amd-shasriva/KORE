@@ -129,13 +129,27 @@ def running_nodes(user: str) -> set[str]:
     return {n.strip() for n in out.split() if n.strip()}
 
 
-def pending_miner_ids(user: str) -> list[str]:
-    """Queued mining jobs, which are the ones safe to drop and resubmit."""
+#: Queued work that is safe to cancel and resubmit. Miners and gates both are:
+#: each is re-derived from disk on the next staffing pass, so dropping one
+#: loses a queue position and nothing else. Arena arms are deliberately absent
+#: -- an arm carries hours of scored tasks that a resubmit would restart.
+REBINDABLE = ("kore-mine-", "kore-gate-")
+
+
+def pending_rebindable_ids(user: str) -> list[str]:
+    """Queued jobs worth rebinding when the hold frees a node.
+
+    This matched only kore-mine- at first, and a gate then sat pending for ten
+    minutes against two idle nodes inside our own reservation while the
+    scavenger logged "free_held=2" every two seconds and rebound nothing. The
+    gate is the stage that turns seeds into mineable tasks, so it is the worst
+    possible job to leave stranded.
+    """
     out = sh(["squeue", "-u", user, "-h", "-t", "PD", "-o", "%i %j"])
     ids = []
     for line in out.splitlines():
         p = line.split()
-        if len(p) >= 2 and p[1].startswith("kore-mine-"):
+        if len(p) >= 2 and p[1].startswith(REBINDABLE):
             ids.append(p[0])
     return ids
 
@@ -324,10 +338,10 @@ def main() -> int:
             # for any other reason would have us cancelling four jobs a second.
             if (free_held and pending
                     and now - last_rebind >= args.rebind_cooldown):
-                stale = pending_miner_ids(user)
+                stale = pending_rebindable_ids(user)
                 if stale:
                     log(f"{len(free_held)} held node(s) free with {len(stale)} "
-                        f"miner(s) queued on a stale node set -> rebinding")
+                        f"job(s) queued on a stale node set -> rebinding")
                     subprocess.run(["scancel", *stale],
                                    capture_output=True, text=True)
                     last_rebind = now

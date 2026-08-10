@@ -174,7 +174,13 @@ def deepen_one(task_id: str, data_root, target: int, gens: int, teacher, cfg):
     from kore.data.amd_knowledge import ExperienceLedger
     from kore.data.gen_wins import generate_wins
     from kore.env.kore_env import KoreEnv
-    from kore.tasks.registry import get_task
+    # Pool-first, then registry -- the same lookup complete_base.py uses. Every
+    # twin id lives in the pool root, not the registry, so registry.get_task
+    # raised KeyError on all of them and the deepen pass finished every shard
+    # with "+0 new wins, 233 still-empty" while the base pass beside it worked.
+    # It is the deepen pass that writes ranked_group records, so this silently
+    # cost the corpus its entire token-bearing half.
+    from kore.tasks.external import resolve_task as get_task
 
     root = Path(data_root)
     path = _wins_shard(root, task_id)
@@ -300,7 +306,7 @@ def _worker(payload: dict):
     from kore.data.gen_wins import generate_wins
     from kore.data.teacher import load_env_local, make_teacher
     from kore.env.kore_env import KoreEnv
-    from kore.tasks.registry import get_task
+    from kore.tasks.external import resolve_task as get_task
 
     load_env_local()
     tkw = {"model": payload["model_teacher"]} if payload.get("model_teacher") else {}

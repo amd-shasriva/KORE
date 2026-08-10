@@ -217,6 +217,19 @@ def main() -> int:
                       if states.get(n, ("", -1))[0].startswith(("idle", "resv"))]
         free_held = [n for n in maybe_free if cpus_allocated(n) == 0]
 
+        # Revive nodes we already hold. Resuming only happened at claim time,
+        # which misses the case that matters most: a held node whose job ends
+        # badly goes DRAINED and then sits inside our own reservation doing
+        # nothing, uncontested and unusable, until somebody notices. m2m-212
+        # was draining while we were queueing miners for it. Nobody else can
+        # take a node of ours, so there is no race here -- just resume it.
+        for node in held:
+            state = states.get(node, ("", -1))[0]
+            if state.startswith(DEAD_STATES) and cpus_allocated(node) == 0:
+                ok = resume(node)
+                log(f"held node {node} was {state}; resume "
+                    f"{'ok' if ok else 'FAILED'}")
+
         # Staffing has to be rate limited independently of the poll. Polling at
         # one second is right for spotting a node; running a staffing pass at
         # one second is not, and the two were tied together: with a held node

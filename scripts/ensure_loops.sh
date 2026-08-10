@@ -87,6 +87,15 @@ start() {
 # network latency inside an allocation -- gates whichever root accumulates seeds,
 # refreshes the shard stamps, and staffs mining across every declared stream.
 #
+# GPU_JOB_CAP is 8 because 8 is where the scheduler actually stops, measured:
+# with eight jobs running and two nodes idle inside my own reservation, the
+# ninth submission went straight to JobLaunchFailure, requeued, and wedged in
+# JobHoldMaxRequeue -- the signature gpu_slots.sh describes for submitting past
+# the ceiling. Set to 10, every pass of every loop offered two jobs that could
+# only ever wedge, and each one held a slot in the queue while doing nothing:
+# four of them had been pending between six and nine hours, one submitted at
+# 16:05, and they were what made the cap look full to the staffing loop.
+#
 # The stream split is 1 frontier-Triton to 2 frontier-twins. Triton already has
 # 10k mined rows and is the dialect the corpus is thickest in; the twins had
 # none at all, because until now nothing mined them -- the arena is 22% HIP and
@@ -94,7 +103,7 @@ start() {
 # exist. Streams are staffed in the order they appear here, and the first one
 # takes what it can, so the ordering is the priority.
 start frontier_pipeline \
-    GPU_JOB_CAP=10 FRONTIER_FAMILIES="attention gemm quantization" \
+    GPU_JOB_CAP=8 FRONTIER_FAMILIES="attention gemm quantization" \
     HIP_ROOT=data/pool_hip_frontier FLYDSL_ROOT=data/pool_flydsl \
     REG_HIP_ROOT=data/registry_hip_frontier \
     REG_FLYDSL_ROOT=data/registry_flydsl_frontier \
@@ -120,7 +129,7 @@ start frontier_pipeline \
 # one-node arena fits there now and starts immediately. Mining is throughput
 # work that can afford to queue; the eval is not.
 start supervise \
-    GPU_JOB_CAP=10 AKA_AFTER_SFT=1 AKA_ARM=v4 AKA_TASK_CONCURRENCY=12 \
+    GPU_JOB_CAP=8 AKA_AFTER_SFT=1 AKA_ARM=v4 AKA_TASK_CONCURRENCY=12 \
     AKA_JOB_NAME=kore-aka KORE_QOS=amd-general-qos \
     AKA_MODEL=/shared_nfs/shasriva/kore/runs/sft_v4 \
     bash "$REPO/scripts/keepalive.sh" supervise -- bash "$REPO/scripts/supervise.sh"
@@ -133,7 +142,7 @@ start supervise \
 # DATAGEN_SHARDS stays unset so this instance never staffs mining, and SFT is
 # already complete, so in practice it supervises exactly one thing.
 start supervise_base \
-    GPU_JOB_CAP=10 AKA_AFTER_SFT=1 AKA_ARM=base AKA_TASK_CONCURRENCY=12 \
+    GPU_JOB_CAP=8 AKA_AFTER_SFT=1 AKA_ARM=base AKA_TASK_CONCURRENCY=12 \
     AKA_JOB_NAME=kore-aka-base KORE_QOS=amd-general-qos \
     AKA_OUT="$REPO/runs/aka_base" \
     SUPERVISE_LOG="$REPO/runs/supervise_base.log" \

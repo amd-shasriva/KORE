@@ -174,6 +174,14 @@ def _conventions() -> str:
     return "\n".join(keep)[:4000]
 
 
+#: Ceiling on the API listing. The reference implementation being ported has to
+#: fit in the same prompt, and an unbudgeted flydsl.expr listing is 212k chars.
+MAX_API_CHARS = 24000
+#: Methods per class. Enough to convey arity and naming without enumerating
+#: every operator on every numeric type.
+MAX_METHODS_PER_CLASS = 12
+
+
 def _api_surface(module: str) -> str:
     """Every public symbol a FlyDSL module exports, with its signature.
 
@@ -221,7 +229,14 @@ def _api_surface(module: str) -> str:
         except (TypeError, ValueError):  # builtins and C types have none
             return name
 
-    out = []
+    # Budget the listing. Expanding every class in flydsl.expr yields 10,634
+    # symbols and 212k characters -- fifty thousand tokens of prompt, which
+    # would crowd out the reference implementation the teacher is meant to be
+    # porting. Module-level symbols are listed in full because the teacher has
+    # to know what exists; methods are capped per class, which is enough to
+    # convey arity without enumerating every numeric type's operators.
+    out: list[str] = []
+    methods: list[str] = []
     try:
         for name in sorted(n for n in dir(mod) if not n.startswith("_")):
             try:
@@ -237,20 +252,30 @@ def _api_surface(module: str) -> str:
             # error you get from guessing a method's arity.
             if not inspect.isclass(obj):
                 continue
+            shown = 0
             for attr in sorted(a for a in dir(obj) if not a.startswith("_")):
+                if shown >= MAX_METHODS_PER_CLASS:
+                    break
                 try:
                     member = getattr(obj, attr)
                 except Exception:  # noqa: BLE001
                     continue
                 if callable(member):
-                    out.append(f"{name}.{describe(attr, member)}")
+                    methods.append(f"{name}.{describe(attr, member)}")
+                    shown += 1
     finally:
         if ctx is not None:
             try:
                 ctx.__exit__(None, None, None)
             except Exception:  # noqa: BLE001
                 pass
-    return ", ".join(out)
+    listing = ", ".join(out)
+    room = MAX_API_CHARS - len(listing)
+    if room > 0 and methods:
+        extra = ", ".join(methods)
+        listing += ", " + (extra if len(extra) <= room
+                           else extra[:room].rsplit(", ", 1)[0] + ", ...")
+    return listing
 
 
 def _build_prompt(spec: dict, triton_source: str) -> tuple[str, str]:

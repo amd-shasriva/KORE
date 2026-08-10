@@ -170,7 +170,19 @@ MINE_HOLD_NODES="${MINE_HOLD_NODES:-6}"
 #: -- @flyc.jit present, entry point defined -- in 36s and 3,417 tokens, and
 #: sonnet-4.5 in 42s. The failure is specific to opus-5 on this prompt, so only
 #: this stream moves.
-FLYDSL_TEACHER_MODEL="${FLYDSL_TEACHER_MODEL:-claude-opus-4.8}"
+#: FlyDSL is written by the strongest model we can reach, which is not the one
+#: that has been writing it.
+#:
+#: The registry FlyDSL root gated 471 seeds and passed 42 -- 8.9%, against 54%
+#: for HIP -- and the failures are not syntax: 416 of 429 came back "incorrect"
+#: and only 13 failed to compile. The kernels build and compute the wrong
+#: answer, which is a capability problem rather than a prompting one.
+#:
+#: The arena settles which model to use. On triton2flydsl, the exact
+#: translation this materializer performs, claude-opus-5 scores 98% correct
+#: against 86% for the base model. opus-4.8 was writing every FlyDSL twin we
+#: have.
+FLYDSL_TEACHER_MODEL="${FLYDSL_TEACHER_MODEL:-claude-opus-5}"
 
 cd "$REPO" || exit 1
 [ -z "${SPUR_CONTROLLER_ADDR:-}" ] && [ -r /etc/profile.d/spur.sh ] && . /etc/profile.d/spur.sh

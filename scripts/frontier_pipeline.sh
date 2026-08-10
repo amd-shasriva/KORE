@@ -67,7 +67,12 @@ REPAIR_MAX_ATTEMPTS="${REPAIR_MAX_ATTEMPTS:-4}"
 #: a FlyDSL one -- it does not know the language well enough for the message to
 #: mean anything. So the FlyDSL roots come out and the whole budget goes to HIP,
 #: where a repair converts into a gated, mineable task about a fifth of the time.
-REPAIR_ROOTS="${REPAIR_ROOTS:-$REG_HIP_ROOT}"
+# The default has to repeat the literal rather than read $REG_HIP_ROOT, which
+# is not defined until 26 lines below this. Under `set -u` that made the script
+# abort on its own first line of work whenever it was run without ensure_loops
+# to supply the variable from the environment -- so it worked under the loop
+# and died by hand, which is the worst way round for something you debug.
+REPAIR_ROOTS="${REPAIR_ROOTS:-${REG_HIP_ROOT:-data/registry_hip_frontier}}"
 
 #: Which roots the gate spends GPU slots on. Gating a root nothing is mining
 #: buys a verdict that will not be read: FlyDSL mining is paused, so a FlyDSL

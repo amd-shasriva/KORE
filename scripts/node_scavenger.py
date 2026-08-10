@@ -93,6 +93,12 @@ def reservation_block(text: str, name: str) -> list[str]:
     return []
 
 
+def running_nodes(user: str) -> set[str]:
+    """Nodes currently running one of our jobs -- never evict these."""
+    out = sh(["squeue", "-u", user, "-h", "-t", "R", "-o", "%N"])
+    return {n.strip() for n in out.split() if n.strip()}
+
+
 def pending_miner_ids(user: str) -> list[str]:
     """Queued mining jobs, which are the ones safe to drop and resubmit."""
     out = sh(["squeue", "-u", user, "-h", "-t", "PD", "-o", "%i %j"])
@@ -178,6 +184,33 @@ def main() -> int:
                  for n in m.group(1).split(",") if n}
         room = args.max_hold - len(held)
         grabbed: list[str] = []
+
+        # Trade up when the hold is full. Holding the cap is not the goal --
+        # holding nodes we can run on is. Right now three of our eight are
+        # unusable: two carry a neighbour's one-CPU job that pins all eight
+        # GPUs, and one is draining. With room at zero the scavenger would skip
+        # a genuinely free node cluster-wide rather than swap out any of them.
+        #
+        # A node that is free this second strictly dominates one occupied by
+        # somebody else's job, whenever the second is not running work of ours.
+        if room <= 0:
+            usable_now = [n for n, (s, _) in states.items()
+                          if n not in taken and s.startswith(("idle",) + DEAD_STATES)
+                          and cpus_allocated(n) == 0]
+            if usable_now:
+                mine_running = {n for n, (s, _) in states.items()
+                                if n in held and cpus_allocated(n) > 0
+                                and n in running_nodes(user)}
+                evictable = [n for n in held if n not in mine_running]
+                if evictable:
+                    drop = evictable[-1]
+                    if subprocess.run(
+                            ["scontrol", "update-reservation", "--name",
+                             args.reservation, "--remove-nodes", drop],
+                            capture_output=True, text=True).returncode == 0:
+                        log(f"hold full; released {drop} (busy) to make room "
+                            f"for a node free right now")
+                        room += 1
 
         if room > 0:
             # Dead nodes first: nobody else can take them, so they are ours for

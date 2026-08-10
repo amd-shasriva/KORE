@@ -114,8 +114,8 @@ fi
 #: frontiertwins and hardpool go to 0 because their tasks are inside
 #: frontierhip now; mining both would double-cover them.
 STREAMS="${DATAGEN_STREAMS:-\
-frontierhip:runs/shards_frontierhip:data/v5frontierhip:2:kore-mine-frontierhip \
-frontiertriton:runs/shards_frontiertriton:data/v5frontier:1:kore-mine-frontiertriton \
+frontierhip:runs/shards_frontierhip:data/v5frontierhip:3:kore-mine-frontierhip \
+frontiertriton:runs/shards_frontiertriton:data/v5frontier:3:kore-mine-frontiertriton \
 frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:0:kore-mine-frontiertwins \
 hardpool:runs/shards_hardpool:data/v5hardpool:0:kore-mine-hardpool \
 poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:0:kore-mine-poolflydsl \

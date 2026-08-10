@@ -93,6 +93,17 @@ def reservation_block(text: str, name: str) -> list[str]:
     return []
 
 
+def pending_miner_ids(user: str) -> list[str]:
+    """Queued mining jobs, which are the ones safe to drop and resubmit."""
+    out = sh(["squeue", "-u", user, "-h", "-t", "PD", "-o", "%i %j"])
+    ids = []
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) >= 2 and p[1].startswith("kore-mine-"):
+            ids.append(p[0])
+    return ids
+
+
 def my_jobs(user: str) -> tuple[int, int]:
     out = sh(["squeue", "-u", user, "-h", "-o", "%T"])
     states = [s.strip() for s in out.splitlines() if s.strip()]
@@ -125,12 +136,15 @@ def main() -> int:
     ap.add_argument("--poll", type=float, default=1.0,
                     help="seconds between polls; one sinfo + one scontrol each")
     ap.add_argument("--staff-cmd", default="bash scripts/staff_datagen.sh")
+    ap.add_argument("--rebind-cooldown", type=float, default=120.0,
+                    help="seconds between rebinding queued miners")
     ap.add_argument("--once", action="store_true")
     args = ap.parse_args()
 
     user = getpass.getuser()
     log(f"scavenger up: reservation={args.reservation} max_hold={args.max_hold} "
         f"poll={args.poll}s")
+    last_rebind = 0.0
 
     while True:
         # One sinfo and one scontrol per poll in the common case. The first
@@ -201,6 +215,29 @@ def main() -> int:
         free_held = [n for n in maybe_free if cpus_allocated(n) == 0]
         if grabbed or free_held:
             running, pending = my_jobs(user)
+
+            # Rebind before staffing. A queued miner is bound to the hold as it
+            # stood when it was submitted, and staff_datagen counts that miner
+            # as already covering its stream -- so a node grabbed one second
+            # ago would sit idle behind four jobs that cannot use it and a
+            # staffing pass that thinks there is nothing to do. Dropping them
+            # lets the same pass resubmit against the hold we have now.
+            #
+            # Cooled down because the check cannot tell "cannot use this node"
+            # from "has not started yet": without it, a node that stays free
+            # for any other reason would have us cancelling four jobs a second.
+            now = time.time()
+            if (free_held and pending
+                    and now - last_rebind >= args.rebind_cooldown):
+                stale = pending_miner_ids(user)
+                if stale:
+                    log(f"{len(free_held)} held node(s) free with {len(stale)} "
+                        f"miner(s) queued on a stale node set -> rebinding")
+                    subprocess.run(["scancel", *stale],
+                                   capture_output=True, text=True)
+                    last_rebind = now
+                    pending = 0
+
             log(f"grabbed={len(grabbed)} free_held={len(free_held)} "
                 f"running={running} pending={pending} -> staffing")
             subprocess.run(args.staff_cmd, shell=True,

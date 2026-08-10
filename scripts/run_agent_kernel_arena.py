@@ -406,11 +406,23 @@ def _api_generate(args):
     The teacher is built once per worker. Building it per call would re-read
     .env.local and re-create the HTTP client for every attempt of every task.
     """
+    import os
+
     from kore.data.teacher import ClaudeTeacher, load_env_local
 
     load_env_local()
+    # ClaudeTeacher resolves its model as os.environ.get("KORE_TEACHER_MODEL",
+    # model), so .env.local silently wins over the constructor argument. That is
+    # right for datagen, where one variable retargets every sweep at once, and
+    # wrong here: an arm labelled claude-opus-4.8 in the ledger must be that
+    # model and not whatever the datagen default happens to be that week. A
+    # benchmark row naming the wrong model is worse than no row.
+    os.environ["KORE_TEACHER_MODEL"] = args.model
     teacher = ClaudeTeacher(model=args.model, temperature=args.temperature,
                             max_tokens=args.max_tokens)
+    if teacher.model != args.model:
+        raise SystemExit(f"refusing to run: asked for {args.model}, "
+                         f"teacher resolved {teacher.model}")
 
     def gen(messages, max_tokens=None, temperature=None, **_):
         return teacher.generate(messages)

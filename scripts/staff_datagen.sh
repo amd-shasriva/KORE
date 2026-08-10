@@ -239,6 +239,15 @@ import json;print(json.load(open('$REPO/$dir/manifest.json')).get('n_shards',0))
         free=$(( free - reserve )); [ "$free" -lt 0 ] && free=0
         say "$name: holding $reserve slot(s) for the arena/gate; $free usable"
     fi
+    # An idle reserved node is capacity the cap does not describe. GPU_JOB_CAP
+    # counts every job I hold, so four miners stuck in burst for eight hours
+    # spent the whole allowance without running anything, and the loop then
+    # declined to submit to nodes that were sitting idle under my own name.
+    res_free=$(mine_res_free)
+    if [ "$res_free" -gt 0 ]; then
+        free=$(( free + res_free ))
+        say "$name: $res_free idle node(s) on $KORE_MINE_RESERVATION; $free usable"
+    fi
     need=$(( want - have )); [ "$want" -gt "$nsh" ] && need=$(( nsh - have ))
     [ "$need" -gt "$free" ] && need=$free
     [ "$need" -le 0 ] && continue
@@ -260,8 +269,16 @@ import json;print(json.load(open('$REPO/$dir/manifest.json')).get('n_shards',0))
     for idx in $picked; do
         # One element per submission: a range would re-queue indices that are
         # already covered, and there is no way to express a gap in an array range.
-        # shellcheck disable=SC2086
+        # general first, then the hold, then burst. general is shared and
+        # use-it-or-lose-it, so leaving a free slot there hands it to someone
+        # else; the hold cannot be taken by anyone until it expires, which
+        # makes it the better thing to fall back to. Burst stays last because a
+        # miner sent there may never start.
         qos_arg="$(pick_qos kore-mine- "$GENERAL_MINE_MAX")"
+        case "$qos_arg" in
+            *amd-general-qos*) ;;
+            *) res="$(mine_res_arg)"; [ -n "$res" ] && qos_arg="$res" ;;
+        esac
         # shellcheck disable=SC2086
         out=$(sbatch $qos_arg --job-name="kore-mine-$name" --array="$idx-$idx" \
             scripts/spur_datagen_array.sbatch \

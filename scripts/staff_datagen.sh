@@ -62,10 +62,26 @@ fi
 #: is also run by hand -- and when it was left pointing at pool-HIP, a manual
 #: pass silently staffed four miners onto the stream that had just been retired,
 #: against shards whose ledger we were deliberately no longer growing.
+#: hipreg and poolflydsl are retired to 0, measured against the frontier list:
+#:
+#:   frontiertwins  224 tasks  185 HIP + 39 FlyDSL  100% frontier
+#:   hipreg         171 tasks                         1% frontier
+#:   poolflydsl     226 tasks                         0% frontier
+#:
+#: hipreg reads runs/unmined_hip.txt, which is not the registry frontier its
+#: name suggests -- it is hip_abs_fp16, hip_add_relu_bf16, hip_div_fp32, the
+#: generated elementwise set. It had mined 3,250 rows, more than any other
+#: stream, which made the largest part of the corpus its least difficult part.
+#: poolflydsl is the right dialect and the wrong difficulty: kbk_actor,
+#: kbk_mlp, kbk_classifier at fp32, scraped modules whose baseline is eager
+#: torch rather than AITER or hipBLASLt.
+#:
+#: Both stay listed at 0 rather than being deleted so their ledgers survive and
+#: either can be revived by changing one number.
 STREAMS="${DATAGEN_STREAMS:-\
-frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:3:kore-mine-frontiertwins \
-poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:3:kore-mine-poolflydsl \
-hipreg:runs/shards_hipreg:data/v5hip:3:kore-mine-hipreg \
+frontiertwins:runs/shards_frontier_twins:data/v5frontier_twins:5:kore-mine-frontiertwins \
+poolflydsl:runs/shards_pool_flydsl:data/v5pool_flydsl:0:kore-mine-poolflydsl \
+hipreg:runs/shards_hipreg:data/v5hip:0:kore-mine-hipreg \
 poolhip:runs/shards_hippool:data/v5hippool:0:kore-mine-poolhip+kore-factory \
 frontier:runs/shards_frontier:data/v5frontier:0:kore-mine-frontier \
 pooltriton:runs/shards_pooltriton:data/v5pooltriton:0:kore-mine-pooltriton}"

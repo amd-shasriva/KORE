@@ -383,6 +383,41 @@ def _attempt_task(task, ws, dst_rel, prompt, policy, args, ref_latency):
     return best
 
 
+#: Models reached over the gateway rather than served from a checkpoint. Matched
+#: by name because that is what the operator types; a local path never looks
+#: like one of these.
+_API_MODEL_PREFIXES = ("claude-", "anthropic/", "gpt-", "opus", "sonnet")
+
+
+def _is_api_model(model: str) -> bool:
+    m = (model or "").lower()
+    return any(m.startswith(p) for p in _API_MODEL_PREFIXES)
+
+
+def _api_generate(args):
+    """A ``generate`` for model_policy backed by the AMD LLM gateway.
+
+    model_policy calls ``gen(messages, max_tokens=..., temperature=...)`` and
+    ClaudeTeacher.generate takes the same message list, so the adapter is only
+    about the keyword arguments. Nothing else in the run changes: an API arm and
+    a checkpoint arm see the same prompts, the same retry budget and the same
+    scorer, which is the only way the comparison means anything.
+
+    The teacher is built once per worker. Building it per call would re-read
+    .env.local and re-create the HTTP client for every attempt of every task.
+    """
+    from kore.data.teacher import ClaudeTeacher, load_env_local
+
+    load_env_local()
+    teacher = ClaudeTeacher(model=args.model, temperature=args.temperature,
+                            max_tokens=args.max_tokens)
+
+    def gen(messages, max_tokens=None, temperature=None, **_):
+        return teacher.generate(messages)
+
+    return gen
+
+
 def _generation_health(reply: str, code: str) -> str:
     """Describe a reply that is suspect on its face, or "" when it looks fine.
 
@@ -663,7 +698,16 @@ def cmd_run(args) -> int:
     # TypeError before a single task ran. `revision` belongs to the hub-pinning
     # path and is meaningless for a local checkpoint directory, which is what an
     # evaluated run always points at.
+    #
+    # An API model is injected as `generate` rather than served, which is the
+    # seam model_policy already exposes. Everything downstream is untouched: the
+    # same transcript, the same three attempts, the same verifier feedback and
+    # the same scoring. That is the whole point of running one -- a comparison
+    # against a frontier model is only worth anything if the harness either side
+    # of it is identical.
     policy = model_policy(args.model,
+                          generate=_api_generate(args) if _is_api_model(args.model)
+                          else None,
                           max_tokens=args.max_tokens,
                           temperature=args.temperature)
 

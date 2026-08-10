@@ -141,10 +141,20 @@ def main() -> int:
         # only when the cheap pass says there is something worth checking.
         states = node_states()
         resv_text = sh(["scontrol", "show", "reservation"])
+        # Tell "the scheduler did not answer" apart from "the reservation is
+        # not there". Both look like an empty string, and conflating them cost
+        # 45 consecutive polls reporting the hold as gone while it sat intact:
+        # the daemon had been started without /etc/profile.d/spur.sh, so it had
+        # no SPUR_CONTROLLER_ADDR and every scontrol call failed to connect.
+        if not resv_text.strip():
+            log("scontrol returned nothing -- is SPUR_CONTROLLER_ADDR set? "
+                "(source /etc/profile.d/spur.sh before starting this)")
+            time.sleep(max(args.poll, 5.0))
+            continue
         held = reservation_block(resv_text, args.reservation)
         if not held and not args.once:
             log(f"reservation {args.reservation} is gone; waiting")
-            time.sleep(args.poll)
+            time.sleep(max(args.poll, 5.0))
             continue
 
         taken = {n for m in re.finditer(r"Nodes=(\S+)", resv_text)

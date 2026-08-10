@@ -61,11 +61,29 @@ def reserved_nodes() -> set[str]:
     return {n for n in nodes if n}
 
 
-def idle_nodes() -> set[str]:
-    """Nodes the scheduler calls idle, which on a full cluster means broken."""
+#: States a node must not be in for a claim on it to be worth anything.
+#:
+#: idle, because on a cluster running 137 allocated with nothing spare, a node
+#: that is idle and unclaimed is idle because it cannot launch -- three of them
+#: took a five-minute hello-world straight to JobLaunchFailure.
+#:
+#: drain and drng, because a draining node still runs its current job and so
+#: still looks like a perfectly good thing to claim, and then goes to DRAINED
+#: the moment that job ends and never takes another. That is the trap this
+#: reservation walked into with m2m-078: it finished an arena arm cleanly and
+#: drained on the spot, and the miner queued for it sat on Reason=launch.
+UNUSABLE_STATES = ("idle", "drain", "drng", "down", "fail", "unk", "maint")
+
+
+def unusable_nodes() -> set[str]:
+    """Nodes no claim should be spent on, by scheduler state."""
     out = _run(["sinfo", "-h", "-N", "-o", "%N %T"])
-    return {ln.split()[0] for ln in out.splitlines()
-            if len(ln.split()) > 1 and ln.split()[1].startswith("idle")}
+    bad = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) > 1 and parts[1].lower().startswith(UNUSABLE_STATES):
+            bad.add(parts[0])
+    return bad
 
 
 def reservation_nodes(name: str) -> list[str]:
@@ -123,20 +141,20 @@ def main() -> int:
     )
 
     taken = reserved_nodes()
-    idle = idle_nodes()
+    unusable = unusable_nodes()
     # A node sitting idle on a full cluster is idle because it cannot launch --
     # three of them took a five-minute hello-world straight to
     # JobLaunchFailure. Claiming one buys a slot that never starts a job.
     fresh = [(r, n) for r, n, u, _ in rows
              if u != me and n not in taken and r is not None
-             and r > 0 and n not in idle]
+             and r > 0 and n not in unusable]
 
     # Rank what we already hold against what is available in one list. Ranking
     # only the fresh candidates and swapping blind is worse than not swapping:
     # the first version of this proposed trading four nodes that free in 2-4h
     # for four that free in 7-9h.
     pool = fresh + [(rem_by_node[n], n) for n in swappable
-                    if rem_by_node.get(n) is not None and n not in idle]
+                    if rem_by_node.get(n) is not None and n not in unusable]
     pool.sort(key=lambda t: t[0])
 
     slots = max(args.want - len(keep), 0)

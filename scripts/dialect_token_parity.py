@@ -39,6 +39,17 @@ SKIP_PARTS = (
     "seed_attempts", "repair_attempts", "events", "manifest", "verdict",
 )
 
+#: Built mixtures, excluded from the dialect count.
+#:
+#: These are assembled *from* the roots below, not alongside them, and the
+#: directory keeps every rebuild: multicap, multicap_v2 and multicap_v3 have
+#: the same source histogram to within one row, so counting the directory
+#: charged the corpus three times for one dataset -- 3.5GB of the 12GB on
+#: disk. They also carry the general half of the mixture (chat, math,
+#: instruction following), which has no dialect at all and was being scored as
+#: Triton.
+DERIVED_PARTS = ("b05factory/sft", "b05factory_synced", "/midtrain/")
+
 
 def dialect_of(task_id: bytes, root: str = "") -> str:
     """Dialect of a row, from the twin suffix and then from its root.
@@ -75,11 +86,21 @@ def main() -> int:
     rows: dict[str, int] = defaultdict(int)
     per_root: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
-    files = [
+    all_files = [
         p for p in Path(args.data_dir).glob("*/**/*.jsonl")
         if not any(s in str(p) for s in SKIP_PARTS)
     ]
-    print(f"scanning {len(files)} files", flush=True)
+    files = [p for p in all_files
+             if not any(s in str(p).replace("\\", "/") for s in DERIVED_PARTS)]
+    derived = [p for p in all_files if p not in set(files)]
+    derived_chars = sum(p.stat().st_size for p in derived)
+    print(f"scanning {len(files)} source files "
+          f"({len(derived)} built-mixture files excluded)", flush=True)
+
+    # Rows without a task id are the general half of the corpus -- chat, math,
+    # code, instruction following. They have no dialect, and folding them into
+    # Triton was the difference between "Triton is 96%" and a real answer.
+    nokernel_chars = 0
 
     for i, path in enumerate(files, 1):
         root = path.relative_to(args.data_dir).parts[0]
@@ -96,7 +117,10 @@ def main() -> int:
                         d = file_dialect
                     else:
                         m = TASK_ID.search(line)
-                        d = dialect_of(m.group(1) if m else b"", root)
+                        if not m or not m.group(1):
+                            nokernel_chars += len(line)
+                            continue
+                        d = dialect_of(m.group(1), root)
                     chars[d] += len(line)
                     rows[d] += 1
                     per_root[root][d] += len(line)
@@ -112,6 +136,10 @@ def main() -> int:
     for d in ("Triton", "HIP", "FlyDSL"):
         print(f"{d:<10}{chars[d]/cpt:>14,.0f}{100*chars[d]/total:>8.1f}%{rows[d]:>12,}")
     print(f"{'TOTAL':<10}{total/cpt:>14,.0f}{100:>8.1f}%{sum(rows.values()):>12,}")
+    print(f"\n  non-kernel rows (chat/math/code, no dialect): "
+          f"{nokernel_chars/cpt:,.0f} tokens")
+    print(f"  built mixtures excluded as derived:           "
+          f"{derived_chars/cpt:,.0f} tokens")
 
     tri = chars["Triton"] or 1
     print("\n=== parity against Triton ===")

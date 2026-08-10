@@ -74,7 +74,19 @@ REPAIR_ROOTS="${REPAIR_ROOTS:-$REG_HIP_ROOT}"
 #: gate holds one of the eight shared general nodes to produce passers that sit
 #: unconsumed. The already-gated FlyDSL set stays promoted and sharded by the
 #: harvest, so resuming it later costs nothing.
-GATE_ROOTS="${GATE_ROOTS:-$REG_HIP_ROOT $REG_FLYDSL_ROOT $FLYDSL_ROOT}"
+GATE_ROOTS="${GATE_ROOTS:-$REG_HIP_ROOT $REG_FLYDSL_ROOT}"
+
+#: The pool-sourced roots: seeded, gated and harvested, but no longer mined.
+#:
+#: Their streams are retired to 0 because neither is frontier -- pool_flydsl is
+#: kbk_actor and kbk_mlp at fp32, 0% of the frontier list, and pool_hip_frontier
+#: is not gated at all, so every seed it has ever produced was dead on arrival.
+#: Keeping them alive costs the one resource the frontier set is actually short
+#: of: there are 224 mineable frontier tasks and the teacher is what makes more,
+#: so a gateway call spent on a scraped MLP is a frontier twin not seeded.
+#:
+#: Set to 1 to revive both. The ledgers and shards are untouched.
+POOL_STREAMS="${POOL_STREAMS:-0}"
 SLEEP="${FRONTIER_SLEEP:-300}"
 
 #: root | seed-glob | materializer | extra args. The materializers are the slow,
@@ -274,9 +286,11 @@ while :; do
     purge_held | while read -r l; do say "$l"; done
 
     # --- 1. keep both materializers alive (no GPU slot consumed) -------------
-    start_materializer materialize_pool_hip.py    "$HIP_ROOT"    600 hip_frontier_materialize.log
-    start_materializer materialize_pool_flydsl.py "$FLYDSL_ROOT" 400 \
-        flydsl_materialize.log KORE_TEACHER_MODEL="$FLYDSL_TEACHER_MODEL"
+    if [ "$POOL_STREAMS" = "1" ]; then
+        start_materializer materialize_pool_hip.py    "$HIP_ROOT"    600 hip_frontier_materialize.log
+        start_materializer materialize_pool_flydsl.py "$FLYDSL_ROOT" 400 \
+            flydsl_materialize.log KORE_TEACHER_MODEL="$FLYDSL_TEACHER_MODEL"
+    fi
     # Matched on its --source-root so it is distinguishable from the pool-sourced
     # HIP materializer, which runs the same script against a different root.
     start_registry_materializer materialize_pool_hip.py "$REG_HIP_ROOT" 500 \
@@ -400,15 +414,17 @@ while :; do
     # No task list: these ids are the external pool's and were already narrowed
     # by --families when they were seeded; frontier_tasks.txt is registry ids
     # and would reject every one of them.
-    HIP_ROOTS="$FLYDSL_ROOT" \
-    HIP_PROMOTED="$REPO/$POOL_FLYDSL_OK_ROOT" \
-    HIP_DATA_ROOT="$REPO/$POOL_FLYDSL_DATA_ROOT" \
-    HIP_SHARD_DIR="$REPO/$POOL_FLYDSL_SHARD_DIR" \
-    HIP_TASK_IDS_OUT="$REPO/runs/pool_flydsl_tasks.txt" \
-    HIP_TWIN_GLOBS='*__flydsl' \
-    NO_SUBMIT=1 \
-        bash "$REPO/scripts/hip_pool_harvest.sh" "$POOL_FLYDSL_SHARDS" 2>&1 \
-        | grep -E "promoted|PARTITION|nothing to do" | tee -a "$LOG"
+    if [ "$POOL_STREAMS" = "1" ]; then
+        HIP_ROOTS="$FLYDSL_ROOT" \
+        HIP_PROMOTED="$REPO/$POOL_FLYDSL_OK_ROOT" \
+        HIP_DATA_ROOT="$REPO/$POOL_FLYDSL_DATA_ROOT" \
+        HIP_SHARD_DIR="$REPO/$POOL_FLYDSL_SHARD_DIR" \
+        HIP_TASK_IDS_OUT="$REPO/runs/pool_flydsl_tasks.txt" \
+        HIP_TWIN_GLOBS='*__flydsl' \
+        NO_SUBMIT=1 \
+            bash "$REPO/scripts/hip_pool_harvest.sh" "$POOL_FLYDSL_SHARDS" 2>&1 \
+            | grep -E "promoted|PARTITION|nothing to do" | tee -a "$LOG"
+    fi
 
     # Frontier registry shards are static (the 482 ids do not change), so only
     # refresh their commit stamp -- a stale manifest kills every worker on the

@@ -312,6 +312,21 @@ while :; do
     "$PY" "$REPO/scripts/claim_soonest_nodes.py" --want "$MINE_HOLD_NODES" \
         2>&1 | grep -E 'claimed|released' | while read -r l; do say "  $l"; done
 
+    # Nudge. A miner queued against the hold binds to the node set as it stood
+    # when it was submitted, so one queued before a swap waits forever on nodes
+    # we no longer hold while a reserved node sits idle beside it -- four of
+    # them did exactly that overnight. When the hold has a free node and miners
+    # are queued, drop the queued ones; the staffing pass at the bottom of this
+    # loop resubmits them against the set we hold now.
+    if [ "$(mine_res_free)" -gt 0 ]; then
+        stale=$(_squeue -t PD -o "%i %j" | awk '$2 ~ /^kore-mine-/ {print $1}')
+        if [ -n "$stale" ]; then
+            say "  hold has a free node with miners queued; rebinding them"
+            # shellcheck disable=SC2086
+            scancel $stale 2>/dev/null
+        fi
+    fi
+
     # --- 1. keep both materializers alive (no GPU slot consumed) -------------
     if [ "$POOL_STREAMS" = "1" ]; then
         start_materializer materialize_pool_hip.py    "$HIP_ROOT"    600 hip_frontier_materialize.log

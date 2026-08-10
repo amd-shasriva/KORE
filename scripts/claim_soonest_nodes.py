@@ -100,6 +100,8 @@ def main() -> int:
     ap.add_argument("--reservation", default="kore_mine")
     ap.add_argument("--want", type=int, default=6,
                     help="how many nodes the reservation should hold")
+    ap.add_argument("--min-gain-hours", type=float, default=1.0,
+                    help="a swap must shorten the wait by at least this much")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -151,6 +153,32 @@ def main() -> int:
 
     add = [n for n in want_nodes if n not in held]
     drop = [n for n in swappable if n not in want_nodes]
+
+    # Hysteresis. "Soonest" moves every minute as clocks run down, so swapping
+    # on any improvement would trade a node freeing in 2.0h for one freeing in
+    # 1.9h and then back again, churning the reservation without ever
+    # shortening the wait. Pair each candidate against the node it displaces,
+    # cheapest first, and only make the trade when it buys a real margin.
+    if args.min_gain_hours > 0:
+        margin = args.min_gain_hours * 3600
+        add_ranked = sorted(add, key=lambda n: rem_by_node.get(n) or 0)
+        drop_ranked = sorted(
+            drop, key=lambda n: (rem_by_node.get(n) is None,
+                                 rem_by_node.get(n) or 0), reverse=True)
+        paired_add, paired_drop = [], []
+        for new, old in zip(add_ranked, drop_ranked):
+            old_rem = rem_by_node.get(old)
+            new_rem = rem_by_node.get(new) or 0
+            if old_rem is None or old_rem - new_rem >= margin:
+                paired_add.append(new)
+                paired_drop.append(old)
+        # Filling an empty slot is always worth it; only swaps need the margin.
+        free_slots = slots - len(swappable)
+        if free_slots > 0:
+            for n in add_ranked:
+                if n not in paired_add and len(paired_add) - len(paired_drop) < free_slots:
+                    paired_add.append(n)
+        add, drop = paired_add, paired_drop
 
     for n in add:
         print(f"  claim   {n:<20} frees in {hours(n)}")

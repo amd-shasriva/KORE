@@ -134,6 +134,18 @@ def main() -> int:
     from kore.data.twins import spec_of
     load_env_local()
 
+    # materialize() copies driver.py and reference.py from a module-level POOL
+    # that defaults to the external task pool, and main() in that module is
+    # what normally repoints it. Importing the function without setting it sent
+    # every task looking for its driver under data/task_pool and failing with
+    # FileNotFoundError before a single kernel was verified.
+    import materialize_pool_flydsl as mpf
+    mpf.POOL = Path(args.source_root).resolve()
+    if not mpf.POOL.is_dir():
+        print(f"source root does not exist: {mpf.POOL}", file=sys.stderr)
+        return 2
+    print(f"source root: {mpf.POOL}")
+
     out_root = Path(args.out)
     ids = _load_ids(args.task_list)
     if args.limit:

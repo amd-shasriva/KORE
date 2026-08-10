@@ -136,7 +136,9 @@ def main() -> int:
     ap.add_argument("--poll", type=float, default=1.0,
                     help="seconds between polls; one sinfo + one scontrol each")
     ap.add_argument("--staff-cmd", default="bash scripts/staff_datagen.sh")
-    ap.add_argument("--rebind-cooldown", type=float, default=120.0,
+    ap.add_argument("--staff-cooldown", type=float, default=120.0,
+                    help="minimum seconds between staffing passes")
+    ap.add_argument("--rebind-cooldown", type=float, default=300.0,
                     help="seconds between rebinding queued miners")
     ap.add_argument("--once", action="store_true")
     args = ap.parse_args()
@@ -145,6 +147,7 @@ def main() -> int:
     log(f"scavenger up: reservation={args.reservation} max_hold={args.max_hold} "
         f"poll={args.poll}s")
     last_rebind = 0.0
+    last_staff = 0.0
 
     while True:
         # One sinfo and one scontrol per poll in the common case. The first
@@ -213,7 +216,18 @@ def main() -> int:
         maybe_free = [n for n in reservation_block(resv_text, args.reservation)
                       if states.get(n, ("", -1))[0].startswith(("idle", "resv"))]
         free_held = [n for n in maybe_free if cpus_allocated(n) == 0]
-        if grabbed or free_held:
+
+        # Staffing has to be rate limited independently of the poll. Polling at
+        # one second is right for spotting a node; running a staffing pass at
+        # one second is not, and the two were tied together: with a held node
+        # free it called staff_datagen 58 times in a minute, and because each
+        # pass can cancel and resubmit the queued miners, the jobs were being
+        # thrown back into the queue faster than the scheduler could ever place
+        # them. Two genuinely free nodes sat idle the whole time. Fast to
+        # notice, slow to act.
+        now = time.time()
+        due = (now - last_staff) >= args.staff_cooldown
+        if grabbed or (free_held and due):
             running, pending = my_jobs(user)
 
             # Rebind before staffing. A queued miner is bound to the hold as it
@@ -226,7 +240,6 @@ def main() -> int:
             # Cooled down because the check cannot tell "cannot use this node"
             # from "has not started yet": without it, a node that stays free
             # for any other reason would have us cancelling four jobs a second.
-            now = time.time()
             if (free_held and pending
                     and now - last_rebind >= args.rebind_cooldown):
                 stale = pending_miner_ids(user)
@@ -242,6 +255,7 @@ def main() -> int:
                 f"running={running} pending={pending} -> staffing")
             subprocess.run(args.staff_cmd, shell=True,
                            capture_output=True, text=True, timeout=900)
+            last_staff = time.time()
 
         if args.once:
             return 0

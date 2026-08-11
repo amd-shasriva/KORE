@@ -30,6 +30,7 @@ import os
 import shutil
 import sys
 import pathlib
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -174,12 +175,16 @@ def _conventions() -> str:
     return "\n".join(keep)[:4000]
 
 
-#: Ceiling on the API listing. The reference implementation being ported has to
-#: fit in the same prompt, and an unbudgeted flydsl.expr listing is 212k chars.
-MAX_API_CHARS = 24000
+#: Ceiling on the API listing.
+#:
+#: Set to 24k first and that was far too generous: the prompt reached 41,143
+#: characters, the gateway began returning APITimeout, single calls took up to
+#: 36 minutes, and eight workers managed five completions in an hour. A prompt
+#: the model cannot answer is worse than one that omits a signature.
+MAX_API_CHARS = 9000
 #: Methods per class. Enough to convey arity and naming without enumerating
 #: every operator on every numeric type.
-MAX_METHODS_PER_CLASS = 12
+MAX_METHODS_PER_CLASS = 6
 #: Share of the budget for module-level names; the rest is reserved for
 #: methods so they cannot be crowded out by generated type names.
 NAME_SHARE = 0.55
@@ -238,10 +243,20 @@ def _api_surface(module: str) -> str:
     # porting. Module-level symbols are listed in full because the teacher has
     # to know what exists; methods are capped per class, which is enough to
     # convey arity without enumerating every numeric type's operators.
+    # Generated numeric types are 132 of flydsl.expr's 395 names -- BFloat16x1
+    # through Float8E5M2x16 and friends. They are a naming pattern, not an API
+    # to learn, and expanding each one's methods is most of what made the
+    # prompt unanswerable. Collapse them to a single line.
+    generated = re.compile(r"^(?:BFloat|Float|Int|Uint|Half)\w*\d")
+    folded: set[str] = set()
+
     out: list[str] = []
     methods: list[str] = []
     try:
         for name in sorted(n for n in dir(mod) if not n.startswith("_")):
+            if generated.match(name):
+                folded.add(re.sub(r"\d+", "N", name))
+                continue
             try:
                 obj = getattr(mod, name)
             except Exception:  # noqa: BLE001 - a lazy attribute that will not build
@@ -284,9 +299,13 @@ def _api_surface(module: str) -> str:
         return text[:budget].rsplit(", ", 1)[0] + ", ..."
 
     names = clip(out, int(MAX_API_CHARS * NAME_SHARE))
+    if folded:
+        names += ("\n  numeric types follow the pattern "
+                  + ", ".join(sorted(folded)[:14])
+                  + " (N is a bit width or vector lane count)")
     if not methods:
         return names
-    return names + "\n  methods: " + clip(methods, MAX_API_CHARS - len(names))
+    return names + "\n  methods: " + clip(methods, max(MAX_API_CHARS - len(names), 0))
 
 
 def _build_prompt(spec: dict, triton_source: str) -> tuple[str, str]:

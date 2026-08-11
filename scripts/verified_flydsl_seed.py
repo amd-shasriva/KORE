@@ -66,6 +66,38 @@ the wrong values. Re-derive the indexing and the accumulation order.
 Return the complete corrected file. Do not explain."""
 
 
+RETRY_PROMPT = """You are fixing a FlyDSL kernel that compiled and ran on gfx950 but did \
+not match the reference. Return the complete corrected file defining `{entry}`, \
+nothing else.
+
+These are the only symbols available, with exact signatures. Pass exactly the \
+arguments each signature shows; take each symbol from the module it is listed \
+under.
+
+flyc (flydsl.compiler): {flyc_api}
+
+fx (flydsl.expr): {fx_api}
+
+The kernel that failed:
+
+```python
+{kernel}
+```
+
+What the verifier reported:
+
+{error}
+
+How to read it: "too many positional arguments" or "missing a required \
+argument" means the arity is wrong -- find the call above in the signature list. \
+"module has no attribute" means the symbol is on the other module or does not \
+exist. "object has no attribute" on a FlyDSL value means torch semantics were \
+assumed; a FlyDSL value has no .shape, .reshape, .device or .dtype. "requires a \
+Context" means IR was built outside the jitted function. An SNR far below zero \
+with no Python error means it ran and computed wrong values -- re-derive the \
+indexing and accumulation order."""
+
+
 def _load_ids(path: str) -> list[str]:
     return [ln.split("#", 1)[0].strip()
             for ln in Path(path).read_text().splitlines()
@@ -80,12 +112,34 @@ def seed_with_feedback(task_id: str, spec: dict, source: str, teacher,
                                          materialize)
     from verify_pool_hip_seeds import verify_one
 
+    from materialize_pool_flydsl import _api_surface
+
     prompt, entry = _build_prompt(spec, source)
-    history: list[dict] = [{"role": "user", "content": prompt}]
     last = ""
+    last_seed = ""
+
+    def message(attempt: int) -> list[dict]:
+        """One user turn, fixed size, whatever the attempt number.
+
+        Accumulating the conversation looked natural and was the thing that
+        broke this: each rejected kernel was appended verbatim, so prompts ran
+        19k, 25k, 35k, 40k, 49k characters and the gateway answered the later
+        ones with APITimeout -- 55 timeouts against 7 completions in 95
+        minutes. A retry needs the API, the kernel it is fixing and the error,
+        and nothing it already saw.
+        """
+        if attempt == 1 or not last_seed:
+            return [{"role": "user", "content": prompt}]
+        return [{"role": "user", "content": RETRY_PROMPT.format(
+            flyc_api=_api_surface("flydsl.compiler"),
+            fx_api=_api_surface("flydsl.expr"),
+            entry=entry,
+            kernel=last_seed[:8000],
+            error=last[:2000],
+        )}]
     for attempt in range(1, attempts + 1):
         try:
-            reply = teacher.generate(history)
+            reply = teacher.generate(message(attempt))
             seed = _extract_code(reply)
             if "flyc.jit" not in seed:
                 raise ValueError("no @flyc.jit launch wrapper")
@@ -93,8 +147,6 @@ def seed_with_feedback(task_id: str, spec: dict, source: str, teacher,
                 raise ValueError(f"does not define {entry!r}")
         except Exception as exc:  # noqa: BLE001 - retry structural misses too
             last = f"{type(exc).__name__}: {exc}"
-            history += [{"role": "assistant", "content": "(unusable reply)"},
-                        {"role": "user", "content": FEEDBACK.format(error=last)}]
             continue
 
         task_dir = materialize(task_id, seed, out_root)
@@ -108,8 +160,7 @@ def seed_with_feedback(task_id: str, spec: dict, source: str, teacher,
         # the message a fix can be derived from.
         detail = " ".join(verdict.get("diagnostics") or []) or verdict.get("error", "")
         last = (detail or "no diagnostic")[:4000]
-        history += [{"role": "assistant", "content": seed},
-                    {"role": "user", "content": FEEDBACK.format(error=last)}]
+        last_seed = seed
         # A failed candidate must not be left where the gate would count it as
         # a judged seed; the next attempt overwrites it, and the final failure
         # is removed below.

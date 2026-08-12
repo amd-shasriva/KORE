@@ -44,6 +44,12 @@ def code_of(text: str) -> str:
     return max(m, key=len).strip() if m else (text or "").strip()
 
 
+#: A finished assistant turn ends on sentence or code punctuation. Used by the
+#: truncated_target gate; see the comment at its call site for why length alone
+#: cannot detect a truncated row.
+_TERMINAL = re.compile(r'[.!?}\)\]>"\'`;:]\s*$|\\\]$|```\s*$')
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--path", default=str(REPO / "data/v5_sft.jsonl"))
@@ -128,6 +134,21 @@ def main() -> int:
         target = msgs[-1].get("content") or ""
         if msgs[-1].get("role") != "assistant":
             fail["last_not_assistant"] += 1
+        # Truncated targets. The length gate above asks whether a row is UNDER the
+        # cap, which a truncated row passes by construction, because truncation is
+        # how it got under the cap -- so length alone cannot catch this. 552 math
+        # rows shipped with the chain of thought severed mid-word ("Thus let r=1",
+        # "then g(x_6)= (g(x"), and each one teaches that a valid way to answer a
+        # hard question is to emit sixteen thousand tokens and stop without an
+        # end-of-turn. They were also the longest rows in the corpus, so they were a
+        # far larger share of the tokens assistant-only loss actually trains on than
+        # of the row count. Only rows long enough to have plausibly hit the cap are
+        # checked: a SHORT answer ending without punctuation is usually legitimate
+        # style, and 17 of 552 short math rows match the pattern harmlessly.
+        if (r.get("_tokens", 0) >= 12000
+                and target.rstrip()
+                and not _TERMINAL.search(target.rstrip()[-40:])):
+            fail["truncated_target"] += 1
         if str(src).startswith("kernel"):
             why = cheats(code_of(target))
             if why:
@@ -138,7 +159,7 @@ def main() -> int:
     gates = ["heldout_probe_leak", "contaminated_task_leak", "arena_contamination",
              "provenance_not_object", "kernel_assistant_turns_not_1",
              "no_assistant_turn", "bad_role", "missing_content", "empty_content",
-             "last_not_assistant", "no_messages"]
+             "last_not_assistant", "no_messages", "truncated_target"]
     for g in gates:
         n = fail.get(g, 0)
         print(f"  {'PASS' if n == 0 else 'FAIL'}  {g:<28} {n:,}")

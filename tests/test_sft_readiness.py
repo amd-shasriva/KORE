@@ -42,7 +42,7 @@ def test_the_30b_sft_config_keeps_resumable_checkpoints():
     unrecoverable, and the premise was wrong: there is no per-user quota. Both
     volumes are NFSv3 with no quota tooling, and NFSv3 reports a full volume as
     EDQUOT, so the write simply landed while other users had the volume at zero.
-    With 17T free against a 976GB rotation peak, the space is there and the
+    With 42T free against a ~1.46TB rotation peak, the space is there and the
     optimizer state should stay.
     """
     import json
@@ -53,10 +53,17 @@ def test_the_30b_sft_config_keeps_resumable_checkpoints():
     assert raw.get("save_only_model") is False, (
         "optimizer state must be kept so a killed run resumes; if disk pressure "
         "returns, fix the disk rather than the resumability")
-    # limit=1 is what makes this self-cleaning: the Trainer writes the new
-    # checkpoint and then deletes the previous one, so steady state is one
-    # checkpoint and only the rotation window holds two.
-    assert raw.get("save_total_limit") == 1
+    # >= 2, and this reverses what this test used to assert. limit=1 looked
+    # self-cleaning -- the Trainer writes the new checkpoint and then deletes the
+    # previous one, so steady state is one -- but that ordering is exactly the
+    # problem: there is a window in which the only complete checkpoint has been
+    # deleted, and on a partition that kills jobs at the ~2h mark, a run with 32
+    # save points will eventually be killed inside it. The premise that forced
+    # limit=1 (~1090GB free, where two checkpoints did not fit) was stale by three
+    # generations; /shared_nfs has 42T, so ~1.46TB is 3.5% of it.
+    assert raw.get("save_total_limit", 0) >= 2, (
+        "save_total_limit must be >= 2: at limit=1 the rotation window leaves "
+        "nothing resumable, and preemption is the expected way this run ends")
     # A 662-step run with save_steps=400 has exactly ONE save point, and run
     # 33992 died on it. Three save points bound the worst-case loss to ~200 steps.
     assert raw.get("save_steps") <= 200, (
@@ -120,17 +127,20 @@ def test_packing_stays_off_without_flash_attention():
 
 
 def test_checkpoint_rotation_bounds_disk_to_one_checkpoint():
-    """40 save events must not mean 40 retained checkpoints.
+    """32 save events must not mean 32 retained checkpoints.
 
-    save_steps=50 over a 2,024-step run fires ~40 times, and a 30B checkpoint
-    with optimizer state is ~488GB. Retaining them all would be ~19TB, which is
-    more than the whole shared volume has free. save_total_limit=1 is what makes
-    the frequency safe: the Trainer writes the new checkpoint and then deletes the
-    previous one, so steady state is one and only the rotation window briefly
-    holds two (~976GB against 17T).
+    save_steps=50 over a 1,613-step run fires ~32 times, and a 30B checkpoint with
+    optimizer state is ~488GB. Retaining them all would be ~15TB. What makes the
+    frequency safe is that rotation is BOUNDED, not that it is bounded to one: at
+    limit=2 steady state is two checkpoints and the rotation window briefly holds
+    three, ~1.46TB against 42T free.
 
-    Verified against reality as well as config -- the completed v3 run left
-    exactly one checkpoint directory on disk.
+    The bound is two-sided on purpose. Too high and the footprint grows on a shared
+    volume that has already had another user consume the margin under a write; too
+    low -- specifically one -- and the rotation window has no complete checkpoint in
+    it, which on a preempting partition means a kill can destroy the only resume
+    point. Both failures have precedent in this project, which is why neither edge
+    is left unasserted.
     """
     import json
     import pathlib
@@ -140,9 +150,10 @@ def test_checkpoint_rotation_bounds_disk_to_one_checkpoint():
     raw = json.loads(path.read_text())
     steps = raw.get("save_steps")
     limit = raw.get("save_total_limit")
-    assert limit == 1, (
+    assert limit is not None and 2 <= limit <= 3, (
         f"save_total_limit={limit} with save_steps={steps}: at ~488GB per 30B "
-        "checkpoint, anything above 1 grows without bound over a long run")
+        "checkpoint it must stay small, but 1 is unsafe because the rotation "
+        "window would leave nothing resumable when a preemption lands in it")
     # Frequent saves are only defensible while rotation is bounded. If someone
     # raises the limit, they must also justify the frequency.
     assert steps is not None and steps <= 50, (

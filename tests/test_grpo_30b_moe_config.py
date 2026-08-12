@@ -239,14 +239,23 @@ def test_the_accelerate_yaml_says_which_value_is_authoritative():
 def test_the_checkpoint_budget_matches_the_30b_arithmetic():
     """Adam keeps ~16 bytes/param, so a 30.5B checkpoint is ~488GB.
 
-    A rotation transiently holds two, peaking near 976GB on a SHARED volume, so
-    save_total_limit above 1 does not fit. The SFT config makes the same argument
-    for the same model; the two must not disagree.
+    This used to assert exactly 1, on the premise that a rotation peak near 976GB
+    was all a volume with ~1090GB free could hold. That figure was stale:
+    /shared_nfs has 42T, so limit=2 peaking near ~1.46TB is 3.5% of it. The bound
+    is now two-sided, because 1 turned out to be the riskier edge -- the Trainer
+    writes the new checkpoint before rotating the old one out, so at limit=1 there
+    is a window containing no complete checkpoint, and both of these runs expect
+    preemption and will eventually be killed inside it.
+
+    The SFT config makes the same argument for the same model on the same volume;
+    the two must not disagree, which is what this asserts.
     """
     config = _config()
     sft = json.loads((REPO / SFT_CONFIG).read_text())
-    assert config.save_total_limit == 1
-    assert sft["save_total_limit"] == 1
+    assert 2 <= config.save_total_limit <= 3, config.save_total_limit
+    assert sft["save_total_limit"] == config.save_total_limit, (
+        f"SFT says {sft['save_total_limit']} and GRPO says "
+        f"{config.save_total_limit}: same model, same volume, same arithmetic")
     assert config.save_steps > 0
 
 

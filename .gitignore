@@ -76,6 +76,12 @@ data/task_pool/
 # 1.8GB of raw JSONL would bloat a repository whose .git is already 1.3GB, and
 # data/release/reassemble.sh reconstructs this file byte-identically.
 data/v5_sft.jsonl
+# The held-out eval half, ignored for the same reason and released the same way
+# (data/release/sft/v5_eval.jsonl.gz). Listing it is also protective: it was left
+# untracked-but-not-ignored, and repo automation on the cluster runs `git stash -u`
+# to preserve a dirty tree, which REMOVES untracked files -- it deleted this file
+# once. Ignored files survive that; untracked ones do not.
+data/v5_eval.jsonl
 data/v5_replay.jsonl
 data/v5_translate_*.jsonl
 data/v5_flydsl_lang.jsonl

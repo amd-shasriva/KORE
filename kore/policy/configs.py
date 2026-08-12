@@ -182,6 +182,31 @@ class SFTConfig(DistributedMixin):
     # Repair weighting: up-weight repair (broken -> fixed) turns.
     repair_loss_weight: float = 2.0
 
+    #: Held-out slice, produced by scripts/v5_split_eval.py and removed from
+    #: dataset_path (by content hash, since the mixture upsamples scarce slices and
+    #: a line-number split leaves duplicate copies behind in training).
+    #:
+    #: This exists because the run's top risk -- losing instruction-following while
+    #: learning kernels -- was previously unobservable until the run ended: 1,867
+    #: optimizer steps and ~30h before anyone could tell whether it had happened.
+    #: Rows carry an _eval_group tag and are loaded as one dataset PER GROUP, so the
+    #: trainer logs eval_kernel_generate_loss, eval_instruction_following_loss and so
+    #: on separately. A pooled scalar could not distinguish "kernels improved, chat
+    #: collapsed" from "nothing moved", and those two call for opposite decisions.
+    eval_dataset_path: str = ""
+    eval_steps: int = 200
+    #: 1, deliberately. Eval runs at the same 16,896-token cap as training but without
+    #: group_by_length's length sorting, so a batch can pair the longest row in the
+    #: slice with anything; batch 1 keeps eval off the memory peak.
+    per_device_eval_batch_size: int = 1
+    #: Evaluate once BEFORE the first optimizer step. Without this the earliest
+    #: measurement is step 200, which then becomes the baseline every later delta is
+    #: computed against -- so any capability already lost in the first 200 steps is
+    #: silently folded into "normal" and the retention alarm can never see it. A
+    #: step-0 baseline is the untrained model, which is the only honest reference for
+    #: "did this run damage anything".
+    eval_on_start: bool = True
+
     use_lora: bool = True
     lora: LoRAConfig = field(default_factory=LoRAConfig)
 

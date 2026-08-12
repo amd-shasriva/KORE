@@ -158,6 +158,23 @@ def resolve(
                 "materialize the packaged corpus."
             )
 
+    if stage == "sft":
+        # Same check for the held-out eval slice. Checked here rather than only in
+        # train_sft so a missing file costs seconds at resolve time instead of
+        # failing after every rank has loaded the model.
+        eval_path = resolved.get("eval_dataset_path")
+        if eval_path:
+            absolute = Path(eval_path)
+            if not absolute.is_absolute():
+                absolute = root / absolute
+            if not absolute.is_file():
+                raise ValueError(
+                    f"sft: eval_dataset_path {eval_path!r} does not exist (looked "
+                    f"at {absolute}). Run scripts/v5_split_eval.py to carve it out "
+                    "of the training mixture, or clear the key to train without "
+                    "an in-run retention signal."
+                )
+
     # Strict parse LAST, so it validates exactly what will be written out.
     _stage_loader(stage)(dict(resolved))
     return resolved, changes

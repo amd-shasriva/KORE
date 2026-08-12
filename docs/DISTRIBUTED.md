@@ -19,8 +19,12 @@ The block below is a transcription of the non-comment fields in
 {
   "model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
   "model_revision": "b2cff646eb4bb1d68355c01b18ae02e7cf42d120",
-  "dataset_path": "/shared_nfs/shasriva/kore/datagen/multicap_v4.jsonl",
-  "output_dir": "/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b",
+  "dataset_path": "/home/shasriva/Kore-RL/KORE/data/v5_sft.jsonl",
+  "eval_dataset_path": "/home/shasriva/Kore-RL/KORE/data/v5_eval.jsonl",
+  "eval_steps": 200,
+  "eval_on_start": true,
+  "per_device_eval_batch_size": 1,
+  "output_dir": "/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b_v5",
   "use_lora": false,
   "distributed": true,
   "bf16": true,
@@ -30,11 +34,17 @@ The block below is a transcription of the non-comment fields in
   "max_seq_length": 17408,
   "num_train_epochs": 1.0,
   "learning_rate": 5e-06,
-  "lr_scheduler_type": "cosine",
+  "lr_scheduler_type": "cosine_with_min_lr",
+  "lr_scheduler_kwargs": {"min_lr_rate": 0.1},
   "warmup_ratio": 0.15,
-  "repair_loss_weight": 2.0,
+  "max_grad_norm": 0.5,
+  "packing": false,
+  "repair_loss_weight": 1.0,
+  "adam_beta2": 0.98,
+  "report_to": "tensorboard",
   "save_steps": 50,
-  "save_total_limit": 1,
+  "save_total_limit": 2,
+  "save_only_model": false,
   "fsdp": "full_shard auto_wrap",
   "fsdp_transformer_layer_cls": "Qwen3MoeDecoderLayer",
   "fsdp_cpu_offload": false,
@@ -45,15 +55,32 @@ The block below is a transcription of the non-comment fields in
 ```
 
 The 17,408-token cap matches the mixture filter; raising it would add no
-admitted data. Measured SFT is about 478 steps at 90–120 seconds per step, or
-roughly 12–16 hours. A second epoch would cross the 23-hour walltime and force a
-checkpoint resume, so it is deferred until evaluation says it is necessary.
+admitted data. One epoch is **1,613 optimizer steps** (206,586 rows / global batch
+128). Earlier revisions of this page said 478 steps and 12–16 hours; both were
+wrong — 478 by a factor of about four, and the walltime because no step time has
+ever been measured on the real length distribution rather than on artificially
+maximal sequences. Expect 26–36 hours and at least one preemption, and measure
+`train_samples_per_second` over the first 50 steps before believing any estimate
+here. A second epoch would cross the 23-hour walltime, so it is deferred until
+the held-out eval says it is necessary.
 
-`save_total_limit: 1` is not a durability preference. A 30.5B Adam checkpoint is
-about 488 GB; rotation temporarily holds two (~976 GB), which fits the shared
-volume's roughly 1,090 GB free space. Limit 2 would require about 1,464 GB and
-fail mid-run. The saved checkpoint is therefore the single recoverable
-generation.
+`save_total_limit: 2` replaces an earlier `1`, and the reasoning inverted. A 30.5B
+Adam checkpoint is about 488 GB and the Trainer writes the new one *before*
+rotating the old one out, so limit 2 peaks near 1.46 TB. The old justification for
+1 was that the volume had roughly 1,090 GB free and could not hold two; it
+actually has 42 TB, making the peak 3.5% of free space. Limit 1 was the more
+dangerous setting, because its rotation window contains no complete checkpoint at
+all, and this run is expected to be preempted enough times to eventually be killed
+inside one.
+
+`eval_dataset_path` holds out 899 rows (0.43% of the mixture), removed from
+training by content hash so the mixture's deliberate duplicates cannot leave a
+copy behind. Rows are tagged by capability and loaded as one dataset per group, so
+the log carries `eval_instruction_following_loss` separately from
+`eval_kernel_generate_loss`. With `eval_on_start` the baseline is the untrained
+model, and the trainer warns when kernel loss falls while retained capabilities
+climb — the signature of catastrophic forgetting, which was previously invisible
+until the run finished.
 
 ## Launch boundary
 

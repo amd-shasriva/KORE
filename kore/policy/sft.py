@@ -21,6 +21,7 @@ every downstream stage (DPO, GRPO, soup) can load a plain full model.
 
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 from typing import Optional
@@ -308,6 +309,34 @@ def load_sft_dataset(path: Path, repair_weight: float = 1.0,
     return out
 
 
+def load_eval_datasets(path: str | Path) -> dict:
+    """Load the held-out slice as one ``Dataset`` per ``_eval_group``.
+
+    Returned as a dict because ``Trainer`` accepts a mapping of eval datasets and
+    logs ``eval_<key>_loss`` for each. That per-capability breakdown is the whole
+    point: this run teaches kernels while risking instruction-following, and a
+    single pooled eval loss averages the two together, so the number could sit flat
+    while one half climbs and the other falls.
+
+    No repair up-weighting here even when training uses it -- duplicating eval rows
+    would just reweight the mean of a metric we want comparable across steps.
+    """
+    from datasets import Dataset
+
+    groups: dict[str, list] = {}
+    with open(path, encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            if not isinstance(rec, dict) or "messages" not in rec:
+                continue
+            group = str(rec.get("_eval_group") or "unlabelled")
+            groups.setdefault(group, []).append({"messages": rec["messages"]})
+    return {g: Dataset.from_list(r) for g, r in sorted(groups.items()) if r}
+
+
 def _filter_overlong(ds, tok, max_length: int):
     """Drop rows whose chat-rendered token length exceeds ``max_length``.
 
@@ -542,6 +571,36 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
     # wrapper is the other source of the mismatch on FSDP1/use_orig_params).
     grad_ckpt = bool(config.gradient_checkpointing)
 
+    # Held-out eval, one dataset per capability group. Off unless a path is set, so
+    # the no-eval behaviour is unchanged for callers that do not want the ~1% of
+    # wall clock this costs.
+    eval_sets: dict = {}
+    eval_kwargs: dict = {}
+    _eval_path = str(getattr(config, "eval_dataset_path", "") or "")
+    if _eval_path:
+        if not Path(_eval_path).is_file():
+            raise FileNotFoundError(f"eval_dataset_path does not exist: {_eval_path}")
+        eval_sets = load_eval_datasets(_eval_path)
+        if not eval_sets:
+            raise ValueError(f"eval_dataset_path parsed to zero rows: {_eval_path}")
+        eval_kwargs = {
+            "eval_strategy": "steps",
+            "eval_steps": int(getattr(config, "eval_steps", 200)),
+            "per_device_eval_batch_size": int(
+                getattr(config, "per_device_eval_batch_size", 1)),
+            # Baseline at step 0, i.e. the untrained model. Otherwise the first
+            # measurement is step 200 and every delta is computed against a model
+            # that has already been trained for 200 steps, hiding whatever those
+            # steps cost.
+            "eval_on_start": bool(getattr(config, "eval_on_start", True)),
+            # Eval is a diagnostic, not a model-selection signal here (one epoch, a
+            # fixed schedule, and nothing consumes best_model_at_end), so keep the
+            # final checkpoint deterministic rather than metric-dependent.
+            "load_best_model_at_end": False,
+        }
+        log.metric("sft.eval_groups",
+                   **{g: len(d) for g, d in eval_sets.items()})
+
     args = TRLSFTConfig(
         output_dir=config.output_dir,
         num_train_epochs=config.num_train_epochs,
@@ -584,6 +643,7 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         dataloader_prefetch_factor=getattr(config, "dataloader_prefetch_factor", 4),
         group_by_length=config.group_by_length,
         dataset_num_proc=getattr(config, "dataset_num_proc", 32),
+        **eval_kwargs,
         **fsdp_kwargs,
     )
     # ------------------------------------------------------------------ #
@@ -680,6 +740,70 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         def __init__(self):
             self._recent: list[float] = []
             self._entropy0: dict = {}
+            self._eval0: dict = {}
+
+        def _on_eval_log(self, state, logs: dict):
+            """Report per-capability eval loss, and alarm on the divergence that
+            defines catastrophic forgetting.
+
+            The signature of forgetting is not "loss went up" -- taught capabilities
+            are supposed to improve while retained ones drift a little. It is the two
+            moving in OPPOSITE directions: kernel loss falling while chat or
+            instruction-following climbs. Alarming on that shape rather than on an
+            absolute threshold is what makes this readable at step 200 instead of in
+            hindsight.
+            """
+            per_group = {k[len("eval_"):-len("_loss")]: v
+                         for k, v in logs.items()
+                         if k.startswith("eval_") and k.endswith("_loss")
+                         and isinstance(v, (int, float))}
+            if not per_group:
+                return
+            step = int(state.global_step)
+            for group, val in per_group.items():
+                self._eval0.setdefault(group, val)
+            deltas = {g: (v - self._eval0[g]) / self._eval0[g]
+                      for g, v in per_group.items() if self._eval0.get(g)}
+            taught = [d for g, d in deltas.items() if g.startswith("kernel")]
+            retained = {g: d for g, d in deltas.items() if not g.startswith("kernel")}
+            if taught and retained:
+                learning = min(taught) < -0.02
+                regressed = {g: round(d, 4) for g, d in retained.items() if d > 0.05}
+                if learning and regressed:
+                    log.warn("sft: RETENTION REGRESSION -- kernel loss is falling "
+                             "while retained capabilities climb", step=step,
+                             kernel_delta=round(min(taught), 4), regressed=regressed,
+                             note="raise the replay share or lower the LR")
+            log.event("sft_eval", step=step,
+                      **{f"{g}_loss": round(float(v), 5)
+                         for g, v in sorted(per_group.items())},
+                      **{f"{g}_delta": round(d, 4) for g, d in sorted(deltas.items())})
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            # Fingerprint the data order. group_by_length uses LengthGroupedSampler,
+            # which Trainer constructs with NO generator, so its permutation comes
+            # from the global CPU RNG and is not bound to args.seed; accelerate's
+            # seedable-sampler path only covers a plain RandomSampler. On resume the
+            # Trainer computes how many batches to skip from the NEW dataloader and
+            # calls skip_first_batches, which is only correct if the permutation is
+            # reproduced. If it is not, some rows train twice and others never, with
+            # nothing raising. This makes that falsifiable: compare the fingerprint
+            # across a resume, and if it differs the skip was wrong.
+            try:
+                trainer = kwargs.get("train_dataloader")
+                sampler = getattr(trainer, "sampler", None) or getattr(
+                    trainer, "batch_sampler", None)
+                head = list(itertools.islice(iter(sampler), 8)) if sampler else None
+            except Exception as exc:  # noqa: BLE001 - diagnostic only
+                head, sampler = None, None
+                log.info("sft: sampler fingerprint unavailable", err=str(exc)[:120])
+            if head is not None:
+                log.metric("sft.sampler_order",
+                           sampler=type(sampler).__name__,
+                           first_8=str(head),
+                           resumed=bool(state.global_step),
+                           note="must match across a resume, or skip_first_batches "
+                                "replayed a different ordering")
 
         def on_optimizer_step(self, args, state, control, **kwargs):
             # Reset AFTER the step so each logged value covers exactly one global
@@ -689,7 +813,8 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
 
         def on_log(self, args, state, control, logs=None, **kwargs):
             logs = logs or {}
-            if "loss" not in logs:  # skip eval/summary logs - train-step only
+            if "loss" not in logs:
+                self._on_eval_log(state, logs)
                 return
             loss, gnorm = logs.get("loss"), logs.get("grad_norm")
             step = int(state.global_step)
@@ -731,6 +856,7 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
                       grad_norm=gnorm, **routing, **gpu_mem_snapshot())
 
     trainer = SFTTrainer(model=model, args=args, train_dataset=ds,
+                         **({"eval_dataset": eval_sets} if eval_sets else {}),
                          peft_config=peft_cfg, processing_class=tok,
                          callbacks=[_ObsCallback()])
     from kore.policy.configs import latest_checkpoint

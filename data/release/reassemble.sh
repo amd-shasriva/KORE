@@ -19,14 +19,21 @@ cat provenance/datagen.tar.gz.part* | gunzip | tar -C ../b05factory -xf -
 # others so a fresh checkout reproduces it with no network and no hub account.
 cat sft/multicap_v4.jsonl.gz.part* | gunzip > ../b05factory/sft/multicap_v4.jsonl
 
-# v5: what the 30B SFT config now points at. 207,782 rows / 502,470,043 tokens,
-# 165,047 distinct targets over 11,793 tasks; 61.2% kernel / 38.8% replay by rows
-# and 14% replay by tokens. Six task shapes rather than v4's one, every kernel
-# target verified numerically on gfx950, and screened against the evaluation
-# benchmark's own sources -- which v4 never was.
+# v5: what the 30B SFT config now points at. 206,586 rows after the eval split
+# (207,782 built, 1,196 removed), 165,047 distinct targets over 11,793 tasks;
+# 61.2% kernel / 38.8% replay by rows and 14% replay by tokens. Six task shapes
+# rather than v4's one, every kernel target verified numerically on gfx950, and
+# screened against the evaluation benchmark's own sources -- which v4 never was.
 #
 # Kept alongside v4 rather than replacing it. Deleting the v4 parts would not
 # reclaim any space (the blobs stay in history regardless) and it would remove the
 # only fallback if v5 evaluates worse, so there is cost and no benefit.
 cat sft/v5_sft.jsonl.gz.part* | gunzip > ../b05factory/sft/v5_sft.jsonl
+
+# The held-out eval slice, shipped rather than regenerated. scripts/v5_split_eval.py
+# would rebuild it, but only from the PRE-split mixture -- rerunning it against the
+# already-split file would carve a second slice out of what is left. Shipping both
+# halves keeps the train/eval boundary reproducible byte-for-byte, which is the
+# whole point of holding rows out.
+gunzip -c sft/v5_eval.jsonl.gz > ../b05factory/sft/v5_eval.jsonl
 echo reassembled

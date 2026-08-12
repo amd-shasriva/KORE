@@ -265,25 +265,47 @@ def load_sft_dataset(path: Path, repair_weight: float = 1.0,
 
     factor = max(1, int(round(repair_weight)))
     rows = []
-    for line in Path(path).read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        rec = json.loads(line)
-        messages = rec["messages"] if isinstance(rec, dict) and "messages" in rec else rec
-        row = {"messages": messages}
-        rows.append(row)
-        # Up-weight TRUE repair turns only (by provenance kind), not the whole
-        # kernel bucket: after mixing, repairs AND optimization wins are both tagged
-        # _source="kernel_repair_opt", so keying on _source doubled wins too and
-        # reshaped the trained mix (audit THEME G/I1). Provenance kind is the honest
-        # signal and also catches DAgger repairs (which lacked the bucket tag).
-        if factor > 1 and isinstance(rec, dict):
-            prov = rec.get("_provenance") or {}
-            is_repair = (prov.get("kind") == "repair") or (rec.get("_source") == "repair")
-            if is_repair:
-                rows.extend([dict(row) for _ in range(factor - 1)])
-    return Dataset.from_list(rows)
+    # Largest `_tokens` seen. The v5 builder measures every row with this exact
+    # tokenizer and revision and gates at build time, so when the field is present
+    # the caller can skip re-tokenising 239k rows on all eight ranks -- a 13.5-minute
+    # per-rank pass that drops nothing. Stays None if any row lacks the field, in
+    # which case the caller does the work rather than trusting an absent measurement.
+    max_tokens_seen: "int | None" = 0
+    # Streamed, not read_text().splitlines(). The v5 mixture is 1.79GB, so the old
+    # form held ~1.8GB of str plus ~1.8GB of list per rank, on all eight ranks at
+    # once, on a box that has already lost a run to host-memory exhaustion.
+    with open(path, encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            messages = (rec["messages"] if isinstance(rec, dict) and "messages" in rec
+                        else rec)
+            row = {"messages": messages}
+            rows.append(row)
+            if max_tokens_seen is not None:
+                t = rec.get("_tokens") if isinstance(rec, dict) else None
+                if isinstance(t, int) and t > 0:
+                    max_tokens_seen = max(max_tokens_seen, t)
+                else:
+                    max_tokens_seen = None
+            # Up-weight TRUE repair turns only (by provenance kind), not the whole
+            # kernel bucket: after mixing, repairs AND optimization wins are both
+            # tagged _source="kernel_repair_opt", so keying on _source doubled wins
+            # too and reshaped the trained mix. Provenance kind is the honest signal
+            # and also catches DAgger repairs (which lacked the bucket tag).
+            if factor > 1 and isinstance(rec, dict):
+                prov = rec.get("_provenance") or {}
+                is_repair = ((prov.get("kind") == "repair")
+                             or (rec.get("_source") == "repair"))
+                if is_repair:
+                    rows.extend([dict(row) for _ in range(factor - 1)])
+    out = Dataset.from_list(rows)
+    # Carried out-of-band: the Dataset itself keeps only `messages`, because that is
+    # the one column the trainer reads.
+    out._kore_max_tokens = max_tokens_seen  # type: ignore[attr-defined]
+    return out
 
 
 def _filter_overlong(ds, tok, max_length: int):
@@ -332,6 +354,28 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
             f"(cwd={Path.cwd()}). Run `cd data/release && ./reassemble.sh` to "
             "materialize the packaged corpus, or point dataset_path at the built shard."
         )
+    # is_file() also passes on an empty or truncated shard, and an empty Dataset is
+    # only noticed after every rank has loaded 61GB of weights. Cost of checking
+    # here is one line read; cost of not checking is an allocation.
+    _n_rows = 0
+    with open(dataset_path, encoding="utf-8", errors="ignore") as _fh:
+        _first = ""
+        for _line in _fh:
+            if _line.strip():
+                _n_rows += 1
+                if not _first:
+                    _first = _line
+    if _n_rows == 0:
+        raise ValueError(f"sft: training dataset {str(dataset_path)!r} has no rows")
+    try:
+        if "messages" not in json.loads(_first):
+            raise ValueError(
+                f"sft: first row of {str(dataset_path)!r} has no 'messages' key; "
+                "the loader reads nothing else, so this file would train on nothing")
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"sft: first row of {str(dataset_path)!r} is not valid JSON: {exc}") from exc
+    log.info("sft: dataset preflight ok", path=str(dataset_path), rows=_n_rows)
 
     import torch
     from peft import LoraConfig
@@ -403,30 +447,54 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
     # which we turn OFF under FSDP (FSDP owns checkpointing), so disable it here.
     model.config.use_cache = False
 
-    # MoE load balancing (audit): the checkpoint ships router_aux_loss_coef=0.001,
-    # but Qwen3MoeForCausalLM only ADDS that term to the loss when the forward is
-    # asked for router logits, and nothing here was asking. So the coefficient was
-    # documented, configured, and inert -- 128 experts, top-8, and no shared expert,
-    # with zero pressure against the router collapsing onto a subset.
+    # MoE load balancing stays OFF, deliberately, and this is the note explaining
+    # why the obvious fix is wrong.
     #
-    # That matters more for this run than for a general one. Every expert the
-    # router stops selecting stops receiving gradient and cannot recover, and
-    # kernel data is exactly the narrow, low-entropy distribution that concentrates
-    # routing. The same reasoning already justified this config's 0.15 warmup and
-    # 0.5 gradient clip; this is the third leg of it, and it was missing.
-    _aux = getattr(model.config, "router_aux_loss_coef", None)
-    if getattr(model.config, "num_experts", None) and _aux:
-        model.config.output_router_logits = True
-        log.info("sft: MoE load-balancing loss ENABLED",
+    # The checkpoint ships router_aux_loss_coef=0.001 and Qwen3MoeForCausalLM only
+    # adds that term when the forward is asked for router logits, so the
+    # coefficient is configured and inert. Setting output_router_logits=True looks
+    # like the fix and is not one, for three independent reasons:
+    #
+    # 1. It adds no gradient here. Router logits are harvested by monkey-patching
+    #    Qwen3MoeSparseMoeBlock.forward, and that block sits INSIDE the region
+    #    wrapped by gradient checkpointing. With use_reentrant=True (set below,
+    #    because non-reentrant raises CheckpointError on this SDPA runtime) the
+    #    wrapped forward runs under torch.no_grad(), so every captured tensor is
+    #    detached. Measured: router-gate gradient norms are byte-identical with
+    #    the flag on and off. The aux term still lands in the REPORTED loss as a
+    #    constant ~+0.008, which only breaks comparability with earlier runs.
+    #
+    # 2. If the gradient were live it would be 8x over-weighted. The CE term is
+    #    normalised by a global token count and survives the num_processes/FSDP
+    #    scaling exactly; the aux term is a per-micro-batch mean with no such
+    #    denominator, so it comes out at coef * gradient_accumulation_steps.
+    #
+    # 3. If it were live AND correctly scaled it would still be the wrong loss.
+    #    Qwen3 was pretrained with a GLOBAL-batch balancing loss; transformers
+    #    computes the MICRO-batch variant, which at per_device_train_batch_size=2
+    #    is effectively per-sequence. Qiu et al. (ACL 2025 Long 249), the paper
+    #    behind Qwen3's choice, show that regime forces even domain-specific
+    #    sequences to spread across all experts and measurably suppresses the
+    #    expert specialisation we want -- and this corpus is 86% kernel code.
+    #
+    # It also costs up to ~40 GB of transient VRAM at the longest length band,
+    # because load_balancing_loss_func materialises an int64 one-hot of shape
+    # (num_layers * B * S, top_k, num_experts) plus float and mask copies.
+    #
+    # What routing actually needs here is measurement, not a loss: per-layer
+    # expert-load entropy accumulated per OPTIMIZER step (not per micro-batch),
+    # via forward hooks gated on `not torch.is_grad_enabled()` so the checkpoint
+    # recompute is not double counted.
+    if getattr(model.config, "num_experts", None):
+        log.info("sft: MoE load-balancing loss intentionally OFF",
                  num_experts=getattr(model.config, "num_experts", None),
                  experts_per_tok=getattr(model.config, "num_experts_per_tok", None),
-                 router_aux_loss_coef=_aux)
-    elif getattr(model.config, "num_experts", None):
-        log.info("sft: MoE detected but router_aux_loss_coef is unset/zero; "
-                 "load balancing stays off",
-                 num_experts=getattr(model.config, "num_experts", None))
+                 router_aux_loss_coef=getattr(model.config, "router_aux_loss_coef", None),
+                 reason="detached under reentrant checkpointing; micro-batch LBL at "
+                        "batch=2 suppresses expert specialisation")
 
     ds = load_sft_dataset(dataset_path, repair_weight=config.repair_loss_weight)
+    _premeasured = getattr(ds, "_kore_max_tokens", None)
     # Drop rows whose rendered length exceeds max_seq_length - ONLY under completion-
     # only loss. There, an over-length row whose assistant span is truncated away would
     # make TRL raise ("no assistant tokens"), and even a partially-cut assistant tail
@@ -435,9 +503,23 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
     # rank (consistent FSDP shards). NB: on the current multicap mix this drops ~8.7% of
     # rows, almost entirely pathologically-long (>16k tok) math_reasoning CoTs (a data-
     # quality item for the data pass) and only ~0.6% of kernels.
+    #
+    # Skipped when the builder already measured every row. This pass costs ~3.4ms per
+    # row -- 13.5 minutes for 239k rows, single-threaded, on all eight ranks
+    # simultaneously -- and TRL re-tokenises the whole corpus properly afterwards
+    # anyway with num_proc=32 under main_process_first. On the v5 mixture it dropped
+    # exactly zero rows, because the build gates at 16,896 tokens using this same
+    # tokenizer and revision. `_kore_max_tokens` is the builder's own measurement, so
+    # this is an exact comparison rather than a character-count bound; it is None
+    # whenever any row lacked the field, and then the full pass runs.
     n_over = 0
     if assistant_only:
-        ds, n_over = _filter_overlong(ds, tok, config.max_seq_length)
+        if isinstance(_premeasured, int) and 0 < _premeasured <= config.max_seq_length:
+            log.info("sft: overlong filter SKIPPED (rows pre-measured at build time)",
+                     max_tokens_in_corpus=_premeasured,
+                     max_seq_length=config.max_seq_length)
+        else:
+            ds, n_over = _filter_overlong(ds, tok, config.max_seq_length)
     log.info("sft: dataset loaded", dataset=str(dataset_path), model=config.model_id,
              use_lora=bool(config.use_lora), epochs=config.num_train_epochs,
              distributed=bool(config.distributed), fsdp=bool(fsdp_kwargs),
@@ -467,6 +549,7 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
         lr_scheduler_type=config.lr_scheduler_type,
+        lr_scheduler_kwargs=getattr(config, "lr_scheduler_kwargs", None) or {},
         warmup_ratio=config.warmup_ratio,
         weight_decay=config.weight_decay,
         max_grad_norm=config.max_grad_norm,
@@ -478,12 +561,19 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         gradient_checkpointing=grad_ckpt,
         gradient_checkpointing_kwargs={"use_reentrant": True},
         logging_steps=config.logging_steps,
+        # OFF, against the HF default. With it on, a NaN or Inf micro-batch loss is
+        # replaced in the logged average by the running average, so a diverging run
+        # reports a clean curve while the gradient poisons the weights. _ObsCallback
+        # alarms on the non-finite values this now lets through.
+        logging_nan_inf_filter=False,
         save_steps=config.save_steps,
         save_total_limit=getattr(config, "save_total_limit", 2),
         # Weights-only checkpoints when asked: ~61GB instead of ~488GB at 30B, which
         # is what makes a write survivable on a volume other users can fill mid-save.
         save_only_model=bool(getattr(config, "save_only_model", False)),
         report_to=config.report_to,
+        adam_beta2=getattr(config, "adam_beta2", 0.98),
+        **({"logging_dir": config.logging_dir} if getattr(config, "logging_dir", "") else {}),
         dataloader_num_workers=getattr(config, "dataloader_num_workers", 8),
         dataloader_pin_memory=getattr(config, "dataloader_pin_memory", True),
         # THROUGHPUT (audit R2 perf): persist dataloader workers across the 3 SFT epochs
@@ -492,22 +582,153 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         # far less compute on the SDPA (no-packing) runtime with micro-batch>1.
         dataloader_persistent_workers=getattr(config, "dataloader_num_workers", 8) > 0,
         dataloader_prefetch_factor=getattr(config, "dataloader_prefetch_factor", 4),
-        group_by_length=getattr(config, "group_by_length", True),
+        group_by_length=config.group_by_length,
         dataset_num_proc=getattr(config, "dataset_num_proc", 32),
         **fsdp_kwargs,
     )
+    # ------------------------------------------------------------------ #
+    # MoE routing instrumentation.
+    #
+    # This replaces the load-balancing loss rather than complementing it. That loss
+    # cannot be correctly scoped here (see the note at the model load: detached
+    # under reentrant checkpointing, 8x over-weighted by the accumulation path, and
+    # micro-batch rather than global-batch, which is the variant Qwen3 was
+    # deliberately NOT pretrained with). What is genuinely missing is not pressure
+    # on the router but VISIBILITY into it: nothing in this run logs routing at all,
+    # so "did the router collapse onto a few of the 128 experts?" is unanswerable,
+    # and the warmup ratio and gradient clip are justified by a hypothesis nobody
+    # can check.
+    #
+    # Counting, not penalising. Hooks accumulate expert selections and reset per
+    # OPTIMIZER step, so the entropy reported is the global-batch load -- the
+    # quantity that actually predicts specialisation -- not the per-micro-batch
+    # load. The `not torch.is_grad_enabled()` gate is what keeps the count honest:
+    # under reentrant checkpointing the layer forward runs twice, once with grad
+    # disabled and once during the backward recompute with it enabled, so counting
+    # only the former de-duplicates exactly.
+    _expert_counts: dict = {}
+
+    def _install_router_hooks(m) -> int:
+        try:
+            from transformers.models.qwen3_moe.modeling_qwen3_moe import (
+                Qwen3MoeSparseMoeBlock)
+        except Exception:  # noqa: BLE001 - a dense model has no routers to watch
+            return 0
+        n_experts = int(getattr(m.config, "num_experts", 0) or 0)
+        if not n_experts:
+            return 0
+
+        def _make(layer_idx: int):
+            def _hook(_mod, _inp, out):
+                if torch.is_grad_enabled():
+                    return  # backward recompute; already counted
+                logits = out[1] if isinstance(out, tuple) and len(out) > 1 else None
+                if logits is None:
+                    return
+                with torch.no_grad():
+                    k = int(getattr(m.config, "num_experts_per_tok", 8) or 8)
+                    top = logits.detach().float().topk(k, dim=-1).indices.reshape(-1)
+                    c = torch.bincount(top, minlength=n_experts).to("cpu")
+                    prev = _expert_counts.get(layer_idx)
+                    _expert_counts[layer_idx] = c if prev is None else prev + c
+            return _hook
+
+        n = 0
+        for name, mod in m.named_modules():
+            if isinstance(mod, Qwen3MoeSparseMoeBlock):
+                idx = next((int(t) for t in name.split(".") if t.isdigit()), n)
+                mod.register_forward_hook(_make(idx))
+                n += 1
+        return n
+
+    def _routing_stats(watch=(0, 24, 47)) -> dict:
+        """Normalised load entropy, peak share and dead-expert count per layer."""
+        import math
+        out: dict = {}
+        for idx in watch:
+            c = _expert_counts.get(idx)
+            if c is None or float(c.sum()) <= 0:
+                continue
+            total = float(c.sum())
+            n = int(c.numel())
+            p = (c.float() / total).tolist()
+            h = -sum(x * math.log(x) for x in p if x > 0) / math.log(n)
+            uniform = 1.0 / n
+            out[f"L{idx}_load_entropy"] = round(h, 4)
+            out[f"L{idx}_max_share"] = round(max(p) / uniform, 2)
+            out[f"L{idx}_dead"] = int(sum(1 for x in p if x < 0.1 * uniform))
+        return out
+
+    _n_hooks = _install_router_hooks(model)
+    if _n_hooks:
+        log.info("sft: MoE routing hooks installed", blocks=_n_hooks,
+                 note="counts reset per optimizer step; global-batch load, not micro")
+
     # Lightweight per-log-step observability callback (guarded transformers import).
     from transformers import TrainerCallback
 
     class _ObsCallback(TrainerCallback):
+        """Per-log-step observability, plus a divergence alarm.
+
+        The alarm exists because the Trainer's default hides exactly the failure it
+        should surface: with logging_nan_inf_filter on, a NaN or Inf micro-batch
+        loss is REPLACED in the logged average by the running average, so a run
+        training on poisoned weights reports a clean curve. That filter is turned
+        off in the args below; this is the other half, which says so loudly.
+        """
+
+        def __init__(self):
+            self._recent: list[float] = []
+            self._entropy0: dict = {}
+
+        def on_optimizer_step(self, args, state, control, **kwargs):
+            # Reset AFTER the step so each logged value covers exactly one global
+            # batch. Resetting per micro-batch would report the per-sequence load,
+            # which is the misleading quantity.
+            _expert_counts.clear()
+
         def on_log(self, args, state, control, logs=None, **kwargs):
             logs = logs or {}
             if "loss" not in logs:  # skip eval/summary logs - train-step only
                 return
-            log.event("sft_step", step=int(state.global_step), loss=logs.get("loss"),
+            loss, gnorm = logs.get("loss"), logs.get("grad_norm")
+            step = int(state.global_step)
+
+            def _bad(v):
+                return v is not None and (v != v or v in (float("inf"), float("-inf")))
+
+            if _bad(loss) or _bad(gnorm):
+                log.warn("sft: NON-FINITE loss or grad_norm -- the run is diverging",
+                         step=step, loss=loss, grad_norm=gnorm)
+            elif isinstance(gnorm, (int, float)) and gnorm > 0:
+                # A spike against the running median, not the mean: one large step
+                # would drag a mean far enough to hide the next one.
+                if len(self._recent) >= 20:
+                    med = sorted(self._recent)[len(self._recent) // 2]
+                    if med > 0 and gnorm > 10 * med:
+                        log.warn("sft: grad_norm spike", step=step, grad_norm=gnorm,
+                                 running_median=round(med, 4), ratio=round(gnorm / med, 1))
+                self._recent.append(float(gnorm))
+                if len(self._recent) > 200:
+                    self._recent.pop(0)
+
+            routing = _routing_stats() if _n_hooks else {}
+            if routing:
+                # Collapse is loudest in the deeper layers, so alarm on any watched
+                # layer rather than an average that would hide one bad layer.
+                first = self._entropy0
+                for key, val in routing.items():
+                    if not key.endswith("_load_entropy"):
+                        continue
+                    if first.get(key) is None:
+                        first[key] = val
+                    elif first[key] > 0 and val < 0.85 * first[key]:
+                        log.warn("sft: router load entropy collapsing", step=step,
+                                 layer=key, now=val, at_start=first[key])
+            log.event("sft_step", step=step, loss=loss,
                       lr=logs.get("learning_rate"),
                       epoch=round(float(state.epoch), 4) if state.epoch is not None else None,
-                      grad_norm=logs.get("grad_norm"), **gpu_mem_snapshot())
+                      grad_norm=gnorm, **routing, **gpu_mem_snapshot())
 
     trainer = SFTTrainer(model=model, args=args, train_dataset=ds,
                          peft_config=peft_cfg, processing_class=tok,
@@ -530,11 +751,21 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
     # Restore the pristine (un-tagged) chat template before saving so the checkpoint's
     # tokenizer is byte-identical to the base. The {% generation %} markers are only
     # needed for THIS run's mask generation (they render identically at inference).
+    #
+    # ONE writer, and a barrier first. trainer.save_model has already written the
+    # tokenizer from rank 0 -- with the tagged template -- so this rewrite is
+    # necessary, but running it unguarded had all eight ranks writing the same NFS
+    # files concurrently. On NFSv3 that can leave a half-written
+    # tokenizer_config.json or chat_template.jinja, which every downstream stage
+    # then loads.
     if base_chat_template is not None:
         tok.chat_template = base_chat_template
-    tok.save_pretrained(config.output_dir)
-    log.metric("sft_done", out=config.output_dir, merged_lora=bool(config.use_lora),
-               **gpu_mem_snapshot())
+    trainer.accelerator.wait_for_everyone()
+    if trainer.args.should_save:
+        tok.save_pretrained(config.output_dir)
+        log.metric("sft_done", out=config.output_dir,
+                   merged_lora=bool(config.use_lora), **gpu_mem_snapshot())
+    trainer.accelerator.wait_for_everyone()
     return config.output_dir
 
 

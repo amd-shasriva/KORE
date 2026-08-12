@@ -49,9 +49,19 @@ fsdp_config:
   fsdp_version: 1
   fsdp_reshard_after_forward: FULL_SHARD          # ZeRO-3 equivalent (shard params+grads+optim)
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
-  fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer  # 14B/32B Qwen3; use LlamaDecoderLayer for the 70B
+  # Qwen3MoeDecoderLayer, not Qwen3DecoderLayer. The production target is the 30B
+  # A3B MoE, whose layers are Qwen3MoeDecoderLayer; naming the dense class here
+  # matches nothing, so the auto-wrap policy wraps no layer at all and a 30B model
+  # is sharded as one unit, which OOMs. TrainingArguments.__post_init__ currently
+  # re-exports FSDP_TRANSFORMER_CLS_TO_WRAP from the JSON config and overrides this
+  # value, so the stale name was inert -- but only for launches that go through
+  # train_sft. Anyone reading this file, or any refactor that stops passing
+  # fsdp_config, would inherit the broken one.
+  fsdp_transformer_layer_cls_to_wrap: Qwen3MoeDecoderLayer  # 30B-A3B MoE; Qwen3DecoderLayer for dense 14B/32B
   fsdp_backward_prefetch: BACKWARD_PRE
-  fsdp_forward_prefetch: false
+  # true, matching what TrainingArguments already exports, so reading this file
+  # and reading the running job agree.
+  fsdp_forward_prefetch: true
   fsdp_state_dict_type: FULL_STATE_DICT           # consolidate a plain HF ckpt so the next stage loads it via from_pretrained (cross-stage handoff)
   fsdp_use_orig_params: true
   fsdp_activation_checkpointing: false            # done via HF Trainer gradient_checkpointing (use_reentrant=True; SDPA-swap robust, see configs.build_fsdp_kwargs); FSDP-plugin checkpointing mismatches saved-tensor counts on FSDP1/use_orig_params

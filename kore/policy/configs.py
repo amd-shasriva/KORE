@@ -131,6 +131,27 @@ class SFTConfig(DistributedMixin):
     # Plan hyperparams.
     learning_rate: float = 1e-5
     lr_scheduler_type: str = "cosine"
+    #: Extra kwargs for the scheduler. The reason this exists is the LR floor: a
+    #: plain cosine decays to exactly zero, so the tail of a 1,867-step run
+    #: contributes almost nothing AND the checkpoint arrives as a converged endpoint
+    #: rather than a warm start for a second epoch or for the RL stage that follows.
+    #: Set lr_scheduler_type="cosine_with_min_lr" with {"min_lr_rate": 0.1} to hold
+    #: 10% of peak, which is what the closest published recipe on this architecture
+    #: (Nemotron-Cascade-2, 30B/3B-active) uses.
+    lr_scheduler_kwargs: dict = field(default_factory=dict)
+    #: Batch rows of similar length together. This was previously reachable only as
+    #: a getattr default in sft.py, undocumented in every launch JSON, despite being
+    #: the single largest influence on batch composition: measured padding is 0.5%
+    #: with it on and 33.3% with it off, because the collator pads to the longest row
+    #: IN BATCH. It is a field now so turning it off is a visible config diff.
+    group_by_length: bool = True
+    #: AdamW second-moment decay. 0.98 rather than the 0.999 default: it shortens
+    #: the second-moment window, which is the standard mitigation for the loss
+    #: spikes MoE routing instability produces, and is what the closest published
+    #: recipe on this architecture uses.
+    adam_beta2: float = 0.98
+    #: Where report_to="tensorboard" writes. Local directory, no network.
+    logging_dir: str = ""
     num_train_epochs: float = 3.0          # 2-3 epochs
     warmup_ratio: float = 0.03
     weight_decay: float = 0.0

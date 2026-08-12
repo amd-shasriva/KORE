@@ -203,12 +203,57 @@ requeue_self() {
     fi
     return 1
 }
+# Submit a FRESH job rather than requeueing this one, and prefer it over
+# requeue_self at the time limit.
+#
+# The header above already refuses `#SBATCH --requeue` because a requeued job on
+# this controller trips JobHoldMaxRequeue on its first requeue and is held
+# permanently. `scontrol requeue` goes through the same path, so the old time-limit
+# handler was reaching for the mechanism the header exists to avoid: at 22h30m it
+# would have requeued itself and been held, stalling the run silently with every
+# checkpoint intact and nothing running. A fresh submission cannot be held that way.
+#
+# Correctness rests on the job being reproducible from its positional arguments,
+# which is already the design (see the note above CFG): output_dir is stable across
+# submissions, and the trainer resumes from the newest complete checkpoint via
+# latest_checkpoint(). A new job id means a new output file, which is the only
+# observable difference.
+#
+# GENERATION is carried as a fourth positional argument and capped, so a run that
+# somehow fails immediately on startup cannot resubmit itself forever.
+GENERATION="${4:-0}"
+KORE_MAX_GENERATIONS="${KORE_MAX_GENERATIONS:-12}"
+resubmit_self() {
+    local out rc next
+    next=$((GENERATION + 1))
+    if ((next > KORE_MAX_GENERATIONS)); then
+        echo "[sft-1node] refusing to resubmit: generation $next exceeds cap " \
+             "$KORE_MAX_GENERATIONS. If training is genuinely unfinished, raise " \
+             "KORE_MAX_GENERATIONS; if it is looping, fix the startup failure." >&2
+        return 1
+    fi
+    out="$(sbatch "$REPO/scripts/spur_sft_1node.sbatch" \
+                  "$CFG" "$FROM_STAGE" "$OUT_DIR" "$next" 2>&1)"
+    rc=$?
+    if ((rc == 0)) && grep -qE 'Submitted batch job [0-9]+' <<<"$out"; then
+        echo "[sft-1node] resubmitted as generation $next: $out"
+        return 0
+    fi
+    printf '[sft-1node] resubmit failed: %s\n' "$out" >&2
+    return 1
+}
 handle_requeue_warning() {
     trap - USR1 TERM INT
-    echo "[sft-1node] USR1 time-limit warning; draining and requesting requeue"
+    echo "[sft-1node] USR1 time-limit warning; draining and resubmitting" \
+         "(generation ${GENERATION})"
     terminate_child
+    # Resubmit first. Requeue is kept only as a fallback for the case where the
+    # controller accepts a requeue but refuses a new submission (a full queue),
+    # since a held job is still recoverable by hand and a lost run is not.
+    if resubmit_self; then exit 0; fi
+    echo "[sft-1node] resubmit failed; falling back to requeue" >&2
     if requeue_self; then exit 0; fi
-    echo "[sft-1node] FATAL explicit requeue failed" >&2
+    echo "[sft-1node] FATAL neither resubmit nor requeue landed" >&2
     exit 143
 }
 cleanup() {

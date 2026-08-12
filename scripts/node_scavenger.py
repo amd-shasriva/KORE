@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 import re
 import subprocess
 import sys
@@ -37,6 +38,52 @@ import time
 
 NODE_RE = re.compile(r"^crsuse2-m2m-\d+$")
 DEAD_STATES = ("drain", "down", "fail")
+
+
+#: Nodes that take an allocation and then fail to launch. Kept in a file so it
+#: survives a restart and can be edited without touching this script.
+#:
+#: A node like this is worse than a busy one, because it looks free: the hold
+#: shows a spare node, every submission is scheduled onto it, and each one comes
+#: back "launch failed requeued held" holding a slot in the cap until something
+#: purges it. crsuse2-m2m-279 did this three times in a row while the controller
+#: answered 12 of 12 probes, which is what rules out the outage as the cause.
+BLACKLIST_FILE = "runs/node_blacklist.txt"
+
+
+def blacklisted_nodes() -> set[str]:
+    try:
+        text = open(BLACKLIST_FILE).read()
+    except OSError:
+        return set()
+    out = set()
+    for line in text.splitlines():
+        name = line.split("#", 1)[0].strip()
+        if name:
+            out.add(name)
+    return out
+
+
+def _ensure_controller_addr() -> None:
+    """Find the controller ourselves if the environment did not bring it.
+
+    Every spur client reads SPUR_CONTROLLER_ADDR from a profile script, which a
+    login shell sources and an ssh command or a service manager does not. A
+    scavenger restarted the second way logged "scontrol returned nothing" once a
+    second against a healthy controller and claimed no nodes for as long as it
+    ran -- indistinguishable, in the log, from the outage it was started during.
+    """
+    if os.environ.get("SPUR_CONTROLLER_ADDR"):
+        return
+    try:
+        text = open("/etc/profile.d/spur.sh").read()
+    except OSError:
+        return
+    m = re.search(r'SPUR_CONTROLLER_ADDR="?([^"\n]+)"?', text)
+    if m:
+        os.environ["SPUR_CONTROLLER_ADDR"] = m.group(1).strip()
+        print(f"[scavenger] took SPUR_CONTROLLER_ADDR from /etc/profile.d/spur.sh: "
+              f"{os.environ['SPUR_CONTROLLER_ADDR']}", flush=True)
 
 #: The only QoS this account may submit under. amd-primus-qos refuses us
 #: outright -- "QOS 'amd-primus-qos' is not permitted for user 'shasriva'
@@ -133,7 +180,11 @@ def running_nodes(user: str) -> set[str]:
 #: each is re-derived from disk on the next staffing pass, so dropping one
 #: loses a queue position and nothing else. Arena arms are deliberately absent
 #: -- an arm carries hours of scored tasks that a resubmit would restart.
-REBINDABLE = ("kore-mine-", "kore-gate-")
+#:
+#: FlyDSL seeding joins them because it ledgers every task as it finishes and
+#: skips the passing ones when it starts again, so a rebind costs the tasks in
+#: flight rather than the run.
+REBINDABLE = ("kore-mine-", "kore-gate-", "kore-flyseed")
 
 
 def pending_rebindable_ids(user: str) -> list[str]:
@@ -193,6 +244,7 @@ def main() -> int:
     ap.add_argument("--once", action="store_true")
     args = ap.parse_args()
 
+    _ensure_controller_addr()
     user = getpass.getuser()
     log(f"scavenger up: reservation={args.reservation} max_hold={args.max_hold} "
         f"poll={args.poll}s")
@@ -266,10 +318,13 @@ def main() -> int:
             # Dead nodes first: nobody else can take them, so they are ours for
             # the cost of a reserve plus a resume. Idle nodes second, and only
             # because we may win the race; usually we will not.
+            banned = blacklisted_nodes()
             dead = [n for n, (s, _) in states.items()
-                    if s.startswith(DEAD_STATES) and n not in taken]
+                    if s.startswith(DEAD_STATES) and n not in taken
+                    and n not in banned]
             idle = [n for n, (s, _) in states.items()
-                    if s.startswith("idle") and n not in taken]
+                    if s.startswith("idle") and n not in taken
+                    and n not in banned]
             for node in dead + idle:
                 if room <= 0:
                     break
@@ -306,7 +361,18 @@ def main() -> int:
         # nothing, uncontested and unusable, until somebody notices. m2m-212
         # was draining while we were queueing miners for it. Nobody else can
         # take a node of ours, so there is no race here -- just resume it.
+        banned_held = blacklisted_nodes()
         for node in held:
+            # A blacklisted node in the hold is worse than an empty slot: it
+            # advertises capacity that every submission is then scheduled onto
+            # and none can launch on. Drop it and let the loop claim a real one.
+            if node in banned_held:
+                if subprocess.run(
+                        ["scontrol", "update-reservation", "--name",
+                         args.reservation, "--remove-nodes", node],
+                        capture_output=True, text=True).returncode == 0:
+                    log(f"dropped blacklisted node {node} from the hold")
+                continue
             state = states.get(node, ("", -1))[0]
             if state.startswith(DEAD_STATES) and cpus_allocated(node) == 0:
                 ok = resume(node)

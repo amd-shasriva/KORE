@@ -177,14 +177,26 @@ def _conventions() -> str:
 
 #: Ceiling on the API listing.
 #:
-#: Set to 24k first and that was far too generous: the prompt reached 41,143
-#: characters, the gateway began returning APITimeout, single calls took up to
-#: 36 minutes, and eight workers managed five completions in an hour. A prompt
-#: the model cannot answer is worse than one that omits a signature.
-MAX_API_CHARS = 9000
-#: Methods per class. Enough to convey arity and naming without enumerating
-#: every operator on every numeric type.
-MAX_METHODS_PER_CLASS = 6
+#: Set to 24k first and cut to 9k because the prompt reached 41,143 characters,
+#: the gateway began returning APITimeout, single calls took up to 36 minutes,
+#: and eight workers managed five completions in an hour.
+#:
+#: That diagnosis was wrong, and the cut cost more than it saved. The timeouts
+#: were extended thinking: opus-5 spent its entire output budget reasoning and
+#: returned nothing, on prompts of every size -- 32,768 output tokens and zero
+#: characters of text, measured. With thinking disabled the same 24k-character
+#: prompt is answered in 20 to 40 seconds.
+#:
+#: So the budget can afford the whole API, and the whole API is what the model
+#: needs: at 9k the flydsl.expr listing was clipped mid-list, and the seeder's
+#: failures were "too many positional arguments", "module has no attribute
+#: zeros" and other symbols invented to fill the gap. The complete listing is
+#: about 20k characters, so this is sized to never clip rather than to a target.
+MAX_API_CHARS = 40000
+#: Methods per class. Six showed a class existed without showing how to call it;
+#: fourteen covers the constructors and the load/store/copy methods that the
+#: arity errors were concentrated in.
+MAX_METHODS_PER_CLASS = 14
 #: Share of the budget for module-level names; the rest is reserved for
 #: methods so they cannot be crowded out by generated type names.
 NAME_SHARE = 0.55

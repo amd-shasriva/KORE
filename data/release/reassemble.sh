@@ -18,4 +18,15 @@ cat provenance/datagen.tar.gz.part* | gunzip | tar -C ../b05factory -xf -
 # 65.9/21.5/12.3 kernel/chat/coding by tokens. Rebuilt by concatenation like the
 # others so a fresh checkout reproduces it with no network and no hub account.
 cat sft/multicap_v4.jsonl.gz.part* | gunzip > ../b05factory/sft/multicap_v4.jsonl
+
+# v5: what the 30B SFT config now points at. 207,782 rows / 502,470,043 tokens,
+# 165,047 distinct targets over 11,793 tasks; 61.2% kernel / 38.8% replay by rows
+# and 14% replay by tokens. Six task shapes rather than v4's one, every kernel
+# target verified numerically on gfx950, and screened against the evaluation
+# benchmark's own sources -- which v4 never was.
+#
+# Kept alongside v4 rather than replacing it. Deleting the v4 parts would not
+# reclaim any space (the blobs stay in history regardless) and it would remove the
+# only fallback if v5 evaluates worse, so there is cost and no benefit.
+cat sft/v5_sft.jsonl.gz.part* | gunzip > ../b05factory/sft/v5_sft.jsonl
 echo reassembled

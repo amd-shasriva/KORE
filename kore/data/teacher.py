@@ -314,6 +314,15 @@ class ClaudeTeacher:
         # waste (Claude dropping a 60-90s completion that hit stop_reason=max_tokens).
         self.max_tokens = int(os.environ.get("KORE_TEACHER_MAX_TOKENS", max_tokens))
         self.system = system
+        # Extended thinking is on by default for opus-5 on this gateway, and its
+        # tokens come out of max_tokens before any answer does. On the FlyDSL
+        # port prompt the model spent 32,768 output tokens thinking and emitted
+        # zero characters of text: all 96 calls of a seeding run returned empty
+        # at stop_reason=max_tokens. The same prompt with thinking off answered
+        # in 54s using 5,142 tokens. Only disabling is available -- the gateway
+        # rejects an explicit `enabled` with a 400.
+        self.thinking_off = (os.environ.get("KORE_TEACHER_THINKING", "").strip().lower()
+                             in ("off", "disabled", "0", "false", "no"))
 
     @staticmethod
     def _resolve_user() -> str:
@@ -355,6 +364,8 @@ class ClaudeTeacher:
         kw = dict(model=self.model, max_tokens=self.max_tokens,
                   temperature=self.temperature, messages=merged,
                   timeout=_REQUEST_TIMEOUT)
+        if self.thinking_off:
+            kw["thinking"] = {"type": "disabled"}
         if system:
             kw["system"] = system
 

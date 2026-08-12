@@ -403,6 +403,29 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
     # which we turn OFF under FSDP (FSDP owns checkpointing), so disable it here.
     model.config.use_cache = False
 
+    # MoE load balancing (audit): the checkpoint ships router_aux_loss_coef=0.001,
+    # but Qwen3MoeForCausalLM only ADDS that term to the loss when the forward is
+    # asked for router logits, and nothing here was asking. So the coefficient was
+    # documented, configured, and inert -- 128 experts, top-8, and no shared expert,
+    # with zero pressure against the router collapsing onto a subset.
+    #
+    # That matters more for this run than for a general one. Every expert the
+    # router stops selecting stops receiving gradient and cannot recover, and
+    # kernel data is exactly the narrow, low-entropy distribution that concentrates
+    # routing. The same reasoning already justified this config's 0.15 warmup and
+    # 0.5 gradient clip; this is the third leg of it, and it was missing.
+    _aux = getattr(model.config, "router_aux_loss_coef", None)
+    if getattr(model.config, "num_experts", None) and _aux:
+        model.config.output_router_logits = True
+        log.info("sft: MoE load-balancing loss ENABLED",
+                 num_experts=getattr(model.config, "num_experts", None),
+                 experts_per_tok=getattr(model.config, "num_experts_per_tok", None),
+                 router_aux_loss_coef=_aux)
+    elif getattr(model.config, "num_experts", None):
+        log.info("sft: MoE detected but router_aux_loss_coef is unset/zero; "
+                 "load balancing stays off",
+                 num_experts=getattr(model.config, "num_experts", None))
+
     ds = load_sft_dataset(dataset_path, repair_weight=config.repair_loss_weight)
     # Drop rows whose rendered length exceeds max_seq_length - ONLY under completion-
     # only loss. There, an over-length row whose assistant span is truncated away would

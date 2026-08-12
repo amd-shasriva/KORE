@@ -70,3 +70,18 @@ data/b501supp/
 data/b501wave3/
 data/replay_v4.jsonl
 data/task_pool/
+
+# v5 build intermediates and the uncompressed mixture. The mixture IS committed,
+# but as gzip parts under data/release/sft/ like every other released corpus --
+# 1.8GB of raw JSONL would bloat a repository whose .git is already 1.3GB, and
+# data/release/reassemble.sh reconstructs this file byte-identically.
+data/v5_sft.jsonl
+data/v5_replay.jsonl
+data/v5_translate_*.jsonl
+data/v5_flydsl_lang.jsonl
+data/v5_modality.jsonl
+data/v5_dpo_chosen.jsonl
+data/v5_replay_extra.jsonl
+data/v5_sft.receipt.json
+data/_contaminated_quarantine/
+runs/v5_build/

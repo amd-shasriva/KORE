@@ -65,7 +65,24 @@ imposes, at §4 and §5:
 | Midtrain `amd_kernels` channel (kernelbot-data) | 5,638 | 6.6% of midtrain |
 | **Midtrain total** | **27,070** | **31.5% of midtrain** |
 | SFT `kernel_qa` Tier-2 curriculum, generated OSS-Instruct-style over KernelBook kernels | 298 | of 9,965 curriculum rows |
+| **SFT v5 (`data/v5_sft.jsonl`), rows whose task derives from a KernelBook module** | **41,291** | **19.3% of rows / 31.4% of tokens** |
 | Any checkpoint trained on the above | — | the whole model is a "Covered Model" |
+
+**The v5 figure is materially larger than the midtrain exposure and was not previously
+recorded.** Measured directly over `data/v5_sft.jsonl`: 41,291 rows carrying 156,791,157
+tokens across 9,544 distinct `kbk_*` task ids. The mechanism is indirect and therefore easy
+to miss — the pool build ingested 9,527 KernelBook PyTorch modules as *tasks*, and those
+tasks then seeded the repair, win, ranked-group and backend-twin generation that makes up
+most of the kernel side. No KernelBook text is copied into a v5 row; what each row inherits
+is the *problem* a KernelBook module defines. Whether that constitutes "Training Use" of the
+dataset under §5 is a legal question and not an engineering one, but the volume means it
+cannot be treated as incidental.
+
+Note also that remediation option 3 is more attractive here than for midtrain: v5 rows are
+generated kernels solving a task, not reproductions of KernelBook rows, so re-deriving the
+task pool from the per-row upstream repositories would leave the v5 kernels themselves
+untouched. Only the task provenance needs relabelling — the per-row `licenses`, `repo_name`
+and `sha` fields are still present in the pinned upstream revision.
 
 **Why it matters here specifically.** KORE's own [`LICENSE`](LICENSE) currently forbids external
 "benchmarks" and "public claims" about results. That restriction applies to AMD personnel and not
@@ -422,6 +439,30 @@ Each carries its own licence and citation requirements, none of which is recorde
 contains hashed benchmark records used to exclude contamination; it is derived from those
 benchmarks and inherits their terms. Because it stores hashes rather than benchmark text, its
 redistribution exposure is lower than the benchmarks themselves, but it is not zero.
+
+## 7.1 FlyDSL — RESOLVED
+
+- Upstream: https://github.com/ROCm/flydsl, local checkout `third_party/flydsl`.
+- Licence: **Apache License 2.0**, "Copyright 2025 FlyDSL Project Contributors"
+  (`third_party/flydsl/LICENSE`). Verified by reading the file. There is no `NOTICE`
+  and no upstream `THIRD_PARTY` file, so no additional terms attach.
+- Flows into: `data/v5_sft.jsonl` as the `kernel_flydsl_language` slice (293 kernel
+  definitions extracted from `tests/`, `examples/`, `docs/` and `kernels/` by
+  `scripts/v5_stage2b_flydsl.py`), and indirectly as the target dialect of every
+  FlyDSL twin.
+- Obligations: attribution, retention of the licence text, and marking modified
+  files. Extracted kernels are unmodified verbatim function bodies; generated
+  kernels carry `SPDX-License-Identifier: Apache-2.0` headers inherited from
+  upstream. Apache-2.0 places no restriction on training use.
+- Evaluation-overlap control: `kernels/` is AMD's production kernel library and is
+  the corpus AgentKernelArena draws its FlyDSL tasks from. Six files whose stems
+  name an arena task — `fused_rope_cache_kernel`, `layernorm_kernel`,
+  `moe_sorting_kernel`, `rmsnorm_kernel`, `softmax_kernel`,
+  `topk_gating_softmax_kernel` — are excluded by name, as is any file importing
+  them, and every remaining file and kernel name is screened against all 111 arena
+  FlyDSL task names.
+- Previously unrecorded: this dependency was consumed before it appeared in this
+  file. Added after an audit found it missing.
 
 ## 8. Runtime dependencies
 

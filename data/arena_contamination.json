@@ -1,0 +1,985 @@
+{
+ "matches": {
+  "kbk_act_norm_f891b1b4_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0682
+  ],
+  "kbk_actor_c5d6c1ec_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.0619
+  ],
+  "kbk_actor_de509b95_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.0783
+  ],
+  "kbk_actor_e92d3860_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.058
+  ],
+  "kbk_ae_af2d1e42_fp32": [
+   "torch2hip/kernelbench/level2/l2n85_Conv2d_GroupNorm_Scale_MaxPool_Clamp",
+   0.0541
+  ],
+  "kbk_affine_channel2d_0ef0e188_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1071
+  ],
+  "kbk_affine_channel2d_8d2cb3db_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1071
+  ],
+  "kbk_affine_channelwise_3a9da046_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1111
+  ],
+  "kbk_ann_f28770c8_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.0615
+  ],
+  "kbk_ar_67a19bf8_fp32": [
+   "torch2hip/gpumode/11122_PositionEmbedder",
+   0.0698
+  ],
+  "kbk_arc_margin_product_2fa5503c_fp32": [
+   "torch2hip/gpumode/11122_PositionEmbedder",
+   0.0612
+  ],
+  "kbk_attention_62b947d9_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0517
+  ],
+  "kbk_aux_module_336844be_fp32": [
+   "hip2hip/gpumode/MaskedLanguageModel",
+   0.1333
+  ],
+  "kbk_banana_res_net_17324de9_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.1067
+  ],
+  "kbk_baseline_model_f583831b_fp32": [
+   "hip2hip/gpumode/MaskedLanguageModel",
+   0.1481
+  ],
+  "kbk_bce_label_smoothing_loss_fd0bfe3e_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.2222
+  ],
+  "kbk_bias_conv_fc2_net_e9a5a3be_fp32": [
+   "torch2hip/kernelbench/level2/l2n52_Conv2d_Activation_BatchNorm",
+   0.0698
+  ],
+  "kbk_bicubic_7de42220_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.2143
+  ],
+  "kbk_bilinear_attention_59339581_fp32": [
+   "hip2hip/gpumode/ItemQueryAttention",
+   0.0506
+  ],
+  "kbk_bilinear_attention_d527a93c_fp32": [
+   "hip2hip/gpumode/ItemQueryAttention",
+   0.0506
+  ],
+  "kbk_block_3661153e_fp32": [
+   "torch2hip/kernelbench/level2/l2n6_Conv3d_Softmax_MaxPool_MaxPool",
+   0.1077
+  ],
+  "kbk_block_5f4a471e_fp32": [
+   "torch2hip/kernelbench/level2/l2n6_Conv3d_Softmax_MaxPool_MaxPool",
+   0.1077
+  ],
+  "kbk_bound_softmax_impl_00082efe_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1
+  ],
+  "kbk_clamp_ef35d835_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0667
+  ],
+  "kbk_clamp_module_072089c7_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0606
+  ],
+  "kbk_classifier_42224885_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.0682
+  ],
+  "kbk_classifier_4dde3654_fp32": [
+   "torch2hip/kernelbench/level2/l2n17_Conv2d_InstanceNorm_Divide",
+   0.0526
+  ],
+  "kbk_classifier_e668bfa0_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.0682
+  ],
+  "kbk_cnn_encoder_f61ede8c_fp32": [
+   "torch2hip/gpumode/11122_PositionEmbedder",
+   0.0698
+  ],
+  "kbk_compressed_sigmoid_1db529aa_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0909
+  ],
+  "kbk_concat_cell_2cb67cce_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0556
+  ],
+  "kbk_concat_fusion_layer_212aace2_fp32": [
+   "torch2hip/kernelbench/level2/l2n86_Matmul_Divide_GELU",
+   0.0816
+  ],
+  "kbk_conv_block_9093a697_fp32": [
+   "torch2hip/kernelbench/level2/l2n82_Conv2d_Tanh_Scaling_BiasAdd_Max",
+   0.0505
+  ],
+  "kbk_conv_block_f2ba7c90_fp32": [
+   "torch2hip/kernelbench/level2/l2n17_Conv2d_InstanceNorm_Divide",
+   0.0526
+  ],
+  "kbk_conv_block_gn_e69ee68f_fp32": [
+   "torch2hip/kernelbench/level2/l2n82_Conv2d_Tanh_Scaling_BiasAdd_Max",
+   0.0645
+  ],
+  "kbk_copy_channels_07a7b05e_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.1333
+  ],
+  "kbk_cosine_similarity_84afa4bb_fp32": [
+   "torch2hip/kernelbench/level1/l1n40_LayerNorm",
+   0.0667
+  ],
+  "kbk_cpu_speed_model_792f72c2_fp32": [
+   "torch2hip/kernelbench/level2/l2n17_Conv2d_InstanceNorm_Divide",
+   0.0526
+  ],
+  "kbk_critic_d3ca0852_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.3125
+  ],
+  "kbk_critic_f2329cd1_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.0537
+  ],
+  "kbk_cross_entropy_743301f4_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.25
+  ],
+  "kbk_cross_entropy_loss_label_smoothing_c1b023da_fp32": [
+   "hip2hip/gpumode/CrossEntropyLossLabelSmoothing",
+   0.957
+  ],
+  "kbk_cross_region_f08d4c81_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.069
+  ],
+  "kbk_custom_batch_norm_autograd_9dc454f0_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0896
+  ],
+  "kbk_customize_layer_94e40f9c_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0882
+  ],
+  "kbk_customized_layer_c336919d_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0882
+  ],
+  "kbk_debayer3x3_6600e0e5_fp32": [
+   "torch2hip/kernelbench/level3/l3n31_VisionAttention",
+   0.0625
+  ],
+  "kbk_deep_model_817b2e48_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.1093
+  ],
+  "kbk_deep_neural_net_d5b2377e_fp32": [
+   "torch2hip/kernelbench/level2/l2n85_Conv2d_GroupNorm_Scale_MaxPool_Clamp",
+   0.0584
+  ],
+  "kbk_depthwise_separable_conv_14ba8ebf_fp32": [
+   "torch2hip/kernelbench/level2/l2n6_Conv3d_Softmax_MaxPool_MaxPool",
+   0.0597
+  ],
+  "kbk_depthwise_separable_conv_2607c9c1_fp32": [
+   "torch2hip/kernelbench/level2/l2n52_Conv2d_Activation_BatchNorm",
+   0.1406
+  ],
+  "kbk_divide_max_a4031fc8_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1875
+  ],
+  "kbk_divide_max_b63322a4_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1875
+  ],
+  "kbk_dnn_encoder_6f36a67b_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.0548
+  ],
+  "kbk_dqn_d0186ea1_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.0526
+  ],
+  "kbk_duelingmlp_dd10139c_fp32": [
+   "hip2hip/gpumode/MaskedLanguageModel",
+   0.0588
+  ],
+  "kbk_embed_76a81b01_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.2564
+  ],
+  "kbk_embedding_0da9a566_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.0976
+  ],
+  "kbk_embedding_layer_123cd1c8_fp32": [
+   "torch2hip/kernelbench/level2/l2n17_Conv2d_InstanceNorm_Divide",
+   0.0545
+  ],
+  "kbk_enc_3f23125c_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0968
+  ],
+  "kbk_enc_c5e06772_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0968
+  ],
+  "kbk_encoder_2393717a_fp32": [
+   "torch2hip/kernelbench/level2/l2n17_Conv2d_InstanceNorm_Divide",
+   0.0513
+  ],
+  "kbk_encoder_f87f9ea0_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.0526
+  ],
+  "kbk_fc_6d608d31_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.0542
+  ],
+  "kbk_fcn_mse_833e51de_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0769
+  ],
+  "kbk_feature_encoder_ba3ae14f_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.1892
+  ],
+  "kbk_feed_forward_network_d8f97bb6_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0882
+  ],
+  "kbk_feedforward_7250c4f9_fp32": [
+   "hip2hip/gpumode/Feedforward",
+   0.3158
+  ],
+  "kbk_ffn_4f99a327_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0698
+  ],
+  "kbk_focal_loss_3f1fb4b1_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0769
+  ],
+  "kbk_focal_loss_8f979a3c_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0769
+  ],
+  "kbk_focal_loss_9291f5d5_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0769
+  ],
+  "kbk_focal_loss_b1d3dece_fp32": [
+   "hip2hip/gpumode/KDLoss",
+   0.0526
+  ],
+  "kbk_fused_leaky_relu_070f69dc_fp32": [
+   "hip2hip/gpumode/FusedLeakyReLU",
+   1.0
+  ],
+  "kbk_g_relu_db372f84_fp32": [
+   "hip2hip/gpumode/Sigmoid",
+   0.0517
+  ],
+  "kbk_gate_ffaa2fb3_fp32": [
+   "torch2hip/gpumode/11122_PositionEmbedder",
+   0.075
+  ],
+  "kbk_gated_fusion_b8549a4b_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0909
+  ],
+  "kbk_gated_linear_04c00886_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.0698
+  ],
+  "kbk_gategru_selection_layer_425db599_fp32": [
+   "hip2hip/gpumode/GateGRUSelectionLayer",
+   0.623
+  ],
+  "kbk_gelu_211fe994_fp32": [
+   "hip2hip/gpumode/GELU",
+   0.3333
+  ],
+  "kbk_gelu_2e902577_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0751
+  ],
+  "kbk_gelu_543436ea_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0505
+  ],
+  "kbk_gelu_6c9f38dc_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0751
+  ],
+  "kbk_gelu_7f8333d0_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0751
+  ],
+  "kbk_gelu_b9dd6663_fp32": [
+   "hip2hip/gpumode/GELU",
+   1.0
+  ],
+  "kbk_gelu_bbe94738_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0751
+  ],
+  "kbk_gelu_d4db27fd_fp32": [
+   "hip2hip/gpumode/GELU",
+   1.0
+  ],
+  "kbk_gelu_f9411e81_fp32": [
+   "hip2hip/gpumode/GELU",
+   1.0
+  ],
+  "kbk_gelu_fb74f29d_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0751
+  ],
+  "kbk_gem_312a96d3_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.1481
+  ],
+  "kbk_gem_ba4f2291_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.1111
+  ],
+  "kbk_gem_e81dabd0_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0556
+  ],
+  "kbk_gem_ed73252d_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0556
+  ],
+  "kbk_generator_f52e3384_fp32": [
+   "hip2hip/gpumode/ItemQueryAttention",
+   0.0563
+  ],
+  "kbk_geometric_mean_0fec3257_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1875
+  ],
+  "kbk_glu_9e97d05e_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1765
+  ],
+  "kbk_glu_d9457ed6_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1765
+  ],
+  "kbk_grouped_channel_norm_3160a738_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0732
+  ],
+  "kbk_grouped_channel_norm_eab7defd_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0732
+  ],
+  "kbk_grouping_e138f5d3_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0612
+  ],
+  "kbk_gsa_helper_9bdee47b_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0536
+  ],
+  "kbk_hard_sigmoid_4d62755c_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0513
+  ],
+  "kbk_hardswish_03e3ed93_fp32": [
+   "hip2hip/gpumode/SiLU",
+   0.3333
+  ],
+  "kbk_hardswish_619dee37_fp32": [
+   "hip2hip/gpumode/SiLU",
+   0.3333
+  ],
+  "kbk_hardswish_76ffcd37_fp32": [
+   "hip2hip/gpumode/SiLU",
+   0.3333
+  ],
+  "kbk_image_level_feature_pooling2d_d8a2c476_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1034
+  ],
+  "kbk_interactivekl_loss_425a8f85_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1429
+  ],
+  "kbk_interactivekl_loss_bddb6807_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1429
+  ],
+  "kbk_interactivekl_loss_db2df6ac_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1429
+  ],
+  "kbk_kd_loss_0810fc9e_fp32": [
+   "hip2hip/gpumode/KDLoss",
+   0.0976
+  ],
+  "kbk_l0_loss_77cadb4e_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0606
+  ],
+  "kbk_l0_loss_9f32f5df_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0606
+  ],
+  "kbk_l2_norm_212e858d_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0526
+  ],
+  "kbk_l2_norm_2f8394e6_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0526
+  ],
+  "kbk_l2_norm_d62ca399_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0526
+  ],
+  "kbk_layer_norm2d_79b9397b_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0723
+  ],
+  "kbk_layer_norm2d_7d5ccfd3_fp32": [
+   "torch2hip/kernelbench/level3/l3n31_VisionAttention",
+   0.0519
+  ],
+  "kbk_layer_norm_09f7c405_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.1277
+  ],
+  "kbk_layer_norm_1fd319b4_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.1837
+  ],
+  "kbk_layer_norm_1fec2fb1_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.1837
+  ],
+  "kbk_layer_norm_221ef497_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.1667
+  ],
+  "kbk_layer_norm_2299194a_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0769
+  ],
+  "kbk_layer_norm_235f8da4_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.1277
+  ],
+  "kbk_layer_norm_35c18f42_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.1837
+  ],
+  "kbk_layer_norm_37fa9378_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.18
+  ],
+  "kbk_layer_norm_3a42b486_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.082
+  ],
+  "kbk_layer_norm_56c5de71_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0769
+  ],
+  "kbk_layer_norm_59e35ffc_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.1837
+  ],
+  "kbk_layer_norm_69f61fb2_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0667
+  ],
+  "kbk_layer_norm_7e668a4b_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0857
+  ],
+  "kbk_layer_norm_80df8cd2_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.1837
+  ],
+  "kbk_layer_norm_8a82c345_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0769
+  ],
+  "kbk_layer_norm_a096f35a_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0769
+  ],
+  "kbk_layer_norm_afb792f1_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.1765
+  ],
+  "kbk_layer_norm_c09d2643_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0769
+  ],
+  "kbk_layer_norm_cfff6942_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.1053
+  ],
+  "kbk_layer_normalization_85c9f41a_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.3721
+  ],
+  "kbk_layer_normalization_f83fc383_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0667
+  ],
+  "kbk_lg_regv_11ef8e69_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.0588
+  ],
+  "kbk_lin_model_5f1e58c8_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.1892
+  ],
+  "kbk_linear_net_396d5308_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.0904
+  ],
+  "kbk_linear_normal_gamma_11d9926a_fp32": [
+   "hip2hip/gpumode/MaskedLanguageModel",
+   0.0612
+  ],
+  "kbk_logistic_regression_2b0173ef_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.0513
+  ],
+  "kbk_masked_language_model_8b9f4ccc_fp32": [
+   "hip2hip/gpumode/MaskedLanguageModel",
+   0.5625
+  ],
+  "kbk_masked_softmax_a6116c52_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0526
+  ],
+  "kbk_masked_softmax_b9b1169f_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0526
+  ],
+  "kbk_mish_e5fabd21_fp32": [
+   "hip2hip/gpumode/SiLU",
+   0.6667
+  ],
+  "kbk_mlp_0015bd99_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0586
+  ],
+  "kbk_mlp_c884704d_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.12
+  ],
+  "kbk_mlp_model_26dfb513_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.0758
+  ],
+  "kbk_mm_tensor_norm_2d7f2115_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1364
+  ],
+  "kbk_mnist_cnn_a7e2805a_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.0509
+  ],
+  "kbk_my_custom_c62c9d59_fp32": [
+   "hip2hip/gpumode/Sigmoid",
+   0.3382
+  ],
+  "kbk_ncm_output_d0d11593_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.1667
+  ],
+  "kbk_net_8c4f98eb_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.0769
+  ],
+  "kbk_net_994fa55d_fp32": [
+   "torch2hip/kernelbench/level1/l1n95_CrossEntropyLoss",
+   0.0714
+  ],
+  "kbk_neural_gas_energy_cdba0041_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0769
+  ],
+  "kbk_neural_net_b00df63d_fp32": [
+   "hip2hip/gpumode/MLP_model",
+   0.0594
+  ],
+  "kbk_neural_network_06c047c3_fp32": [
+   "torch2hip/kernelbench/level2/l2n17_Conv2d_InstanceNorm_Divide",
+   0.0556
+  ],
+  "kbk_neural_network_64b7f399_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.0635
+  ],
+  "kbk_normal_attention_dot_0f751f6c_fp32": [
+   "hip2hip/gpumode/NormalAttention_embedded_gaussian",
+   0.2426
+  ],
+  "kbk_normal_attention_embedded_gaussian_cb9cd8ac_fp32": [
+   "hip2hip/gpumode/NormalAttention_embedded_gaussian",
+   0.1736
+  ],
+  "kbk_normalize_2b3c5a11_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.1538
+  ],
+  "kbk_normalize_3c43944c_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1667
+  ],
+  "kbk_normalize_c79e5e7c_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.1429
+  ],
+  "kbk_normalize_scale_ca3307e3_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0625
+  ],
+  "kbk_normmlp_502478f4_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.1111
+  ],
+  "kbk_not_norm_2af98704_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0714
+  ],
+  "kbk_npi_arg_1567f785_fp32": [
+   "torch2hip/gpumode/11122_PositionEmbedder",
+   0.0789
+  ],
+  "kbk_peg_070bd4f5_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1143
+  ],
+  "kbk_peg_65f0e156_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1143
+  ],
+  "kbk_pix_block_e280a2c3_fp32": [
+   "torch2hip/kernelbench/level2/l2n52_Conv2d_Activation_BatchNorm",
+   0.0769
+  ],
+  "kbk_pixel_norm_8c7c4a3f_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1667
+  ],
+  "kbk_position_embedder_b2c28caf_fp32": [
+   "torch2hip/gpumode/11122_PositionEmbedder",
+   0.4062
+  ],
+  "kbk_position_wise_feed_forward_d19a3e6d_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.4167
+  ],
+  "kbk_positional_wise_feed_forward_132d80a6_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0775
+  ],
+  "kbk_positionwise_feed_forward_269d9983_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0936
+  ],
+  "kbk_positionwise_feed_forward_50f8a1ca_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0936
+  ],
+  "kbk_positionwise_feed_forward_5b1c0350_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0936
+  ],
+  "kbk_positionwise_feed_forward_66c67006_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0989
+  ],
+  "kbk_positionwise_feed_forward_6a6fbcf3_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0978
+  ],
+  "kbk_power_0ccbae92_fp32": [
+   "torch2hip/kernelbench/level1/l1n26_GELU_",
+   0.0667
+  ],
+  "kbk_q_net_c9d713f7_fp32": [
+   "torch2hip/gpumode/11122_PositionEmbedder",
+   0.0698
+  ],
+  "kbk_q_network_1e5421d6_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.0635
+  ],
+  "kbk_r_soft_max_b8583c6a_fp32": [
+   "hip2hip/gpumode/Transpose",
+   0.0682
+  ],
+  "kbk_regl1_8046aa53_fp32": [
+   "torch2hip/kernelbench/level2/l2n99_Matmul_GELU_Softmax",
+   0.0612
+  ],
+  "kbk_res_block_f309dc09_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0811
+  ],
+  "kbk_res_connection_layer_dda0cfba_fp32": [
+   "hip2hip/gpumode/layer_normalization",
+   0.0709
+  ],
+  "kbk_reward_model_network_18937a5b_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.0769
+  ],
+  "kbk_reward_model_network_4a8ae177_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.0769
+  ],
+  "kbk_scale_1bf753e0_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0968
+  ],
+  "kbk_scaled_dot_product_attention_b4165ffc_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0667
+  ],
+  "kbk_scaled_dot_product_attention_d1f13e28_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0667
+  ],
+  "kbk_se_net_292c2392_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.0833
+  ],
+  "kbk_se_net_6e7b5c4f_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.0833
+  ],
+  "kbk_self_attention_6b0e1153_fp32": [
+   "torch2hip/gpumode/11122_PositionEmbedder",
+   0.0909
+  ],
+  "kbk_self_attn_match_b6be574f_fp32": [
+   "torch2hip/kernelbench/level3/l3n44_MiniGPTBlock",
+   0.0755
+  ],
+  "kbk_sig_loss_15396bd8_fp32": [
+   "hip2hip/gpumode/KDLoss",
+   0.0513
+  ],
+  "kbk_sigmoid_5953a9ee_fp32": [
+   "hip2hip/gpumode/Sigmoid",
+   1.0
+  ],
+  "kbk_silu_b928ce65_fp32": [
+   "hip2hip/gpumode/SiLU",
+   1.0
+  ],
+  "kbk_simple_conv2d_module_d2367bf8_fp32": [
+   "hip2hip/gpumode/KDLoss",
+   0.0682
+  ],
+  "kbk_simple_matmul_module_27fc6bf5_fp32": [
+   "hip2hip/gpumode/SimpleMatmulModule",
+   1.0
+  ],
+  "kbk_simple_short_cut_f26bcb6b_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.12
+  ],
+  "kbk_simple_stack_model_6f1ca6b3_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0526
+  ],
+  "kbk_sinusoidal_pos_emb_c867bbcd_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.0682
+  ],
+  "kbk_softmax_module_2b421abf_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.3
+  ],
+  "kbk_spherical_bessel_basis_d7934953_fp32": [
+   "torch2hip/gpumode/11122_PositionEmbedder",
+   0.0556
+  ],
+  "kbk_square_activation_c95dab92_fp32": [
+   "hip2hip/gpumode/SiLU",
+   0.2
+  ],
+  "kbk_swish_a27b7907_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1429
+  ],
+  "kbk_tanh_cb3ea7ef_fp32": [
+   "hip2hip/gpumode/TanH",
+   1.0
+  ],
+  "kbk_temporal_gated_conv_dad605d8_fp32": [
+   "torch2hip/kernelbench/level2/l2n52_Conv2d_Activation_BatchNorm",
+   0.0824
+  ],
+  "kbk_tensor_proba_5610c011_fp32": [
+   "torch2hip/gpumode/10099_Gather",
+   0.0541
+  ],
+  "kbk_tfbce_loss_92ac3c0a_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1176
+  ],
+  "kbk_thresholded_relu_98d6d14a_fp32": [
+   "torch2hip/gpumode/10099_Gather",
+   0.0769
+  ],
+  "kbk_transpose_7ae447f2_fp32": [
+   "hip2hip/gpumode/Transpose",
+   1.0
+  ],
+  "kbk_two_arg_net_ad9349a6_fp32": [
+   "hip2hip/gpumode/ItemQueryAttention",
+   0.0563
+  ],
+  "kbk_two_layer_net_53025f61_fp32": [
+   "hip2hip/gpumode/PositionWiseFeedForward",
+   0.0952
+  ],
+  "kbk_upsample_6d4156ba_fp32": [
+   "torch2hip/kernelbench/level2/l2n17_Conv2d_InstanceNorm_Divide",
+   0.0588
+  ],
+  "kbk_variable_weights_and_biases_ce484ccc_fp32": [
+   "torch2hip/kernelbench/level2/l2n86_Matmul_Divide_GELU",
+   0.0851
+  ],
+  "kbk_variant_sigmoid_e94d41e2_fp32": [
+   "hip2hip/gpumode/SoftmaxModule",
+   0.1579
+  ],
+  "syn_synth_model_depthwise_conv_convtranspose2d_square_9b9c63a1_fp32": [
+   "torch2hip/kernelbench/level2/l2n73_Conv2d_BatchNorm_Scaling",
+   0.0545
+  ],
+  "syn_synth_model_instancenorm2d_groupnorm2d_square_d0eba038_fp32": [
+   "torch2hip/kernelbench/level2/l2n73_Conv2d_BatchNorm_Scaling",
+   0.0526
+  ],
+  "syn_synth_model_linear_nobias_layernorm_square_667fed5d_fp32": [
+   "torch2hip/kernelbench/level2/l2n73_Conv2d_BatchNorm_Scaling",
+   0.0556
+  ]
+ },
+ "meta": {
+  "arena_root": "/home/shasriva/third_party/AgentKernelArena",
+  "arena_tasks_implicated": 16,
+  "arena_tasks_scored": 355,
+  "arena_tasks_total": 355,
+  "arena_tasks_unscreened": 68,
+  "arena_unscreened_by_category": {
+   "hip2hip": 10,
+   "image_kernel": 18,
+   "instruction2triton": 31,
+   "repository": 9
+  },
+  "boilerplate_shingles": 479,
+  "built": "2026-08-11T22:26:40",
+  "exact_matches": 6,
+  "pool_tasks_blocked": 24,
+  "pool_tasks_scored": 13570,
+  "threshold": 0.3
+ },
+ "unscreened": [
+  "hip2hip/others/assign_score_withk",
+  "hip2hip/others/ball_query",
+  "hip2hip/others/furthest_point_sample",
+  "hip2hip/others/knn",
+  "hip2hip/others/matrix_multiplication",
+  "hip2hip/others/mla_decode",
+  "hip2hip/others/points_in_boxes",
+  "hip2hip/others/roiaware_pool3d",
+  "hip2hip/others/roipoint_pool3d",
+  "hip2hip/others/three_nn",
+  "image_kernel/mi300x_sglang_hip_mha_batch_prefill",
+  "image_kernel/mi300x_sglang_hip_pa_decode",
+  "image_kernel/mi300x_sglang_hip_pa_ragged",
+  "image_kernel/mi300x_sglang_triton_fp8_gemm",
+  "image_kernel/mi300x_sglang_triton_gemm",
+  "image_kernel/mi355x_sglang_triton_mxfp8_grouped_gemm",
+  "image_kernel/mi355x_sglang_triton_mxfp8_linear",
+  "image_kernel/mi355x_vllm_aiter_mxfp4_moe_2stage_kimi_k3",
+  "image_kernel/mi355x_vllm_ck_a8w8_blockscale_gemm",
+  "image_kernel/mi355x_vllm_ck_cktile_moe_2stage",
+  "image_kernel/mi355x_vllm_ck_moe_2stage",
+  "image_kernel/mi355x_vllm_hip_dynamic_per_tensor_quant",
+  "image_kernel/mi355x_vllm_tilelang_mhc_fused_post_pre",
+  "image_kernel/mi355x_vllm_triton_fused_moe_gptq_awq",
+  "image_kernel/mi355x_vllm_triton_kda_linear_attn_kimi_k3",
+  "image_kernel/mi355x_vllm_triton_paged_attention_2d",
+  "image_kernel/mi355x_vllm_triton_sparse_attn_prefill_ragged",
+  "image_kernel/mi355x_vllm_triton_unified_attention",
+  "instruction2triton/rocmbench/gemm",
+  "instruction2triton/rocmbench/layernorm",
+  "instruction2triton/rocmbench/moe_gemm",
+  "instruction2triton/rocmbench/multreduce_matmul_dot_kernel",
+  "instruction2triton/rocmbench/naive_softmax",
+  "instruction2triton/rocmbench/rmsnorm_bwd",
+  "instruction2triton/rocmbench/rmsnorm_fwd",
+  "instruction2triton/rocmbench/softmax",
+  "instruction2triton/rocmbench/test_add_kernel",
+  "instruction2triton/rocmbench/test_batched_vecmat",
+  "instruction2triton/rocmbench/test_block_copy",
+  "instruction2triton/rocmbench/test_block_pointer_matmul",
+  "instruction2triton/rocmbench/test_cast_matmul",
+  "instruction2triton/rocmbench/test_chained_dot_fp8",
+  "instruction2triton/rocmbench/test_chained_matmul",
+  "instruction2triton/rocmbench/test_flashattention_fwd",
+  "instruction2triton/rocmbench/test_gemm_fusion",
+  "instruction2triton/rocmbench/test_gemm_no_scf",
+  "instruction2triton/rocmbench/test_iv_dependent_matmul",
+  "instruction2triton/rocmbench/test_kernel_dot",
+  "instruction2triton/rocmbench/test_kernel_sub",
+  "instruction2triton/rocmbench/test_load_reduce",
+  "instruction2triton/rocmbench/test_matmul_MXFP",
+  "instruction2triton/rocmbench/test_randn",
+  "instruction2triton/rocmbench/test_random_int",
+  "instruction2triton/rocmbench/test_reverse_range",
+  "instruction2triton/rocmbench/test_tma_store_gemm",
+  "instruction2triton/rocmbench/test_triton_flip",
+  "instruction2triton/rocmbench/test_triton_sort",
+  "instruction2triton/rocmbench/test_triton_swizzle2d",
+  "instruction2triton/rocmbench/triton_multreduce_matmul_kernel",
+  "repository/aiter/mla_decode_rope",
+  "repository/aiter/moe_routing_sigmoid_top1_fused",
+  "repository/aiter/pa_decode",
+  "repository/aiter/pa_prefill",
+  "repository/aiter/unified_attention",
+  "repository/rocprim/block_radix_rank",
+  "repository/rocprim/device_binary_search",
+  "repository/rocprim/device_merge_sort",
+  "repository/rocprim/device_search_n"
+ ]
+}

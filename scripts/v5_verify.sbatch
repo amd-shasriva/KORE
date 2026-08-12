@@ -9,7 +9,11 @@
 #SBATCH --job-name=kore-v5-verify
 #SBATCH --account=amd-general
 #SBATCH --partition=amd-spur
-#SBATCH --qos=amd-general-qos
+# amd-burst-qos, not amd-general-qos. General is capped at 8 nodes for the whole
+# team and was full, so this pended on QOSGrpNodeLimit indefinitely; burst reaches
+# all 282 nodes. Burst jobs can be preempted, which is irrelevant here -- this is a
+# read-only verification that costs an hour and can simply be resubmitted.
+#SBATCH --qos=amd-burst-qos
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=32
 #SBATCH --time=01:00:00

@@ -250,10 +250,17 @@ resubmit_self() {
     # `--qos=amd-burst-qos` to get a node now; without this, a preempted burst run
     # would resubmit itself into the general queue and sit behind everyone else,
     # turning a 45-minute interruption into a day.
+    # `|| true` is load-bearing, not defensive noise. This script runs under
+    # `set -euo pipefail`, and a command substitution whose pipeline exits non-zero
+    # makes the ASSIGNMENT non-zero, which kills the script -- silently, with an
+    # empty stderr. That is exactly how job 6520 died: it read TimeLimit with the
+    # same idiom, SPUR's scontrol does not emit that field, grep found nothing and
+    # returned 1. Any grep over optional output needs this.
     local qos_arg=()
     local qos
     qos="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
-           | tr ' ' '\n' | grep -m1 '^QOS=' | cut -d= -f2)"
+           | tr ' ' '\n' | grep -m1 '^QOS=' | cut -d= -f2 || true)"
+    [[ -z "$qos" ]] && qos="${KORE_SFT_QOS:-}"
     [[ -n "$qos" ]] && qos_arg=(--qos="$qos")
     out="$(sbatch "${qos_arg[@]}" "$REPO/scripts/spur_sft_1node.sbatch" \
                   "$CFG" "$FROM_STAGE" "$OUT_DIR" "$next" 2>&1)"
@@ -300,19 +307,32 @@ trap handle_requeue_warning USR1
 # minutes against NFS, and the drain has to finish one before the limit lands.
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
     _drain_after="${KORE_REQUEUE_AFTER_SECONDS:-}"
+    _tl=""
     if [[ -z "$_drain_after" ]]; then
-        # TimeLimit prints as [DD-]HH:MM:SS.
-        _tl="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
-               | tr ' ' '\n' | grep -m1 '^TimeLimit=' | cut -d= -f2)"
+        # Try to read the real limit, but do NOT depend on it. SPUR's scontrol (a
+        # reimplementation, Version=0.8.0) does not emit TimeLimit at all, and
+        # squeue's %l is empty for a job that has left the queue, so every read here
+        # is best-effort and every one needs `|| true` -- see the note in
+        # resubmit_self for how the missing `|| true` killed job 6520.
+        _tl="$(squeue -j "$SLURM_JOB_ID" -h -o '%l' 2>/dev/null | tr -d ' \r' || true)"
+        if [[ -z "$_tl" || "$_tl" == "UNLIMITED" ]]; then
+            _tl="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
+                   | tr ' ' '\n' | grep -m1 '^TimeLimit=' | cut -d= -f2 || true)"
+        fi
+        # [DD-]HH:MM:SS
         if [[ "$_tl" =~ ^(([0-9]+)-)?([0-9]+):([0-9]+):([0-9]+)$ ]]; then
             _limit=$(( ${BASH_REMATCH[2]:-0} * 86400 + 10#${BASH_REMATCH[3]} * 3600 \
                        + 10#${BASH_REMATCH[4]} * 60 + 10#${BASH_REMATCH[5]} ))
             (( _limit > 3600 )) && _drain_after=$(( _limit - 3600 ))
         fi
     fi
-    _drain_after="${_drain_after:-81000}"
+    # Falls back to the HEADER's walltime minus an hour, not to the old 22h30m
+    # constant. That constant was tuned for a 23h limit and would drain a healthy
+    # 7-day run at 22h30m -- the precise interruption the long walltime exists to
+    # prevent. Keep KORE_SFT_WALL_SECONDS in step with the #SBATCH --time above.
+    _drain_after="${_drain_after:-$(( ${KORE_SFT_WALL_SECONDS:-604800} - 3600 ))}"
     echo "[sft-1node] will drain and resubmit after ${_drain_after}s" \
-         "(job TimeLimit=${_tl:-unknown})"
+         "(read TimeLimit='${_tl:-unavailable}'; SPUR often does not report it)"
     (
         sleep "$_drain_after"
         kill -USR1 "$$"

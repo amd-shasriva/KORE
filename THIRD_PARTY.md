@@ -2,7 +2,7 @@
 
 KORE is proprietary and AMD-internal (see [`LICENSE`](LICENSE)). It nevertheless incorporates,
 derives from, or measures against third-party material. This file records what that material is,
-under what terms it was obtained, which shipped artifact it flows into, and — importantly —
+under what terms it was obtained, which shipped artifact it flows into, and, importantly,
 **which items remain unresolved**.
 
 Machine-readable provenance lives in `data/release/meta/source_metadata.json` (schema `1.0`,
@@ -16,20 +16,20 @@ casual reading of the project would suggest. Method and evidence are in §9.
 
 ---
 
-# ⚠️ SECTION 0 — BLOCKING FINDINGS. DO NOT SHIP WITHOUT READING THIS.
+# SECTION 0: BLOCKING FINDINGS. DO NOT SHIP WITHOUT READING THIS.
 
 Three sources are recorded with a licence they are not under. Two of them carry terms that
 **directly constrain proprietary redistribution of a model trained on this data**; the third
 (§0.3) is AMD's own material and is a labelling error rather than an exposure. Neither of the two
 was visible to the build, because the dataset licences in `source_metadata.json` were hard-coded by
 hand and `kore/data/midtrain_corpus.py::_license_from_root` only ever reads the licence file at a
-repository *root* — never a per-directory licence or a per-file SPDX header.
+repository *root*, never a per-directory licence or a per-file SPDX header.
 
-## 0.1 — BLOCKER: KernelBook and kernelbot-data are NOT MIT. They carry a use-based restriction on training AI models.
+## 0.1. BLOCKER: KernelBook and kernelbot-data are NOT MIT. They carry a use-based restriction on training AI models.
 
 `GPUMODE/KernelBook` and `GPUMODE/kernelbot-data` are recorded as **MIT** in
 `source_metadata.json`, in every row of the shipped corpora, and in the previous version of this
-file. **Both are actually under the "June 9 Researcher Reciprocity License, Version 1.0"** — a
+file. **Both are actually under the "June 9 Researcher Reciprocity License, Version 1.0"**, a
 bespoke licence adapting the Open RAIL-D pattern. It is not an OSI-approved open-source licence
 and it is not MIT.
 
@@ -39,25 +39,25 @@ and it is not MIT.
 force at the exact revision KORE consumed. `kernelbot-data` at `4159cf6b…` (2026-07-30) carries the
 same licence.
 
-**What the licence actually requires.** The grant is broad — reproduce, prepare derivative works,
+**What the licence actually requires.** The grant is broad: reproduce, prepare derivative works,
 sublicense, distribute, and explicitly "commercial analysis". It is *not* copyleft and it does not
 forbid commercial use. But it defines "Training Use" to cover training, fine-tuning, distillation,
 synthetic-data generation and embedding, defines any model so trained as a **"Covered Model"**
 (expressly including model weights, checkpoints, adapters, APIs and hosted services), and then
 imposes, at §4 and §5:
 
-- **§5** — for Training Use, the Attachment A use restriction **"must be included as an enforceable
+- **§5**: for Training Use, the Attachment A use restriction **"must be included as an enforceable
   provision in any legal agreement, terms of use, acceptable use policy, license, or other terms
   governing the use or Distribution of a Covered Model"**, and downstream users must be given
   notice that the model is subject to Attachment A.
-- **Attachment A** — a covered provider may not impose terms that prevent GPU Mode, dataset
+- **Attachment A**: a covered provider may not impose terms that prevent GPU Mode, dataset
   contributors, or authorized researchers from generating outputs, evaluating the model,
   benchmarking it, publishing research, or exploring their own research ideas **on materially equal
   terms to ordinary users**, and may not retaliate against them for doing so.
-- **§4.1–§4.4** — pass on the licence text or a link, retain attribution notices, credit GPU Mode
+- **§4.1-§4.4**: pass on the licence text or a link, retain attribution notices, credit GPU Mode
   and the dataset by name with a link, and mark modified files as changed.
 
-**Affected artifacts — this is the largest single exposure in the corpus:**
+**Affected artifacts. This is the largest single exposure in the corpus:**
 
 | Shipped artifact | Rows | Share |
 | --- | --- | --- |
@@ -66,12 +66,12 @@ imposes, at §4 and §5:
 | **Midtrain total** | **27,070** | **31.5% of midtrain** |
 | SFT `kernel_qa` Tier-2 curriculum, generated OSS-Instruct-style over KernelBook kernels | 298 | of 9,965 curriculum rows |
 | **SFT v5 (`data/v5_sft.jsonl`), rows whose task derives from a KernelBook module** | **41,291** | **19.3% of rows / 31.4% of tokens** |
-| Any checkpoint trained on the above | — | the whole model is a "Covered Model" |
+| Any checkpoint trained on the above | n/a | the whole model is a "Covered Model" |
 
 **The v5 figure is materially larger than the midtrain exposure and was not previously
 recorded.** Measured directly over `data/v5_sft.jsonl`: 41,291 rows carrying 156,791,157
 tokens across 9,544 distinct `kbk_*` task ids. The mechanism is indirect and therefore easy
-to miss — the pool build ingested 9,527 KernelBook PyTorch modules as *tasks*, and those
+to miss: the pool build ingested 9,527 KernelBook PyTorch modules as *tasks*, and those
 tasks then seeded the repair, win, ranked-group and backend-twin generation that makes up
 most of the kernel side. No KernelBook text is copied into a v5 row; what each row inherits
 is the *problem* a KernelBook module defines. Whether that constitutes "Training Use" of the
@@ -81,7 +81,7 @@ cannot be treated as incidental.
 Note also that remediation option 3 is more attractive here than for midtrain: v5 rows are
 generated kernels solving a task, not reproductions of KernelBook rows, so re-deriving the
 task pool from the per-row upstream repositories would leave the v5 kernels themselves
-untouched. Only the task provenance needs relabelling — the per-row `licenses`, `repo_name`
+untouched. Only the task provenance needs relabelling: the per-row `licenses`, `repo_name`
 and `sha` fields are still present in the pinned upstream revision.
 
 **Why it matters here specifically.** KORE's own [`LICENSE`](LICENSE) currently forbids external
@@ -89,8 +89,8 @@ and `sha` fields are still present in the pinned upstream revision.
 to third parties, so there is no conflict today while the project is internal-only. But if a
 Covered Model is ever offered externally, the terms of that offering must carry Attachment A and
 must not restrict research access, benchmarking, or publication by the parties Attachment A
-protects. Terms of service that forbid benchmarking or publishing evaluations — a common default in
-commercial model ToS — would breach it.
+protects. Terms of service that forbid benchmarking or publishing evaluations, a common default in
+commercial model ToS, would breach it.
 
 **Remediation options, in increasing order of cost:**
 
@@ -110,9 +110,9 @@ commercial model ToS — would breach it.
 **Also note:** KORE's loader (`_load_kernelbook_pairs`) reads only `python_code` and `triton_code`
 and **discards KernelBook's per-row `licenses`, `repo_name`, `sha` and `repo_link` fields**. The
 per-row upstream attribution for all 21,432 rows was available and was thrown away. Option 3 above
-depends on recovering it, which is possible — it is still in the pinned upstream revision.
+depends on recovering it, which is possible: it is still in the pinned upstream revision.
 
-## 0.2 — BLOCKER: AGPL-3.0 source code is in the shipped midtrain corpus, stamped `Apache-2.0`.
+## 0.2. BLOCKER: AGPL-3.0 source code is in the shipped midtrain corpus, stamped `Apache-2.0`.
 
 `unslothai/unsloth` is recorded as **Apache-2.0**. At the pinned commit
 `3b235895bdf08410e0a9032e663e82c0de60a6a4` (2026-07-14) the repository is **dual-licensed**: its
@@ -137,7 +137,7 @@ in their own `source_metadata`.** They are self-identifying: the admitted text i
 | `unsloth/kernels/moe/**` | 7 | 6 `triton`, 1 `docs` | MoE grouped-GEMM Triton kernels: `forward.py`, `backward.py`, `tuning.py`, `interface.py`, `autotune_cache.py`, `README.md` |
 | **Total** | **29** | 26 `triton`, 3 `docs` | 0.034% of the 86,010-row midtrain corpus; the other 16 unsloth rows are genuinely Apache-2.0 |
 
-Note the second group is precisely the kind of file KORE's `triton` channel is built to harvest —
+Note the second group is precisely the kind of file KORE's `triton` channel is built to harvest:
 MoE grouped GEMM is a P0/P1 coverage cell in `docs/DATASET_SPEC.md` §1.5. This was not a fluke of
 the crawler; it is the crawler working as intended against a subtree it had no licence signal for.
 
@@ -150,25 +150,25 @@ mislabelled, and that a proprietary product built on it without review carries a
 `source_metadata.path` begins `studio/` or `unsloth/kernels/moe/` out of the corpus and rebuild the
 Stage-0 artifact. There is no meaningful data loss. Do this before, not after, the next training
 run. A corpus-side guard belongs in the ingestion path so the same class of subtree relicensing
-cannot recur — the check must read per-directory licence files and per-file SPDX headers, not just
+cannot recur: the check must read per-directory licence files and per-file SPDX headers, not just
 the repository root.
 
 **No other copyleft or non-commercial source is present.** A full scan of all 86,010 midtrain rows
 and both the SFT and DPO artifacts for AGPL / GPL / LGPL / MPL / CC-BY-NC / CC-BY-SA / research-only
 markers returns unsloth and nothing else (§9).
 
-## 0.3 — The catalog records this repository itself as MIT, contradicting `LICENSE`.
+## 0.3. The catalog records this repository itself as MIT, contradicting `LICENSE`.
 
 `source_metadata.json` records `amd-shasriva/KORE.git` with `"license": "MIT"`, and that value is
 stamped into **2,323 midtrain rows** (1,784 `pytorch_triton_pairs` + 539 `kore_tasks`). KORE is
 proprietary and AMD-internal. This is AMD's own material, so nothing is being infringed and there
-is no third-party exposure — but it is a false licence statement inside a shipped artifact, it
+is no third-party exposure, but it is a false licence statement inside a shipped artifact, it
 would be read as an outbound MIT grant by anyone auditing the corpus, and it must be corrected to
 `LicenseRef-AMD-Proprietary-Internal` when the catalog is regenerated.
 
 ---
 
-## 1. Base model — RESOLVED
+## 1. Base model: RESOLVED
 
 | Artifact | Licence (SPDX) | Upstream URL | Pinned revision | Used for / flows into |
 | --- | --- | --- | --- | --- |
@@ -176,7 +176,7 @@ would be read as an outbound MIT grant by anyone auditing the corpus, and it mus
 
 Verified by reading `LICENSE` at that exact revision: it is the unmodified Apache License 2.0. The
 model card at that revision declares `license: apache-2.0`. There is **no** `NOTICE` file, and Qwen3
-carries **no** Qwen-specific community licence, naming clause, or user-count threshold — unlike
+carries **no** Qwen-specific community licence, naming clause, or user-count threshold, unlike
 Llama-family models and unlike some earlier Qwen releases that used a bespoke research licence.
 
 **This permits what KORE does**: training derivative models, and proprietary deployment of the
@@ -185,7 +185,7 @@ they attach on *redistribution of the Work or a Derivative Work*: include the li
 copyright/patent/attribution notices, and state that you changed the files. A checkpoint
 fine-tuned from Qwen3-14B should therefore ship an Apache-2.0 notice attributing Qwen3-14B and
 stating it was modified. Apache-2.0 §3 also grants a patent licence that terminates on patent
-litigation against the Work — routine, but worth knowing.
+litigation against the Work, routine, but worth knowing.
 
 The trainers still do not pass `revision=` to `from_pretrained`, so the pin is documentary rather
 than enforced at load time; the local cache does hold exactly this revision.
@@ -196,7 +196,7 @@ than enforced at load time; the local cache does hold exactly this revision.
 previously-unresolved `SEE-REPO` entries are now resolved, and all 14 are permissive.** Row counts
 are rows contributed to the shipped 86,010-row midtrain corpus.
 
-### 2.1 Previously `SEE-REPO` — now resolved
+### 2.1 Previously `SEE-REPO`, now resolved
 
 | Source | Licence (SPDX) | Upstream URL | Pinned revision | Used for / flows into |
 | --- | --- | --- | --- | --- |
@@ -217,16 +217,16 @@ are rows contributed to the shipped 86,010-row midtrain corpus.
 
 Compound-licence detail, recorded so a future audit does not have to re-derive it:
 
-- **MIOpen** — MIT overall; `src/include/miopen/kernel_cache.hpp` and `src/kernel_cache.cpp` are
+- **MIOpen**: MIT overall; `src/include/miopen/kernel_cache.hpp` and `src/kernel_cache.cpp` are
   additionally under Apache-2.0 (Vratis Ltd, 2015). SPDX expression: `MIT AND Apache-2.0`.
-- **rocFFT** — MIT for AMD's own code; bundles CLI11 2.2 under BSD-3-Clause (University of
+- **rocFFT**: MIT for AMD's own code; bundles CLI11 2.2 under BSD-3-Clause (University of
   Cincinnati). SPDX expression: `MIT AND BSD-3-Clause`.
-- **rocSOLVER** — AMD's grant is two-clause (no endorsement clause), so BSD-2-Clause; the file also
+- **rocSOLVER**: AMD's grant is two-clause (no endorsement clause), so BSD-2-Clause; the file also
   carries a bundled third-party BSD-3-Clause block. SPDX expression:
   `BSD-2-Clause AND BSD-3-Clause`.
-- **rccl** — BSD-3-Clause from NVIDIA NCCL; Microsoft's contributions are MIT.
-- **hipCUB** — BSD-3-Clause; copyright Duane Merrill and NVIDIA, with AMD modifications.
-- **cutlass** — the file carries an explicit `SPDX-License-Identifier: BSD-3-Clause` tag.
+- **rccl**: BSD-3-Clause from NVIDIA NCCL; Microsoft's contributions are MIT.
+- **hipCUB**: BSD-3-Clause; copyright Duane Merrill and NVIDIA, with AMD modifications.
+- **cutlass**: the file carries an explicit `SPDX-License-Identifier: BSD-3-Clause` tag.
 
 GitHub's licence API reports `NOASSERTION` for MIOpen, cutlass, hipCUB, pytorch, rccl, rocFFT,
 rocSOLVER, composable_kernel, unsloth and xformers, because each of those licence files is
@@ -250,7 +250,7 @@ full by hand.
 | xformers (facebookresearch) | BSD-3-Clause | https://github.com/facebookresearch/xformers | 42fc265f8831e7f900ffb89f331a1b43e0dfa13f | 38 midtrain rows; attention reference |
 | kernels (triton-lang) | MIT | https://github.com/triton-lang/kernels | 4f3d31f009ef6a113b44803194ac3412360e882a | 11 midtrain rows |
 
-### 2.3 Corrected at the pinned commit — see §0
+### 2.3 Corrected at the pinned commit, see §0
 
 | Source | Licence (SPDX) | Upstream URL | Pinned revision | Used for / flows into |
 | --- | --- | --- | --- | --- |
@@ -259,7 +259,7 @@ full by hand.
 
 ## 3. Datasets
 
-### 3.1 Recorded in the catalog — both misattributed, see §0.1
+### 3.1 Recorded in the catalog, both misattributed, see §0.1
 
 | Dataset | Licence (SPDX) | Upstream URL | Pinned revision | Used for / flows into |
 | --- | --- | --- | --- | --- |
@@ -269,7 +269,7 @@ full by hand.
 Catalog value for both is `MIT`. Actual value is the June 9 Researcher Reciprocity License v1.0,
 in force at both pinned revisions.
 
-### 3.2 General-replay datasets — previously undocumented, now identified (see §4)
+### 3.2 General-replay datasets: previously undocumented, now identified (see §4)
 
 | Dataset | Licence (SPDX) | Upstream URL | Pinned revision | Used for / flows into |
 | --- | --- | --- | --- | --- |
@@ -291,10 +291,10 @@ Terms notes:
   mixture as a research artifact."* **The subset identity therefore decides the terms, not the
   mixture licence.** All 19 rows confirmed by exact SHA-256 (9 `chat`, 10
   `instruction_following`) came from `ai2-adapt-dev/numinamath_tir_math_decontaminated`, which the
-  card lists as **Apache-2.0** — with no exceptions and no non-commercial subset seen. The signature
+  card lists as **Apache-2.0**, with no exceptions and no non-commercial subset seen. The signature
   is uniform across all 8,135 rows (100% boxed-answer, 100% fenced Python, ~61% SymPy
   tool-integrated reasoning), consistent with the whole slice being that one subset. The subset id
-  is not recorded per row, so this is very strong but not exhaustive — see §10.2. The mixture also
+  is not recorded per row, so this is very strong but not exhaustive; see §10.2. The mixture also
   contains outputs generated by third-party models, which the card notes are subject to their own
   terms.
 - **OpenCodeInstruct** is CC-BY-4.0 and its card states it is "ready for commercial/non-commercial
@@ -302,7 +302,7 @@ Terms notes:
 - **OpenThoughts3-1.2M** and **ToolACE** are Apache-2.0; both are synthetic, so the terms of the
   generating models sit behind them.
 
-## 4. General-replay slice — RESOLVED
+## 4. General-replay slice: RESOLVED
 
 The previous version of this file reported 21,486 midtrain rows (25.0% of the corpus) as
 unrecoverable, stamped:
@@ -317,7 +317,7 @@ license:        DEVELOPMENT-INTERNAL
 which *code path* produced the row, not where the content came from.
 `build_midtrain_corpus` applies `_development_replay_metadata` to any replay row that arrives
 without a `_source_metadata` key, and `kore/data/general_replay.py::_load_from_hf` never attaches
-one — so real upstream data loaded through that path is stamped identically to the 75-row bundled
+one, so real upstream data loaded through that path is stamped identically to the 75-row bundled
 smoke set. The content is definitely not the bundled set: all 21,486 rows are distinct, and **zero**
 match any of the 75 bundled sample texts.
 
@@ -326,11 +326,11 @@ one-to-one onto `HF_SOURCES` in `kore/data/general_replay.py`:
 
 | Replay kind | Rows | Upstream dataset | Licence | How it was established |
 | --- | --- | --- | --- | --- |
-| `tool_use` | 3,997 | `Team-ACE/ToolACE` | Apache-2.0 | **Proven** — 6/6 sampled rows matched a specific upstream row by full-text SHA-256 |
-| `chat` | 4,670 | `allenai/tulu-3-sft-mixture` | ODC-By-1.0 | **Proven** — 9 sampled rows matched by SHA-256, all in the Apache-2.0 NuminaMath-TIR subset |
-| `instruction_following` | 3,465 | `allenai/tulu-3-sft-mixture` | ODC-By-1.0 | **Proven** — 10 sampled rows matched by SHA-256, all in the Apache-2.0 NuminaMath-TIR subset |
-| `code` | 4,677 | `nvidia/OpenCodeInstruct` | CC-BY-4.0 | **Proven** — 1 sampled row matched by SHA-256; low sample yield is an index artifact, see below |
-| `math` | 4,677 (1,910 traces) | `open-thoughts/OpenThoughts3-1.2M` | Apache-2.0 | **Strong content and cache evidence, not hash-proven** — see §10.2 |
+| `tool_use` | 3,997 | `Team-ACE/ToolACE` | Apache-2.0 | **Proven**: 6/6 sampled rows matched a specific upstream row by full-text SHA-256 |
+| `chat` | 4,670 | `allenai/tulu-3-sft-mixture` | ODC-By-1.0 | **Proven**: 9 sampled rows matched by SHA-256, all in the Apache-2.0 NuminaMath-TIR subset |
+| `instruction_following` | 3,465 | `allenai/tulu-3-sft-mixture` | ODC-By-1.0 | **Proven**: 10 sampled rows matched by SHA-256, all in the Apache-2.0 NuminaMath-TIR subset |
+| `code` | 4,677 | `nvidia/OpenCodeInstruct` | CC-BY-4.0 | **Proven**: 1 sampled row matched by SHA-256; low sample yield is an index artifact, see below |
+| `math` | 4,677 (1,910 traces) | `open-thoughts/OpenThoughts3-1.2M` | Apache-2.0 | **Strong content and cache evidence, not hash-proven**; see §10.2 |
 | **Total** | **21,486** | | | |
 
 A SHA-256 equality between a corpus row's `root_content_hash` and an upstream row re-rendered
@@ -341,8 +341,8 @@ Notes on the two slices where the sampling method was weakest, and why:
 - **`code`.** The Hugging Face dataset server indexes only 1,400,000 of OpenCodeInstruct's
   5,000,000 rows (`partial: true`), so ~72% of the dataset cannot be queried at all and most probes
   can never hit. One probe did land an exact SHA-256 match, which proves the slice is
-  OpenCodeInstruct. Non-matching probes returned template siblings — OpenCodeInstruct is heavily
-  templated, so many rows share a 100-character opening — not different content.
+  OpenCodeInstruct. Non-matching probes returned template siblings; OpenCodeInstruct is heavily
+  templated, so many rows share a 100-character opening, not different content.
 - **`math`.** Fully indexed, but only reachable through BM25 ranking over 1.2M rows; candidate
   pools ran 30k–90k rows deep and the top-100 window cannot surface a specific record, so this
   method cannot confirm regardless of the truth. The attribution rests instead on: the loader's
@@ -358,7 +358,7 @@ four primary datasets above, each pinned to the revision recorded in §3.2, and 
 configured fallbacks (`ise-uiuc/Magicoder-Evol-Instruct-110K`, `nvidia/OpenMathInstruct-2`,
 `Salesforce/xlam-function-calling-60k`). The dataset-cache lock files record the matching
 `load_dataset` calls, including OpenCodeInstruct's non-default `train` config. This independently
-rules out the fallback sources — which matters, because
+rules out the fallback sources, which matters, because
 `Salesforce/xlam-function-calling-60k` is **CC-BY-NC-4.0** and would have been a genuine
 non-commercial blocker had `tool_use` fallen back to it. It did not.
 
@@ -367,7 +367,7 @@ non-commercial blocker had `tool_use` fallen back to it. It did not.
 | Class | Rows | Detail |
 | --- | --- | --- |
 | (a) Upstream source with a known licence | 21,486 | 8,135 tulu-3 · 4,677 OpenCodeInstruct · 4,677 OpenThoughts3 · 3,997 ToolACE |
-| (b) Generated by this repository's own code | 0 | — |
+| (b) Generated by this repository's own code | 0 | none |
 | (c) Model output carrying its own terms | 0 directly | but every one of these four datasets is itself synthetic or partly synthetic, so vendor terms sit one level upstream |
 | Untraceable | **0** | |
 
@@ -384,12 +384,12 @@ item rather than asserted either way.
 `development_mode`. Until that changes, any future corpus built through the same path will again
 launder real upstream provenance into `DEVELOPMENT-INTERNAL`.
 
-## 5. Kernel-curriculum slice — provenance identified, stamping still absent
+## 5. Kernel-curriculum slice: provenance identified, stamping still absent
 
 9,956 midtrain rows (11.6%) carry **no `source_metadata` at all** and no licence field. They were
 appended post-hoc by `data/release/generators/augment_midtrain.py`, which writes bare
 `{"text": ..., "source": "kernel_curriculum"}` records straight onto the finished corpus file,
-bypassing the source contract — and therefore also bypassing decontamination, dedup and the
+bypassing the source contract, and therefore also bypassing decontamination, dedup and the
 tokenizer admission check.
 
 Their origin is nevertheless determinate: they are the non-distractor tiers of
@@ -416,7 +416,7 @@ Portions of the SFT, DPO and curriculum data were generated by **Anthropic Claud
 (`kore/data/teacher.py` defaults to `claude-opus-4.8`, overridable via `KORE_TEACHER_MODEL`;
 `DATASET_STATUS.md` records `claude-opus-5` for the curriculum run) accessed through AMD's internal
 LLM gateway. External use of teacher-generated text is subject to the applicable Anthropic terms
-and to AMD's gateway terms — including any restriction on using outputs to develop competing
+and to AMD's gateway terms, including any restriction on using outputs to develop competing
 models, which is the specific clause to check before a KORE checkpoint is offered externally.
 
 Volumes in the shipped artifacts: 9,965 curriculum rows (all six tiers appear in SFT as
@@ -427,7 +427,7 @@ does not change its provenance.
 SFT composition for reference (56,493 rows): `kernel_repair_opt` 19,630 · `kernel_qa` 9,965 ·
 `general_chat` 7,984 · `agentic_tooluse` 6,917 · `general_code` 5,999 · `math_reasoning` 5,998.
 The four `general_*` / `math_reasoning` / `agentic_tooluse` channels total 26,898 rows drawn from
-the same four upstream datasets as §4 — 15,616 of them are byte-identical to midtrain replay rows —
+the same four upstream datasets as §4 (15,616 of them are byte-identical to midtrain replay rows),
 and, like the midtrain slice, they carry **no provenance fields at all**. The DPO artifact
 (96,675 pairs) carries no `_source` field on any row.
 
@@ -440,7 +440,7 @@ contains hashed benchmark records used to exclude contamination; it is derived f
 benchmarks and inherits their terms. Because it stores hashes rather than benchmark text, its
 redistribution exposure is lower than the benchmarks themselves, but it is not zero.
 
-## 7.1 FlyDSL — RESOLVED
+## 7.1 FlyDSL: RESOLVED
 
 - Upstream: https://github.com/ROCm/flydsl, local checkout `third_party/flydsl`.
 - Licence: **Apache License 2.0**, "Copyright 2025 FlyDSL Project Contributors"
@@ -456,9 +456,9 @@ redistribution exposure is lower than the benchmarks themselves, but it is not z
   upstream. Apache-2.0 places no restriction on training use.
 - Evaluation-overlap control: `kernels/` is AMD's production kernel library and is
   the corpus AgentKernelArena draws its FlyDSL tasks from. Six files whose stems
-  name an arena task — `fused_rope_cache_kernel`, `layernorm_kernel`,
+  name an arena task (`fused_rope_cache_kernel`, `layernorm_kernel`,
   `moe_sorting_kernel`, `rmsnorm_kernel`, `softmax_kernel`,
-  `topk_gating_softmax_kernel` — are excluded by name, as is any file importing
+  `topk_gating_softmax_kernel`) are excluded by name, as is any file importing
   them, and every remaining file and kernel name is screened against all 111 arena
   FlyDSL task names.
 - Previously unrecorded: this dependency was consumed before it appeared in this
@@ -471,7 +471,7 @@ PyTorch (ROCm build), pytorch-triton-rocm, Transformers, TRL, PEFT, Accelerate, 
 scikit-learn, XGBoost, and the ROCm stack including AITER, hipBLASLt and rocprofv3. Each is used
 under its own licence; none is vendored into this repository except as noted in §2. These are
 build- and run-time dependencies that are not redistributed with the corpora or the checkpoint, so
-their obligations are weaker than §2's — but a shipped container image would change that.
+their obligations are weaker than §2's, but a shipped container image would change that.
 
 ## 9. How this was verified
 
@@ -487,8 +487,8 @@ So that the next auditor can re-run rather than re-derive:
 2. **Subtree relicensing.** The unsloth tree at the pinned commit was enumerated via the GitHub
    trees API and filtered for licence-like filenames, which found three AGPL-3.0 subtree licences.
    Corpus rows were then matched by `source_metadata.path` prefix.
-3. **Corpus-wide copyleft scan.** All four shipped artifacts — 86,010 midtrain rows, 56,493 SFT
-   rows, 96,675 DPO pairs and 9,965 curriculum rows — were scanned for AGPL / GPL / LGPL / MPL /
+3. **Corpus-wide copyleft scan.** All four shipped artifacts (86,010 midtrain rows, 56,493 SFT
+   rows, 96,675 DPO pairs and 9,965 curriculum rows) were scanned for AGPL / GPL / LGPL / MPL /
    CC-BY-NC / CC-BY-SA / research-only / proprietary markers. The 29 unsloth rows in midtrain are
    the only matches anywhere; SFT, DPO and curriculum are clean.
 4. **Replay attribution.** Corpus rows were re-rendered through KORE's own formatters
@@ -513,14 +513,14 @@ actually used.
 
 Honest list. Everything not on it is resolved above.
 
-**10.1 — Evaluation benchmark licences (§7).** MMLU, HumanEval, LiveCodeBench, IFEval, BFCL and
+**10.1. Evaluation benchmark licences (§7).** MMLU, HumanEval, LiveCodeBench, IFEval, BFCL and
 MT-Bench are used through `kore/eval/retention.py` and hashed into
 `data/release/meta/benchmark_artifact.json.gz`. Their individual licences and citation requirements
 have not been resolved. *Not resolved because* it was out of scope for this pass, which prioritised
 material that flows into shipped training data; benchmarks are evaluation-only and are not
 redistributed as text. Tractable: six datasets, same method as §3.
 
-**10.2 — Sampling, not census, on two points (§4).** First: the `math` slice (4,677 rows from 1,910
+**10.2. Sampling, not census, on two points (§4).** First: the `math` slice (4,677 rows from 1,910
 traces) is attributed to OpenThoughts3-1.2M on content-signature and cache evidence, with no exact
 hash match. Second: the tulu-3 slice's per-row subset identity is confirmed for 19 rows out of
 8,135 — all Apache-2.0 NuminaMath-TIR — so a stray row from one of tulu-3's non-commercial subsets

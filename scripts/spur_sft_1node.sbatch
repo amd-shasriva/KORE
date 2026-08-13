@@ -401,6 +401,10 @@ requeue_self() {
 # somehow fails immediately on startup cannot resubmit itself forever.
 GENERATION="${4:-0}"
 KORE_MAX_GENERATIONS="${KORE_MAX_GENERATIONS:-12}"
+#: Set by resubmit_self on success so handle_requeue_warning can print which job
+#: to follow. Global rather than a return value because bash functions cannot
+#: return strings.
+RESUBMITTED_JOB_ID=""
 resubmit_self() {
     local out rc next
     next=$((GENERATION + 1))
@@ -432,6 +436,7 @@ resubmit_self() {
                   "$CFG" "$FROM_STAGE" "$OUT_DIR" "$next" 2>&1)"
     rc=$?
     if ((rc == 0)) && grep -qE 'Submitted batch job [0-9]+' <<<"$out"; then
+        RESUBMITTED_JOB_ID="$(grep -oE '[0-9]+' <<<"$out" | tail -1)"
         echo "[sft-1node] resubmitted as generation $next: $out"
         return 0
     fi
@@ -446,7 +451,21 @@ handle_requeue_warning() {
     # Resubmit first. Requeue is kept only as a fallback for the case where the
     # controller accepts a requeue but refuses a new submission (a full queue),
     # since a held job is still recoverable by hand and a lost run is not.
-    if resubmit_self; then exit 0; fi
+    #
+    # This process now exits 0 without ever reaching the SFT_RC=0 sentinel near the
+    # end of this script (that line is only reached after the trainer itself
+    # returns). To the scheduler that looks identical to a normal successful exit --
+    # Slurm records JobState=COMPLETED either way. Left unmarked, the supervisor's
+    # fallback completion check (which treats a "completed" Slurm state as the whole
+    # stage finishing, for controllers where SFT_RC=0 cannot be read) would declare
+    # the run done and stop supervising the generation that was just submitted,
+    # orphaning it mid-training. Printing which job to follow, in the same spot the
+    # single-trainer lock reports its holder, is what lets the supervisor tell "this
+    # job cycled to a new generation" apart from "the run is finished".
+    if resubmit_self; then
+        echo "SFT_RESUBMITTED=$RESUBMITTED_JOB_ID"
+        exit 0
+    fi
     echo "[sft-1node] resubmit failed; falling back to requeue" >&2
     if requeue_self; then exit 0; fi
     echo "[sft-1node] FATAL neither resubmit nor requeue landed" >&2

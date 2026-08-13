@@ -1,381 +1,248 @@
-# How KORE Builds Its Training Data
+# How KORE Builds the v5 Training Set
 
-KORE trains a model to write fast GPU kernels for AMD MI355X, in the three languages AMD ships: **Triton, HIP, and FlyDSL**. The v5 dataset is built from three kinds of example — **translation, repair, and optimization** — and every one of them was proven on hardware before it was kept.
-
-**The principle everything follows from: an example exists only if it was verified on a real GPU.** Nothing is kept because a model produced it. Every kernel is compiled, executed on an MI355X, and checked against an independent fp32 oracle. Anything that fails is discarded. We generate far more than we keep — the discarding *is* the method.
-
----
-
-## 1. The method, end to end
-
-```mermaid
-flowchart TB
-  T["<b>THE TASK</b> — one GPU operation to make fast<br/>fp32 oracle · harness · spec · slow Triton kernel<br/>─────────────<br/><b>1,546</b> curated tasks · <b>486</b> frontier · <b>13,570</b> mined pool"]
-
-  subgraph TRANS["1 · TRANSLATION — budget: 3 attempts per task"]
-    direction TB
-    TR1["rewrite the operation in <b>HIP</b> or <b>FlyDSL</b><br/>original oracle + harness reused unchanged"]
-    TR2{"compile and run<br/>against the fp32 oracle"}
-    TR1 --> TR2
-    TR2 -- "fail — retry with the real error" --> TR1
-    TR2 -- "fail 3x" --> TRX["<b>discarded</b> · task never mined<br/>810 HIP · 2,963 FlyDSL"]
-  end
-
-  T -- "11,780 attempts" --> TRANS
-  TR2 -- "<b>pass</b> · HIP 90% · FlyDSL 9%" --> S0[("<b>6,957</b> translation examples<br/>6,668 HIP · 289 FlyDSL")]
-  TR2 -- "pass" --> V[("<b>VERIFIED TASK</b><br/>now exists in 1-3 languages")]
-  T -- "already Triton" --> V
-
-  V --> ASK["<b>every verified task is then worked two more ways</b>"]
-
-  subgraph Q1["2 · REPAIR — budget: 250 attempts, 50 kept per task"]
-    direction TB
-    A1["break the kernel<br/>17 injected bugs (2/3) · real model failures (1/3)"]
-    A2{"does it<br/>really fail?"}
-    A3["model fixes it, given the<br/><b>verifier's real error text</b>"]
-    A4{"fix passes on<br/><b>every</b> shape?"}
-    A1 --> A2 -- "yes" --> A3 --> A4
-    A2 -- "no — the bug broke nothing" --> A1
-    A4 -- "no" --> AX["discarded"]
-  end
-
-  subgraph Q2["3 · OPTIMIZATION — budget: 8 rounds x 9 attempts = 72 calls, 3 kept"]
-    direction TB
-    C1["propose one improvement"]
-    C2{"correct <b>and</b><br/>≥2% faster?"}
-    C3["accept as new best"]
-    C4["show what happened,<br/>try another angle"]
-    C5{"after 8 rounds:<br/>beats AMD's<br/>own kernel?"}
-    C1 --> C2
-    C2 -- "yes" --> C3 --> C5
-    C2 -- "no" --> C4 --> C1
-    C5 -- "no" --> CX["<b>all 8 rounds discarded</b>"]
-  end
-
-  ASK --> Q1
-  ASK --> Q2
-
-  A4 -- "pass" --> S1[("<b>130,378</b> repair examples")]
-  C5 -- "pass" --> S2[("<b>6,712</b> win examples")]
-
-  S0 --> NEW[("<b>NEW THIS CYCLE</b><br/><b>144,047</b> examples · <b>556M</b> tokens<br/>30.8% HIP · 68.1% Triton · 1.1% FlyDSL")]
-  S1 --> NEW
-  S2 --> NEW
-  V4[("<b>carried forward from v4</b><br/>244,732 examples<br/>82,165 kernel · 162,567 replay")] --> FIN
-  NEW --> FIN[("<b>V5 DATASET</b><br/><b>388,779</b> examples<br/>226,212 kernel — <b>2.75x</b> v4's kernel data")]
-```
-
-
-
-Every arrow reaching a saved example has passed a hardware check. Translation rejects whole tasks — 3,773 of 11,780 attempts were thrown away. Repair and optimization reject individual answers, and optimization is harshest: a trajectory that fails the final gate loses all 8 rounds.
-
----
-
-## 2. Where tasks come from
-
-A **task** is one GPU operation — flash attention, a fused MoE layer, an fp8 GEMM. Every task carries its own grader, which is why we never have to ask a model whether an answer is good:
-
-
-| File             | What it is                                                                   |
-| ---------------- | ---------------------------------------------------------------------------- |
-| `reference.py`   | a slow, obviously-correct fp32 implementation — **the mathematical truth**   |
-| `driver.py`      | the harness that runs a candidate and reports accuracy and speed             |
-| `task.yaml`      | shapes, data type, the accuracy bar, and **which production kernel to beat** |
-| `seed_triton.py` | a working but slow starting kernel                                           |
-
-
-
-| Source           | Count      | Origin                                                                |
-| ---------------- | ---------- | --------------------------------------------------------------------- |
-| Curated registry | **1,546**  | 267 hand-written by us, 1,279 generated from operator specifications  |
-| Mined pool       | **13,570** | **GPUMODE/KernelBook** (9,527) — real PyTorch modules mined from permissively-licensed GitHub, pinned at commit `b76504d8` · **operator composition** (4,043) — chains of real PyTorch operators assembled programmatically from a fixed seed |
-
-
-*The 4,043 composed tasks are not model-written code: a program samples a chain of real `torch.nn` operators — for example AvgPool → Softmax → Conv2d 3×3 — and emits a module that is valid by construction and reproducible from a seed. Every one still passed the same execution check, deduplication and benchmark-contamination screen as a mined module; 9,000 were generated and 4,043 survived.*
-
-Of the curated set, **486 are "frontier"** — a hard filter on operator family, keeping only what dominates LLM serving cost:
-
-
-| attention | MoE | quantization | GEMM | norm-fusion |
-| --------- | --- | ------------ | ---- | ----------- |
-| 214       | 115 | 94           | 52   | 11          |
-
-
-**The baseline is what separates a strong task from a weak one.** Frontier tasks are raced against **AITER and hipBLASLt — the kernels AMD actually ships** — at real model scales (16.7M to 68.7B elements). Beating those by 1.2× is a genuine engineering result. The mined pool is raced against unoptimized PyTorch at roughly 1M elements with a 17µs median, where a "3,000× speedup" describes a weak baseline rather than a good kernel. That is why frontier tasks are worked first.
-
-**Provenance is pinned and decontaminated.** External corpora are fixed at specific commit hashes, so the dataset is reproducible. Every mined module is screened against our held-out evaluation tasks *and* the public KernelBench benchmark: 13,592 of 27,162 candidates were rejected as duplicates, nondeterministic oracles, unsafe code, or benchmark overlap. Two whole operator families and 45 named tasks are permanently withheld so evaluation stays honest.
-
----
-
-## 3. Translation → 6,957 examples
+`data/v5_sft.jsonl` and `data/v5_eval.jsonl` (specified in `docs/DATASET_SPEC.md`)
+are assembled, not generated fresh. Every row traces back to a kernel that was
+already compiled, executed on an MI355X, and checked against an independent fp32
+oracle by an earlier agentic datagen pass. This document explains the five-stage
+build that turns that already-verified material into the shipped mixture, and
+the two post-build passes that hold out an evaluation split and remove a class
+of defective row the build itself could not see.
 
 ```mermaid
 flowchart LR
-  A["the task's<br/>working Triton kernel"] --> B["model rewrites it in<br/>HIP or FlyDSL"]
-  B --> C{"compile + run against<br/>the same fp32 oracle"}
-  C -- "fails" --> D["show the real error,<br/>retry up to 3x"]
-  D --> B
-  C -- "fails 3x" --> E["discard — task is<br/>never mined"]
-  C -- "passes" --> F[("save the pair<br/>+ unlock the task<br/>for steps 2 and 3")]
+  A["agentic datagen\nrepair / wins / groups\n+ HIP/FlyDSL twins"] --> S1["stage 1\ngather, dedup, thin"]
+  S1 --> S2["stage 2 / 2b\ntranslation shapes\nFlyDSL language anchor"]
+  S1 --> S3["stage 3\ngold wins from groups\nstep-centric from agentic"]
+  S2 --> S4["stage 4\ncomposition, safety screen,\nreplay budget, dedup"]
+  S3 --> S4
+  S4 --> SE["split_eval\nheld out by content hash"]
+  SE --> FT["fix_truncated\ndrop cut-off targets"]
+  FT --> V["verify\n12 correctness gates"]
 ```
 
-
-
-**Starts from:** the task's working Triton kernel.
-
-**The loop:**
-
-1. **Ask for the same operation in the target language**, giving the model the source and the exact call signature it must expose.
-2. **Compile and run it** against the *original* task's oracle and harness — only the kernel is new, so both versions are graded by the identical yardstick.
-3. **On failure, retry** with the verifier's real error, up to 3 attempts.
-4. **On success**, the pair becomes a training example *and* the task becomes available in that language for steps 2 and 3.
-
-**Stops when:** it passes, or 3 attempts are spent.
-
-**Saves:** the Triton kernel as the question, the verified HIP or FlyDSL kernel as the answer, plus the target language, the accuracy it achieved, and the operation it implements.
-
-
-| Target              | Attempted | Verified    | In the dataset | Why the gap                                                                    |
-| ------------------- | --------- | ----------- | -------------- | ------------------------------------------------------------------------------ |
-| **Triton → HIP**    | 8,525     | 7,715 (90%) | **6,668**      | C++ from the PyTorch source — close to what the model already knows            |
-| **Triton → FlyDSL** | 3,255     | 292 (9%)    | **289**        | AMD's MLIR builder: unfamiliar API, manual tiling, no automatic bounds masking |
-
-
-*(The dataset column is the promoted set — verified twins that also belong to a task family we mine.)*
-
-**Why these examples are unusually strong.** A translation pair is not two kernels that resemble each other; it is a **proven semantic equivalence**. Both sides were executed on the same hardware against the same oracle and agreed. That is exactly the supervision a translation task needs, and it is what the benchmark tests directly in its `torch2hip` and `triton2flydsl` categories.
-
-This step also explains the shape of the dataset: we did not choose 68% Triton. We attempted FlyDSL 3,255 times and 289 survived.
-
----
-
-## 4. Repair → 130,378 examples
-
-```mermaid
-flowchart TB
-  T["<b>the verified task</b><br/>a working kernel"] --> SRC{"where does the<br/>broken version<br/>come from?"}
-  SRC -- "two thirds" --> INJ["<b>inject a bug</b><br/>1 of 17, matched to the operator"]
-  SRC -- "one third" --> NAT["<b>take a real failure</b><br/>the model just produced one"]
-  INJ --> CHK{"run it —<br/>does it actually fail?"}
-  NAT --> CHK
-  CHK -- "no, still works" --> SRC
-  CHK -- "yes, it fails" --> ASK["give the model the broken kernel<br/>+ <b>the verifier's real error text</b>"]
-  ASK --> FIX["model returns a fix"]
-  FIX --> RUN{"run the fix on hardware,<br/>on every shape"}
-  RUN -- "fails" --> DROP["discard"]
-  DROP --> SRC
-  RUN -- "passes" --> SAVE[("<b>SAVE</b><br/>3-turn conversation<br/>+ error text + measured accuracy")]
-  SAVE --> BUD{"50 examples,<br/>or 250 attempts?"}
-  BUD -- "not yet" --> SRC
-  BUD -- "done" --> END["task complete"]
-```
-
-
-
-**Starts from:** a working kernel for the task.
-
-**The loop, one example at a time:**
-
-1. **Break it.** Two thirds by injecting one of 17 bugs chosen to suit the operator; one third by capturing a kernel the model genuinely got wrong.
-2. **Prove it is broken.** Run it. If the injected bug did not actually break anything, discard and try another — we never train on a "fix" for something that was never broken.
-3. **Ask for a fix**, handing over the broken kernel and the verifier's error text verbatim, not a summary.
-4. **Check the fix** on hardware, across every shape the task declares.
-5. **Keep or discard.** Stored only if it passes. A fix that crashes, or that works on one shape but not the rest, is dropped.
-
-**Stops when:** 50 examples accepted, or 250 attempts spent — whichever comes first.
-
-**Saves:** the three-turn conversation (broken code + error → fix + reasoning), the failure class, the verbatim error, and the measured accuracy of the accepted fix.
-
-### The 17 injected bugs
-
-These are real failure modes taken from how GPU kernels actually break:
-
-
-| What it attacks         | Example bug                                             | What goes wrong                             |
-| ----------------------- | ------------------------------------------------------- | ------------------------------------------- |
-| **Numerical precision** | accumulate in bf16 instead of fp32                      | answers drift, silently                     |
-|                         | drop the `+ eps` guard inside `rsqrt`                   | divide-by-zero on a zero-variance row → NaN |
-|                         | drop `abs()` from the max used for a quantization scale | wrong scale, whole tensor mis-scaled        |
-| **Memory safety**       | drop the bounds mask on the final partial tile          | reads past the end of the tensor            |
-|                         | invert a comparison — `<` becomes `>=`                  | selects exactly the wrong elements          |
-|                         | off-by-one in a load index                              | every value shifted by one                  |
-| **Tiling / compile**    | tile size 128 → 96 (not a power of two)                 | fails to compile                            |
-|                         | K tile not a multiple of 32                             | illegal for fp8 scale groups                |
-| **Parallelism**         | remove a synchronization barrier                        | race between wavefronts                     |
-|                         | turn an atomic add into a plain store                   | cross-workgroup reduction is lost           |
-| **Layout**              | swap two stride multipliers                             | operand is silently transposed              |
-| **Low precision**       | swap fp8 `e4m3` for `e5m2`                              | wrong encoding for this chip                |
-|                         | swap the high and low int4 nibbles                      | garbage dequantization                      |
-
-
-Each is a **one-line change that looks entirely plausible in code review and is definitively wrong on hardware**. Three real examples, from a live run against the fused RMSNorm + fp8 quantization kernel:
-
-```diff
-- y = x * rsqrt(mean(x^2) + eps) * w      # drop the epsilon guard
-+ y = x * rsqrt(mean(x^2)) * w
-
--     ss += tl.sum(x * x, axis=0)          # reduce over the wrong axis
-+     ss += tl.sum(x * x, axis=1)
-
--     mask = offs < N                      # invert the bounds check
-+     mask = offs >= N
-```
-
-The bug is always chosen to suit the operator — an attention kernel gets attention bugs, a quantization kernel gets quantization bugs — so the model is never asked to debug something implausible. And because the change is a single token, the model cannot find it by pattern-matching a diff; it has to reason from the error message back to the cause, which is exactly the skill we want.
-
----
-
-## 5. Optimization → 6,712 examples
-
-```mermaid
-flowchart TB
-  T["<b>the verified task</b><br/>starting kernel"] --> M0["measure it —<br/>this is the number to beat"]
-  M0 --> PROP["model proposes<br/>one improvement"]
-  PROP --> RUN{"run it —<br/>is it correct?"}
-  RUN -- "no" --> FB1["tell it the exact error<br/>next round is a repair"]
-  RUN -- "yes" --> FAST{"at least <b>2% faster</b><br/>than the best so far?"}
-  FAST -- "no" --> FB2["tell it: correct but not faster<br/>next round tries something structural"]
-  FAST -- "yes" --> BEST["accept as the new best"]
-  FB1 --> RND
-  FB2 --> RND
-  BEST --> RND{"8 rounds done?"}
-  RND -- "not yet" --> PROP
-  RND -- "done" --> VEND{"does the final kernel beat<br/><b>AMD's own production kernel?</b>"}
-  VEND -- "no" --> DROP["<b>discard the entire trajectory</b><br/>8 rounds of work, thrown away"]
-  VEND -- "yes" --> CLEAN["strip the dead ends —<br/>keep only steps that helped"]
-  CLEAN --> SAVE[("<b>SAVE</b><br/>the winning path<br/>+ before/after timings + proof")]
-```
-
-
-
-**Starts from:** a working kernel, and its measured time — the number to beat.
-
-**The loop, 8 rounds:**
-
-1. **The model proposes one improvement**, seeing the current kernel and how the last attempt went.
-2. **Run it on hardware.** Three outcomes, each steering the next round:
-  - *wrong answer* → it is shown the exact error, and the next round is a repair
-  - *correct but under 2% faster* → it is told the change did not pay, and the next round tries something structural rather than another tweak
-  - *correct and at least 2% faster* → accepted as the new best, and the next round builds on it
-3. **After 8 rounds, the final check:** is the result faster than AMD's production kernel? If not, **the whole trajectory is discarded** — all 8 rounds.
-4. **Clean up what survives.** Real optimization wanders, so we strip the dead ends and keep only the steps that actually helped, and we drop any step whose explanation does not match what its code actually changed.
-
-**Stops when:** 3 distinct verified wins for the task, or 9 attempts spent — up to 72 model calls to keep at most 3 examples.
-
-**Saves:** the cleaned-up path, the winning kernel, before-and-after timings, what it was raced against, and the statistical evidence that the speedup was real rather than measurement noise.
-
-**Why so few?** 6,712 wins against 130,378 repairs is not an accident of effort — it is the bar. Beating a tuned vendor kernel is genuinely hard, and most trajectories end with nothing to keep. These are the most valuable examples in the dataset precisely because they are the hardest to earn.
-
----
-
-## 6. When we stop
-
-Every stage has an explicit budget. Nothing runs open-ended.
-
-
-| Stage        | Budget                                 | Stops when                                |
-| ------------ | -------------------------------------- | ----------------------------------------- |
-| Translation  | 3 attempts, error fed back each time   | it passes, or attempts run out            |
-| Repair       | 250 attempts per task                  | 50 examples accepted, or budget spent     |
-| Optimization | 8 rounds per attempt, up to 9 attempts | **3 verified wins**, or 72 attempts spent |
-
-
-The optimization budget is the strictest: roughly **72 model calls per task to keep at most 3 examples**, because the bar is beating a tuned vendor kernel. That ratio is what "verified" costs.
-
-A task is finished once its examples are written, and finished tasks are skipped on every later pass, so no work is ever repeated.
-
----
-
-## 7. Exactly what we store
-
-Each record keeps not just the text but **the measurements that justified keeping it**, so any example can be audited or re-filtered later without re-running anything.
-
-**Translation example** — a proven equivalence:
-
-
-| Stored                       | Example                                                      |
-| ---------------------------- | ------------------------------------------------------------ |
-| the question                 | the original Triton kernel, with the required call signature |
-| the answer                   | the verified HIP or FlyDSL kernel                            |
-| `target_language`            | `hip` or `flydsl`                                            |
-| `snr_db`                     | measured agreement with the fp32 oracle                      |
-| `operation`, `arch`, `dtype` | e.g. `flash_attn_prefill`, `gfx950`, `bf16`                  |
-
-
-**Repair example** — one three-turn conversation:
-
-
-| Stored                       | Example                                                                   |
-| ---------------------------- | ------------------------------------------------------------------------- |
-| the conversation             | system prompt, the broken kernel + real error, the fix with its reasoning |
-| `failure_class`              | `compile_fail` or `snr_fail`                                              |
-| `error_text`                 | the verifier's actual output, verbatim                                    |
-| `parent_hash`                | fingerprint of the broken kernel                                          |
-| `child_snr_db`               | measured accuracy of the accepted fix, e.g. `31.29`                       |
-| `operation`, `arch`, `dtype` | e.g. `fused_rmsnorm_quant`, `gfx950`, `fp8`                               |
-
-
-**Win example** — the optimization path plus full timing evidence:
-
-
-| Stored                               | Example                                                                   |
-| ------------------------------------ | ------------------------------------------------------------------------- |
-| `trajectory`                         | the multi-round conversation, reconstructed to only the steps that helped |
-| `final_source`                       | the winning kernel                                                        |
-| `initial_wall_us` → `final_wall_us`  | e.g. `412.6` → `171.4`                                                    |
-| `speedup`                            | e.g. `1.58×` (median across the dataset; p90 is 6.58×)                    |
-| `snr_db`                             | accuracy of the winning kernel                                            |
-| `baseline_wall_us`, `baseline_type`  | what it was raced against, and what that baseline actually was            |
-| `timing_classification`              | `faster` — the statistical verdict, not just a ratio                      |
-| four CV / confidence-interval fields | proof the measurement was stable, not noise                               |
-
-
----
-
-## 8. The v5 dataset
-
-v5 is this cycle's new data **plus** everything v4 already held. New this cycle:
-
-**144,047 verified examples — 556M tokens — from roughly 2,600 distinct tasks.**
-
-
-|                  | HIP        | Triton     | FlyDSL    | Total       |
-| ---------------- | ---------- | ---------- | --------- | ----------- |
-| **translation**  | 6,668      | —          | 289       | **6,957**   |
-| **repair**       | 37,549     | 91,580     | 1,249     | **130,378** |
-| **optimization** | 150        | 6,562      | 0         | **6,712**   |
-| **Total**        | **44,367** | **98,142** | **1,538** | **144,047** |
-| *share*          | *30.8%*    | *68.1%*    | *1.1%*    |             |
-| *tokens*         | *200M*     | *349M*     | *8M*      | ***556M***  |
-
-
-**Language coverage is the headline.** HIP is **30.8%** of the new data, against a benchmark that is 22% HIP and carries its two hardest bars there. That was our weakest area before this cycle.
-
-### v5 in full
-
-The new examples are added to everything v4 already held, giving:
-
-|                                        | Examples    |
-| -------------------------------------- | ----------: |
-| new this cycle — translation, repair, optimization | **144,047** |
-| carried from v4 — kernel work          | 82,165      |
-| carried from v4 — replay (chat, code, maths) | 162,567 |
-| **v5 total**                           | **388,779** |
-
-Of that, **226,212 are kernel examples — 2.75× the 82,165 v4 trained on.** The 162,567 replay rows are general chat, code and maths, carried forward deliberately: without them a model trained this hard on kernels stops being a usable general assistant.
-
-**How correctness is judged.** Not a single check. Each kernel runs at least **5 times with fresh random inputs** and we keep the **worst** result. It must clear a per-task signal-to-noise threshold (22–40 dB, set individually per operation) *and* a per-element precision bound, and its handling of NaN and infinity must match the oracle exactly. Timing alternates with the baseline, flushing the cache between runs, and the harness is hardened against a kernel that tries to detect that it is being benchmarked.
-
-*The optimization search also produced 99,335 ranked comparisons of six kernels each, held in reserve. They are 94% Triton, so training on them would deepen the language we already have most of.*
-
----
-
-## 9. What is next
-
-**The dataset is complete.** Two steps follow.
-
-**1 — Supervised fine-tuning** on the full v5 mixture of 388,779 examples.
-
-**2 — Reinforcement learning.** This is where the real leverage is, and it needs no new data collection: **the task library is already a reward function.** Every one of the 486 frontier tasks ships an fp32 oracle, a correctness gate, and a vendor baseline to beat — which is exactly the signal RL requires. The same infrastructure that verified this dataset can score a model's attempts live, with a reward that is measured on hardware rather than predicted by another model.
-
-That is the strategic point worth holding onto: what was built here is not only a dataset. It is a verified environment, and the dataset is its first output.
+## 1. Where a row starts: agentic datagen
+
+Nothing in v5 is written by asking a model for a kernel and trusting it. Every
+task carries an oracle and a harness (`kore/env/kore_env.py`), and a teacher's
+proposal is compiled, run, and timed before it can become a record. Three
+generators produce the raw material stage 1 reads:
+
+- **`kore/data/gen_repair.py`**, using **`kore/data/mutate.py`**'s 17 injected
+  bug families (precision, masking, tiling, parallelism, layout, low-precision
+  encoding) plus naturally-failed teacher samples, produces a `RepairRecord`
+  only when the teacher's fix passes the same validation the break failed.
+- **`kore/data/gen_wins.py`** runs a short greedy evolve loop and reconstructs a
+  clean, convergent `WinRecord` from the raw search log: it keeps only the
+  strictly-improving path to the kept kernel, drops any turn whose stated change
+  is not actually present in its diff, and regenerates every feedback string
+  from the kept measurements so the footer multiplies out exactly. A win is
+  admitted only when it beats the task's declared production baseline, not
+  merely the seed.
+- **`kore/data/gen_groups.py`** samples several candidate rewrites of one
+  parent, verifies each, and ranks them into a `RankedGroupRecord` with the
+  implied preference pairs (`faster-correct > slower-correct > incorrect >
+  non-compiling`). These feed DPO in the legacy v3/v4 recipe; stage 3 (below)
+  is what makes them useful to v5.
+
+A separate materializer (`kore/data/twins.py`) asks a teacher to re-express a
+task's Triton kernel in HIP or FlyDSL against the *same* oracle and harness,
+and keeps the result only if it verifies. A verified twin is what stage 2
+re-poses into the `torch2kernel`, `port`, and `instruction` shapes.
+
+## 2. Stage 1: gather, dedup, thin (`scripts/v5_stage1_gather.py`)
+
+Stage 1 reads every `repair` / `wins` / `groups` shard across 13 data roots:
+236,425 raw records. Two properties of that raw corpus decide what happens
+next.
+
+**Cross-root duplication.** A root's resume ledger is scoped to itself, so a
+task finished under one data root looks untouched to a job pointed at another,
+and gets independently regenerated. `dedup_by_source_hash` collapses every
+record to its representative kernel source and keeps one copy; this removes
+81,550 duplicate rows.
+
+**Repair redundancy.** The repair shards carry far more answers than distinct
+problems: 9.24 answers per distinct `(task, broken-kernel)` problem, with over
+half the rows sitting on the 12.7% of problems answered 25 or more times,
+because the generator's quota counts accepted fixes, not distinct problems, and
+keeps re-answering a bug already in the shard once a task's mutators are
+exhausted. Two or three distinct fixes to one bug is real signal; dozens is a
+memorization risk at this scale, so `thin_repairs` caps how many distinct fixes
+per problem survive (four for most dialects, six for FlyDSL, where coverage
+still outranks redundancy), preferring distinct fixes over repeats and the
+higher-accuracy fix within a tie. This removes 53,923 further rows, taking
+repair from 9.24 to 1.95 answers per problem.
+
+Stage 1 also drops any win whose speedup exceeds a 10x credibility ceiling (a
+kernel reported three orders of magnitude faster than its reference is a
+statement about a broken or non-kernel baseline, not a kernel achievement),
+and caches the *superset* of what the strict and audited admission policies
+would keep, since stage 4's screen is authoritative and is the only stage that
+sees the benchmark contamination index.
+
+## 3. Stage 2 and 2b: shapes that already exist, re-posed
+
+**`scripts/v5_stage2_translate.py`** reads verified HIP and FlyDSL twin
+directories directly. A twin holds `reference.py` (the PyTorch that defines the
+operation, and what the oracle executes) beside a kernel that already passed
+the correctness gate on real gfx950; that pair *is* the `torch2kernel` shape,
+not an approximation of it, and the twin's Triton original gives the `port`
+shape. Nothing is generated and nothing is re-run: the build cost is zero,
+because the verified work already exists and only the question is rewritten.
+
+Every twin contributes `torch2kernel`, since that is the shape v5 needs most; a
+second shape (`port` or `instruction`, chosen deterministically by a hash of
+the kernel so the choice is stable across rebuilds) alternates so both stay
+populated without stacking three near-identical answers on one kernel. The
+completion is byte-identical across shapes for the same kernel, so a third copy
+would not add a third lesson, only a third copy of the same target tokens.
+
+**`scripts/v5_stage2b_flydsl.py`** builds the FlyDSL language anchor described
+in `docs/SOURCE_PROVENANCE.md`: it mines the DSL's own test suite, examples, and
+docs, plus the wider FlyDSL ecosystem, while excluding AMD's own production
+kernel library (the corpus the benchmark's FlyDSL tasks are drawn from) and
+screening every remaining kernel by filename and by normalized body against the
+benchmark's own FlyDSL sources.
+
+## 4. Stage 3: recovering signal the SFT path never read
+
+Two large, already-verified artifacts reached zero training rows before this
+stage existed.
+
+**Ranked groups.** `build_sft` (the legacy v3/v4 path) consumes repair and win
+records and silently drops every `RankedGroupRecord`, so tens of thousands of
+measured candidate kernels taught ranking, through DPO, and never generation.
+Each group's rank-0 candidate is its robustly-best correct kernel; framing a
+slower correct sibling as the parent turns the group into an ordinary
+optimization demonstration. `kore/data/gold_wins.py` mints one only when the
+gain over that sibling clears 1.05x by roughly two standard deviations of the
+paired-ratio measurement noise, not merely ties it, capped at 40 gold wins per
+task so no single task dominates.
+
+**Agentic trajectories.** 108,822 multi-turn episodes hold the only records
+carrying per-turn correctness and speedup, and stage 1 never opens them because
+it reads only `repair`, `wins`, and `groups`. Half of what the evaluation
+benchmark asks is "here is a working kernel, make it faster under execution
+feedback," which is exactly an agentic episode. `kore/data/step_centric.py`
+decomposes each into up to N-1 examples, keeping only the correctness-preserving,
+high-gain revisions; an episode that produced no such revision (a first-turn win
+has no parent to improve on) is instead emitted whole, truncated at its winning
+turn. A trajectory contributes one or the other, never both, because a step
+row's messages are a strict prefix of the full one and exact-content dedup does
+not catch a prefix.
+
+Both recovered shapes, and every step-centric row, pass through the same
+history-flattening rule: the trainer puts full loss on every assistant turn
+with no per-turn opt-out, so an earlier assistant turn in a multi-turn record is
+by construction a rejected revision. `flatten_history` folds prior turns into
+the user turn as quoted context, so the model still sees the search history but
+is asked to produce only the revision worth imitating.
+
+## 5. Stage 4: assembling the mixture (`scripts/v5_stage4_mixture.py`)
+
+This is where composition becomes a target to solve for rather than whatever
+volume happened to survive stages 1-3.
+
+**Final safety screen.** Every row, regardless of which stage produced it, is
+re-checked against `kore.data.v5_policy.admits` and the AgentKernelArena
+contamination index (`docs/SOURCE_PROVENANCE.md`). Upstream stages filter too,
+but they were written at different times against different rules, and stage
+1's cache predates the benchmark screen entirely; re-asking here means one place
+decides what is trainable and nothing that slipped an earlier stage can reach
+the mixture.
+
+**Sanitize.** Every row is reduced to exactly one assistant turn, `_provenance`
+is coerced to an object, and a target is dropped if it delegates to a torch
+operator for the computation the kernel exists to do (`kore.data.v5_emit.cheats`,
+`docs/SOURCE_PROVENANCE.md`) or is degenerate: too short, or a bare
+`revert`/`no-op` tool call. The first build before this rule shipped a single
+`revert` target 543 times.
+
+**Composition solve.** `kore/data/v5_plan.py` targets a fixed skill mixture
+(optimize 25%, torch2kernel 22%, repair 18%, port 13%, instruction 13%, language
+9%) rather than the benchmark's own task proportions, because matching a
+benchmark's distribution is how a model overfits to it: MultiPL-T's OCaml model
+gained 13 points on the benchmark whose format it trained on and lost 7.7 points
+on a differently-formatted benchmark testing the same language. The solver
+keeps every distinct row (downsampling only throws away verified examples for
+no benefit) and upsamples a short shape toward its target, capped at 2x its
+distinct-row count; an earlier pass capped at 4x and pushed overall repetition
+in the mixture to 45%, so the cap was tightened rather than the target.
+
+**FlyDSL rebalancing.** Two corrections apply after the shape plan, because
+FlyDSL's problem is shape *and* format, not only volume. Repair-shaped
+(`ANALYSIS:`-preamble) FlyDSL rows are held to at most half of FlyDSL's tokens;
+they measured 81.8% before this fix, which meant the dominant FlyDSL training
+signal was a repair preamble on a benchmark whose FlyDSL tasks ask for a direct
+port. Separately, a dialect floor tops FlyDSL up toward 5% of the kernel body
+by repeating its distinct rows, capped at 4x their distinct count so the anchor
+cannot compound into memorization.
+
+**Length gate.** Rows are measured with the real tokenizer
+(`Qwen/Qwen3-Coder-30B-A3B-Instruct`, revision
+`b2cff646eb4bb1d68355c01b18ae02e7cf42d120`) against a 16,896-token cap, not a
+character estimate. This runs once on the kernel side (so replay is budgeted
+against the kernel side's true size) and again on the final mixture.
+
+**Replay, budgeted by tokens.** Kernel rows average roughly 3,500 tokens against
+roughly 730 for a replay row, so matching a row-share target undershoots the
+token share by about five times: an earlier build hit 42% of rows but only
+13.5% of tokens, well under the range where replay reliably protects retained
+capability. Replay is therefore selected by tokens against a 14%-of-tokens
+target (`docs/DATASET_SPEC.md` reports the realized figure, which is lower).
+
+**Target-repeat cap.** No single kernel body, identified by its extracted code
+rather than its whole message (a kernel can recur under different prompts and
+still look distinct if the whole message is hashed), may appear more than 12
+times across kernel and replay combined. The build this caught: one target
+shipped 543 times, and the replay side separately shipped the single word
+"arnold" 304 times.
+
+The result is written to `data/v5_sft.jsonl` alongside a receipt
+(`data/v5_sft.receipt.json`) recording every count above.
+
+## 6. Holding out an evaluation slice (`scripts/v5_split_eval.py`)
+
+The run's stated top risk is instruction-following collapse, and until this
+script existed there was no signal on it until the run finished, tens of hours
+later. `v5_split_eval.py` reservoir-samples a stratified slice (the eight
+groups in `docs/DATASET_SPEC.md`) in one streaming pass and **removes** the
+sampled rows from the training file; it does not merely copy them out, because
+a row left in both files measures memorization, not generalization.
+
+Rows are held out by content hash, not by line number. The mixture's own
+upsampling means a line-number split leaves a row's twin behind in training: a
+first attempt did exactly that, and 296 of 900 held-out rows still had a
+surviving copy in `data/v5_sft.jsonl`. Hashing the full message list and
+removing every matching hash from the training file closes that gap; the
+verified result is zero message-hash overlap between the two files.
+
+## 7. Fixing a defect the build could not see (`scripts/v5_fix_truncated.py`)
+
+The length gate in stage 4 asks whether a row is *under* the token cap, and a
+truncated row passes that check by construction, since truncation is how it
+got under the cap in the first place. `docs/DATASET_SPEC.md` describes the
+defect this uncovered (chain-of-thought math rows cut off mid-token) and the
+heuristic that catches it. The script runs against both files: it drops
+truncated rows from training, drops truncated rows from eval, and backfills
+eval's math group from clean training rows so no group shrinks, removing those
+backfilled rows from training in turn to keep the two files disjoint.
+
+## 8. Verification (`scripts/v5_verify.py`, `scripts/v5_verify_all.sh`)
+
+`v5_verify.py` runs the correctness gates in `docs/DATASET_SPEC.md` against a
+file and reports composition, duplication, and token statistics alongside them.
+`v5_verify_all.sh` is the full pre-launch check: it reassembles the shipped
+gzip parts and confirms they reproduce the working files byte-for-byte, confirms
+the two files share no message hash, and runs the gate battery against both.
+Every gate exists because an earlier draft of this exact pipeline failed it;
+none of them are hypothetical.
+
+## What this build does not need to do again
+
+The dataset is complete for this cycle. The next step is reinforcement
+learning, and it needs no new data collection: every task in the registry
+already ships an oracle, a correctness gate, and a baseline to beat, which is
+the reward signal RL requires. What was verified here is a task library, not
+only a training set, and the same infrastructure that gated every row above
+can score a policy's live attempts the same way.

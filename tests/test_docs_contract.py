@@ -429,7 +429,7 @@ EXPECTED_MIDTRAIN_ROWS = 86_010
 EXPECTED_SFT_ROWS = 56_493
 EXPECTED_DPO_PAIRS = 96_675
 # tests/test_sft_launch_readiness.py, default suite (excludes the release test).
-EXPECTED_SFT_READINESS_TESTS = 36
+EXPECTED_SFT_READINESS_TESTS = 37
 
 
 def _registry_baseline_counts() -> dict[str, int]:

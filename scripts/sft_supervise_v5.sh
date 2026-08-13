@@ -1,44 +1,31 @@
 #!/usr/bin/env bash
-# Start the v5 SFT run under supervision on burst nodes, and keep it alive.
+# Start the v5 SFT run under supervision on primus, and keep it alive.
 #
 # One entry point rather than a remembered command line, because the details are not
 # guessable and getting one wrong is expensive:
 #
-#   * account amd-burst WITH qos amd-burst-qos. This reverses an earlier choice of
-#     amd-primus, and the reason is placement latency under a live infrastructure
-#     incident. Both guaranteed pools are capped and full with three jobs queued ahead
-#     of us, so a new submission there waits ~19h; burst has cap headroom (124 of ~282)
-#     and placed three consecutive submissions in under a minute each. When the failure
-#     being recovered from is a node dying, a 19h requeue is indistinguishable from
-#     losing the run.
+#   * account amd-primus WITH qos amd-primus-qos, and nothing else. ONE job, queued,
+#     waiting for a real allocation. The account must match the QoS; pairing
+#     amd-general with amd-burst-qos is a phantom association that the controller
+#     accepts and never schedules.
 #
-#   * HISTORICAL: account amd-primus WITH qos amd-primus-qos, chosen when that was the
-#     pairing that DEMONSTRABLY scheduled. The run landed there (job 9229 on crsuse2-m2m-037) after
-#     burst never did: even a 1-GPU, 1-CPU, 5-minute burst probe stayed PENDING while
-#     113 other burst jobs ran, so the amd-burst association is present but not
-#     functioning for placement. Recovery must target a pool we have actually started
-#     in, or a preemption would resubmit into a queue that never runs.
+#     This settles a question that was reopened twice, so the reasoning is worth
+#     keeping. Burst looked attractive because it placed jobs in under a minute while
+#     the guaranteed pools were hours deep. That speed was an illusion: burst is the
+#     lowest-priority tier, and the partition runs 135 alloc / 56 mix / 36
+#     down-or-drained / 2 idle. Since the job needs --exclusive (without it we land on
+#     nodes whose eight GPUs already hold 207-288 GiB of another tenant's memory), it
+#     can only be placed on a WHOLLY idle node -- and on a cluster this saturated,
+#     healthy nodes never sit idle, because they are taken the moment they free. The
+#     idle ones are idle because they are broken.
 #
-#     primus is also a GUARANTEED pool, so unlike burst the run cannot be preempted --
-#     which is a better outcome than the burst plan this file previously described.
+#     Measured: six consecutive burst placements died on their node -- ...301, ...297,
+#     ...296, ...331, ...291, ...317, four still DOWN afterwards -- one of them before
+#     the job produced a single line of output. Total progress banked: none. Fast
+#     placement onto hardware that dies is slower than waiting for hardware that works.
 #
-#   * HISTORICAL, for context: account amd-burst WITH qos amd-burst-qos. Both parts matter: burst QoS paired
-#     with the amd-general account was a PHANTOM association -- accepted by the
-#     controller and never scheduled, because zero of the running burst jobs used that
-#     account. A job of ours sat PENDING with the meaningless Reason=None for nine
-#     hours while 42 jobs submitted later ran. Ops added this user to the amd-burst
-#     account on 2026-08-13, which is what makes the pairing real.
-#
-#     Why burst rather than the guaranteed pools: amd-general-qos is capped at 8 nodes
-#     and amd-primus-qos at 16, both were full, and both are dominated by holds that do
-#     not rotate (general had a 15-day job and two unlimited; primus had two 30-day,
-#     three 14-day and two unlimited). Measured churn was one opening every ~4h per
-#     pool with 7 competitors ahead, i.e. ~32h. Burst is using 113 of ~282 nodes, so
-#     the cap no longer binds and only real free hardware does.
-#
-#     Burst is preemptible, which is the trade and the reason this supervisor exists.
-#     amd-general and amd-primus jobs stay queued as backups; the training lock in the
-#     launcher guarantees that whichever starts first is the only one that trains.
+#     primus is also GUARANTEED, so unlike burst the run cannot be preempted once it
+#     starts, which is what a multi-day run needs.
 #
 #   * KORE_OUTPUT_DIR must match the config's output_dir. The supervisor uses it as
 #     the authoritative "this run finished" test, so a mismatch means it can never
@@ -82,7 +69,7 @@ export STALL_SECS="${STALL_SECS:-2700}"
 # cluster with zero fully-idle nodes that is strictly worse than waiting. The run
 # wants a whole node (--exclusive), so a long pending wait is expected and correct.
 export STUCK_PENDING_SECS="${STUCK_PENDING_SECS:-0}"
-export KORE_SFT_QOS="amd-burst-qos"
+export KORE_SFT_QOS="amd-primus-qos"
 
 LOG="$REPO/runs/supervise_v5_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "$REPO/runs"
@@ -92,6 +79,6 @@ echo "[supervise] output_dir=$KORE_OUTPUT_DIR"
 echo "[supervise] log=$LOG"
 
 exec bash scripts/watch_and_resume.sh sft \
-    sbatch --account=amd-burst --qos=amd-burst-qos "$REPO/scripts/spur_sft_1node.sbatch" \
+    sbatch --account=amd-primus --qos=amd-primus-qos "$REPO/scripts/spur_sft_1node.sbatch" \
     configs/sft_coder30b_a3b.json - - \
     >>"$LOG" 2>&1

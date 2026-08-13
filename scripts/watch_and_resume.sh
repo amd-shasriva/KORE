@@ -54,30 +54,115 @@ log_age() {      # seconds since the log was last written; huge if absent
 
 submit() {
     local out id
-    out="$("${SUBMIT[@]}" 2>&1 | tail -3)"
+    # EXCLUDE is applied here. It used to be assigned when a node wedged us and then
+    # never read, so the retry could land straight back on the bad node -- which is
+    # the specific thing it exists to prevent, since a prior tenant's leftover GPU
+    # memory survives --exclusive.
+    if [ -n "$EXCLUDE" ]; then
+        log "excluding node(s): $EXCLUDE"
+        out="$("${SUBMIT[@]}" --exclude="$EXCLUDE" 2>&1 | tail -3)"
+    else
+        out="$("${SUBMIT[@]}" 2>&1 | tail -3)"
+    fi
     # --parsable prints a bare id; without it, "Submitted batch job <id>".
     id="$(printf '%s' "$out" | grep -oE '[0-9]{4,}' | tail -1)"
     [ -n "$id" ] || { log "submit produced no job id: $out"; return 1; }
     printf '%s' "$id"
 }
 
+# Did the TRAINING finish, as opposed to the job merely leaving the queue?
+#
+# This must not rest on Slurm accounting alone. The launcher prints SFT_RC=0 only
+# after the trainer returns and the model is saved, so it is the one signal that
+# means "the work is done" rather than "the scheduler stopped telling us about it".
+# Without an authoritative completion test, a supervisor whose accounting lookup
+# comes back empty will happily resubmit a FINISHED run until MAX_RESUBMITS, each
+# time reloading 61GB and retraining from the last checkpoint -- days of wasted GPU
+# on a job that already succeeded, unattended.
+run_completed() {
+    # Run-SPECIFIC and authoritative: a finished run leaves a consolidated model at
+    # the top of output_dir, not just checkpoint-* subdirectories. Checked first
+    # because output_dir names the run (…_v5), so it cannot be satisfied by some
+    # earlier run's artifacts.
+    if [ -n "${KORE_OUTPUT_DIR:-}" ] \
+        && [ -s "$KORE_OUTPUT_DIR/config.json" ] \
+        && ls "$KORE_OUTPUT_DIR"/*.safetensors >/dev/null 2>&1; then
+        return 0
+    fi
+    # Then the launcher's own sentinel, but ONLY for jobs this supervisor started.
+    # Globbing every runs/sft-*.out would let a PREVIOUS run's success declare this
+    # one finished before it has trained a single step -- harmless today because no
+    # such log exists, and a silent no-op launch the first time one does.
+    local j
+    for j in $SEEN_JOBS; do
+        grep -qs "SFT_RC=0" "$REPO/runs/sft-${j}.out" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+# Terminal state, preferring scontrol. On this controller sacct can come back empty
+# while `scontrol show job` still reports JobState and ExitCode, and treating an
+# empty answer as "preempted" is what turns a crash-loop into 40 resubmissions.
+terminal_state() {
+    local st
+    st="$(scontrol show job "$1" 2>/dev/null | tr ' ' '\n' \
+          | grep -m1 '^JobState=' | cut -d= -f2 || true)"
+    [ -z "$st" ] && st="$(sacct -j "$1" --format=State -n 2>/dev/null | head -1 | tr -d ' ' || true)"
+    printf '%s' "$st"
+}
+terminal_exit() {
+    local rc
+    rc="$(scontrol show job "$1" 2>/dev/null | tr ' ' '\n' \
+          | grep -m1 '^ExitCode=' | cut -d= -f2 || true)"
+    [ -z "$rc" ] && rc="$(sacct -j "$1" --format=ExitCode -n 2>/dev/null | head -1 | tr -d ' ' || true)"
+    printf '%s' "$rc"
+}
+
 resubmits=0
 JOB=""
 EXCLUDE=""
+LAST_START=""
+consecutive_fast_failures=0
+#: Job ids this supervisor has started or adopted, so run_completed cannot be
+#: satisfied by an unrelated run's log.
+SEEN_JOBS=""
+
+# Adopt a job that is already in flight rather than starting a second one. Two
+# concurrent runs would share output_dir and interleave checkpoint writes into each
+# other, which corrupts the only thing that makes preemption survivable. This makes
+# the supervisor safe to start after a manual launch, which is how it will usually
+# be used.
+existing="$(squeue -u "${USER:-$(id -un)}" -h -o '%i %j %T' 2>/dev/null \
+            | awk -v n="kore-${STAGE}" '$2==n && ($3=="RUNNING" || $3=="PENDING"){print $1}' \
+            | tail -1 || true)"
+if [ -n "$existing" ]; then
+    JOB="$existing"
+    SEEN_JOBS="$SEEN_JOBS $existing"
+    LAST_START="$(date +%s)"
+    log "adopting in-flight job=$JOB rather than submitting a duplicate"
+fi
 
 while :; do
     if [ -z "$JOB" ]; then
+        if run_completed; then
+            log "training already reported completion; nothing to supervise"
+            exit 0
+        fi
         if [ "$resubmits" -ge "$MAX_RESUBMITS" ]; then
             log "hit MAX_RESUBMITS=$MAX_RESUBMITS; stopping"
             exit 1
         fi
         JOB="$(submit)" || { sleep "$POLL_SECS"; continue; }
         resubmits=$((resubmits + 1))
+        SEEN_JOBS="$SEEN_JOBS $JOB"
+        LAST_START="$(date +%s)"
         log "submitted job=$JOB (attempt $resubmits)"
         sleep 15
     fi
 
     state="$(job_state "$JOB")"
+    [ -z "$state" ] && state="$(scontrol show job "$JOB" 2>/dev/null | tr ' ' '\n' \
+        | grep -m1 '^JobState=' | cut -d= -f2 | grep -E 'RUNNING|PENDING' || true)"
 
     case "$state" in
         RUNNING)
@@ -123,18 +208,44 @@ while :; do
                 sleep "$POLL_SECS"
                 continue
             fi
-            rc="$(sacct -j "$JOB" --format=ExitCode -n 2>/dev/null | head -1 | tr -d ' ')"
-            st="$(sacct -j "$JOB" --format=State -n 2>/dev/null | head -1 | tr -d ' ')"
+            rc="$(terminal_exit "$JOB")"
+            st="$(terminal_state "$JOB")"
             log "job=$JOB left the queue state=${st:-?} exit=${rc:-?}"
-            if [ "$STAGE" = "sft" ] && printf '%s' "$st" | grep -qi completed; then
-                log "SFT completed; done"
+            # Ask the WORK whether it is done before asking the scheduler. This is
+            # the check that makes unattended operation safe.
+            if run_completed; then
+                log "training reported SFT_RC=0 (or a consolidated model exists); done"
                 exit 0
             fi
-            if [ "$STAGE" = "aka" ] && printf '%s' "$st" | grep -qi completed; then
-                log "arena eval completed; done"
+            if printf '%s' "$st" | grep -qi completed; then
+                log "$STAGE completed; done"
                 exit 0
             fi
-            log "treating as preemption; resubmitting to resume"
+            # A job that FAILED immediately is a bug, not a preemption. Resubmitting
+            # a crash on a loop burns the attempt budget and hides the error, so
+            # require that the run actually got somewhere before treating it as
+            # interrupted. Job 6520 died in 12 seconds on a shell bug; a supervisor
+            # without this would have retried it 40 times.
+            short_run=0
+            if [ -n "$LAST_START" ]; then
+                elapsed=$(( $(date +%s) - LAST_START ))
+                [ "$elapsed" -lt "${MIN_PROGRESS_SECS:-300}" ] && short_run=1
+            fi
+            if printf '%s' "$st" | grep -qiE 'fail|cancel' && [ "$short_run" = 1 ]; then
+                consecutive_fast_failures=$((consecutive_fast_failures + 1))
+                log "job=$JOB ended ${elapsed:-?}s after starting with state=$st" \
+                    "-- that is a crash, not a preemption" \
+                    "(consecutive: $consecutive_fast_failures)"
+                if [ "$consecutive_fast_failures" -ge "${MAX_FAST_FAILURES:-3}" ]; then
+                    log "STOPPING: $consecutive_fast_failures consecutive fast failures." \
+                        "Fix the error rather than retrying. Last log:"
+                    tail -25 "$(newest_log "$JOB")" 2>/dev/null | sed 's/^/    /'
+                    exit 1
+                fi
+            else
+                consecutive_fast_failures=0
+            fi
+            log "treating as interruption; resubmitting to resume"
             JOB=""
             sleep 20
             ;;

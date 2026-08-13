@@ -312,6 +312,26 @@ while :; do
             # require that the run actually got somewhere before treating it as
             # interrupted. Job 6520 died in 12 seconds on a shell bug; a supervisor
             # without this would have retried it 40 times.
+            # A DIRTY NODE is not a code bug, and must not consume the crash-loop
+            # budget. The launcher exits 3 after printing KORE_BAD_NODE=<host> when a
+            # previous tenant left memory allocated on a card (measured once at
+            # ~270GB), which would otherwise wedge training after the model load.
+            # Land on three such nodes in a row and a fast-failure counter would halt
+            # the supervisor over a cluster-hygiene problem. Instead: exclude that
+            # node, retry immediately, and do not count it.
+            badnode="$(grep -m1 -oE 'KORE_BAD_NODE=[^ ]+' "$(newest_log "$JOB")" 2>/dev/null \
+                       | cut -d= -f2 || true)"
+            if [ -n "$badnode" ]; then
+                EXCLUDE="$(printf '%s' "${EXCLUDE:+$EXCLUDE,}$badnode")"
+                log "job=$JOB landed on a dirty node ($badnode) with memory already" \
+                    "allocated on a GPU; excluding it and resubmitting." \
+                    "excluded so far: $EXCLUDE"
+                JOB=""
+                PENDING_SINCE=""
+                sleep 15
+                continue
+            fi
+
             short_run=0
             if [ -n "$LAST_START" ]; then
                 elapsed=$(( $(date +%s) - LAST_START ))

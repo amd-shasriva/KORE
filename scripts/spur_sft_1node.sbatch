@@ -42,7 +42,19 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:mi355x:8
 #SBATCH --cpus-per-task=128
-#SBATCH --time=23:00:00
+# 7 days, not 23 hours. The 23h figure was assumed, not measured against the
+# controller: `scontrol show partition amd-spur` reports MaxTime=UNLIMITED, and a
+# probe job submitted with --time=7-00:00:00 was accepted and ran. This matters
+# because one epoch is 1,609 steps and the honest walltime estimate is 26-36h, so a
+# 23h limit GUARANTEED at least one interruption for a run that can otherwise finish
+# in a single allocation. Every interruption costs a full model reload plus a
+# dataloader skip-ahead, and the resume path at 30B has never been exercised
+# end-to-end, so the cheapest way to de-risk it is to not need it.
+#
+# This is also the closest thing available to the week-long node reservation this run
+# would ideally have: `scontrol create reservation` requires root or sudo/wheel
+# membership, so a real reservation has to come from the SPUR team via ticket.
+#SBATCH --time=7-00:00:00
 # NOTE: --requeue is deliberately ABSENT. On this SPUR controller a requeued
 # job trips JobHoldMaxRequeue on its first requeue and is held permanently,
 # so any transient NODE_FAIL became an unrecoverable hold. Recovery now lives
@@ -265,11 +277,33 @@ trap handle_requeue_warning USR1
 
 # SPUR's sbatch does not implement Slurm's --signal option, and Slurm does NOT
 # auto-requeue a job that merely hits its time limit (only preemption / node
-# failure). Generate the warning locally at 22h30m of the 23h limit so the run
-# drains and EXPLICITLY requeues itself with 30 min to spare.
+# failure), so the warning has to be generated locally.
+#
+# Derived from the job's ACTUAL TimeLimit rather than hardcoded. The old default was
+# 81000s (22h30m), tuned to a 23h limit; with the limit now 7 days that timer would
+# have drained a perfectly healthy run at 22h30m and resubmitted it for no reason --
+# the exact interruption the longer walltime exists to avoid. Falls back to the old
+# constant only if TimeLimit cannot be read.
+#
+# The margin is 60 minutes, not 30: a checkpoint write is ~488GB and takes 4-8
+# minutes against NFS, and the drain has to finish one before the limit lands.
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    _drain_after="${KORE_REQUEUE_AFTER_SECONDS:-}"
+    if [[ -z "$_drain_after" ]]; then
+        # TimeLimit prints as [DD-]HH:MM:SS.
+        _tl="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
+               | tr ' ' '\n' | grep -m1 '^TimeLimit=' | cut -d= -f2)"
+        if [[ "$_tl" =~ ^(([0-9]+)-)?([0-9]+):([0-9]+):([0-9]+)$ ]]; then
+            _limit=$(( ${BASH_REMATCH[2]:-0} * 86400 + 10#${BASH_REMATCH[3]} * 3600 \
+                       + 10#${BASH_REMATCH[4]} * 60 + 10#${BASH_REMATCH[5]} ))
+            (( _limit > 3600 )) && _drain_after=$(( _limit - 3600 ))
+        fi
+    fi
+    _drain_after="${_drain_after:-81000}"
+    echo "[sft-1node] will drain and resubmit after ${_drain_after}s" \
+         "(job TimeLimit=${_tl:-unknown})"
     (
-        sleep "${KORE_REQUEUE_AFTER_SECONDS:-81000}"
+        sleep "$_drain_after"
         kill -USR1 "$$"
     ) &
     REQUEUE_TIMER_PID="$!"

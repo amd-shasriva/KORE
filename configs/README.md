@@ -9,11 +9,19 @@ The operational constraints are encoded in the config comments because they are
 easy to undo accidentally:
 
 - `max_seq_length: 17408` matches the mixture admission limit.
-- One epoch is about 478 steps at 90–120 seconds per step and fits the
-  23-hour allocation; a second epoch does not.
-- A checkpoint is about 488 GB. `save_total_limit: 1` is mandatory: normal
-  rotation already has two checkpoints on disk (~976 GB), while limit 2 would
-  exceed the shared volume.
+- One epoch is **1,609 steps** (206,000 rows at a global batch of 128), not
+  478. An earlier revision of this file said 478; the config's own
+  `_comment_epochs_and_lr` records that figure as wrong, left over from a
+  `repair_loss_weight`-inflated row count that no longer applies. One epoch
+  does not fit a 23-hour allocation, which is why the launcher requests seven
+  days instead; see [`docs/CLUSTER_OPERATIONS.md`](../docs/CLUSTER_OPERATIONS.md)
+  for the measured walltime and the reasoning.
+- A checkpoint is about 488 GB. `save_total_limit: 2`, not 1: the Trainer
+  writes the new checkpoint before rotating the old one out, so normal
+  rotation transiently holds three checkpoints (~1.46 TB) against 42 TB free
+  on `/shared_nfs` (3.5%). Limit 1 was the riskier setting for a run that
+  expects preemption, because its rotation window holds no complete
+  checkpoint at all; limit 2 is what makes a kill mid-rotation resumable.
 - The explicit MoE transformer layer avoids incorrect FSDP wrapping of experts.
 
 `accelerate_fsdp.yaml` is the shared Trainer launcher configuration.

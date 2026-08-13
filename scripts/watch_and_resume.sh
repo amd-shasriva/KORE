@@ -297,6 +297,27 @@ while :; do
             rc="$(terminal_exit "$JOB")"
             st="$(terminal_state "$JOB")"
             log "job=$JOB left the queue state=${st:-?} exit=${rc:-?}"
+            # A JOB THAT CYCLED TO A NEW GENERATION is not a failure and not a
+            # completion. At its walltime boundary the launcher submits a fresh job
+            # and exits 0 WITHOUT ever reaching the SFT_RC=0 sentinel (that line is
+            # only reached after the trainer itself returns), so to Slurm this job's
+            # exit is indistinguishable from a genuinely finished one -- both report
+            # JobState=COMPLETED. Checked before both the run_completed and the
+            # "completed" fallback below, or the fallback would declare the whole
+            # stage done and stop supervising the generation that was just
+            # submitted, orphaning it mid-training. Mirrors the KORE_LOCK_HELD
+            # handling: follow the new job rather than resubmitting or exiting.
+            resubmitted="$(grep -m1 -oE 'SFT_RESUBMITTED=[0-9]+' "$(newest_log "$JOB")" \
+                           2>/dev/null | cut -d= -f2 || true)"
+            if [ -n "$resubmitted" ]; then
+                log "job=$JOB reached its walltime and resubmitted as $resubmitted;" \
+                    "following $resubmitted"
+                JOB="$resubmitted"
+                SEEN_JOBS="$SEEN_JOBS $resubmitted"
+                PENDING_SINCE=""
+                sleep "$POLL_SECS"
+                continue
+            fi
             # Ask the WORK whether it is done before asking the scheduler. This is
             # the check that makes unattended operation safe.
             if run_completed; then

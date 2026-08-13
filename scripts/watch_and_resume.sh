@@ -54,16 +54,11 @@ log_age() {      # seconds since the log was last written; huge if absent
 
 submit() {
     local out id
-    # EXCLUDE is applied here. It used to be assigned when a node wedged us and then
-    # never read, so the retry could land straight back on the bad node -- which is
-    # the specific thing it exists to prevent, since a prior tenant's leftover GPU
-    # memory survives --exclusive.
-    if [ -n "$EXCLUDE" ]; then
-        log "excluding node(s): $EXCLUDE"
-        out="$("${SUBMIT[@]}" --exclude="$EXCLUDE" 2>&1 | tail -3)"
-    else
-        out="$("${SUBMIT[@]}" 2>&1 | tail -3)"
-    fi
+    # No --exclude. Node exclusion was tried and removed: this cluster repairs and
+    # returns nodes continuously, and at ~4 idle of 228 the capacity a blacklist
+    # discards is worth more than the ten seconds the hygiene check costs to reject a
+    # bad node and try the next one.
+    out="$("${SUBMIT[@]}" 2>&1 | tail -3)"
     # --parsable prints a bare id; without it, "Submitted batch job <id>".
     id="$(printf '%s' "$out" | grep -oE '[0-9]{4,}' | tail -1)"
     [ -n "$id" ] || { log "submit produced no job id: $out"; return 1; }
@@ -120,9 +115,6 @@ terminal_exit() {
 
 resubmits=0
 JOB=""
-# Seeded from the persisted list so a restarted supervisor does not have to
-# rediscover, one wasted submission at a time, every dirty node it already found.
-EXCLUDE="$(paste -sd, "$REPO/runs/.sft_bad_nodes" 2>/dev/null || true)"
 LAST_START=""
 consecutive_fast_failures=0
 launch_failures=0
@@ -177,10 +169,6 @@ while :; do
                 node="$(squeue -j "$JOB" -h -o '%N' 2>/dev/null | head -1)"
                 log "job=$JOB RUNNING but log untouched ${age}s -- wedged on ${node:-?}; cancelling"
                 scancel "$JOB" 2>/dev/null
-                # Steer the retry away from a node that just wedged us. A prior
-                # tenant's leftover GPU memory survives --exclusive, so the same
-                # node will usually do it again.
-                [ -n "$node" ] && EXCLUDE="$node"
                 JOB=""
                 sleep 20
             else
@@ -363,17 +351,14 @@ while :; do
             badnode="$(grep -m1 -oE 'KORE_BAD_NODE=[^ ]+' "$(newest_log "$JOB")" 2>/dev/null \
                        | cut -d= -f2 || true)"
             if [ -n "$badnode" ]; then
-                # Persist as well as remember. An in-memory list dies with this
-                # process, and the cron guard restarts this process, so a node found
-                # dirty here would otherwise be retried freely a few minutes later.
-                # The guard reads the same file and passes the same --exclude.
-                printf '%s\n' "$badnode" >> "$REPO/runs/.sft_bad_nodes" 2>/dev/null || true
-                sort -u -o "$REPO/runs/.sft_bad_nodes" "$REPO/runs/.sft_bad_nodes" 2>/dev/null || true
-                EXCLUDE="$(paste -sd, "$REPO/runs/.sft_bad_nodes" 2>/dev/null \
-                           || printf '%s' "${EXCLUDE:+$EXCLUDE,}$badnode")"
-                log "job=$JOB landed on a dirty node ($badnode) with memory already" \
-                    "allocated on a GPU; excluding it and resubmitting." \
-                    "excluded so far: $EXCLUDE"
+                # Retry WITHOUT excluding the node. Nodes here are cycled and repaired
+                # constantly (one failed, went DOWN, and ran our next job cleanly
+                # fifteen minutes later), and with about four idle nodes out of 228,
+                # refusing repaired capacity costs far more than an occasional ten
+                # second rejection. --exclusive keeps us off occupied GPUs to begin
+                # with; this check is just the backstop for leaked memory.
+                log "job=$JOB found memory already allocated on a GPU on $badnode;" \
+                    "resubmitting (not excluding it -- nodes here get repaired)"
                 JOB=""
                 PENDING_SINCE=""
                 sleep 15

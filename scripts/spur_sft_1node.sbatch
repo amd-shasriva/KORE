@@ -145,6 +145,37 @@ if [[ "$VISIBLE_GPUS" != "8" ]]; then
     exit 2
 fi
 
+# Counting devices is not enough: they also have to be EMPTY. A previous tenant can
+# leave memory allocated on a card after its job ends -- this project measured ~270GB
+# still held on one -- and the only symptom is that training wedges after the model
+# load, which the supervisor currently notices via a 45-minute stall timer. Now that
+# re-entering the queue costs hours rather than minutes, spending 45 minutes to
+# discover a dirty node is far too expensive.
+#
+# Checked here, before any weights are read, so a bad node costs seconds. Exit 3 is
+# distinct from the count failure above so the supervisor can tell "this NODE is bad,
+# exclude it and retry" apart from "the CODE is broken, stop retrying".
+BAD_GPU="$("$PY" - <<'PY'
+import torch
+bad = []
+for i in range(torch.cuda.device_count()):
+    free, total = torch.cuda.mem_get_info(i)
+    # 90%: leaves room for driver/context overhead while still catching a leak
+    # measured in tens of gigabytes, which is what actually wedges a run.
+    if free < 0.90 * total:
+        bad.append(f"gpu{i} {(total-free)/2**30:.1f}GiB already allocated "
+                   f"({100*free/total:.0f}% free)")
+print("; ".join(bad))
+PY
+)"
+if [[ -n "$BAD_GPU" ]]; then
+    echo "[sft-1node] BAD NODE $(hostname): $BAD_GPU" >&2
+    echo "KORE_BAD_NODE=$(hostname)"
+    echo "[sft-1node] a prior tenant left memory on this card; excluding and retrying" >&2
+    exit 3
+fi
+echo "[sft-1node] all 8 GPUs present and empty"
+
 # Full-node GRES bind-mounts all eight render devices; drop SPUR's physical list
 # so accelerate's multi_gpu_launcher can assign one logical device per rank.
 unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL

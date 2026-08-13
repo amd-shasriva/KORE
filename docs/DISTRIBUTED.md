@@ -35,9 +35,18 @@ The block below is a transcription of the non-comment fields in
 `configs/sft_coder30b_a3b.json`, and `tests/test_docs_contract.py` asserts it
 key-for-key against the live file, so it cannot silently drift.
 
+Note `model_id`: this run WARM STARTS from step 150 of itself rather than from
+the raw Instruct base. Job 9229 trained 150 clean steps before its node died,
+and those weights are intact (25/25 shards, and a full 456 GB read returned no
+unreadable bytes). It is a warm start and not a bit-exact resume because the
+step-150 optimizer is a single consolidated 244 GB file whose load is what
+SIGBUSed every resume attempt, so the AdamW moments and the LR/step counters
+restart. At step 150 of 1,609, still inside the 241-step warmup, those moments
+are worth much less than the 2.3 h of training they would cost to abandon.
+
 ```json
 {
-  "model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+  "model_id": "/shared_nfs/shasriva/kore/runs/sft_v5_step150_weights/checkpoint-150",
   "model_revision": "b2cff646eb4bb1d68355c01b18ae02e7cf42d120",
   "dataset_path": "/home/shasriva/Kore-RL/KORE/data/v5_sft.jsonl",
   "eval_dataset_path": "/home/shasriva/Kore-RL/KORE/data/v5_eval.jsonl",

@@ -244,7 +244,18 @@ resubmit_self() {
              "KORE_MAX_GENERATIONS; if it is looping, fix the startup failure." >&2
         return 1
     fi
-    out="$(sbatch "$REPO/scripts/spur_sft_1node.sbatch" \
+    # Preserve the QoS the job is ACTUALLY running under, which is not necessarily
+    # the one in the header. amd-general-qos is capped at 8 nodes team-wide and runs
+    # deep queues, so a launch may legitimately be submitted with
+    # `--qos=amd-burst-qos` to get a node now; without this, a preempted burst run
+    # would resubmit itself into the general queue and sit behind everyone else,
+    # turning a 45-minute interruption into a day.
+    local qos_arg=()
+    local qos
+    qos="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
+           | tr ' ' '\n' | grep -m1 '^QOS=' | cut -d= -f2)"
+    [[ -n "$qos" ]] && qos_arg=(--qos="$qos")
+    out="$(sbatch "${qos_arg[@]}" "$REPO/scripts/spur_sft_1node.sbatch" \
                   "$CFG" "$FROM_STAGE" "$OUT_DIR" "$next" 2>&1)"
     rc=$?
     if ((rc == 0)) && grep -qE 'Submitted batch job [0-9]+' <<<"$out"; then

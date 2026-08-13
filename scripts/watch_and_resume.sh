@@ -124,6 +124,7 @@ EXCLUDE=""
 LAST_START=""
 consecutive_fast_failures=0
 launch_failures=0
+PENDING_SINCE=""
 #: Job ids this supervisor has started or adopted, so run_completed cannot be
 #: satisfied by an unrelated run's log.
 SEEN_JOBS=""
@@ -168,6 +169,7 @@ while :; do
     case "$state" in
         RUNNING)
             launch_failures=0
+            PENDING_SINCE=""
             age="$(log_age "$JOB")"
             if [ "$age" -gt "$STALL_SECS" ]; then
                 node="$(squeue -j "$JOB" -h -o '%N' 2>/dev/null | head -1)"
@@ -226,8 +228,60 @@ while :; do
                     sleep "$backoff"
                     ;;
                 *)
-                    log "job=$JOB pending ($reason)"
-                    sleep "$POLL_SECS"
+                    # A job can sit in PENDING with Reason=None and StartTime=N/A
+                    # indefinitely -- job 6684 did it for 1h48m while other users'
+                    # jobs started around it. The scheduler is not saying it cannot
+                    # run us; it is saying nothing at all, and waiting on that is
+                    # indistinguishable from being wedged. Fresh submissions DO get
+                    # picked up (6620 started on its second attempt), so past a
+                    # threshold, resubmitting is strictly better than waiting.
+                    #
+                    # The threshold has to exceed a legitimate queue wait for an
+                    # exclusive whole-node request, hence 25 minutes rather than a
+                    # couple of poll cycles.
+                    pending_secs=$(( $(date +%s) - ${PENDING_SINCE:-$(date +%s)} ))
+                    if [ -z "${PENDING_SINCE:-}" ]; then
+                        PENDING_SINCE="$(date +%s)"
+                        pending_secs=0
+                    fi
+                    # DISABLED BY DEFAULT (STUCK_PENDING_SECS=0), and that is the
+                    # important part. Queue position is by submit time at equal
+                    # priority, so cancelling and resubmitting a merely-waiting job
+                    # sends it to the BACK of the queue. On a full cluster that is
+                    # strictly worse than waiting, however long the wait looks.
+                    #
+                    # My first version of this fired after 25 minutes, on the theory
+                    # that job 6684 sitting at PENDING(None) for 1h48m was wedged. It
+                    # was not wedged, it was starved: the request is --exclusive, and a
+                    # whole-node request cannot start while zero nodes are fully idle,
+                    # which was exactly the cluster state (137 allocated, 54 partially
+                    # allocated, 0 idle). Resubmitting would have surrendered a
+                    # position earned at 01:29 for nothing.
+                    #
+                    # Set STUCK_PENDING_SECS explicitly if you ever have evidence of a
+                    # genuinely wedged pending job -- but note that JobLaunchFailure,
+                    # the one wedge actually observed here, is handled above and does
+                    # need a resubmit because such a job holds no useful position.
+                    if [ "${STUCK_PENDING_SECS:-0}" -le 0 ]; then
+                        log "job=$JOB pending ($reason) ${pending_secs}s;" \
+                            "holding queue position"
+                        sleep "$POLL_SECS"
+                    elif printf '%s' "$reason" | grep -q QOSGrpNodeLimit; then
+                        # A full QoS cap is a real capacity answer, not a wedge.
+                        log "job=$JOB pending on a full QoS cap (${pending_secs}s);" \
+                            "holding queue position"
+                        sleep "$POLL_SECS"
+                    elif [ "$pending_secs" -gt "$STUCK_PENDING_SECS" ]; then
+                        log "job=$JOB has been PENDING ($reason) for ${pending_secs}s" \
+                            "with no start time -- cancelling and resubmitting"
+                        scancel "$JOB" 2>/dev/null
+                        JOB=""
+                        PENDING_SINCE=""
+                        sleep 20
+                    else
+                        log "job=$JOB pending ($reason) for ${pending_secs}s"
+                        sleep "$POLL_SECS"
+                    fi
                     ;;
             esac
             ;;

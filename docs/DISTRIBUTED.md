@@ -35,18 +35,25 @@ The block below is a transcription of the non-comment fields in
 `configs/sft_coder30b_a3b.json`, and `tests/test_docs_contract.py` asserts it
 key-for-key against the live file, so it cannot silently drift.
 
-Note `model_id`: this run WARM STARTS from step 150 of itself rather than from
-the raw Instruct base. Job 9229 trained 150 clean steps before its node died,
-and those weights are intact (25/25 shards, and a full 456 GB read returned no
-unreadable bytes). It is a warm start and not a bit-exact resume because the
-step-150 optimizer is a single consolidated 244 GB file whose load is what
-SIGBUSed every resume attempt, so the AdamW moments and the LR/step counters
-restart. At step 150 of 1,609, still inside the 241-step warmup, those moments
-are worth much less than the 2.3 h of training they would cost to abandon.
+Note `model_id`: this is a CLEAN run from the pinned Instruct base. A warm
+start from step 150 of this same run was considered and rejected. Those weights
+are intact and preserved at
+`/shared_nfs/shasriva/kore/runs/sft_v5_step150_weights`, and are not used.
+
+The step-150 optimizer cannot be reloaded (a single consolidated 244 GB file
+whose load SIGBUSes every rank), so a warm start necessarily resets the AdamW
+moments and the LR schedule. Step 150 sits at `lr=3.079e-06`, still climbing the
+241-step warmup, so the model would be warmed up twice across a discontinuity,
+see the first ~9% of data twice (1.09 epochs, not 1), and inherit this run's
+generation-tagged chat template into the shipped artifact. It saves ~2.5 h,
+against an ~18 h queue wait and a ~25 h run.
+
+Deep into the run the trade reverses, and warm starting from the latest
+**sharded** checkpoint is both correct and free of all of the above.
 
 ```json
 {
-  "model_id": "/shared_nfs/shasriva/kore/runs/sft_v5_step150_weights/checkpoint-150",
+  "model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
   "model_revision": "b2cff646eb4bb1d68355c01b18ae02e7cf42d120",
   "dataset_path": "/home/shasriva/Kore-RL/KORE/data/v5_sft.jsonl",
   "eval_dataset_path": "/home/shasriva/Kore-RL/KORE/data/v5_eval.jsonl",

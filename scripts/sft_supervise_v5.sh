@@ -47,6 +47,11 @@ export MAX_FAST_FAILURES="${MAX_FAST_FAILURES:-3}"
 # A 30B load plus a dataset map can legitimately look quiet for a while, and killing
 # a healthy run for being slow is worse than waiting. 45 min.
 export STALL_SECS="${STALL_SECS:-2700}"
+# 0 = never cancel a merely-waiting job. Queue position is by submit time at equal
+# priority, so resubmitting a pending job sends it to the back of the queue -- on a
+# cluster with zero fully-idle nodes that is strictly worse than waiting. The run
+# wants a whole node (--exclusive), so a long pending wait is expected and correct.
+export STUCK_PENDING_SECS="${STUCK_PENDING_SECS:-0}"
 export KORE_SFT_QOS="amd-burst-qos"
 
 LOG="$REPO/runs/supervise_v5_$(date +%Y%m%d_%H%M%S).log"

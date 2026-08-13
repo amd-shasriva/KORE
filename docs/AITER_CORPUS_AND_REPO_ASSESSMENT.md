@@ -47,7 +47,7 @@ Another agent is ingesting HipKittens, in a `kore.data` module that was still
 uncommitted when this was written. It made a deliberate and correct call:
 HipKittens kernels are C++ that
 `#include "kittens.cuh"`, so training them as `FULL_KERNEL` responses would
-teach the model to answer with code the harness cannot compile — negative
+teach the model to answer with code the harness cannot compile: negative
 transfer that looks like clean data. It therefore emits knowledge-QA rows
 teaching transferable reasoning, not kernel bodies.
 
@@ -66,7 +66,7 @@ dependencies are thin infrastructure, not framework entanglement:
 | `utils.logger.AiterTritonLogger` | 73 | logging; delete |
 | `utils._triton.kernel_repr.make_kernel_repr` | 66 | a `__repr__` helper; delete |
 | `utils._triton.arch_info` | 40 | arch string lookup; inline |
-| `utils._triton.pid_preprocessing` (`pid_grid`, `remap_xcd`) | 40 | **the XCD swizzle** — small, substantive, inlinable |
+| `utils._triton.pid_preprocessing` (`pid_grid`, `remap_xcd`) | 40 | **the XCD swizzle**: small, substantive, inlinable |
 | `utils.gemm_config_utils.get_gemm_config` | 22 | reads the tuning CSVs |
 
 19 files depend on `aiter` *only* for the repr helper. So unlike HipKittens
@@ -76,7 +76,7 @@ rewrite.
 
 `remap_xcd` deserves a specific mention: it is the XCD swizzle, the same
 technique AITER's `opus_gemm` credits to HipKittens. It is a real, transferable
-gfx950 optimization that fits in a few lines — exactly the kind of pattern that
+gfx950 optimization that fits in a few lines, exactly the kind of pattern that
 is worth teaching and cheap to teach.
 
 ### The form: pairs, not dumps
@@ -90,7 +90,7 @@ correctness oracle, extracted rather than authored.
 
 The tuning CSVs should be transformed, not dumped. `gfx,cu_num,B,M,N,K,
 kernelId,splitK,us,kernelName,tflops,bw` is AMD's own measured autotuning
-result on our target arch — the schema teaches *which tile shape wins at which
+result on our target arch: the schema teaches *which tile shape wins at which
 problem shape*, which is a real skill. Emitted as raw table rows it would teach
 memorization of a table that goes stale; emitted as selection-reasoning it
 teaches the skill. Note the timings in those CSVs are **AMD's measurements on
@@ -107,7 +107,7 @@ contaminated rather than earned.
 So AITER Triton ingestion must be decontaminated against the aiter-baselined
 task set specifically, not just against the usual benchmark holdouts. The
 repository already has `kore/data/decontam.py` and a holdout-family mechanism,
-so this is a wiring requirement rather than new machinery — but it is a
+so this is a wiring requirement rather than new machinery, but it is a
 precondition, not a follow-up.
 
 ### Provenance, and a catalog discrepancy worth knowing
@@ -165,7 +165,7 @@ Concretely, to attempt one of these tasks we would need:
 
 1. **A workspace builder**: clone-or-reuse upstream aiter at a *pinned* commit,
    copy the task folder in, duplicate per attempt. Pinning matters more here
-   than anywhere else — an unpinned clone makes the baseline drift between the
+   than anywhere else: an unpinned clone makes the baseline drift between the
    attempt and the measurement.
 2. **A disk and time budget**: a full aiter clone is ~650 MB before submodules,
    per task and potentially per attempt. `/home` is shared and at 79%.
@@ -188,7 +188,7 @@ candidate that needs no new kernel at all: the dense/varlen `deterministic`
 default asymmetry documented in the companion file. If the measurement confirms
 that a default `flash_attn_func` backward is landing on the CK fallback while a
 shipped asm kernel sits unused, that is a dispatch bug with a small fix and a
-clear argument — the kind of change an upstream maintainer can evaluate
+clear argument, the kind of change an upstream maintainer can evaluate
 quickly.
 
 That PR should not be opened until the behaviour is measured on hardware. The

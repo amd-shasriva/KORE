@@ -1,6 +1,6 @@
 # Legacy 14B midtrain experiment: why production starts from instruct
 
-> **Status — historical evidence, not a launch recipe.** This report records the
+> **Status: historical evidence, not a launch recipe.** This report records the
 > cancelled 14B experiment. Its output was deleted after epoch 1.29 and no
 > production stage consumes it. Production uses
 > `Qwen/Qwen3-Coder-30B-A3B-Instruct → SFT → multi-turn RL`.
@@ -28,13 +28,13 @@ exact weights the run started from (`Qwen/Qwen3-14B` @
 | # | Measurement | Result | Power |
 | --- | --- | --- | --- |
 | 1 | Held-out LM loss on held-out Triton kernel source | **1.5787 -> 0.8181 bits/token**, paired effect **-0.837** [-0.923, -0.749], 34/34 documents improved, Wilcoxon p = 3.8e-7 | 38,088 paired tokens over 34 documents |
-| 2 | Held-out LM loss on general-domain text | **2.8152 -> 3.0175 bits/token**, paired effect **+0.375** [+0.059, +0.674], 4/18 improved, Wilcoxon p = 0.037 | 578 paired tokens over 18 documents — thin |
-| 3 | Single-shot kernel generation, verified + cold-cache benched on gfx950 | correct kernels **23/34 -> 0/34**; compiled **32/34 -> 4/34**; exact McNemar p = **2.4e-7** | 34 paired tasks, 1 bit each — and the effect is still overwhelming |
+| 2 | Held-out LM loss on general-domain text | **2.8152 -> 3.0175 bits/token**, paired effect **+0.375** [+0.059, +0.674], 4/18 improved, Wilcoxon p = 0.037 | 578 paired tokens over 18 documents, thin |
+| 3 | Single-shot kernel generation, verified + cold-cache benched on gfx950 | correct kernels **23/34 -> 0/34**; compiled **32/34 -> 4/34**; exact McNemar p = **2.4e-7** | 34 paired tasks, 1 bit each, and the effect is still overwhelming |
 
 The honest summary: **(1) is what the training bought, (2) is part of what it cost,
 and (3) is the part that matters and it is much worse than "no improvement".** The
 checkpoint predicts held-out Triton source far better than the base while being
-unable to *write* Triton at all — 29 of its 33 parseable responses are not valid
+unable to *write* Triton at all: 29 of its 33 parseable responses are not valid
 Python, against 0 of 32 for the base. Sections 1 and 3 are not in tension; together
 they say the run taught the model the domain and broke its output surface.
 
@@ -57,13 +57,13 @@ checkpoint; it starts from the vendor instruct model instead.
 
 | | |
 | --- | --- |
-| Candidate | `runs/midtrain_14b_frontier` — 13 safetensors shards, 55.0 GiB fp32, 14,768,307,200 parameters |
+| Candidate | `runs/midtrain_14b_frontier`: 13 safetensors shards, 55.0 GiB fp32, 14,768,307,200 parameters |
 | Reference | `Qwen/Qwen3-14B` at the pinned commit the corpus was built against, 14,768,307,200 parameters |
-| Scope | 34 tasks — the held-out reservation (45) minus the 11 whose optimized source leaked into the mid-train corpus |
+| Scope | 34 tasks: the held-out reservation (45) minus the 11 whose optimized source leaked into the mid-train corpus |
 | Load dtype | `bfloat16` for **both** arms |
 | Decoding | greedy (`temperature = 0.0`), `max_new_tokens = 4096`, template thinking OFF, for **both** arms |
 | Prompt | one turn, byte-identical per task across arms, digest-verified |
-| Budget | 1 bench per task, `mode = parallel` — matched |
+| Budget | 1 bench per task, `mode = parallel`, matched |
 
 Both arms are loaded at bf16 deliberately. The mid-train output is fp32 on disk
 because FSDP `FULL_STATE_DICT` gathers the bf16-mixed-precision fp32 master copy,
@@ -73,7 +73,7 @@ disabled for the same class of reason documented in `docs/E2E_SERVING_GATE.md`: 
 Qwen3's thinking on, a bounded token budget is spent inside `<think>` and the answer
 never arrives, which reads as a capability difference and is a budget artifact.
 
-### The scope is clean — verified, not assumed
+### The scope is clean: verified, not assumed
 
 The 11 excluded tasks are excluded because `gen_curriculum.py`'s Tier-4 win glob
 had no held-out filter. Since every number here is a held-out claim, that exclusion
@@ -110,9 +110,9 @@ the detector's generic-scaffolding suppression, so these numbers are an upper bo
 | median over the 34 in-scope seeds | **0.56** |
 | 28 of 34 seeds | >= 0.50 |
 | highest (`genb_cv_conv2d_7x7_s1_d1_fp16`) | 0.805 |
-| lowest (`mla_decode_bf16`, `paged_attn_decode_bf16` — the two whole-family holdouts) | 0.123, 0.203 |
+| lowest (`mla_decode_bf16`, `paged_attn_decode_bf16`, the two whole-family holdouts) | 0.123, 0.203 |
 
-This is the signature of a shared generator template, not of a leaked kernel — the
+This is the signature of a shared generator template, not of a leaked kernel: the
 detector, which suppresses generic scaffolding, flags none of them. But it means
 result (1) must not be described as loss on text the model has seen nothing like.
 [The gain is quantified against this below](#does-the-gain-track-corpus-overlap-yes).
@@ -127,7 +127,7 @@ the only comparison on this scope with real statistical power: single-shot
 generation yields one bit per task (~34 bits total), while teacher-forced loss over
 the same 34 kernels yields 38,088 paired per-token measurements.
 
-Both arms score the **identical token sequence** — same tokenizer, same
+Both arms score the **identical token sequence**: same tokenizer, same
 `vocab_size` (151,936), verified per document by token-id digest;
 `compare_documents` refuses to compare arms whose tokenization differs, so the
 per-token delta is a true paired difference.
@@ -140,15 +140,15 @@ per-token delta is a true paired difference.
 - **paired per-document effect: -0.8368 bits/token**, 95% bootstrap CI
   [-0.9233, -0.7486]
 - Wilcoxon p = 3.8e-7, exact sign p = 1.2e-10, bootstrap p = 1e-4
-- **34 of 34 documents improved** — no task got worse
+- **34 of 34 documents improved**, no task got worse
 - corpus-level (token-weighted): -0.7606 bits/token, perplexity ratio **0.590x**
 
 A 48% reduction in bits per token with every single document improving is not a
 marginal effect. **The mid-train run did what continued pretraining is supposed to
 do.**
 
-The adjacent-domain document set — each held-out task's torch `reference.py` oracle,
-5,292 tokens — moves further in the same direction: 3.1206 -> 1.3405 bits/token,
+The adjacent-domain document set (each held-out task's torch `reference.py` oracle,
+5,292 tokens) moves further in the same direction: 3.1206 -> 1.3405 bits/token,
 paired effect -3.2882 [-3.5350, -2.9796], 34/34 improved. These are thin, highly
 templated shim files, which is precisely why the effect is larger, and is a second
 reason to read the magnitudes as partly template acquisition.
@@ -163,7 +163,7 @@ allocation and once on the MI355X:
 | CPU (crsuse2-m2m-103) | 1.579139 | 38,088 |
 | MI355X (crsuse2-m2m-079) | 1.578699 | 38,088 |
 
-They agree to 4.4e-4 bits/token — three orders of magnitude below the effect being
+They agree to 4.4e-4 bits/token, three orders of magnitude below the effect being
 claimed. The number is a property of the weights, not of the device.
 
 ### Does the gain track corpus overlap? Yes.
@@ -189,8 +189,8 @@ and the two structurally distinct whole-family holdouts individually:
 | `mla_decode_bf16` | 0.123 | 1.247 | 1.094 | **-0.152** |
 | `paged_attn_decode_bf16` | 0.203 | 1.593 | 1.131 | **-0.462** |
 
-**The gain is real everywhere — all 34 documents improved, including the two least
-overlapping — but it is roughly 2.3x larger where the surface form is
+**The gain is real everywhere: all 34 documents improved, including the two least
+overlapping, but it is roughly 2.3x larger where the surface form is
 well-represented in the corpus, and smallest (-0.152 bits/token) on the single most
 novel task.** Read the headline -0.837 as domain adaptation plus template
 acquisition, in unknown proportion, with -0.15 to -0.46 as the defensible floor for
@@ -216,7 +216,7 @@ from the bundled retention samples).
 - corpus-level: +0.2023 bits/token, perplexity ratio **1.15x**
 
 **This is a statistically significant general-domain regression**, and it happened
-*despite* 21,486 general-replay rows (25% of the corpus) being present — the
+*despite* 21,486 general-replay rows (25% of the corpus) being present. The
 `general_replay_frac: 0.30` in `configs/midtrain_14b_full.json` was honored in the
 built corpus, contrary to the stale note in `data/DATASET_STATUS.md` that records the
 replay slice as deferred.
@@ -227,7 +227,7 @@ replay slice as deferred.
   a 578-token probe is not a benchmark. This detects "did general LM quality move",
   not "how much".
 - **The probe is not decontaminated.** Canonical benchmark items may sit inside the
-  general-replay slice, which would *flatter* the trained arm — so if anything this
+  general-replay slice, which would *flatter* the trained arm, so if anything this
   biases against finding the regression that was found.
 - A bits/token regression on 578 tokens is not the same claim as a benchmark
   regression. The accuracy view below points the same way but cannot reach
@@ -244,7 +244,7 @@ replay slice as deferred.
 
 All three MMLU flips are base-correct / mid-train-wrong, and all three are cases
 where the base answered the gold letter and the mid-train arm answered a different
-one — the same direction as the loss regression in section 2, from an independent
+one, the same direction as the loss regression in section 2, from an independent
 instrument. It is **not significant**: three discordant pairs cannot be, and a
 one-item change moves this MMLU number by 8.3 points.
 
@@ -257,7 +257,7 @@ splits, which requires HuggingFace egress this node does not have
 
 ## 3. Kernel generation: the headline question
 
-This was designed as the low-power measurement — one greedy attempt per task is one
+This was designed as the low-power measurement: one greedy attempt per task is one
 bit of evidence per task, and 34 bits cannot resolve a subtle effect. It did not need
 to: the effect is a near-total collapse and clears an exact test by five orders of
 magnitude.
@@ -336,8 +336,8 @@ kernel, so the cheapest correct answer is to return it:
 
 **It is not "the base model is the better kernel engineer".** The base arm's 23
 correct kernels have a median token similarity of 0.997 to the seed it was shown, and
-two of its four faster-than-baseline results — `genb_fx_reglu_act_fp16` at 2.36x and
-`genb_moe_sigmoid_topk_norenorm_fp16` at 1.65x — are **byte-identical to the seed**.
+two of its four faster-than-baseline results (`genb_fx_reglu_act_fp16` at 2.36x and
+`genb_moe_sigmoid_topk_norenorm_fp16` at 1.65x) are **byte-identical to the seed**.
 Those numbers are the *seed's*, not the model's. This is exactly the failure mode
 `kore/eval/policies.py` documents ("the campaign reported the seed's `fast_p` as if
 it were KORE's"), and it is why the base arm's absolute numbers must not be quoted as
@@ -345,7 +345,7 @@ a model capability.
 
 Read the comparison as what it actually measures: **can the model return a
 syntactically valid kernel at all when it is shown one?** The base can, almost always
-by copying. The mid-train checkpoint cannot — it corrupts what it is copying. That is
+by copying. The mid-train checkpoint cannot: it corrupts what it is copying. That is
 a smaller claim than "worse at optimization" and a more actionable one: it says the
 Stage-0 output is **not usable as a generation policy as it stands**, which matters
 because Stage-1 SFT and Stage-2 GRPO both sample from it.
@@ -360,7 +360,7 @@ Two further limits on the kernel numbers specifically:
   provenance rests on the declared baseline alone.
 - **Only 12 of the base's 23 correct kernels are scoreable for speed.** Nine were
   demoted to `screening` timing grade and two (`mla_decode_bf16`,
-  `paged_attn_decode_bf16` — the whole-family holdouts) came back
+  `paged_attn_decode_bf16`, the whole-family holdouts) came back
   `performance_ineligible`, so `fast_p` sees 12 tasks' worth of timing out of 34.
   Those 11 are verifier PASSES with no defensible timing; see harness defect 1, which
   is what stopped them being filed as correctness failures.
@@ -373,15 +373,15 @@ Every defect encountered while building this, whether or not it changed a number
 
 | # | Defect | Severity | Status |
 | --- | --- | --- | --- |
-| 1 | `bakeoff.evaluate_policy`'s per-task `correct` silently means "correct AND carrying an integrity-gated speedup". A kernel the verifier ACCEPTS whose timing was demoted to screening grade has `rr.speedup is None`, so a **verifier pass is filed as a correctness failure**. This is right for `fast_p` (an unscoreable kernel must contribute 0) and wrong for any funnel built on the same field. | reporting-fatal for this eval | **Fixed** — `correct_gate` (the reward's own gate) and `timed` are now additive fields on the per-task record; `correct` keeps its `fast_p` meaning so no existing consumer changes. Regression: `test_a_correct_but_screening_timed_kernel_is_correct_and_unscoreable`. |
-| 2 | No way to point any eval at a checkpoint-vs-base comparison. `bakeoff` compares *policies*, `vs_opus` compares against a teacher, `generalization` reads an offline measures JSON. Nothing prompted two checkpoints identically on the held-out scope at a matched budget. | missing capability | **Fixed** — `kore/eval/checkpoint_ab.py`. |
-| 3 | `kore.eval.policies._task_prompt` was private, so an A/B could only re-render the prompt in a second copy — a silent path for the two arms to drift apart. | latent correctness | **Fixed** — promoted to `policies.task_prompt`, private alias retained. `test_first_turn_messages_match_the_live_model_policy` asserts the replayed prompt equals what `model_policy` sends live. |
-| 4 | `kore.eval.e2e_sglang_vllm._openai_compatible_generate` takes a single prompt STRING, so it cannot carry the KORE policy contract (system prompt + task turn). Reusing it for an endpoint-backed eval would have silently changed what the model was asked. | would have invalidated an endpoint run | **Worked around** — `checkpoint_ab.endpoint_generate` sends a full message list. The serving-gate module is owned elsewhere and was not modified. |
-| 5 | `kore.policy.serve.load_generate` has no per-token log-likelihood path and no batched generation, so an LM-loss measurement was impossible through it and a 34-prompt greedy sweep would have paid full per-request latency 34 times. | throughput / capability | **Worked around** — `checkpoint_ab.load_hf_batch_generate` returns `generate`, `generate_batch` and `nll` from ONE load. `serve.py` is owned elsewhere and was not modified. |
-| 6 | `heldout_lm.assert_documents_uncontaminated` initially only asked `filter_generalization_scope` whether a task was *contaminated*. That function does not reject **training** tasks, so held-out loss over a trained task would have been accepted silently. | would have invalidated a held-out claim | **Fixed** — the guard now requires positive membership in `generalization_eval_ids()`. Regression: `test_a_training_task_document_is_refused_too`. |
-| 7 | `scripts/operations_registry.json` must enumerate every file under `scripts/`, so adding the two sbatch entrypoints broke `tests/test_operations_registry.py`. | test contract | **Fixed** — both registered as `diagnostic`. (This file is outside the ownership boundary for this work; only the two new records were added.) |
-| 8 | `kore.policy.format.parse_response` **leaves the opening ```` ```python ```` fence inside the extracted kernel when the closing fence is missing** — i.e. whenever a response is cut off mid-code-block. The result is a syntax error on line 1 of a kernel the model may otherwise have written correctly. Reproducer: `parse_response("FULL_KERNEL\n```python\nimport triton\n")` returns a kernel starting with ```` ```python ````; the same input with a closing fence parses correctly. | real, but changed nothing here | **Reported, not fixed.** It hit 3 of 34 mid-train tasks and **0 tasks were harness-attributable**: all 3 are independently invalid after stripping the fence (`Perhaps you forgot a comma?`, `too many nested parentheses`, `unindent does not match`). `kore/policy/format.py` is outside this work's ownership boundary, and patching around it inside `kore/eval` would have made the replayed source differ from what `model_policy` submits live — which is the property that makes this measurement credible. It belongs to that module's owner. |
-| 9 | `checkpoint_ab.observation_summary` truncated `Observation.error_text` from the FRONT. `error_text` is a traceback, so the informative last line was discarded and every compile failure read as an anonymous frame of `_genops._run_correctness`. This actively obstructed diagnosing result 3. | self-inflicted, reporting | **Fixed** — the field is now `error_tail` and keeps the last 400 characters, marked with a leading `...` when clipped. Regressions: `test_error_text_is_truncated_from_the_END_not_the_front`, plus short-string and no-error cases. The shipped `measures_*.json` from job 27715 predates the fix and carries the old `error_head`; the syntax-error taxonomy in section 3 was recovered by re-parsing the archived completions on CPU, which needs no GPU. |
+| 1 | `bakeoff.evaluate_policy`'s per-task `correct` silently means "correct AND carrying an integrity-gated speedup". A kernel the verifier ACCEPTS whose timing was demoted to screening grade has `rr.speedup is None`, so a **verifier pass is filed as a correctness failure**. This is right for `fast_p` (an unscoreable kernel must contribute 0) and wrong for any funnel built on the same field. | reporting-fatal for this eval | **Fixed**: `correct_gate` (the reward's own gate) and `timed` are now additive fields on the per-task record; `correct` keeps its `fast_p` meaning so no existing consumer changes. Regression: `test_a_correct_but_screening_timed_kernel_is_correct_and_unscoreable`. |
+| 2 | No way to point any eval at a checkpoint-vs-base comparison. `bakeoff` compares *policies*, `vs_opus` compares against a teacher, `generalization` reads an offline measures JSON. Nothing prompted two checkpoints identically on the held-out scope at a matched budget. | missing capability | **Fixed**: `kore/eval/checkpoint_ab.py`. |
+| 3 | `kore.eval.policies._task_prompt` was private, so an A/B could only re-render the prompt in a second copy, a silent path for the two arms to drift apart. | latent correctness | **Fixed**: promoted to `policies.task_prompt`, private alias retained. `test_first_turn_messages_match_the_live_model_policy` asserts the replayed prompt equals what `model_policy` sends live. |
+| 4 | `kore.eval.e2e_sglang_vllm._openai_compatible_generate` takes a single prompt STRING, so it cannot carry the KORE policy contract (system prompt + task turn). Reusing it for an endpoint-backed eval would have silently changed what the model was asked. | would have invalidated an endpoint run | **Worked around**: `checkpoint_ab.endpoint_generate` sends a full message list. The serving-gate module is owned elsewhere and was not modified. |
+| 5 | `kore.policy.serve.load_generate` has no per-token log-likelihood path and no batched generation, so an LM-loss measurement was impossible through it and a 34-prompt greedy sweep would have paid full per-request latency 34 times. | throughput / capability | **Worked around**: `checkpoint_ab.load_hf_batch_generate` returns `generate`, `generate_batch` and `nll` from ONE load. `serve.py` is owned elsewhere and was not modified. |
+| 6 | `heldout_lm.assert_documents_uncontaminated` initially only asked `filter_generalization_scope` whether a task was *contaminated*. That function does not reject **training** tasks, so held-out loss over a trained task would have been accepted silently. | would have invalidated a held-out claim | **Fixed**: the guard now requires positive membership in `generalization_eval_ids()`. Regression: `test_a_training_task_document_is_refused_too`. |
+| 7 | `scripts/operations_registry.json` must enumerate every file under `scripts/`, so adding the two sbatch entrypoints broke `tests/test_operations_registry.py`. | test contract | **Fixed**: both registered as `diagnostic`. (This file is outside the ownership boundary for this work; only the two new records were added.) |
+| 8 | `kore.policy.format.parse_response` **leaves the opening ```` ```python ```` fence inside the extracted kernel when the closing fence is missing**, i.e. whenever a response is cut off mid-code-block. The result is a syntax error on line 1 of a kernel the model may otherwise have written correctly. Reproducer: `parse_response("FULL_KERNEL\n```python\nimport triton\n")` returns a kernel starting with ```` ```python ````; the same input with a closing fence parses correctly. | real, but changed nothing here | **Reported, not fixed.** It hit 3 of 34 mid-train tasks and **0 tasks were harness-attributable**: all 3 are independently invalid after stripping the fence (`Perhaps you forgot a comma?`, `too many nested parentheses`, `unindent does not match`). `kore/policy/format.py` is outside this work's ownership boundary, and patching around it inside `kore/eval` would have made the replayed source differ from what `model_policy` submits live, which is the property that makes this measurement credible. It belongs to that module's owner. |
+| 9 | `checkpoint_ab.observation_summary` truncated `Observation.error_text` from the FRONT. `error_text` is a traceback, so the informative last line was discarded and every compile failure read as an anonymous frame of `_genops._run_correctness`. This actively obstructed diagnosing result 3. | self-inflicted, reporting | **Fixed**: the field is now `error_tail` and keeps the last 400 characters, marked with a leading `...` when clipped. Regressions: `test_error_text_is_truncated_from_the_END_not_the_front`, plus short-string and no-error cases. The shipped `measures_*.json` from job 27715 predates the fix and carries the old `error_head`; the syntax-error taxonomy in section 3 was recovered by re-parsing the archived completions on CPU, which needs no GPU. |
 
 ### Infrastructure faults, not code defects
 
@@ -393,7 +393,7 @@ Every defect encountered while building this, whether or not it changed a number
 ### Which serving route was used, and why
 
 `docs/E2E_SERVING_GATE.md` documents a container-hosted SGLang endpoint as the sound
-way to serve a 14B model on this hardware, and it is — on the box that has docker and
+way to serve a 14B model on this hardware, and it is, on the box that has docker and
 the image. It was **not** usable here: the checkpoint lives on cluster NFS, the
 cluster has no container runtime, and the checkpoint cannot be transferred (above).
 
@@ -402,15 +402,15 @@ The route taken is `transformers` in-process, batched, via
 section 1 needs and which an OpenAI-compatible endpoint cannot expose at all. Three
 things it pins that a naive port would get wrong:
 
-- **left padding** — a batched decoder-only `generate` with right padding continues
+- **left padding**: a batched decoder-only `generate` with right padding continues
   from pad tokens and produces garbage for every sequence shorter than the longest
   in its batch;
-- **`enable_thinking=False`** — matching `serve.load_generate`, so the token budget
+- **`enable_thinking=False`**: matching `serve.load_generate`, so the token budget
   reaches the kernel;
-- **one dtype for both arms** — see above.
+- **one dtype for both arms**: see above.
 
 Measured cost: 839 s for the base arm's 34 completions at `batch_size 12`
-(~25 s/completion), which is why the batched path matters — 34 sequential requests
+(~25 s/completion), which is why the batched path matters: 34 sequential requests
 at 4,096 tokens each would have dominated the job.
 
 ---
@@ -522,7 +522,7 @@ Whole suite after this work: **7,972 passed, 4 skipped, 58 deselected** in 142 s
 
 > **`pytest -q` prints no verdict, and that is a trap.** `pyproject.toml`'s `addopts`
 > already contains `-q`, so the documented `python -m pytest -q -p no:warnings`
-> resolves to `-qq`, which suppresses the `N passed` summary line entirely — the run
+> resolves to `-qq`, which suppresses the `N passed` summary line entirely: the run
 > ends on a bare `[100%]` and looks like it produced no result. The exit code is still
 > correct. To see the counts, override `addopts`:
 > `python -m pytest -p no:warnings --tb=no -q -o addopts="--strict-markers --import-mode=importlib -m 'not gpu and not release'"`.
@@ -548,8 +548,8 @@ Whole suite after this work: **7,972 passed, 4 skipped, 58 deselected** in 142 s
   one the campaign's own bake-off uses, which is why it was the one measured.
 - **A real general-capability verdict.** The retention smoke sets are 12 MMLU items
   and 3 HumanEval items; the general LM probe is 578 tokens. Both instruments point
-  the same way — the loss probe significantly (p = 0.037), the accuracy probe in the
-  same direction but far short of significance (p = 0.25) — and the full splits need
+  the same way (the loss probe significantly, p = 0.037, the accuracy probe in the
+  same direction but far short of significance, p = 0.25), and the full splits need
   HuggingFace egress this node does not have. Until then the section-2 regression is
   a signal, not a measurement.
 - **How much of result (1) is generalization versus template acquisition.**

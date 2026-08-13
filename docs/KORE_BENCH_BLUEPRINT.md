@@ -1,6 +1,6 @@
 # KORE-Bench blueprint: candidate AMD ROCm/Triton task expansion
 
-> **Status — design blueprint, not a shipped benchmark or release plan.** The
+> **Status: design blueprint, not a shipped benchmark or release plan.** The
 > repository is AMD-internal and its current production evaluation uses
 > AgentKernelArena and KernelBench-AMD. Counts, taxonomy targets, and release
 > language below are proposals that require an explicit task manifest and release

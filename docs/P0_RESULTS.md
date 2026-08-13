@@ -1,11 +1,11 @@
-# P0 roofline / Speed-of-Light validation — native gfx950 (MI350-class / CDNA4)
+# P0 roofline / Speed-of-Light validation: native gfx950 (MI350-class / CDNA4)
 
 **Verdict: `INTEGRITY_ONLY`. All three preregistered checks FAIL under the v2 analysis.**
 
 Three independent runs now agree: a re-analysis of the stored datasheet-peak artifact, a
 re-measurement on calibrated peaks over ten operators, and a re-measurement over **all fifteen**
 once attention and MoE became modellable. Coverage was the strongest remaining objection and it is
-now closed — including the operators that matter most made the model *worse*, and leave-one-family-out
+now closed: including the operators that matter most made the model *worse*, and leave-one-family-out
 transfer on MoE is R² = −384. See "Full-coverage replication" below for the definitive result.
 
 An earlier revision of this document reported `PARTIAL`, with check (b) as a "decisive PASS" at
@@ -31,12 +31,12 @@ controls, and all three are decisive:
 | Control | Result |
 | --- | --- |
 | Named-term model, raw in-sample R² | **0.9783** (reproduces the previously reported headline exactly) |
-| `T_candidate`-only predictor, raw in-sample R² | **0.9971** — *higher* than the named model |
+| `T_candidate`-only predictor, raw in-sample R² | **0.9971** (*higher* than the named model) |
 | `T_candidate`-only, task-level cross-validated R² | **0.9970** vs the named model's 0.9471 |
 | Preregistered normalized target, held-out task clusters | **R² = −0.4582** |
 
 The preregistered primary target is the normalized gap `(T_candidate − T_min) / T_candidate`,
-which removes the shared scale. On held-out task clusters it scores −0.458 — worse than predicting
+which removes the shared scale. On held-out task clusters it scores −0.458, worse than predicting
 the mean. Against a `T_candidate`-only baseline the increment is **−0.3365**, 95% CI
 [−0.4880, +0.6078]. In-sample it reaches only 0.3140. `p = p_adjusted = 0.986`.
 
@@ -54,7 +54,7 @@ DECISION: INTEGRITY_ONLY        model_fingerprint_status: legacy-unfingerprinted
 shaping_evidence: disabled      authorized families: none
 ```
 
-η is a *worse* predictor of speedup than the trivial `1/T_candidate` — that is, worse than the
+η is a *worse* predictor of speedup than the trivial `1/T_candidate`, that is, worse than the
 statement "faster kernels are faster."
 
 Reproduce:
@@ -68,15 +68,15 @@ print(json.dumps(reanalyze_report(json.load(open('data/p0_study_final.json'))), 
 ## Full-coverage replication: attention and MoE included (`data/p0_study_v2_attention_moe.json`)
 
 The strongest objection to everything below was coverage. Five of the fifteen
-operators — `fused_moe_silu`, `topk_softmax`, `flash_attn_decode`,
-`flash_attn_prefill`, `paged_attn_decode` — had no roofline at all, because
+operators (`fused_moe_silu`, `topk_softmax`, `flash_attn_decode`,
+`flash_attn_prefill`, `paged_attn_decode`) had no roofline at all, because
 `estimate_work` blanket-excluded attention and MoE as indefensible. What
 survived to be tested was ten memory- or compute-bound primitives, and the
 operators that dominate real serving were simply absent.
 
 That exclusion was too broad. A tiled attention implementation never writes the
 S×S score matrix to HBM, so its mandatory traffic is exactly Q, K, V read and O
-written, and the two matmuls give exact FLOPs — defensible in precisely the
+written, and the two matmuls give exact FLOPs, defensible in precisely the
 sense this module requires. Those forms are now modelled (see
 `kore.analysis.roofline.estimate_work`), coverage is **15/15**, and the study
 was re-measured on the same calibrated peaks under the v2 fingerprint:
@@ -93,7 +93,7 @@ DECISION: INTEGRITY_ONLY        135 measures, 15 rooflines, 0 unmodeled
 (a)'s deficit widens from −0.109 to −0.169 and the normalized held-out R² falls
 from 0.056 to 0.023. The raw in-sample R² of 0.960 again sits *below* the
 denominator-preserving null's median of 0.971, and the permutation test now
-fails to reject at p = 0.992 — random regressors sharing the same denominator
+fails to reject at p = 0.992: random regressors sharing the same denominator
 are essentially always better.
 
 Leave-one-family-out transfer is where this becomes unambiguous:
@@ -113,7 +113,7 @@ MoE is off the scale by two orders of magnitude, and that is physically
 coherent rather than a fitting artifact: a MoE kernel's cost is dominated by
 expert-weight traffic whose volume depends on the *routing*, which a static
 roofline cannot see. The model does not merely fail to generalize across
-families — on the family whose cost structure it least resembles, it is
+families: on the family whose cost structure it least resembles, it is
 catastrophically wrong. All eight families return `FAIL`.
 
 Two studies on ten operators and one on all fifteen now agree on
@@ -132,7 +132,7 @@ not an artifact of missing coverage.
 The re-analysis above adjudicates a *stored* v1 artifact whose peaks were datasheet numbers. The
 obvious objection is that the model only fails because it was fed the wrong constants. It was
 therefore re-measured end to end against **calibrated peaks from this device** (HBM 4.763 TB/s,
-bf16 1.296 PF/s — 60% and 56% of datasheet), under a verified model fingerprint, on an otherwise
+bf16 1.296 PF/s, 60% and 56% of datasheet), under a verified model fingerprint, on an otherwise
 idle GPU:
 
 ```bash
@@ -149,7 +149,7 @@ topk_softmax_bf16,flash_attn_decode_bf16,flash_attn_prefill_bf16,paged_attn_deco
 > The historic run passed the **v1** fingerprint
 > `sha256:a6e01795829dd9a1c11752e12ff84825241f1e7d1e752c47dd2d926f7b858c7a`. Since
 > `data/calibration_v1.json` was reissued under v2, that value no longer matches and the command
-> exits 1 with `physical-model fingerprint mismatch` — which is the guard working. The v2 digest
+> exits 1 with `physical-model fingerprint mismatch`, which is the guard working. The v2 digest
 > above is what the file carries today; it is verified to be accepted (checked with `--dry-run` on a
 > CPU box, which is the whole command minus the GPU measurement).
 
@@ -166,7 +166,7 @@ peaks are real, but η still trails the trivial `1/T_candidate`. The raw in-samp
 reproduces the old headline and remains *below* the denominator-preserving null's median of 0.944:
 random regressors sharing the same denominator score higher, and the permutation test cannot reject
 them (p = 0.83). Only under the normalized target does the named model finally beat its baseline
-(+0.254, p = 0.001) — but at CV R² = 0.056 it explains essentially none of the variance, and its
+(+0.254, p = 0.001), but at CV R² = 0.056 it explains essentially none of the variance, and its
 95% CI [−0.327, +0.447] spans zero.
 
 Two further findings sharpen the negative result:
@@ -175,8 +175,8 @@ Two further findings sharpen the negative result:
   activation +0.124, gemm −0.224, reduction −4.39, norm −5.23, quant −5.43, positional −14.87. The
   fit is family-local; it does not generalize to an operator class it has not seen.
 - **At the time of this run the model could not express the operators that matter most.** Five of
-  the fifteen requested operators — `fused_moe_silu`, `topk_softmax`, `flash_attn_decode`,
-  `flash_attn_prefill`, `paged_attn_decode` — had no roofline and were dropped as *unsupported
+  the fifteen requested operators (`fused_moe_silu`, `topk_softmax`, `flash_attn_decode`,
+  `flash_attn_prefill`, `paged_attn_decode`) had no roofline and were dropped as *unsupported
   model*, leaving ten memory- or compute-bound primitives. That gap is now closed: see the
   full-coverage section above, where all fifteen are modelled and the verdict is unchanged.
 
@@ -188,8 +188,8 @@ constants.
 
 **Still valid.** The measurements themselves are sound: the peak calibration, the AITER baseline
 timings, the PMC collection methodology, and the paired timing protocol are unaffected. The
-speed-of-light ceiling remains usable as an *integrity* bound — a kernel timing faster than
-`T_min` is physically impossible and is rejected — because that use requires only a conservative
+speed-of-light ceiling remains usable as an *integrity* bound: a kernel timing faster than
+`T_min` is physically impossible and is rejected, because that use requires only a conservative
 lower bound on achievable time, not predictive validity.
 
 **No longer claimable.** That counter-derived named terms explain the runtime residual; that η
@@ -219,7 +219,7 @@ model can never authorize shaping. The shipped models are therefore not affected
 ## Peak calibration (measured achievable, not datasheet)
 
 On-device microbenchmarks (`kore.analysis.calibrate_peaks`, batched event timing). These are the
-values in `data/calibration_v1.json` — the document both replications above were actually run with,
+values in `data/calibration_v1.json`, the document both replications above were actually run with,
 so they are the numbers behind every calibrated figure in this report:
 
 | peak | datasheet (MI350X) | measured achievable | attained | method |
@@ -232,9 +232,9 @@ The datasheet column is MI350X, not MI355X: this node reports Marketing Name "AM
 MI350X", a 1000 W cap and 2200 MHz max sclk, giving 256 CU × 2.2 GHz × 4096 bf16 FLOP/clk =
 2.31 PF/s. Dividing by an MI355X 2.5 PF/s ceiling would lower the speed-of-light integrity floor
 by 8% and admit physically impossible timings, so `rooflines.DEFAULT_SKU` pins `mi350x`. An earlier
-revision of this table quoted 2.5 / 5.0 PF/s datasheet and 4.60 TB/s / 1.27 PF/s measured — those
+revision of this table quoted 2.5 / 5.0 PF/s datasheet and 4.60 TB/s / 1.27 PF/s measured; those
 came from the superseded `data/calibration.json` and disagreed with this document's own
-"HBM 4.763 TB/s, bf16 1.296 PF/s — 60% and 56%" above.
+"HBM 4.763 TB/s, bf16 1.296 PF/s, 60% and 56%" above.
 
 > **Applying calibration.** Earlier revisions documented `KORE_PEAK_BF16` / `KORE_PEAK_HBM_BW` /
 > `KORE_PEAK_FP8` environment overrides. Those were deliberately removed as invisible,
@@ -244,14 +244,14 @@ came from the superseded `data/calibration.json` and disagreed with this documen
 > `env_exports` block that no longer applies.) Calibrated peaks must be supplied as a fingerprinted
 > `kore.runtime-calibration.v1` document; see `kore/analysis/calibrate_peaks.py` and the
 > `--calibration` path. Any figure produced without one is computed against **datasheet** peaks,
-> which *understates* `T_min` — and therefore η — by 1.68× (memory-bound) to 1.77× (compute-bound),
+> which *understates* `T_min` (and therefore η) by 1.68× (memory-bound) to 1.77× (compute-bound),
 > i.e. roughly halves η. The direction matters: datasheet peaks are higher, so `T_min = max(W/P,
 > Q/B)` comes out smaller and a kernel looks *further* from the roofline than it is.
 
 Using an achievable rather than datasheet peak rescales η for every kernel of a dtype identically,
 so it does not change any of the relationships tested above.
 
-## Check (a) baselines — AITER production kernels
+## Check (a) baselines: AITER production kernels
 
 The reference for each operator is the real production kernel, tagged per operator in the JSON:
 
@@ -262,7 +262,7 @@ The reference for each operator is the real production kernel, tagged per operat
 | flash_attn_decode / prefill / paged_attn_decode | **AITER** FMHA / ROCm paged attn | 1.32 / 0.07 / 0.15× |
 | fused_moe_silu / topk_softmax | **AITER** `fused_moe` / `topk_softmax` | 0.04 / 0.29× |
 | gemm_bf16 | **hipBLASLt** (`torch.matmul`) | 0.50× |
-| softmax / gelu_tanh | framework (torch — no standalone AITER op) | 0.51 / 0.89× |
+| softmax / gelu_tanh | framework (torch, no standalone AITER op) | 0.51 / 0.89× |
 | gemm_fp8_a8w8 / quant_fp8_pertoken | η-only (fp8 vendor path not built on this stack) | – |
 
 Baseline composition: 10 AITER-vendor, 1 hipBLASLt, 2 framework. Every AITER baseline passes the
@@ -278,7 +278,7 @@ A leave-one-family-out experiment refits the named-term → residual map on all 
 predicts the held-out family. On the normalized target the held-out scores are strongly negative
 for most families, so the residual is at best a **dense per-family** signal and does not transfer
 zero-shot. Combined with the checks above, per-family fitting is a necessary but not sufficient
-condition — no family currently reaches an authorizing verdict.
+condition; no family currently reaches an authorizing verdict.
 
 ## PMC (gfx950)
 
@@ -303,7 +303,7 @@ parse the long-format `*_counter_collection.csv`, and select the longest-running
   under a conservative lower bound and does not depend on predictive validity.
 - **Shaping potential (structurally present, empirically unauthorized).** `Φ = η` is wired into
   GRPO credit as `F_t = γ·Φ(s_{t+1}) − Φ(s_t)`. Potential-based shaping preserves the ordering of
-  returns regardless of whether Φ is predictive, so this is safe — but it should be described as a
+  returns regardless of whether Φ is predictive, so this is safe, but it should be described as a
   variance-reduction heuristic, not as a validated hardware signal.
 - **Residual-descent reward (available, not validated).** `reward_mode="residual"` exists and is
   unit-tested as an alternative objective. Given the results above it should not be used as a

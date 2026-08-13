@@ -123,6 +123,7 @@ JOB=""
 EXCLUDE=""
 LAST_START=""
 consecutive_fast_failures=0
+launch_failures=0
 #: Job ids this supervisor has started or adopted, so run_completed cannot be
 #: satisfied by an unrelated run's log.
 SEEN_JOBS=""
@@ -166,6 +167,7 @@ while :; do
 
     case "$state" in
         RUNNING)
+            launch_failures=0
             age="$(log_age "$JOB")"
             if [ "$age" -gt "$STALL_SECS" ]; then
                 node="$(squeue -j "$JOB" -h -o '%N' 2>/dev/null | head -1)"
@@ -192,6 +194,27 @@ while :; do
                     # is actually working -- measured: 45s said still-held, 60s
                     # showed RUNNING.
                     sleep "$RELEASE_WAIT"
+                    ;;
+                *JobLaunchFailure*|*dispatch*)
+                    # The controller accepted the job, tried to dispatch it, and got
+                    # no confirmation from the node. This does NOT recover on its own
+                    # -- job 6530 sat in it unchanged across three poll cycles, and
+                    # this repo has seen a submission wedge here before. `scontrol
+                    # release` is the wrong tool (nothing is held); the job has to be
+                    # cancelled and a fresh one submitted.
+                    launch_failures=$((launch_failures + 1))
+                    log "job=$JOB failed to dispatch ($reason);" \
+                        "cancelling and resubmitting (launch failure $launch_failures)"
+                    scancel "$JOB" 2>/dev/null
+                    JOB=""
+                    # Back off a little further each time. Retrying instantly into a
+                    # controller that just refused to dispatch tends to reproduce it,
+                    # and burning the resubmission budget on that is how a run dies
+                    # while looking supervised. Capped so it still retries hourly.
+                    backoff=$(( launch_failures * 60 ))
+                    (( backoff > 900 )) && backoff=900
+                    log "backing off ${backoff}s before the next attempt"
+                    sleep "$backoff"
                     ;;
                 *)
                     log "job=$JOB pending ($reason)"

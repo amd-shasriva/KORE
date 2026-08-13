@@ -80,12 +80,24 @@ if grep -qs "SFT_RC=0" "$REPO"/runs/sft-*.out 2>/dev/null; then
     exit 0
 fi
 
-# ---- 2. Is a training job alive? --------------------------------------------
-# Any state that means the job still exists counts. Treating only RUNNING as
-# alive would submit a duplicate against a job that is merely PENDING or
-# CONFIGURING, and two trainers sharing output_dir interleave checkpoint writes.
-JOB_LINE="$(squeue -u "${USER:-shasriva}" -h -o "%i %j %T" 2>/dev/null \
-            | awk '$2=="kore-sft"{print; exit}')"
+# ---- 2. Is a training job alive, and is it actually going to RUN? -----------
+# "A job exists" is not the same as "the run is covered". amd-primus-qos and
+# amd-general-qos are capped at 16 and 8 nodes team-wide and are routinely full, so
+# a job of ours can sit at QOSGrpNodeLimit for many hours. Treating that as covered
+# is how the run stayed down: two cap-blocked jobs were queued, no job was running,
+# and this guard stayed silent because it found a "kore-sft" job in the list.
+#
+# So: a RUNNING job means covered. Otherwise, a pending job only counts as covered
+# if it is on a pool with headroom (amd-burst), because that is the one that
+# actually gets placed. A duplicate submission is safe regardless -- the launcher's
+# training lock guarantees exactly one job trains, and any later starter exits
+# after printing KORE_LOCK_HELD -- so the cost of acting is a wasted queue slot,
+# while the cost of not acting is the run sitting idle.
+mapfile -t OUR_JOBS < <(squeue -u "${USER:-shasriva}" -h -o "%i %j %T %q" 2>/dev/null \
+                        | awk '$2=="kore-sft"')
+RUNNING_LINE="$(printf '%s\n' "${OUR_JOBS[@]:-}" | awk '$3=="RUNNING"{print; exit}')"
+BURST_PENDING="$(printf '%s\n' "${OUR_JOBS[@]:-}" | awk '$4=="amd-burst-qos"{print; exit}')"
+JOB_LINE="${RUNNING_LINE:-$BURST_PENDING}"
 JOB_ID="$(awk '{print $1}' <<<"$JOB_LINE")"
 JOB_STATE="$(awk '{print $3}' <<<"$JOB_LINE")"
 
@@ -94,6 +106,19 @@ JOB_STATE="$(awk '{print $3}' <<<"$JOB_LINE")"
 if [ -z "$JOB_LINE" ] && ! squeue -u "${USER:-shasriva}" -h -o "%i" >/dev/null 2>&1; then
     say "controller unreachable; waiting rather than submitting"
     exit 0
+fi
+
+# A node failure is the failure mode actually observed here, twice: job 10849 died
+# with NODE_FAIL/NodeDown and job 9229 was killed with no error, no traceback and no
+# launcher epilogue, which is what a node going away looks like from inside the job.
+# Nothing about it is recoverable by waiting, and it leaves the training lock behind
+# holding a job id that no longer exists. The launcher takes over a lock whose holder
+# has left the queue, so this only needs to be visible, not repaired.
+if [ -z "$RUNNING_LINE" ] && [ -d "$OUT_DIR/.kore_train.lock" ]; then
+    holder="$(cat "$OUT_DIR/.kore_train.lock/jobid" 2>/dev/null || true)"
+    if [ -n "$holder" ] && ! squeue -j "$holder" -h -o "%T" >/dev/null 2>&1; then
+        say "note: stale training lock from job $holder (gone from the queue); the launcher will take it over"
+    fi
 fi
 
 # ---- 3. Ensure a supervisor is watching whatever is alive --------------------

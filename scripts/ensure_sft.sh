@@ -181,8 +181,11 @@ for jid in $(ls -t "$REPO"/runs/sft-*.err 2>/dev/null | head -15 \
     info="$(scontrol show job "$jid" 2>/dev/null | tr ' ' '\n')"
     case "$(printf '%s' "$info" | grep -m1 '^JobState=')" in
         JobState=NODE_FAIL|JobState=BOOT_FAIL)
-            printf '%s' "$info" | grep -m1 '^NodeList=' | cut -d= -f2 \
-                | xargs -r scontrol show hostnames 2>/dev/null ;;
+            # Taken verbatim, NOT expanded via `scontrol show hostnames`: this
+            # controller has no such entity ("unknown entity type 'hostnames'"), so
+            # that call failed silently and harvested nothing. This job is always
+            # --nodes=1, so NodeList is a single bare hostname and needs no expansion.
+            printf '%s' "$info" | grep -m1 '^NodeList=' | cut -d= -f2 ;;
     esac
 done | grep -E '^[a-z0-9-]+$' | sort -u >> "$BAD_NODES".tmp 2>/dev/null || true
 if [ -s "$BAD_NODES".tmp ]; then

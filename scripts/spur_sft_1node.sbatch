@@ -76,7 +76,40 @@
 # so any transient NODE_FAIL became an unrecoverable hold. Recovery now lives
 # in scripts/spur_pipeline_driver.sh, which resubmits and lets the trainer
 # resume from its last complete checkpoint.
-#SBATCH --exclusive
+# --exclusive is deliberately ABSENT, and this is a correction of an earlier
+# assumption rather than a relaxation of standards.
+#
+# The job still requests --gres=gpu:8, i.e. ALL EIGHT GPUs on the node. That is what
+# makes it a full node for training: no other GPU job can be placed there, and no
+# other process can touch a device we hold. --exclusive adds only one further demand,
+# that not even a single unrelated CPU process coexists, and on this cluster that one
+# extra demand is the difference between running and not running.
+#
+# Measured, on a job submitted at 01:29:30 that was still PENDING at 05:11 while NINE
+# jobs submitted 2.0-3.6 hours LATER all started ahead of it:
+#
+#   job 7163 yquan     submitted 03:28  gpu:8/node  cpus=1  exclusive=no  -> RUNNING
+#   job 7388 olehtika  submitted 03:46  gpu:8/node  cpus=1  exclusive=no  -> RUNNING
+#   job 7509 yihanwan  submitted 04:03  gpu:8/node  cpus=1  exclusive=no  -> RUNNING
+#   job 7727 anamital  submitted 05:05  gpu:8/node  cpus=1  exclusive=no  -> RUNNING
+#   job 7750 jiaolyu   submitted 05:08  gpu:8/node  cpus=1  exclusive=no  -> RUNNING
+#
+# Every one of them asked for the full complement of GPUs, so this is not a case of
+# small jobs slipping through gaps. This scheduler places what fits rather than
+# strictly honouring submit order, and an --exclusive request only fits a COMPLETELY
+# idle node, of which there were 0-2 at any moment while 18 nodes sat drained for a
+# "Bundle 2 upgrade".
+#
+# The original justification for --exclusive was that a co-tenant might exhaust host
+# memory during the ~61GB rank-0 FULL_STATE_DICT gather at each checkpoint. That was
+# never measured, and it is wrong: these nodes have RealMemory=2817843 (2.75 TB) with
+# ~2.7 TB free, and CPUTot=236 of which a typical "mix" node has ONE OR TWO
+# allocated. Our peak host footprint is roughly 2% of the machine. The risk being
+# avoided did not exist; the cost of avoiding it was the run not starting.
+#
+# What still protects the run: --cpus-per-task=128 is a guaranteed allocation (a mix
+# node typically has ~234 free, so it fits comfortably), and the GPU-count guard
+# below fails closed if fewer than eight usable devices are visible.
 #SBATCH --open-mode=append
 #SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/sft-%j.out
 #SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/sft-%j.err

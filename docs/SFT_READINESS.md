@@ -272,7 +272,7 @@ mechanics of the write.
   checkpoint rotation stays bounded to 2-3 copies at `save_steps <= 50`.
 - `tests/test_sft_launch_readiness.py`: the shared masking, model-identity, and
   FSDP-wiring machinery, exercised against `configs/sft_14b_full.json`.
-  Currently **36 pass** in the default suite plus one `release`-marked
+  Currently **37 pass** in the default suite plus one `release`-marked
   full-corpus check; the count is pinned by `tests/test_docs_contract.py`, so
   it cannot drift without an explicit edit here. That suite predates the 30B
   recipe and is a regression guard on shared code paths (`kore/policy/sft.py`,

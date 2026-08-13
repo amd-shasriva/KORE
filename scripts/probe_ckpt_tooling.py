@@ -1,9 +1,15 @@
-"""Probe which FSDP checkpoint-consolidation helpers this environment actually has.
+"""Probe the FSDP checkpoint APIs the SFT run depends on.
 
-Run on the cluster before switching the SFT run to sharded checkpoints: the
-mid-training format is only safe to change if we can still produce a plain HF
-checkpoint at the end for the next stage to load with from_pretrained.
+Two things are checked, both of which only bite at the very end of a multi-day
+run if they are wrong:
+
+  1. ``FullyShardedDataParallelPlugin.set_state_dict_type("FULL_STATE_DICT")``
+     accepts a plain string. train_sft calls this so the FINAL save is a plain HF
+     checkpoint even though periodic checkpoints are sharded.
+  2. ``merge_fsdp_weights`` exists as the offline fallback.
 """
+
+import inspect
 
 import accelerate
 import torch
@@ -13,27 +19,22 @@ print("accelerate", accelerate.__version__)
 print("torch", torch.__version__)
 print("transformers", transformers.__version__)
 
-try:
-    from accelerate.utils import merge_fsdp_weights  # noqa: F401
+from accelerate import FullyShardedDataParallelPlugin
 
-    print("merge_fsdp_weights: AVAILABLE")
-except Exception as exc:  # pragma: no cover - probe
+sig = inspect.signature(FullyShardedDataParallelPlugin.set_state_dict_type)
+print("set_state_dict_type signature:", sig)
+
+# Does it accept the string form we pass, without a live FSDP model?
+plugin = FullyShardedDataParallelPlugin(fsdp_version=1)
+try:
+    plugin.set_state_dict_type("FULL_STATE_DICT")
+    print("set_state_dict_type('FULL_STATE_DICT'): OK ->", plugin.state_dict_type)
+except Exception as exc:
+    print("set_state_dict_type('FULL_STATE_DICT'): FAILED", type(exc).__name__, exc)
+
+try:
+    from accelerate.utils import merge_fsdp_weights
+
+    print("merge_fsdp_weights:", inspect.signature(merge_fsdp_weights))
+except Exception as exc:
     print("merge_fsdp_weights: MISSING", exc)
-
-try:
-    import torch.distributed.checkpoint as dcp  # noqa: F401
-    from torch.distributed.checkpoint.format_utils import dcp_to_torch_save  # noqa: F401
-
-    print("dcp + dcp_to_torch_save: AVAILABLE")
-except Exception as exc:  # pragma: no cover - probe
-    print("dcp: MISSING", exc)
-
-try:
-    from transformers.trainer import Trainer  # noqa: F401
-    import inspect
-    from transformers.training_args import TrainingArguments
-
-    sig = inspect.signature(TrainingArguments.__init__)
-    print("save_only_model supported:", "save_only_model" in sig.parameters)
-except Exception as exc:  # pragma: no cover - probe
-    print("trainer probe failed:", exc)

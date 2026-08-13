@@ -46,11 +46,13 @@ PY
 
 echo
 echo "=== correctness gates: TRAIN ==="
-"$PY" scripts/v5_verify.py 2>&1 | tail -32
+# Full output, not tail: the per-gate PASS/FAIL lines are the record, and
+# truncating them left only the aggregate VERDICT visible.
+"$PY" scripts/v5_verify.py 2>&1
 
 echo
 echo "=== correctness gates: EVAL ==="
-"$PY" scripts/v5_verify.py --path data/v5_eval.jsonl 2>&1 | tail -24
+"$PY" scripts/v5_verify.py --path data/v5_eval.jsonl 2>&1
 
 echo
 echo "=== DONE_ALL ==="

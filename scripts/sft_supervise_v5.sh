@@ -4,7 +4,17 @@
 # One entry point rather than a remembered command line, because the details are not
 # guessable and getting one wrong is expensive:
 #
-#   * account amd-burst WITH qos amd-burst-qos. Both parts matter: burst QoS paired
+#   * account amd-primus WITH qos amd-primus-qos, because that is the pairing that
+#     DEMONSTRABLY schedules. The run landed there (job 9229 on crsuse2-m2m-037) after
+#     burst never did: even a 1-GPU, 1-CPU, 5-minute burst probe stayed PENDING while
+#     113 other burst jobs ran, so the amd-burst association is present but not
+#     functioning for placement. Recovery must target a pool we have actually started
+#     in, or a preemption would resubmit into a queue that never runs.
+#
+#     primus is also a GUARANTEED pool, so unlike burst the run cannot be preempted --
+#     which is a better outcome than the burst plan this file previously described.
+#
+#   * HISTORICAL, for context: account amd-burst WITH qos amd-burst-qos. Both parts matter: burst QoS paired
 #     with the amd-general account was a PHANTOM association -- accepted by the
 #     controller and never scheduled, because zero of the running burst jobs used that
 #     account. A job of ours sat PENDING with the meaningless Reason=None for nine
@@ -64,7 +74,7 @@ export STALL_SECS="${STALL_SECS:-2700}"
 # cluster with zero fully-idle nodes that is strictly worse than waiting. The run
 # wants a whole node (--exclusive), so a long pending wait is expected and correct.
 export STUCK_PENDING_SECS="${STUCK_PENDING_SECS:-0}"
-export KORE_SFT_QOS="amd-burst-qos"
+export KORE_SFT_QOS="amd-primus-qos"
 
 LOG="$REPO/runs/supervise_v5_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "$REPO/runs"
@@ -74,6 +84,6 @@ echo "[supervise] output_dir=$KORE_OUTPUT_DIR"
 echo "[supervise] log=$LOG"
 
 exec bash scripts/watch_and_resume.sh sft \
-    sbatch --account=amd-burst --qos=amd-burst-qos "$REPO/scripts/spur_sft_1node.sbatch" \
+    sbatch --account=amd-primus --qos=amd-primus-qos "$REPO/scripts/spur_sft_1node.sbatch" \
     configs/sft_coder30b_a3b.json - - \
     >>"$LOG" 2>&1

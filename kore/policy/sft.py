@@ -375,6 +375,31 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         stage="sft", config=config, model_spec=identity.spec,
         inspection=identity.inspection))
 
+    # The reporting backend is imported by the Trainer AFTER the model is on the GPUs,
+    # so a missing one is reported at the most expensive possible moment. Run 6620
+    # died exactly there: report_to="tensorboard" with tensorboard absent from the
+    # venv, discovered after eight ranks had loaded 61GB and tokenised 206k rows,
+    # ~11 minutes in. Constructing TrainingArguments does NOT catch it -- the args
+    # accept the string and the callback is only instantiated inside
+    # Trainer.__init__ -- so the import has to be checked explicitly.
+    for _backend in str(getattr(config, "report_to", "") or "").replace(",", " ").split():
+        if _backend in ("none", "all"):
+            continue
+        _module = {"tensorboard": "tensorboard", "wandb": "wandb",
+                   "mlflow": "mlflow", "comet_ml": "comet_ml"}.get(_backend)
+        if not _module:
+            continue
+        try:
+            __import__(_module)
+        except ImportError as _exc:
+            raise RuntimeError(
+                f"sft: report_to={_backend!r} but {_module!r} is not importable "
+                f"({_exc}). Install it (`pip install {_module}`) or set "
+                'report_to="none". Checked here because the Trainer builds this '
+                "callback only after the model is loaded on every rank, which turns "
+                "a missing package into a wasted allocation."
+            ) from _exc
+
     # The dataset is not read until after the model load (~minutes x world_size),
     # so a bad path would otherwise cost a full 14B load on every rank to report.
     if not Path(dataset_path).is_file():

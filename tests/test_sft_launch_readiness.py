@@ -560,7 +560,7 @@ def test_directory_handoff_rejects_a_non_checkpoint_in_production(tmp_path):
                      "KORE_MODEL_IDENTITY_MODE": "production"})
 
 
-def test_fsdp_kwargs_wrap_the_qwen3_decoder_and_consolidate_the_handoff():
+def test_fsdp_kwargs_wrap_the_qwen3_decoder_and_sharded_checkpoints_for_resume():
     from kore.policy.configs import build_fsdp_kwargs, fsdp_enabled
     from kore.policy.sft import sft_config_from_dict
 
@@ -570,9 +570,25 @@ def test_fsdp_kwargs_wrap_the_qwen3_decoder_and_consolidate_the_handoff():
     assert kwargs["fsdp"] == "full_shard auto_wrap"
     fsdp_config = kwargs["fsdp_config"]
     assert fsdp_config["transformer_layer_cls_to_wrap"] == ["Qwen3DecoderLayer"]
-    # A sharded state dict is only reloadable under an identical mesh, which the
-    # cross-stage handoff is not.
-    assert fsdp_config["state_dict_type"] == "FULL_STATE_DICT"
+    # PERIODIC checkpoints are sharded so the run can resume at all. FULL made each
+    # save a rank-0 gather of 456 GB at 30B (7.5 min), and loading its 244 GB
+    # optimizer file back killed all eight ranks with SIGBUS on two separate nodes,
+    # which on a cluster that fails nodes every 10-30 min meant every failure cost
+    # the whole run. The mesh is pinned at 8 ranks on one node and it is the same job
+    # resuming itself, so the "sharded needs an identical mesh" caveat does not bite.
+    assert fsdp_config["state_dict_type"] == "SHARDED_STATE_DICT"
+
+
+def test_final_save_consolidates_for_the_cross_stage_handoff():
+    """Sharded periodic checkpoints must not cost us the plain HF final artifact.
+
+    The next stage loads this with ``from_pretrained`` on a different mesh, so the
+    FINAL save alone is flipped back to FULL_STATE_DICT, with an offline merge of the
+    sharded weights as the fallback.
+    """
+    src = (REPO / "kore" / "policy" / "sft.py").read_text()
+    assert 'plugin.set_state_dict_type("FULL_STATE_DICT")' in src
+    assert "merge_fsdp_weights" in src
 
 
 @pytest.mark.shell

@@ -897,8 +897,36 @@ def train_sft(config: SFTConfig, dataset_path: Path) -> str:
         merged = trainer.model.merge_and_unload()
         merged.save_pretrained(config.output_dir)
     else:
-        log.info("sft: saving full-FT model", out=config.output_dir)
+        # Periodic checkpoints are SHARDED so the run can actually resume (see
+        # build_fsdp_kwargs), but the artifact handed to the next stage has to be a
+        # plain HF checkpoint that from_pretrained can open on any mesh. Flip the
+        # plugin to FULL_STATE_DICT for this one final save so the handoff is
+        # unchanged. Only the SAVE side of FULL is used here, which is the side that
+        # was always working -- it is loading a consolidated 244 GB optimizer that
+        # SIGBUSes, and this save writes no optimizer state at all.
+        _consolidated = False
+        try:
+            plugin = trainer.accelerator.state.fsdp_plugin
+            plugin.set_state_dict_type("FULL_STATE_DICT")
+            _consolidated = True
+        except Exception as exc:
+            log.warn("sft: could not switch to FULL_STATE_DICT for the final save; "
+                     "will merge the sharded weights instead", error=str(exc))
+        log.info("sft: saving full-FT model", out=config.output_dir,
+                 consolidated=_consolidated)
         trainer.save_model(config.output_dir)
+        if not _consolidated:
+            # Fallback: merge the sharded weights offline. Rank 0 only, and after a
+            # barrier, so the shards are all on disk before they are read.
+            trainer.accelerator.wait_for_everyone()
+            if trainer.args.should_save:
+                from accelerate.utils import merge_fsdp_weights
+                sharded = Path(config.output_dir) / "pytorch_model_fsdp_0"
+                if sharded.is_dir():
+                    log.info("sft: merging sharded weights into a full checkpoint",
+                             src=str(sharded), out=config.output_dir)
+                    merge_fsdp_weights(str(sharded), config.output_dir,
+                                       safe_serialization=True)
     # Restore the pristine (un-tagged) chat template before saving so the checkpoint's
     # tokenizer is byte-identical to the base. The {% generation %} markers are only
     # needed for THIS run's mask generation (they render identically at inference).

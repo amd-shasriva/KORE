@@ -917,14 +917,31 @@ def build_fsdp_kwargs(config) -> dict:
         "sync_module_states": True,
         "cpu_ram_efficient_loading": True,
         "limit_all_gathers": True,
-        # FULL_STATE_DICT so ``trainer.save_model()`` consolidates a plain HF
-        # checkpoint that the NEXT stage loads with ``from_pretrained``
-        # (midtrain->sft->dpo->grpo->soup handoff) and that serving can load -
-        # matching GRPO's own save path. A sharded state dict is only reloadable
-        # under an identical FSDP mesh, which the cross-stage handoff is not. At
-        # 14B the rank-0 gather is cheap; for 32B/70B keep it consolidated too
-        # (cpu_ram_efficient_loading streams it) so the handoff never breaks.
-        "state_dict_type": "FULL_STATE_DICT",
+        # SHARDED for the PERIODIC checkpoints; the final cross-stage artifact is
+        # consolidated separately by train_sft, which flips the plugin to
+        # FULL_STATE_DICT for that one save. Those are two different jobs and they
+        # were previously served by one setting, at the cost of the run's ability to
+        # recover.
+        #
+        # FULL_STATE_DICT makes every periodic checkpoint a rank-0 gather of the
+        # whole model plus optimizer, and at 30B that is 456 GB in three files
+        # (optimizer.bin 244 GB, pytorch_model_fsdp.bin 122 GB, safetensors 122 GB).
+        # Measured on this run: 7.5 minutes to write, which is 14% of wall time at
+        # save_steps=50, and -- decisively -- RESUMING FROM IT DOES NOT WORK. Loading
+        # a single 244 GB optimizer file back killed all eight ranks with SIGBUS
+        # (signal 7, i.e. a page that could not be faulted in) on two different
+        # nodes, jobs 10996 on ...289 and 11064 on ...199. A run that cannot resume
+        # cannot survive a cluster where nodes fail every 10-30 minutes: each failure
+        # would cost the entire run rather than the steps since the last save.
+        #
+        # SHARDED_STATE_DICT has each rank write and read only its own slice, so
+        # save and load are 8-way parallel and no process ever has to materialise a
+        # 244 GB file. The usual objection -- that a sharded checkpoint is only
+        # reloadable under an identical FSDP mesh -- does not apply to resume here:
+        # the mesh is pinned at 8 ranks on one node by the launcher, and it is the
+        # SAME job resuming itself. The cross-stage handoff, which genuinely does
+        # face a different mesh, is what the final consolidated save is for.
+        "state_dict_type": "SHARDED_STATE_DICT",
     }
     if getattr(config, "fsdp_cpu_offload", False):
         fsdp_config["offload_params"] = True

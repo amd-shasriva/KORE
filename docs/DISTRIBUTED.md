@@ -99,7 +99,7 @@ combination; these defaults are sized to not repeat it.
 | `fsdp_reshard_after_forward` | `FULL_SHARD` | ZeRO-3 equivalent: params, grads, and optimizer state are all sharded. Unlike GRPO's co-located-rollout path, SFT does no generation, so full resharding costs nothing it needs back. |
 | `fsdp_auto_wrap_policy` | `TRANSFORMER_BASED_WRAP` | Wraps one `Qwen3MoeDecoderLayer` per FSDP unit. |
 | `mixed_precision` | `bf16` | Compute in bf16; `accelerate`'s FSDP prepare step still upcasts every trainable flat-parameter to fp32 (DeepSpeed-ZeRO-style), so the optimizer steps on an fp32 master regardless. Loading the model in fp32 would only double load-time host memory for an identical result. |
-| `fsdp_state_dict_type` | `FULL_STATE_DICT` | Consolidates a plain HF checkpoint so the next stage (GRPO) can load it with `from_pretrained`; a sharded state dict is only reloadable under an identical FSDP mesh. |
+| `fsdp_state_dict_type` | `SHARDED_STATE_DICT` | Periodic checkpoints only. `FULL` made every save a rank-0 gather of 456 GB (7.5 min measured), and loading its 244 GB optimizer file back killed all eight ranks with SIGBUS on two separate nodes, so the run could not resume at all. Sharded has each rank write and read its own slice, 8-way parallel, with no 244 GB single-file load. The "sharded needs an identical mesh" caveat does not bite on resume: the mesh is pinned at 8 ranks on one node and it is the same job resuming itself. `train_sft` flips the plugin to `FULL_STATE_DICT` for the **final** save alone, which is what the next stage loads with `from_pretrained`. |
 | `fsdp_activation_checkpointing` | `false` | Activation checkpointing is enabled on the model directly (`gradient_checkpointing_kwargs={"use_reentrant": True}`), not through the FSDP plugin. The plugin's external `checkpoint_wrapper` mismatches saved-tensor counts on an FSDP1/`use_orig_params` unit and raises `CheckpointError`. |
 | `fsdp_offload_params` | `false` | Kept on-device; the model comfortably fits the 8-GPU mesh. |
 
@@ -122,12 +122,21 @@ micro-batches; `12875 // 8 accumulation = 1,609`). Measured throughput is
 and 12-16 hours on this page described an earlier, smaller mixture and no
 longer applies.
 
-A full checkpoint (bf16 weights + fp32 optimizer state, `FULL_STATE_DICT`
-gathered to rank 0) is measured at **456 GB**. `save_total_limit: 2` holds two
-at steady state (~912 GB); the trainer writes the new checkpoint *before*
-rotating the old one out, so the rotation window transiently holds three
-(~1.37 TB peak). `/shared_nfs` is the target for exactly this reason: the
-model-relative volume this project has used before could not hold that peak.
+A checkpoint (bf16 weights + fp32 optimizer state) is measured at **456 GB**
+under the old `FULL_STATE_DICT` layout: `optimizer.bin` 244 GB,
+`pytorch_model_fsdp.bin` 122 GB, and a consolidated safetensors copy 122 GB.
+`save_total_limit: 2` holds two at steady state (~912 GB); the trainer writes
+the new checkpoint *before* rotating the old one out, so the rotation window
+transiently holds three (~1.37 TB peak). `/shared_nfs` is the target for
+exactly this reason: the model-relative volume this project has used before
+could not hold that peak.
+
+Periodic checkpoints are now `SHARDED_STATE_DICT`, which holds a comparable
+total but writes it as eight per-rank slices in parallel instead of gathering
+everything onto rank 0 first. That removes the 7.5-minute serialised save (14%
+of wall time at `save_steps: 50`) and, more importantly, makes resume work:
+the consolidated 244 GB optimizer file could not be read back at all, dying
+with SIGBUS on every rank.
 
 `save_steps: 50` over 1,609 steps yields 32 checkpoints. That frequency is not
 about preemption risk here (the job holds a guaranteed, non-preemptible QOS

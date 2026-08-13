@@ -72,7 +72,7 @@ are worth much less than the 2.3 h of training they would cost to abandon.
   "adam_beta2": 0.98,
   "report_to": "tensorboard",
   "logging_dir": "/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b_v5/tb",
-  "save_steps": 25,
+  "save_steps": 50,
   "save_total_limit": 2,
   "save_only_model": false,
   "fsdp": "full_shard auto_wrap",
@@ -143,22 +143,22 @@ could not hold that peak.
 Periodic checkpoints are now `SHARDED_STATE_DICT`, which holds a comparable
 total but writes it as eight per-rank slices in parallel instead of gathering
 everything onto rank 0 first. That removes the 7.5-minute serialised save (14%
-of wall time at `save_steps: 25`) and, more importantly, makes resume work:
+of wall time at `save_steps: 50`) and, more importantly, makes resume work:
 the consolidated 244 GB optimizer file could not be read back at all, dying
 with SIGBUS on every rank.
 
-`save_steps: 25` over 1,609 steps yields 64 checkpoints, bounding how much
-work a crash costs: at ~60 s/step, at most ~25 minutes of training is ever at
+`save_steps: 50` over 1,609 steps yields 32 checkpoints, bounding how much
+work a crash costs: at ~60 s/step, at most ~50 minutes of training is ever at
 risk between saves.
 
-It was 50, sized against the 7.5-minute `FULL_STATE_DICT` save. Sharded saves
-are parallel and drop the redundant consolidated copy, so the overhead argument
-for spacing them out no longer holds, and the risk argument now points the
-other way: this cluster is losing the node under the job every 10-30 minutes
-(`NODE_FAIL` on ...301, ...297, ...296, ...331, ...291). At 50 the first
-checkpoint is ~57 minutes out, longer than a node survives, so the run would
-restart from step 0 indefinitely and never bank progress. Raise it back toward
-50 once nodes stop dying mid-run.
+This was briefly 25, for a reason specific to `amd-burst`. There the cluster
+was taking the node away every 10-30 minutes (`NODE_FAIL` on ...301, ...297,
+...296, ...331, ...291, ...317), so a first checkpoint 57 minutes out was one
+the run never reached, and six attempts banked nothing. `amd-primus` is
+guaranteed and non-preemptible, and the run has held a node there for a
+measured 2 h 59 m (job 9229 on `crsuse2-m2m-037`, 154 steps). Against that,
+halving the interval buys ~11 minutes of expected recovery per failure while
+doubling checkpoint I/O. If nodes start dying inside an hour again, lower it.
 
 ## Launch boundary
 

@@ -4,8 +4,16 @@
 # One entry point rather than a remembered command line, because the details are not
 # guessable and getting one wrong is expensive:
 #
-#   * account amd-primus WITH qos amd-primus-qos, because that is the pairing that
-#     DEMONSTRABLY schedules. The run landed there (job 9229 on crsuse2-m2m-037) after
+#   * account amd-burst WITH qos amd-burst-qos. This reverses an earlier choice of
+#     amd-primus, and the reason is placement latency under a live infrastructure
+#     incident. Both guaranteed pools are capped and full with three jobs queued ahead
+#     of us, so a new submission there waits ~19h; burst has cap headroom (124 of ~282)
+#     and placed three consecutive submissions in under a minute each. When the failure
+#     being recovered from is a node dying, a 19h requeue is indistinguishable from
+#     losing the run.
+#
+#   * HISTORICAL: account amd-primus WITH qos amd-primus-qos, chosen when that was the
+#     pairing that DEMONSTRABLY scheduled. The run landed there (job 9229 on crsuse2-m2m-037) after
 #     burst never did: even a 1-GPU, 1-CPU, 5-minute burst probe stayed PENDING while
 #     113 other burst jobs ran, so the amd-burst association is present but not
 #     functioning for placement. Recovery must target a pool we have actually started
@@ -74,7 +82,7 @@ export STALL_SECS="${STALL_SECS:-2700}"
 # cluster with zero fully-idle nodes that is strictly worse than waiting. The run
 # wants a whole node (--exclusive), so a long pending wait is expected and correct.
 export STUCK_PENDING_SECS="${STUCK_PENDING_SECS:-0}"
-export KORE_SFT_QOS="amd-primus-qos"
+export KORE_SFT_QOS="amd-burst-qos"
 
 LOG="$REPO/runs/supervise_v5_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "$REPO/runs"
@@ -84,6 +92,6 @@ echo "[supervise] output_dir=$KORE_OUTPUT_DIR"
 echo "[supervise] log=$LOG"
 
 exec bash scripts/watch_and_resume.sh sft \
-    sbatch --account=amd-primus --qos=amd-primus-qos "$REPO/scripts/spur_sft_1node.sbatch" \
+    sbatch --account=amd-burst --qos=amd-burst-qos "$REPO/scripts/spur_sft_1node.sbatch" \
     configs/sft_coder30b_a3b.json - - \
     >>"$LOG" 2>&1

@@ -1,9 +1,10 @@
 # `kore/data` — verified training-data transformations
 
 The production data path is task pool → agentic trajectories → step-centric SFT
-rows → v3 mixture. It is designed around a simple constraint: a teacher's text
-is not evidence that a kernel is correct or fast. `KoreEnv` produces those
-labels by compile, oracle, and timing.
+rows → v5 mixture (`scripts/v5_stage1_gather.py` through `v5_stage4_mixture.py`,
+documented in [`DATAGEN_OVERVIEW.md`](../../DATAGEN_OVERVIEW.md)). It is designed
+around a simple constraint: a teacher's text is not evidence that a kernel is
+correct or fast. `KoreEnv` produces those labels by compile, oracle, and timing.
 
 ## Task pool
 
@@ -44,15 +45,20 @@ speedups above the configured credibility cap. The 5% threshold is larger than
 the normal timing noise: without it, the corpus would teach the model to chase
 the clock rather than improve kernels.
 
-## v3 mixture
+## v5 mixture
 
-`scripts/build_sft_v3_mixture.py` reads the v2 base, decomposed AMD trajectories,
-and recovered rows. It applies the same gate to all three: nonempty messages,
-17,408-token approximation limit, held-out task and family exclusion, and
-message-content deduplication. No source gets an exception, which prevents a
-recovered file from bypassing the safeguards applied to new trajectories.
+`scripts/v5_stage3_recover.py` reuses `step_centric.py`'s `extract_steps` and
+`extract_full_trajectory`, and `v5_emit.py`'s `flatten_history`, to turn agentic
+trajectories into step-centric rows the same way the v3-era pipeline did.
+`v5_stage4_mixture.py` then applies one gate to every source (task pool,
+recovered trajectories, translated twins): nonempty messages, a token-length
+cap, held-out task and family exclusion, and content-hash deduplication. No
+source is exempt, which prevents a recovered file from bypassing the safeguards
+applied to freshly generated trajectories.
 
-The production model consumes the resulting SFT mixture. Legacy DPO assemblers
-remain in the package for the 14B research branch, but DPO is not part of the
-production recipe; verifiable multi-turn execution rewards are the preferred
-signal.
+The production model consumes the resulting SFT mixture, currently 206,000 rows
+across six task shapes; see [`docs/DATASET_SPEC.md`](../../docs/DATASET_SPEC.md)
+for composition and [`docs/SOURCE_PROVENANCE.md`](../../docs/SOURCE_PROVENANCE.md)
+for where each row's content originates. Legacy DPO assemblers remain in the
+package for the 14B research branch, but DPO is not part of the production
+recipe; verifiable multi-turn execution rewards are the preferred signal.

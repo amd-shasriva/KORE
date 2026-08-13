@@ -13,7 +13,7 @@ are given so they can be re-derived.
 ## Does the AITER-assembly reasoning transfer? Partly, and not the part that matters
 
 The prior ruling on AITER's hand-written assembly was: it cannot be ingested
-because it is **not in the repository** — AITER ships 2,867 pre-assembled ELF
+because it is **not in the repository**: AITER ships 2,867 pre-assembled ELF
 code objects and zero `.s`/`.S`/`.asm` files, so there is no source text to learn
 from.
 
@@ -21,7 +21,7 @@ That argument does **not** transfer to CK. CK's source is public, readable,
 permissively licensed C++, and there is plenty of it. Anyone reusing the
 assembly verdict here would be reusing the wrong half.
 
-The argument that *does* transfer is the other line in the same table — the CK
+The argument that *does* transfer is the other line in the same table: the CK
 slice was marked *"Skip. Template-heavy, low signal per token, and not our output
 language."* That was a one-line judgement. What follows is the measurement behind
 it, which is what makes it a finding rather than a preference.
@@ -58,8 +58,8 @@ model to emit CK would teach it to make the same class of decision through an
 undocumented forty-slot template signature, with no side-condition checking, and
 without ever writing the code those tiles feed.
 
-The transferable skill here — pick tiles that map cleanly onto 64-lane
-wavefronts and the MFMA cores — is already trained, on 1,331 Triton and 188 HIP
+The transferable skill here, picking tiles that map cleanly onto 64-lane
+wavefronts and the MFMA cores, is already trained, on 1,331 Triton and 188 HIP
 C++ tasks, where the model must additionally write the code that consumes them.
 CK would add the parameter-picking without the kernel.
 
@@ -70,13 +70,13 @@ ENTIRE kernel source, ready to run - not a diff, not a snippet"*, and the
 verifier stages exactly one candidate file.
 
 CK's own example is not self-contained. It opens with `#include "common.hpp"` and
-ends by including `run_gemm_example.inc` — CK's private example harness. A CK
+ends by including `run_gemm_example.inc`, CK's private example harness. A CK
 submission would be a type alias plus includes the harness has to supply.
 
 This is precisely the case the project already ruled on, correctly, for
 HipKittens: those kernels are C++ that `#include "kittens.cuh"`, so training them
 as `FULL_KERNEL` responses would teach the model to answer with code the harness
-cannot compile — negative transfer that looks like clean data. That decision is
+cannot compile: negative transfer that looks like clean data. That decision is
 recorded in [`HIPKITTENS_INGEST.md`](HIPKITTENS_INGEST.md), and the reasoning
 applies to CK unchanged. Being AMD's own library does not change what the
 compiler can build.
@@ -86,7 +86,7 @@ compiler can build.
 Measured on this host and on the cluster login node:
 
 * The CK submodule vendored in the AITER checkout
-  (`3rdparty/composable_kernel`) is **uninitialized** — 0 `.hpp`, 0 `.cpp`.
+  (`3rdparty/composable_kernel`) is **uninitialized**: 0 `.hpp`, 0 `.cpp`.
 * The SPUR login node has **no ROCm at all**: no `/opt/rocm`, no `hipcc`. So the
   question "are CK headers installed" cannot be answered there, only on a GPU
   node.
@@ -108,8 +108,8 @@ been measured.
 
 ## Why CK is not a baseline lane either
 
-The instinct that CK belongs as a baseline rather than an output — the correct
-instinct for AITER — is mostly already satisfied, and for a specific reason.
+The instinct that CK belongs as a baseline rather than an output, the correct
+instinct for AITER, is mostly already satisfied, and for a specific reason.
 
 KORE's vendor lane is 110 tasks baselined on AITER and hipBLASLt. AITER is a CK
 *consumer*: where AITER's fastest path for an operator is CK-backed, a task
@@ -147,7 +147,7 @@ to exist.
 | Whether CK headers exist and compile on a **gfx950 node** | **not yet: `scripts/probe_composable_kernel.sh` is queued behind a datagen campaign holding the QoS node cap** |
 
 The verdict does not depend on the unmeasured row. That probe can only make the
-answer more negative — it can confirm CK is uncompilable where episodes run, or
+answer more negative: it can confirm CK is uncompilable where episodes run, or
 find it installed, in which case the reasoning above still stands on its own.
 
 ## Re-deriving the measurements

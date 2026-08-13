@@ -192,9 +192,11 @@ plus issue efficiency plus optional baseline-relative traffic) for the common
 GRPO case where only the candidate's own counters are available. Both are
 bounded diagnostics, not an implicit reward authorization: `compute_reward`
 only applies the PMC term when `profile_reward_weight > 0` and the observation
-carries a passing, fingerprinted `profile_evidence_passed` flag, and every
-shipped config sets `profile_reward_weight` to a level that requires that same
-unauthorized evidence, so the bonus does not fire in production.
+carries a passing, fingerprinted `profile_evidence_passed` flag. `KoreEnv._profile_evidence`
+sets that flag from the same `physics_shaping_evidence_path` /
+`physics_shaping_evidence_fingerprint` config pair the residual reward and PBS
+shaping use, and `profile_reward_weight` itself defaults to `0.0` and is not
+set by any shipped config, so the bonus does not fire in production either way.
 
 ---
 

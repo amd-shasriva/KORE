@@ -34,7 +34,7 @@ FlyDSL is a real, installed, public package:
   an embedded 268 MB MLIR runtime. Its own summary calls it a "ROCm Domain
   Specific Language for layout algebra".
 * `pip show flydsl` reports **`Required-by: amd-aiter`**. It is a dependency of
-  AITER, AMD's production kernel library — not a benchmark-only artifact.
+  AITER, AMD's production kernel library, not a benchmark-only artifact.
 * In the AITER checkout, 62 files reference FlyDSL, and `ops/flydsl` is a
   first-class kernel-authoring directory beside the Triton one.
 
@@ -114,7 +114,7 @@ an SNR and a set of paired timings. A repository task instead needs:
   1.2 GB is 17 JIT-built `.so` files);
 * an edit applied to a *named file inside a tree*, rather than a whole-file
   candidate;
-* the repository's own harness for correctness and timing — which does not emit
+* the repository's own harness for correctness and timing, which does not emit
   the paired, L2-flushed, AB/BA-balanced protocol our publication gate is defined
   on. **Every timing-integrity guarantee in `kore/tasks/_genops.py` would be
   unavailable**, so a repository episode could not produce a publication-grade
@@ -128,9 +128,9 @@ this project already measures in episodes per hour.
 
 ### Why the prior is still right about credibility
 
-The prior — that repository-level work is what actually ships, and that
+The prior, that repository-level work is what actually ships, and that
 Kernel-Smith's credibility came from merged SGLang and LMDeploy PRs rather than
-benchmark rows — holds, and nothing above contradicts it. What the measurement
+benchmark rows, holds, and nothing above contradicts it. What the measurement
 changes is *where* that work belongs. It is an **output** of a good model, not
 **training data** for one. A merged PR is produced once, by running the model
 against a real repository, and its value is entirely in the artifact; putting the

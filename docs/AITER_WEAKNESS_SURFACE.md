@@ -3,12 +3,12 @@
 How to read this document. Every claim below is tagged with how it was
 obtained, because the three kinds are not interchangeable:
 
-- **[source]** — read directly out of the AITER tree at a pinned commit. These
+- **[source]**: read directly out of the AITER tree at a pinned commit. These
   are facts about code, verifiable by anyone with the same commit. They are not
   performance claims.
-- **[paper]** — reported by HipKittens (MLSys 2026, arXiv 2511.08083) on their
+- **[paper]**: reported by HipKittens (MLSys 2026, arXiv 2511.08083) on their
   harness. Quotable only with attribution. **Never** as our number.
-- **[measured]** — produced by our harness on our gfx950 hardware.
+- **[measured]**: produced by our harness on our gfx950 hardware.
 
 There are **no [measured] rows in this document yet.** The reason is recorded
 in [Measurement status](#measurement-status) rather than papered over, and no
@@ -52,8 +52,8 @@ neutral directory and assert on `aiter.__file__`.
 
 `aiter/ops/mha.py::_flash_attn_backward` chooses between two implementations:
 
-- `fmha_v3_bwd` — the hand-written assembly backward (fast path), and
-- `mha_bwd` — the Composable Kernel backward (fallback).
+- `fmha_v3_bwd`: the hand-written assembly backward (fast path), and
+- `mha_bwd`: the Composable Kernel backward (fallback).
 
 The asm path is taken only when
 `can_impl_fmha_v3_bwd(...) | can_impl_fmha_v3_bwd_gfx950()` holds and
@@ -82,7 +82,7 @@ This is the sharpest finding, and it is mechanical:
 The flag is stored on the autograd context in forward and read back in
 backward, so it reaches both gates unchanged. Therefore a **default** call to
 the dense `flash_attn_func` at any sequence length above 256 fails both gates
-and lands on the CK `mha_bwd` fallback — the asm backward is never reached.
+and lands on the CK `mha_bwd` fallback; the asm backward is never reached.
 The varlen entry point, with the opposite default, can reach it.
 
 Two consequences worth stating plainly:
@@ -110,7 +110,7 @@ piece:
 
 So gfx950 ships 40 `hd64` backward objects that the gfx950 gate can never
 select (it requires `hdim_q > 64`, strictly), reachable only through the
-generic gate's `hdim_q == 64 and is_v3_atomic_fp32` branch — which still
+generic gate's `hdim_q == 64 and is_v3_atomic_fp32` branch, which still
 demands `not deterministic`.
 
 Note also that gfx950 has **half** the `hd128` backward variants of the older
@@ -129,7 +129,7 @@ Attributed to arXiv 2511.08083, measured on **their** harness, not ours:
 
 ### The baseline is genuinely moving [source]
 
-HipKittens is not merely "being upstreamed into AITER" — at our installed
+HipKittens is not merely "being upstreamed into AITER": at our installed
 commit it is already a **build dependency**. `aiter/jit/core.py` defines
 `HIP_KITTENS_DIR` and clones `https://github.com/HazyResearch/HipKittens.git`
 on demand, and five gfx950 `opus_gemm` headers implement the "HipKittens XCD
@@ -159,7 +159,7 @@ Counted over the 1,334 tasks under `kore/tasks/`:
 
 Two gaps follow directly. First, the surface the paper identifies as AITER's
 weakest is the one place our pool never uses AITER as the bar. Second, GQA
-**non-causal** backward — the paper's single largest reported gap — is not
+**non-causal** backward (the paper's single largest reported gap) is not
 represented in the pool at all.
 
 `kore/tasks/flash_attn_backward_bf16/driver.py` justifies its torch baseline

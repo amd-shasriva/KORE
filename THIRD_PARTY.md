@@ -523,32 +523,32 @@ redistributed as text. Tractable: six datasets, same method as §3.
 **10.2. Sampling, not census, on two points (§4).** First: the `math` slice (4,677 rows from 1,910
 traces) is attributed to OpenThoughts3-1.2M on content-signature and cache evidence, with no exact
 hash match. Second: the tulu-3 slice's per-row subset identity is confirmed for 19 rows out of
-8,135 — all Apache-2.0 NuminaMath-TIR — so a stray row from one of tulu-3's non-commercial subsets
+8,135 (all Apache-2.0 NuminaMath-TIR), so a stray row from one of tulu-3's non-commercial subsets
 cannot be excluded by census. *Not resolved because* the dataset server cannot answer
 exact-membership queries against list-typed columns, its BM25 ranking cannot surface a specific
 record from a 1.2M-row pool, and OpenCodeInstruct is only 28% indexed. Closeable offline: stream the
 pinned parquet for each dataset, re-render each row through KORE's formatter, and intersect the
-SHA-256 set with the corpus `root_content_hash` set — one pass settles both the `math` attribution
+SHA-256 set with the corpus `root_content_hash` set; one pass settles both the `math` attribution
 and every tulu-3 per-row subset id.
 
-**10.3 — Whether upstream generating-model terms reach through §3.2's grants (§4).** All four replay
-datasets are synthetic model output — OpenThoughts3 from QwQ-32B, the others from their publishers'
+**10.3. Whether upstream generating-model terms reach through §3.2's grants (§4).** All four replay
+datasets are synthetic model output: OpenThoughts3 from QwQ-32B, the others from their publishers'
 own generation pipelines, with tulu-3's card explicitly flagging third-party model output inside the
 mixture. The publishers grant Apache-2.0 / CC-BY-4.0 / ODC-By over the result, but some generating
 models' own terms restrict using their outputs to train a competing model. *Not resolved because*
 this is a legal question about the effect of an intermediate publisher's grant, not a factual one
 this audit can settle.
 
-**10.4 — Anthropic and AMD-gateway terms for teacher-generated content (§6).** Which Anthropic terms
+**10.4. Anthropic and AMD-gateway terms for teacher-generated content (§6).** Which Anthropic terms
 applied at generation time, and whether they restrict external release of a model trained on the
 output. *Not resolved because* it needs AMD's gateway contract, which is not in this repository.
 
-**10.5 — `source_metadata.json` still carries the wrong values (§0).** 14 `SEE-REPO` placeholders,
+**10.5. `source_metadata.json` still carries the wrong values (§0).** 14 `SEE-REPO` placeholders,
 `MIT` for both GPUMODE datasets, `Apache-2.0` for unsloth, and `MIT` for KORE itself. *Not resolved
 because* this pass does not own that artifact and rewriting it changes the content hash of a shipped
 release file. The corrected values are all in §1–§3 and can be applied mechanically.
 
-**10.6 — Selection of an outbound licence by an authorized AMD owner ([`LICENSE`](LICENSE)).**
+**10.6. Selection of an outbound licence by an authorized AMD owner ([`LICENSE`](LICENSE)).**
 Unchanged from before. Note that §0.1 constrains the choice: any outbound terms for a Covered Model
 must carry Attachment A.
 

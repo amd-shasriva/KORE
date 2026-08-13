@@ -86,7 +86,7 @@ untimed, invalid, or omitted outputs remain in the full denominator as zeros.
 Every sample must report four independently identified, hidden-correct
 baselines:
 
-- `vendor-production` — the canonical fast_p denominator;
+- `vendor-production`: the canonical fast_p denominator;
 - `best-vendor`;
 - `compiler`;
 - `eager`.

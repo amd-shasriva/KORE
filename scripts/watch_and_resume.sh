@@ -319,6 +319,24 @@ while :; do
             # Land on three such nodes in a row and a fast-failure counter would halt
             # the supervisor over a cluster-hygiene problem. Instead: exclude that
             # node, retry immediately, and do not count it.
+            # A LOCK LOSER is not a failure. We keep a job queued in both the general
+            # and primus pools so whichever frees first is taken; when the second one
+            # eventually starts it finds the first already training, prints
+            # KORE_LOCK_HELD=<jobid> and exits 0 without touching anything. Resubmitting
+            # it would be pointless churn, and treating it as a completion would abandon
+            # the run. Follow the winner instead.
+            heldby="$(grep -m1 -oE 'KORE_LOCK_HELD=[0-9]+' "$(newest_log "$JOB")" 2>/dev/null \
+                      | cut -d= -f2 || true)"
+            if [ -n "$heldby" ]; then
+                log "job=$JOB exited because job $heldby already holds the training lock;" \
+                    "following $heldby instead"
+                JOB="$heldby"
+                SEEN_JOBS="$SEEN_JOBS $heldby"
+                PENDING_SINCE=""
+                sleep "$POLL_SECS"
+                continue
+            fi
+
             badnode="$(grep -m1 -oE 'KORE_BAD_NODE=[^ ]+' "$(newest_log "$JOB")" 2>/dev/null \
                        | cut -d= -f2 || true)"
             if [ -n "$badnode" ]; then

@@ -280,6 +280,59 @@ out = json.loads(Path(sys.argv[1]).read_text())["output_dir"]
 print(f"[sft-1node] resume_from={latest_checkpoint(out)} output_dir={out}")
 PY
 
+# SINGLE-TRAINER LOCK.
+#
+# We keep a job queued in BOTH the amd-general-qos and amd-primus-qos pools, because
+# both are full and whichever frees first should be taken -- general has 6 rotating
+# slots and primus 14, so holding one place in each roughly doubles the chance of
+# catching an early finish. The hazard that creates is two jobs starting and both
+# training into the same output_dir, which would interleave checkpoint writes and
+# destroy the only thing that makes preemption survivable.
+#
+# So: the first job to start claims a lock and trains; a later starter finds the lock
+# held by a live job, prints KORE_LOCK_HELD=<jobid> and exits 0 without touching
+# anything. mkdir is the primitive because it is atomic even on NFS -- test-then-write
+# is not. A lock whose holder is no longer in the queue is stale (the holder was
+# preempted or killed) and is taken over, which is what makes this safe across
+# restarts rather than a one-shot.
+LOCK_DIR=""
+_train_lock() {
+    local out lock holder state
+    out="$("$PY" -c "
+import json,sys;print(json.loads(open(sys.argv[1]).read())['output_dir'])" "$RESOLVED" 2>/dev/null)"
+    [[ -z "$out" ]] && return 0     # cannot resolve: do not block the run
+    lock="$out/.kore_train.lock"
+    mkdir -p "$out" 2>/dev/null || true
+    if mkdir "$lock" 2>/dev/null; then
+        echo "${SLURM_JOB_ID:-manual}" > "$lock/jobid"
+        LOCK_DIR="$lock"
+        echo "[sft-1node] acquired the training lock"
+        return 0
+    fi
+    holder="$(cat "$lock/jobid" 2>/dev/null || true)"
+    if [[ -n "$holder" && "$holder" != "${SLURM_JOB_ID:-}" ]]; then
+        state="$(squeue -j "$holder" -h -o '%T' 2>/dev/null | head -1 || true)"
+        if [[ "$state" == "RUNNING" ]]; then
+            echo "KORE_LOCK_HELD=$holder"
+            echo "[sft-1node] job $holder is already training; exiting so we do not" \
+                 "write into the same output_dir" >&2
+            exit 0
+        fi
+    fi
+    # Stale: the recorded holder is gone. Claim it.
+    echo "${SLURM_JOB_ID:-manual}" > "$lock/jobid"
+    LOCK_DIR="$lock"
+    echo "[sft-1node] took over a stale training lock from '${holder:-unknown}'"
+}
+_release_lock() {
+    # Only the holder removes it, so a loser exiting cannot free the winner's lock.
+    if [[ -n "$LOCK_DIR" && -d "$LOCK_DIR" ]]; then
+        [[ "$(cat "$LOCK_DIR/jobid" 2>/dev/null || true)" == "${SLURM_JOB_ID:-manual}" ]] \
+            && rm -rf "$LOCK_DIR"
+    fi
+}
+_train_lock
+
 CHILD_PID=""
 REQUEUE_TIMER_PID=""
 
@@ -393,6 +446,10 @@ handle_requeue_warning() {
 }
 cleanup() {
     if [[ -n "$REQUEUE_TIMER_PID" ]]; then kill "$REQUEUE_TIMER_PID" 2>/dev/null || true; fi
+    # Release the training lock however we exit -- completion, preemption, or crash.
+    # A lock left behind is not fatal (the next job sees its holder is gone from the
+    # queue and takes it over) but releasing it makes the common case clean.
+    _release_lock
 }
 trap cleanup EXIT
 trap handle_termination TERM INT

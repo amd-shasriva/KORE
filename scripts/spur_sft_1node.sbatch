@@ -57,7 +57,32 @@
 # naming the model buys nothing anyway, and the script already verifies it received
 # eight usable devices before training -- which is the check that actually matters.
 #SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=128
+# 32, not 128. This is the constraint that actually kept the run out of the cluster.
+#
+# Measured after job 7872 sat PENDING for 8h54m: FORTY-TWO jobs submitted after it
+# were already running, and the discriminator is visible in their requests --
+#
+#   job 9008 zgong     gpu:mi355x:8  cpus=1    running
+#   job 9071 zihaoan2  gpu:8         cpus=1    running
+#   job 8858 oshkarav  gpu:8         cpus=1    running
+#   job 8895 yiqian    gpu:8         cpus=32   running
+#   job 8037 chuschen  (no gpu)      cpus=236  running
+#
+# Jobs wanting 1-32 CPUs are placed continuously; ours wanting 128 never was. An
+# earlier revision of this file argued 128 was safe because three sampled "mix" nodes
+# each had ~234 of 236 CPUs free. That sample was far too small: there are now 59 mix
+# nodes, and jobs like chuschen's take all 236 CPUs, so free-CPU count is genuinely
+# contended and a 128-CPU request excludes most of the cluster.
+#
+# 32 is ample for what this run actually does with CPUs. Step time is dominated by the
+# MoE expert loop on the GPUs, and per-step host work is loading two pre-tokenised
+# rows per rank and padding them. The only CPU-heavy phase is TRL's one-time dataset
+# map, which takes ~35s at 32 procs and merely takes a few minutes at fewer -- paid
+# once against a run measured in tens of hours.
+#
+# dataloader_num_workers and dataset_num_proc are lowered alongside it, so 8 rank
+# processes plus their workers do not oversubscribe the smaller allocation.
+#SBATCH --cpus-per-task=32
 # 7 days, not 23 hours. The 23h figure was assumed, not measured against the
 # controller: `scontrol show partition amd-spur` reports MaxTime=UNLIMITED, and a
 # probe job submitted with --time=7-00:00:00 was accepted and ran. This matters

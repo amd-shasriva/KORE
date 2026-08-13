@@ -154,64 +154,24 @@ if [ "$n" -ge "$MAX_ATTEMPTS" ]; then
 fi
 echo $((n + 1)) > "$ATTEMPTS"
 
-# Harvest dirty nodes before resubmitting. The launcher's GPU-hygiene check exits 3
-# after printing KORE_BAD_NODE=<host> when it finds a card already occupied, and this
-# guard is usually the thing that submitted the job that just died, so if it ignores
-# that signal it will keep re-rolling the same saturated pool. It did: 10903 and 10923
-# were both submitted from here and both landed on full nodes within seconds.
+# No node exclusion list, deliberately. An earlier version harvested dirty and failed
+# nodes and passed them as --exclude, and that was the wrong instinct on this cluster.
+# Nodes here are cycled and repaired continuously: crsuse2-m2m-296 failed a job, went
+# DOWN, and was back and running our next job cleanly about fifteen minutes later. The
+# partition also runs at roughly four idle nodes out of 228, so refusing capacity that
+# has already been fixed is the most expensive mistake available.
 #
-# The list is a FILE rather than a shell variable because the supervisor's in-memory
-# copy is lost every time it restarts, and this guard exists precisely to restart it.
-# Both writers append here and both readers pass it as --exclude, so a node found
-# dirty by either one stays excluded for everyone across restarts and reboots.
-BAD_NODES="$REPO/runs/.sft_bad_nodes"
-for log in $(ls -t "$REPO"/runs/sft-*.err 2>/dev/null | head -12); do
-    grep -hoE 'KORE_BAD_NODE=[^ ]+' "$log" 2>/dev/null | cut -d= -f2
-done | sort -u >> "$BAD_NODES".tmp 2>/dev/null || true
-
-# Also harvest nodes that died UNDER us. A dirty node reports itself, because the
-# hygiene check runs and prints KORE_BAD_NODE before exiting 3. A node that fails
-# outright cannot report anything -- it is gone -- so nothing would ever exclude it
-# and the scheduler is free to hand us the same dying hardware repeatedly. It did:
-# 10849 on ...301, 10886 on ...297, 10942 on ...296, three adjacent nodes, with 296
-# left in state DOWN afterwards. Ask Slurm which of our jobs ended in NODE_FAIL and
-# treat those nodes exactly like dirty ones.
-for jid in $(ls -t "$REPO"/runs/sft-*.err 2>/dev/null | head -15 \
-             | sed 's#.*/sft-\([0-9]\+\)\.err#\1#'); do
-    info="$(scontrol show job "$jid" 2>/dev/null | tr ' ' '\n')"
-    case "$(printf '%s' "$info" | grep -m1 '^JobState=')" in
-        JobState=NODE_FAIL|JobState=BOOT_FAIL)
-            # Taken verbatim, NOT expanded via `scontrol show hostnames`: this
-            # controller has no such entity ("unknown entity type 'hostnames'"), so
-            # that call failed silently and harvested nothing. This job is always
-            # --nodes=1, so NodeList is a single bare hostname and needs no expansion.
-            printf '%s' "$info" | grep -m1 '^NodeList=' | cut -d= -f2 ;;
-    esac
-done | grep -E '^[a-z0-9-]+$' | sort -u >> "$BAD_NODES".tmp 2>/dev/null || true
-if [ -s "$BAD_NODES".tmp ]; then
-    cat "$BAD_NODES" "$BAD_NODES".tmp 2>/dev/null | sort -u | grep -E '^[a-z0-9-]+$' > "$BAD_NODES".new || true
-    mv -f "$BAD_NODES".new "$BAD_NODES" 2>/dev/null || true
-fi
-rm -f "$BAD_NODES".tmp
-
-# Bounded, because an exclude list that only grows eventually excludes the cluster and
-# the run stops being schedulable for a reason nobody is looking at. Nodes are also
-# repaired -- 18 sat drained for a "Bundle 2 upgrade" and came back -- so a permanent
-# blacklist would keep discarding capacity that is healthy again. Keep the 40 most
-# recent findings and let anything older be retried; the hygiene check is the backstop
-# that makes retrying a once-bad node safe.
-if [ "$(wc -l < "$BAD_NODES" 2>/dev/null || echo 0)" -gt 40 ]; then
-    tail -40 "$BAD_NODES" > "$BAD_NODES".new && mv -f "$BAD_NODES".new "$BAD_NODES"
-fi
-EXCLUDE="$(paste -sd, "$BAD_NODES" 2>/dev/null || true)"
+# Nothing is lost by dropping it. --exclusive is what actually keeps us off occupied
+# GPUs, at the source, by only ever placing us on a wholly free node. The hygiene check
+# in the launcher remains as the backstop for leaked memory, and it costs ten seconds
+# to reject a bad node and try again. Retrying is cheaper than remembering.
 
 # amd-burst first: it is the pairing that actually places this job. amd-primus and
 # amd-general are both capped and were full every time this was needed, and
 # amd-general+amd-burst-qos is a phantom association that is accepted and never
 # scheduled. The supervisor keeps whatever lands.
-say "no training job found; submitting on amd-burst (attempt $((n + 1)) of $MAX_ATTEMPTS)${EXCLUDE:+, excluding dirty nodes: $EXCLUDE}"
+say "no training job found; submitting on amd-burst (attempt $((n + 1)) of $MAX_ATTEMPTS)"
 out="$(sbatch --account=amd-burst --qos=amd-burst-qos \
-       ${EXCLUDE:+--exclude="$EXCLUDE"} \
        "$REPO/scripts/spur_sft_1node.sbatch" \
        configs/sft_coder30b_a3b.json - - 2>&1)"
 if grep -qE 'Submitted batch job [0-9]+' <<<"$out"; then

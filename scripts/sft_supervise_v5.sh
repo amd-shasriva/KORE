@@ -35,7 +35,13 @@ export KORE_OUTPUT_DIR="${KORE_OUTPUT_DIR:-$(
 # hours, and allow generously many resubmissions: at ~30h of training in 45-minute
 # worst-case losses, the budget has to absorb a lot of churn.
 export POLL_SECS="${POLL_SECS:-120}"
-export MAX_RESUBMITS="${MAX_RESUBMITS:-60}"
+# High, because dispatch failures consume attempts without ever starting the job.
+# GPU dispatch on this cluster was observed failing roughly half the time, so a
+# budget sized only for preemptions would be exhausted before training began. The
+# guard against a genuine crash-loop is MAX_FAST_FAILURES, which only counts jobs
+# that actually STARTED and then died quickly -- a failed dispatch cannot trip it,
+# so raising this does not weaken that protection.
+export MAX_RESUBMITS="${MAX_RESUBMITS:-300}"
 export MIN_PROGRESS_SECS="${MIN_PROGRESS_SECS:-600}"
 export MAX_FAST_FAILURES="${MAX_FAST_FAILURES:-3}"
 # A 30B load plus a dataset map can legitimately look quiet for a while, and killing

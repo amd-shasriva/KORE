@@ -207,12 +207,21 @@ while :; do
                         "cancelling and resubmitting (launch failure $launch_failures)"
                     scancel "$JOB" 2>/dev/null
                     JOB=""
-                    # Back off a little further each time. Retrying instantly into a
-                    # controller that just refused to dispatch tends to reproduce it,
-                    # and burning the resubmission budget on that is how a run dies
-                    # while looking supervised. Capped so it still retries hourly.
-                    backoff=$(( launch_failures * 60 ))
-                    (( backoff > 900 )) && backoff=900
+                    # Retry FAST, with only a mild escalation and a low cap.
+                    #
+                    # This deliberately does not back off far, because the failure is
+                    # random rather than persistent. Measured against identical
+                    # single-purpose probes: `--gres=gpu:mi355x:8` alone both
+                    # succeeded and failed minutes apart, and gres+cpu128 succeeded
+                    # while gres+cpu32, gres+exclusive and gres+time7d all failed --
+                    # no flag combination predicts it, and roughly half of GPU
+                    # dispatches were failing. Each attempt is therefore an
+                    # independent coin flip, so the expected wait is minimised by
+                    # flipping often; escalating to 15 minutes would just add idle
+                    # time to a 50/50 draw. Attempts are cheap: a failed dispatch
+                    # never starts the job, so it costs nothing but a queue slot.
+                    backoff=$(( 30 + launch_failures * 15 ))
+                    (( backoff > 120 )) && backoff=120
                     log "backing off ${backoff}s before the next attempt"
                     sleep "$backoff"
                     ;;

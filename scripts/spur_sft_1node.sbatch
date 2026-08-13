@@ -312,7 +312,15 @@ import json,sys;print(json.loads(open(sys.argv[1]).read())['output_dir'])" "$RES
     holder="$(cat "$lock/jobid" 2>/dev/null || true)"
     if [[ -n "$holder" && "$holder" != "${SLURM_JOB_ID:-}" ]]; then
         state="$(squeue -j "$holder" -h -o '%T' 2>/dev/null | head -1 || true)"
-        if [[ "$state" == "RUNNING" ]]; then
+        # ANY state that means the holder still exists counts as live, not just
+        # RUNNING. Treating only RUNNING as live is what let two trainers start at
+        # once: jobs 9201 and 9229 were scheduled in the same cycle, and during
+        # startup each saw the other as not-yet-RUNNING, judged the lock stale, and
+        # took it. Both then trained into the same output_dir and were ~10 steps from
+        # writing checkpoint-50 on top of each other. A job that is CONFIGURING,
+        # PENDING or COMPLETING is very much still a job.
+        if [[ -n "$state" && "$state" != "CANCELLED" && "$state" != "FAILED" \
+              && "$state" != "TIMEOUT" && "$state" != "COMPLETED" ]]; then
             echo "KORE_LOCK_HELD=$holder"
             echo "[sft-1node] job $holder is already training; exiting so we do not" \
                  "write into the same output_dir" >&2

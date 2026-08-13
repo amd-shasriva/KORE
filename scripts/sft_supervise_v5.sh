@@ -4,16 +4,23 @@
 # One entry point rather than a remembered command line, because the details are not
 # guessable and getting one wrong is expensive:
 #
-#   * QoS is amd-general-qos, NOT amd-burst-qos, and this reverses an earlier choice.
-#     `amd-general` + `amd-burst-qos` is a PHANTOM association: the controller accepts
-#     the submission and then never schedules it. Measured -- zero of 60 running burst
-#     jobs use the amd-general account, while amd-burst (12), amd-hyperloom (16),
-#     amd-aifw-dev (11), amd-collectives (8), amd-silo-tiger (7) and amd-primus (6) all
-#     do. A job of ours sat PENDING with the meaningless Reason=None for nine hours
-#     while 42 jobs submitted later ran, because it was never actually a candidate.
-#     The accounts that hold burst capacity (amd-burst, amd-spur) reject our
-#     submissions, and amd-primus + amd-burst-qos is rejected too, so burst is simply
-#     not reachable from this login. amd-general-qos is slower but real.
+#   * account amd-burst WITH qos amd-burst-qos. Both parts matter: burst QoS paired
+#     with the amd-general account was a PHANTOM association -- accepted by the
+#     controller and never scheduled, because zero of the running burst jobs used that
+#     account. A job of ours sat PENDING with the meaningless Reason=None for nine
+#     hours while 42 jobs submitted later ran. Ops added this user to the amd-burst
+#     account on 2026-08-13, which is what makes the pairing real.
+#
+#     Why burst rather than the guaranteed pools: amd-general-qos is capped at 8 nodes
+#     and amd-primus-qos at 16, both were full, and both are dominated by holds that do
+#     not rotate (general had a 15-day job and two unlimited; primus had two 30-day,
+#     three 14-day and two unlimited). Measured churn was one opening every ~4h per
+#     pool with 7 competitors ahead, i.e. ~32h. Burst is using 113 of ~282 nodes, so
+#     the cap no longer binds and only real free hardware does.
+#
+#     Burst is preemptible, which is the trade and the reason this supervisor exists.
+#     amd-general and amd-primus jobs stay queued as backups; the training lock in the
+#     launcher guarantees that whichever starts first is the only one that trains.
 #
 #   * KORE_OUTPUT_DIR must match the config's output_dir. The supervisor uses it as
 #     the authoritative "this run finished" test, so a mismatch means it can never
@@ -57,7 +64,7 @@ export STALL_SECS="${STALL_SECS:-2700}"
 # cluster with zero fully-idle nodes that is strictly worse than waiting. The run
 # wants a whole node (--exclusive), so a long pending wait is expected and correct.
 export STUCK_PENDING_SECS="${STUCK_PENDING_SECS:-0}"
-export KORE_SFT_QOS="amd-general-qos"
+export KORE_SFT_QOS="amd-burst-qos"
 
 LOG="$REPO/runs/supervise_v5_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "$REPO/runs"
@@ -67,6 +74,6 @@ echo "[supervise] output_dir=$KORE_OUTPUT_DIR"
 echo "[supervise] log=$LOG"
 
 exec bash scripts/watch_and_resume.sh sft \
-    sbatch --qos=amd-general-qos "$REPO/scripts/spur_sft_1node.sbatch" \
+    sbatch --account=amd-burst --qos=amd-burst-qos "$REPO/scripts/spur_sft_1node.sbatch" \
     configs/sft_coder30b_a3b.json - - \
     >>"$LOG" 2>&1

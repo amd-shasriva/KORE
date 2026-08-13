@@ -33,6 +33,12 @@ anthropic==0.116.0
 # --- base ---
 numpy==2.2.6
 pyyaml>=6.0
+# Required whenever a training config sets report_to="tensorboard", which the SFT
+# config does. The Trainer builds that callback only after the model is loaded on
+# every rank, so its absence surfaced as a crash ~11 minutes into a run rather than
+# at startup; kore/policy/sft.py now checks the import up front, and this keeps a
+# fresh environment from hitting it at all.
+tensorboard==2.21.0
 
 # torch / pytorch-triton-rocm are installed separately from the ROCm index (step 1
 # above); pinned here for reference only:

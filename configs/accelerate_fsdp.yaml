@@ -62,7 +62,13 @@ fsdp_config:
   # true, matching what TrainingArguments already exports, so reading this file
   # and reading the running job agree.
   fsdp_forward_prefetch: true
-  fsdp_state_dict_type: FULL_STATE_DICT           # consolidate a plain HF ckpt so the next stage loads it via from_pretrained (cross-stage handoff)
+  # SHARDED for periodic checkpoints so the run can resume; train_sft flips the
+  # plugin to FULL_STATE_DICT for the final save alone, which is what the next stage
+  # loads via from_pretrained. FULL for periodic saves made every checkpoint a 456 GB
+  # rank-0 gather (7.5 min each) whose optimizer file could not be loaded back at all
+  # -- all eight ranks died with SIGBUS on two separate nodes. See
+  # kore/policy/configs.py:build_fsdp_kwargs for the measurements.
+  fsdp_state_dict_type: SHARDED_STATE_DICT
   fsdp_use_orig_params: true
   fsdp_activation_checkpointing: false            # done via HF Trainer gradient_checkpointing (use_reentrant=True; SDPA-swap robust, see configs.build_fsdp_kwargs); FSDP-plugin checkpointing mismatches saved-tensor counts on FSDP1/use_orig_params
   fsdp_cpu_ram_efficient_loading: true            # rank-0 streams weights, broadcasts

@@ -396,8 +396,16 @@ def test_accelerate_fsdp_yaml_is_valid_full_shard():
     assert cfg["num_processes"] == 8
     fc = cfg["fsdp_config"]
     assert fc["fsdp_auto_wrap_policy"] == "TRANSFORMER_BASED_WRAP"
-    assert fc["fsdp_transformer_layer_cls_to_wrap"] == "Qwen3DecoderLayer"
+    # Qwen3MoeDecoderLayer: the production target is the 30B-A3B MoE, whose layers
+    # are Qwen3MoeDecoderLayer. Naming the dense class matches nothing, so auto-wrap
+    # wraps no layer and the model is sharded as one unit, which OOMs.
+    assert fc["fsdp_transformer_layer_cls_to_wrap"] == "Qwen3MoeDecoderLayer"
     assert fc["fsdp_reshard_after_forward"] == "FULL_SHARD"  # ZeRO-3 equivalent
+    # SHARDED for periodic checkpoints: FULL made each save a 456 GB rank-0 gather
+    # whose optimizer file could not be read back (SIGBUS on all eight ranks, two
+    # different nodes), so the run could not resume. train_sft flips the plugin to
+    # FULL_STATE_DICT for the final cross-stage save only.
+    assert fc["fsdp_state_dict_type"] == "SHARDED_STATE_DICT"
     # Activation checkpointing is done via HF Trainer gradient_checkpointing
     # (use_reentrant=False), NOT the FSDP plugin (which mismatches tensor counts).
     assert fc["fsdp_activation_checkpointing"] is False

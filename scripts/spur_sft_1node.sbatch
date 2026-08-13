@@ -101,40 +101,41 @@
 # so any transient NODE_FAIL became an unrecoverable hold. Recovery now lives
 # in scripts/spur_pipeline_driver.sh, which resubmits and lets the trainer
 # resume from its last complete checkpoint.
-# --exclusive is deliberately ABSENT, and this is a correction of an earlier
-# assumption rather than a relaxation of standards.
+# --exclusive is REQUIRED, and restoring it reverses an earlier removal that was
+# based on an assumption this cluster has since disproven.
 #
-# The job still requests --gres=gpu:8, i.e. ALL EIGHT GPUs on the node. That is what
-# makes it a full node for training: no other GPU job can be placed there, and no
-# other process can touch a device we hold. --exclusive adds only one further demand,
-# that not even a single unrelated CPU process coexists, and on this cluster that one
-# extra demand is the difference between running and not running.
+# The removal argued that --gres=gpu:8 already makes this a full node, because "no
+# other GPU job can be placed there, and no other process can touch a device we
+# hold". That is false under amd-burst-qos. Measured, two consecutive jobs that were
+# placed within seconds of submission and then rejected their own node in ten:
 #
-# Measured, on a job submitted at 01:29:30 that was still PENDING at 05:11 while NINE
-# jobs submitted 2.0-3.6 hours LATER all started ahead of it:
+#   job 10903  crsuse2-m2m-119 (state alloc)  207 GiB already allocated on ALL 8 GPUs
+#   job 10923  crsuse2-m2m-046 (state mix)    288 GiB -- 100%, zero free -- on ALL 8
 #
-#   job 7163 yquan     submitted 03:28  gpu:8/node  cpus=1  exclusive=no  -> RUNNING
-#   job 7388 olehtika  submitted 03:46  gpu:8/node  cpus=1  exclusive=no  -> RUNNING
-#   job 7509 yihanwan  submitted 04:03  gpu:8/node  cpus=1  exclusive=no  -> RUNNING
-#   job 7727 anamital  submitted 05:05  gpu:8/node  cpus=1  exclusive=no  -> RUNNING
-#   job 7750 jiaolyu   submitted 05:08  gpu:8/node  cpus=1  exclusive=no  -> RUNNING
+# We were granted gpu:8 on nodes whose eight cards were already full of somebody
+# else's memory, so the GRES grant is not enforced against other QoS tiers here.
+# Burst is opportunistic capacity layered over the guaranteed pools, which is exactly
+# why it places in seconds: it is not waiting for free GPUs, it is overlaying tenants
+# who already hold them. Instant placement was never a sign of available hardware.
 #
-# Every one of them asked for the full complement of GPUs, so this is not a case of
-# small jobs slipping through gaps. This scheduler places what fits rather than
-# strictly honouring submit order, and an --exclusive request only fits a COMPLETELY
-# idle node, of which there were 0-2 at any moment while 18 nodes sat drained for a
-# "Bundle 2 upgrade".
+# So the earlier trade was not "strictness vs. running". It was landing immediately on
+# occupied hardware and exiting 3, versus waiting for a node that can actually hold
+# the run. Nothing trains on a card with 288 GiB spoken for.
 #
-# The original justification for --exclusive was that a co-tenant might exhaust host
-# memory during the ~61GB rank-0 FULL_STATE_DICT gather at each checkpoint. That was
-# never measured, and it is wrong: these nodes have RealMemory=2817843 (2.75 TB) with
-# ~2.7 TB free, and CPUTot=236 of which a typical "mix" node has ONE OR TWO
-# allocated. Our peak host footprint is roughly 2% of the machine. The risk being
-# avoided did not exist; the cost of avoiding it was the run not starting.
+# The cost is real and is accepted deliberately: --exclusive only fits a COMPLETELY
+# idle node, and the partition is saturated -- 136 alloc, 58 mix, 18 drain, 13 down,
+# and just 4 idle of 228. This job will therefore queue rather than land instantly.
+# Queuing for a clean node is the only option that ends in a trained model.
 #
-# What still protects the run: --cpus-per-task=128 is a guaranteed allocation (a mix
-# node typically has ~234 free, so it fits comfortably), and the GPU-count guard
-# below fails closed if fewer than eight usable devices are visible.
+# The earlier note that a co-tenant cannot exhaust host memory still stands (2.75 TB
+# RealMemory, our peak host footprint ~2%), so host RAM is not why this is back. GPU
+# co-tenancy is.
+#
+# --exclusive does NOT protect against a crashed tenant's LEAKED memory, which
+# survives it. That is what the GPU-hygiene check below is for, and why the bad-node
+# list it feeds is persisted to runs/.sft_bad_nodes and passed as --exclude on every
+# resubmission by both the supervisor and the cron guard.
+#SBATCH --exclusive
 #SBATCH --open-mode=append
 #SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/sft-%j.out
 #SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/sft-%j.err

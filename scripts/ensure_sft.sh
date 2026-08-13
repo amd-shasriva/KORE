@@ -154,12 +154,34 @@ if [ "$n" -ge "$MAX_ATTEMPTS" ]; then
 fi
 echo $((n + 1)) > "$ATTEMPTS"
 
+# Harvest dirty nodes before resubmitting. The launcher's GPU-hygiene check exits 3
+# after printing KORE_BAD_NODE=<host> when it finds a card already occupied, and this
+# guard is usually the thing that submitted the job that just died, so if it ignores
+# that signal it will keep re-rolling the same saturated pool. It did: 10903 and 10923
+# were both submitted from here and both landed on full nodes within seconds.
+#
+# The list is a FILE rather than a shell variable because the supervisor's in-memory
+# copy is lost every time it restarts, and this guard exists precisely to restart it.
+# Both writers append here and both readers pass it as --exclude, so a node found
+# dirty by either one stays excluded for everyone across restarts and reboots.
+BAD_NODES="$REPO/runs/.sft_bad_nodes"
+for log in $(ls -t "$REPO"/runs/sft-*.err 2>/dev/null | head -12); do
+    grep -hoE 'KORE_BAD_NODE=[^ ]+' "$log" 2>/dev/null | cut -d= -f2
+done | sort -u >> "$BAD_NODES".tmp 2>/dev/null || true
+if [ -s "$BAD_NODES".tmp ]; then
+    cat "$BAD_NODES" "$BAD_NODES".tmp 2>/dev/null | sort -u | grep -E '^[a-z0-9-]+$' > "$BAD_NODES".new || true
+    mv -f "$BAD_NODES".new "$BAD_NODES" 2>/dev/null || true
+fi
+rm -f "$BAD_NODES".tmp
+EXCLUDE="$(paste -sd, "$BAD_NODES" 2>/dev/null || true)"
+
 # amd-burst first: it is the pairing that actually places this job. amd-primus and
 # amd-general are both capped and were full every time this was needed, and
 # amd-general+amd-burst-qos is a phantom association that is accepted and never
 # scheduled. The supervisor keeps whatever lands.
-say "no training job found; submitting on amd-burst (attempt $((n + 1)) of $MAX_ATTEMPTS)"
+say "no training job found; submitting on amd-burst (attempt $((n + 1)) of $MAX_ATTEMPTS)${EXCLUDE:+, excluding dirty nodes: $EXCLUDE}"
 out="$(sbatch --account=amd-burst --qos=amd-burst-qos \
+       ${EXCLUDE:+--exclude="$EXCLUDE"} \
        "$REPO/scripts/spur_sft_1node.sbatch" \
        configs/sft_coder30b_a3b.json - - 2>&1)"
 if grep -qE 'Submitted batch job [0-9]+' <<<"$out"; then

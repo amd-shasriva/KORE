@@ -120,7 +120,9 @@ terminal_exit() {
 
 resubmits=0
 JOB=""
-EXCLUDE=""
+# Seeded from the persisted list so a restarted supervisor does not have to
+# rediscover, one wasted submission at a time, every dirty node it already found.
+EXCLUDE="$(paste -sd, "$REPO/runs/.sft_bad_nodes" 2>/dev/null || true)"
 LAST_START=""
 consecutive_fast_failures=0
 launch_failures=0
@@ -361,7 +363,14 @@ while :; do
             badnode="$(grep -m1 -oE 'KORE_BAD_NODE=[^ ]+' "$(newest_log "$JOB")" 2>/dev/null \
                        | cut -d= -f2 || true)"
             if [ -n "$badnode" ]; then
-                EXCLUDE="$(printf '%s' "${EXCLUDE:+$EXCLUDE,}$badnode")"
+                # Persist as well as remember. An in-memory list dies with this
+                # process, and the cron guard restarts this process, so a node found
+                # dirty here would otherwise be retried freely a few minutes later.
+                # The guard reads the same file and passes the same --exclude.
+                printf '%s\n' "$badnode" >> "$REPO/runs/.sft_bad_nodes" 2>/dev/null || true
+                sort -u -o "$REPO/runs/.sft_bad_nodes" "$REPO/runs/.sft_bad_nodes" 2>/dev/null || true
+                EXCLUDE="$(paste -sd, "$REPO/runs/.sft_bad_nodes" 2>/dev/null \
+                           || printf '%s' "${EXCLUDE:+$EXCLUDE,}$badnode")"
                 log "job=$JOB landed on a dirty node ($badnode) with memory already" \
                     "allocated on a GPU; excluding it and resubmitting." \
                     "excluded so far: $EXCLUDE"

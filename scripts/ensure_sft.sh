@@ -168,11 +168,38 @@ BAD_NODES="$REPO/runs/.sft_bad_nodes"
 for log in $(ls -t "$REPO"/runs/sft-*.err 2>/dev/null | head -12); do
     grep -hoE 'KORE_BAD_NODE=[^ ]+' "$log" 2>/dev/null | cut -d= -f2
 done | sort -u >> "$BAD_NODES".tmp 2>/dev/null || true
+
+# Also harvest nodes that died UNDER us. A dirty node reports itself, because the
+# hygiene check runs and prints KORE_BAD_NODE before exiting 3. A node that fails
+# outright cannot report anything -- it is gone -- so nothing would ever exclude it
+# and the scheduler is free to hand us the same dying hardware repeatedly. It did:
+# 10849 on ...301, 10886 on ...297, 10942 on ...296, three adjacent nodes, with 296
+# left in state DOWN afterwards. Ask Slurm which of our jobs ended in NODE_FAIL and
+# treat those nodes exactly like dirty ones.
+for jid in $(ls -t "$REPO"/runs/sft-*.err 2>/dev/null | head -15 \
+             | sed 's#.*/sft-\([0-9]\+\)\.err#\1#'); do
+    info="$(scontrol show job "$jid" 2>/dev/null | tr ' ' '\n')"
+    case "$(printf '%s' "$info" | grep -m1 '^JobState=')" in
+        JobState=NODE_FAIL|JobState=BOOT_FAIL)
+            printf '%s' "$info" | grep -m1 '^NodeList=' | cut -d= -f2 \
+                | xargs -r scontrol show hostnames 2>/dev/null ;;
+    esac
+done | grep -E '^[a-z0-9-]+$' | sort -u >> "$BAD_NODES".tmp 2>/dev/null || true
 if [ -s "$BAD_NODES".tmp ]; then
     cat "$BAD_NODES" "$BAD_NODES".tmp 2>/dev/null | sort -u | grep -E '^[a-z0-9-]+$' > "$BAD_NODES".new || true
     mv -f "$BAD_NODES".new "$BAD_NODES" 2>/dev/null || true
 fi
 rm -f "$BAD_NODES".tmp
+
+# Bounded, because an exclude list that only grows eventually excludes the cluster and
+# the run stops being schedulable for a reason nobody is looking at. Nodes are also
+# repaired -- 18 sat drained for a "Bundle 2 upgrade" and came back -- so a permanent
+# blacklist would keep discarding capacity that is healthy again. Keep the 40 most
+# recent findings and let anything older be retried; the hygiene check is the backstop
+# that makes retrying a once-bad node safe.
+if [ "$(wc -l < "$BAD_NODES" 2>/dev/null || echo 0)" -gt 40 ]; then
+    tail -40 "$BAD_NODES" > "$BAD_NODES".new && mv -f "$BAD_NODES".new "$BAD_NODES"
+fi
 EXCLUDE="$(paste -sd, "$BAD_NODES" 2>/dev/null || true)"
 
 # amd-burst first: it is the pairing that actually places this job. amd-primus and

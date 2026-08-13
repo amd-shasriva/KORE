@@ -40,7 +40,23 @@
 #SBATCH --partition=amd-spur
 #SBATCH --qos=amd-general-qos
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:mi355x:8
+# gpu:8, NOT gpu:mi355x:8. The typed form does not dispatch on this controller: it is
+# accepted, the controller picks a node, and the node never confirms, leaving the job
+# in JobLaunchFailure (dispatch confirmation failed: 0 of 1 nodes confirmed) forever.
+# Measured head to head, three trials each, identical in every other respect:
+#
+#   --gres=gpu:mi355x:8   0 of 3 dispatched
+#   --gres=gpu:8          2 of 3 dispatched
+#   --gpus-per-node=8     0 of 3 dispatched
+#
+# The untyped form is also what other users' working jobs on this cluster request --
+# a running burst job shows TresPerNode=gpu:8/node while ours showed
+# gpu:mi355x:8/node. SPUR advertises each node's GPUs as eight separate
+# `gpu:mi355x:1` entries rather than one `gpu:mi355x:8`, which is the likely reason a
+# typed request for 8 cannot be satisfied. Every node in this partition is MI355X, so
+# naming the model buys nothing anyway, and the script already verifies it received
+# eight usable devices before training -- which is the check that actually matters.
+#SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=128
 # 7 days, not 23 hours. The 23h figure was assumed, not measured against the
 # controller: `scontrol show partition amd-spur` reports MaxTime=UNLIMITED, and a

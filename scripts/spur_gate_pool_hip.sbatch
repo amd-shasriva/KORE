@@ -12,7 +12,10 @@
 # Typed GRES. An untyped "gpu:8" request is accepted at submit time and then
 # fails to bind on these nodes, so the job cycles through JobLaunchFailure into
 # JobHoldMaxRequeue while the partition still shows dozens of idle nodes.
-#SBATCH --gres=gpu:mi355x:8
+# gpu:8, not gpu:mi355x:8 -- the typed form does not dispatch on this controller
+# (JobLaunchFailure, 0 of 1 nodes confirmed). Measured 0/3 vs 2/3; see the full
+# explanation in scripts/spur_sft_1node.sbatch.
+#SBATCH --gres=gpu:8
 # The whole node's CPUs. Asking for a fraction alongside --exclusive is what this
 # scheduler rejects at launch, and gating is hipcc-bound anyway, so the cores are
 # the resource that actually makes it fast.

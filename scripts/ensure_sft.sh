@@ -80,24 +80,30 @@ if grep -qs "SFT_RC=0" "$REPO"/runs/sft-*.out 2>/dev/null; then
     exit 0
 fi
 
-# ---- 2. Is a training job alive, and is it actually going to RUN? -----------
-# "A job exists" is not the same as "the run is covered". amd-primus-qos and
-# amd-general-qos are capped at 16 and 8 nodes team-wide and are routinely full, so
-# a job of ours can sit at QOSGrpNodeLimit for many hours. Treating that as covered
-# is how the run stayed down: two cap-blocked jobs were queued, no job was running,
-# and this guard stayed silent because it found a "kore-sft" job in the list.
+# ---- 2. Is a training job alive? --------------------------------------------
+# ONE job, on amd-primus, and any state of it counts as covered -- including a long
+# QOSGrpNodeLimit wait. That is a deliberate reversal of the previous rule, which
+# treated a cap-blocked pending job as "not covered" and submitted to amd-burst
+# alongside it.
 #
-# So: a RUNNING job means covered. Otherwise, a pending job only counts as covered
-# if it is on a pool with headroom (amd-burst), because that is the one that
-# actually gets placed. A duplicate submission is safe regardless -- the launcher's
-# training lock guarantees exactly one job trains, and any later starter exits
-# after printing KORE_LOCK_HELD -- so the cost of acting is a wasted queue slot,
-# while the cost of not acting is the run sitting idle.
+# The old rule was written when burst was placing jobs in under a minute and the
+# guaranteed pools were hours deep, so a queue position there was worth little. Burst
+# is now actively harmful: it is the lowest-priority tier on a partition running 135
+# alloc / 56 mix / 36 down-or-drained / 2 idle, and --exclusive can only place on a
+# WHOLLY idle node. On a cluster this saturated, healthy nodes never sit idle -- they
+# are taken instantly -- so the idle ones are idle because they are broken. Six burst
+# placements in a row died that way (...301, ...297, ...296, ...331, ...291, ...317,
+# four of them still DOWN afterwards), one of them before our code produced a single
+# line of output. Zero progress was banked.
+#
+# Waiting in the primus queue for a real allocation is therefore the faster route to a
+# trained model, even though it starts slower. Treating the wait as covered is what
+# keeps this guard from piling on duplicates while we wait.
 mapfile -t OUR_JOBS < <(squeue -u "${USER:-shasriva}" -h -o "%i %j %T %q" 2>/dev/null \
                         | awk '$2=="kore-sft"')
 RUNNING_LINE="$(printf '%s\n' "${OUR_JOBS[@]:-}" | awk '$3=="RUNNING"{print; exit}')"
-BURST_PENDING="$(printf '%s\n' "${OUR_JOBS[@]:-}" | awk '$4=="amd-burst-qos"{print; exit}')"
-JOB_LINE="${RUNNING_LINE:-$BURST_PENDING}"
+ANY_PENDING="$(printf '%s\n' "${OUR_JOBS[@]:-}" | awk 'NF{print; exit}')"
+JOB_LINE="${RUNNING_LINE:-$ANY_PENDING}"
 JOB_ID="$(awk '{print $1}' <<<"$JOB_LINE")"
 JOB_STATE="$(awk '{print $3}' <<<"$JOB_LINE")"
 
@@ -166,12 +172,11 @@ echo $((n + 1)) > "$ATTEMPTS"
 # in the launcher remains as the backstop for leaked memory, and it costs ten seconds
 # to reject a bad node and try again. Retrying is cheaper than remembering.
 
-# amd-burst first: it is the pairing that actually places this job. amd-primus and
-# amd-general are both capped and were full every time this was needed, and
-# amd-general+amd-burst-qos is a phantom association that is accepted and never
-# scheduled. The supervisor keeps whatever lands.
-say "no training job found; submitting on amd-burst (attempt $((n + 1)) of $MAX_ATTEMPTS)"
-out="$(sbatch --account=amd-burst --qos=amd-burst-qos \
+# amd-primus, and only amd-primus. Note the account must match the QoS: pairing
+# amd-general with amd-burst-qos is a phantom association that the controller accepts
+# and never schedules.
+say "no training job found; submitting on amd-primus (attempt $((n + 1)) of $MAX_ATTEMPTS)"
+out="$(sbatch --account=amd-primus --qos=amd-primus-qos \
        "$REPO/scripts/spur_sft_1node.sbatch" \
        configs/sft_coder30b_a3b.json - - 2>&1)"
 if grep -qE 'Submitted batch job [0-9]+' <<<"$out"; then

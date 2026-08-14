@@ -62,11 +62,17 @@ fi
 
 mkdir -p "$OUT" "$REPO/runs"
 
+# The knobs travel in the environment, NOT inside --export=ALL,NAME=VALUE.
+# --export takes a comma-separated list, and KORE_AKA_ARMS is "base opus" -- a
+# value with a space in it. Embedding that in the list is exactly how an arm
+# gets silently dropped from a three-day sweep. --export=ALL propagates the
+# submitting environment verbatim, spaces included.
+export KORE_AKA_ARMS="$ARMS"
+export KORE_AKA_OUT="$OUT"
+
 set -- --account=amd-primus --qos=amd-primus-qos --nice="$NICE"
 [ -n "$dep" ] && set -- "$@" "$dep"
-set -- "$@" \
-    --export=ALL,KORE_AKA_ARMS="$ARMS",KORE_AKA_OUT="$OUT" \
-    "$REPO/scripts/spur_aka_final.sbatch"
+set -- "$@" --export=ALL "$REPO/scripts/spur_aka_final.sbatch"
 
 echo "sbatch $*"
 if [ "$DRY" = "1" ]; then

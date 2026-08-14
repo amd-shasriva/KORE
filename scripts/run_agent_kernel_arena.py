@@ -705,6 +705,43 @@ def cmd_run(args) -> int:
                            gpu_arch=args.gpu_arch)[: args.limit or None]
     print(f"{len(tasks)} tasks; model={args.model}", flush=True)
 
+    # Per-task reference latency from the baseline run, which is the denominator
+    # for every suite that reports an absolute time instead of a ratio.
+    ref_latency = _reference_latencies(out_root)
+    ref_cases = _reference_cases(out_root)
+    print(f"reference latencies available for {len(ref_latency)} task(s), "
+          f"per-case rows for {len(ref_cases)} task(s)"
+          + ("" if ref_latency else " -- run `baseline` first or speedups will be"
+             " unavailable for GEAK-style suites"), flush=True)
+
+    # Refuse to burn a full sweep that cannot produce the number it exists to
+    # produce. The 2026-08-10 run printed the warning above with a count of 0,
+    # nobody read it, and 253 of 302 correct kernels came back with a valid
+    # optimized time and no denominator -- unrecoverable, because the workspaces
+    # are deleted afterwards. A warning that costs a day is not a warning.
+    #
+    # Coverage is measured against the tasks this worker will actually score, so
+    # a deliberately narrow --types run is judged on its own slice.
+    if not args.allow_missing_baseline:
+        need = [t.task_id for t in tasks]
+        have = sum(1 for tid in need
+                   if tid in ref_latency or tid in ref_cases)
+        frac = have / max(1, len(need))
+        if frac < args.min_baseline_coverage:
+            print(f"REFUSING TO RUN: baseline coverage {frac:.0%} "
+                  f"({have}/{len(need)} tasks) is below "
+                  f"--min-baseline-coverage {args.min_baseline_coverage:.0%}.\n"
+                  f"  Most suites report an absolute latency and no ratio, so "
+                  f"without a baseline their speedup is unrecoverable after the "
+                  f"run -- workspaces are deleted.\n"
+                  f"  Fix: run `baseline` first with the SAME --out, then re-run:\n"
+                  f"    ... baseline ... --out {out_root}\n"
+                  f"    ... run      ... --out {out_root}\n"
+                  f"  Override with --allow-missing-baseline to score correctness "
+                  f"only.", flush=True)
+            return 2
+
+
     from kore.eval.policies import model_policy  # local: heavy import
 
     # model_policy takes the checkpoint positionally and has no `revision` or
@@ -754,41 +791,6 @@ def cmd_run(args) -> int:
             if row.get("task_id"):
                 results.append(_result_from_dict(row))
 
-    # Per-task reference latency from the baseline run, which is the denominator
-    # for every suite that reports an absolute time instead of a ratio.
-    ref_latency = _reference_latencies(out_root)
-    ref_cases = _reference_cases(out_root)
-    print(f"reference latencies available for {len(ref_latency)} task(s), "
-          f"per-case rows for {len(ref_cases)} task(s)"
-          + ("" if ref_latency else " -- run `baseline` first or speedups will be"
-             " unavailable for GEAK-style suites"), flush=True)
-
-    # Refuse to burn a full sweep that cannot produce the number it exists to
-    # produce. The 2026-08-10 run printed the warning above with a count of 0,
-    # nobody read it, and 253 of 302 correct kernels came back with a valid
-    # optimized time and no denominator -- unrecoverable, because the workspaces
-    # are deleted afterwards. A warning that costs a day is not a warning.
-    #
-    # Coverage is measured against the tasks this worker will actually score, so
-    # a deliberately narrow --types run is judged on its own slice.
-    if not args.allow_missing_baseline:
-        need = [t.task_id for t in tasks]
-        have = sum(1 for tid in need
-                   if tid in ref_latency or tid in ref_cases)
-        frac = have / max(1, len(need))
-        if frac < args.min_baseline_coverage:
-            print(f"REFUSING TO RUN: baseline coverage {frac:.0%} "
-                  f"({have}/{len(need)} tasks) is below "
-                  f"--min-baseline-coverage {args.min_baseline_coverage:.0%}.\n"
-                  f"  Most suites report an absolute latency and no ratio, so "
-                  f"without a baseline their speedup is unrecoverable after the "
-                  f"run -- workspaces are deleted.\n"
-                  f"  Fix: run `baseline` first with the SAME --out, then re-run:\n"
-                  f"    ... baseline ... --out {out_root}\n"
-                  f"    ... run      ... --out {out_root}\n"
-                  f"  Override with --allow-missing-baseline to score correctness "
-                  f"only.", flush=True)
-            return 2
 
     if args.num_shards > 1:
         # Stride rather than contiguous blocks: task cost varies a lot by category
@@ -1023,12 +1025,54 @@ def _result_from_dict(row: dict) -> "ArenaResult":
     return ArenaResult(**{k: v for k, v in row.items() if k in allowed})
 
 
+def _arena_provenance(arena_root) -> dict:
+    """Which AgentKernelArena produced these numbers.
+
+    AKA is a sibling clone, not a submodule, so nothing in this repo records the
+    commit a result was measured against -- and a benchmark number without its
+    task set is not a result. The task count alone moved 413 -> 416 on one
+    upstream pull, and that pull also changed image_kernel timing code, so two
+    runs a week apart can differ for reasons that have nothing to do with the
+    model.
+
+    Recorded automatically on every results file rather than left to a human to
+    note, for the same reason the operator-overlap disclosure rides along: a
+    number that can be quoted without its provenance eventually is.
+    """
+    out: dict = {"arena_root": str(arena_root)}
+    try:
+        import subprocess as _sp
+        for key, cmd in (("arena_commit", ["git", "rev-parse", "HEAD"]),
+                         ("arena_described", ["git", "describe", "--always",
+                                              "--dirty", "--tags"])):
+            p = _sp.run(cmd, cwd=str(arena_root), capture_output=True,
+                        text=True, timeout=20)
+            if p.returncode == 0:
+                out[key] = p.stdout.strip()
+        # A dirty checkout is worth shouting about: a locally edited harness can
+        # change a timing method or a tolerance, and the result would look normal.
+        p = _sp.run(["git", "status", "--porcelain"], cwd=str(arena_root),
+                    capture_output=True, text=True, timeout=20)
+        if p.returncode == 0:
+            out["arena_dirty_files"] = len(
+                [ln for ln in p.stdout.splitlines() if ln.strip()])
+    except Exception as exc:  # noqa: BLE001 - provenance must never fail a run
+        out["arena_commit_error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
 def _write(path: Path, results, args) -> None:
     summary = summarize(results)
+    summary["arena_provenance"] = _arena_provenance(
+        getattr(args, "arena_root", DEFAULT_ARENA))
     path.write_text(json.dumps(
         {"summary": summary, "results": [r.to_dict() for r in results]},
         indent=2) + "\n")
+    prov = summary["arena_provenance"]
     print("\n==== SUMMARY ====")
+    print(f"  arena: {prov.get('arena_described', prov.get('arena_commit', '?'))}"
+          + (f"  ({prov['arena_dirty_files']} locally modified files!)"
+             if prov.get("arena_dirty_files") else ""))
     for ttype, row in summary["by_type"].items():
         bar = row.get("opus_published_mean_speedup")
         verdict = ""

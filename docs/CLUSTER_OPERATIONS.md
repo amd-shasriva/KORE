@@ -29,10 +29,10 @@ read-only tool you run against the log whenever you want a status snapshot.
 
 | Field | Value |
 | --- | --- |
-| Job | 9229 |
-| Node | crsuse2-m2m-037 |
+| Job | 11215 (9229 was an earlier attempt, killed by a node failure at step 154) |
+| Node | assigned at launch (job 11215 pending on `QOSGrpNodeLimit`) |
 | Account / QoS | `amd-primus` / `amd-primus-qos` (guaranteed, non-preemptible) |
-| Walltime | 7 days |
+| Walltime | 3 days (2-2.7x the 26-36 h the run needs) |
 | Measured step time | ~60 s/step |
 | Expected duration | ~29 h |
 
@@ -240,7 +240,7 @@ Symptom first. Find what you are looking at, then read the cause and fix.
 | Job `RUNNING`, `squeue` looks normal, but the log has not grown in tens of minutes | Training wedged, most often after the model load on a node with a hardware or driver issue the free-memory check did not catch, or a genuinely slow first dataset map. | The supervisor cancels and excludes the node once the log is stale past `STALL_SECS` (45 min for the production run). If checking by hand, compare log mtime against the current time before assuming a hang. |
 | Log contains `KORE_LOCK_HELD=<jobid>`, job then exits 0 | This job started while another job (queued in the paired pool) already held the single-trainer lock on the same `output_dir`. This is by design, not a failure. | No action. The supervisor detects this and follows the holder job id instead of resubmitting. |
 | Two jobs both training into the same `output_dir` at once | The single-trainer lock's staleness check used to treat only `RUNNING` as "the holder is alive," so a competing job starting in the same scheduling cycle saw the other as `CONFIGURING`/`PENDING`, judged the lock stale, and took it. Fixed: any state that means the job still exists now counts as live. | Should not recur. If it does, treat it as the lock logic regressing, not as ordinary preemption: stop both jobs and inspect `output_dir/.kore_train.lock/jobid` against `squeue`. |
-| Supervisor logs `"<stage> completed; done"` and exits, but `output_dir` has no consolidated model | The supervisor's completion check has two layers: the authoritative one (`run_completed`: a consolidated model, or the launcher's `SFT_RC=0` sentinel) and a fallback that treats a Slurm `JobState=COMPLETED` as done. A job that self-resubmits at its own walltime boundary (§2, "Two resubmission mechanisms") exits `0` (a clean exit from Slurm's point of view) without ever printing `SFT_RC=0`. The fallback check would read that exit as "the stage is done" for a job that only rolled over into a new generation. | Grep the finished job's log for `resubmitted as generation`; if present, a new job id exists and needs its own supervision (relaunch `sft_supervise_v5.sh`, or supervise the new id directly). This has not been observed on the current run because a ~29h run under a 7-day limit never reaches its own walltime boundary; it is a latent risk if the walltime is ever shortened relative to the true run length. |
+| Supervisor logs `"<stage> completed; done"` and exits, but `output_dir` has no consolidated model | The supervisor's completion check has two layers: the authoritative one (`run_completed`: a consolidated model, or the launcher's `SFT_RC=0` sentinel) and a fallback that treats a Slurm `JobState=COMPLETED` as done. A job that self-resubmits at its own walltime boundary (§2, "Two resubmission mechanisms") exits `0` (a clean exit from Slurm's point of view) without ever printing `SFT_RC=0`. The fallback check would read that exit as "the stage is done" for a job that only rolled over into a new generation. | Grep the finished job's log for `resubmitted as generation`; if present, a new job id exists and needs its own supervision (relaunch `sft_supervise_v5.sh`, or supervise the new id directly). This has not been observed on the current run because a ~29h run finishes well before its own walltime boundary; the margin narrowed from 7 days to 3 (still 2-2.7x the 26-36h needed) but the boundary is still never reached. It becomes a live risk only if the walltime is cut close to the true run length. |
 
 ## 6. SPUR-specific gotchas
 
@@ -264,7 +264,7 @@ never actually schedule. The only way to tell is to watch what really runs.
 | Account + QoS | Status for this user | Evidence |
 | --- | --- | --- |
 | `amd-general` + `amd-general-qos` | Works | In production use (general pool). |
-| `amd-primus` + `amd-primus-qos` | Works | Current run (job 9229). |
+| `amd-primus` + `amd-primus-qos` | Works | Current run (job 11215); job 9229 also ran here. |
 | `amd-primus` + `amd-general-qos` | Works | Verified directly. |
 | `amd-general` + `amd-primus-qos` | Rejected | Controller refuses it outright for this account. |
 | `amd-general` + `amd-burst-qos` | Accepted, never scheduled | `Reason=None`, `StartTime=N/A` for 9 hours while 42 later-submitted jobs ran. Of 60 running burst jobs sampled, zero used the `amd-general` account; the accounts actually running under burst were `amd-burst`, `amd-hyperloom`, `amd-aifw-dev`, `amd-collectives`, `amd-silo-tiger`, `amd-primus`. |

@@ -1,8 +1,12 @@
 # SFT readiness: Qwen3-Coder-30B-A3B production run
 
-**Status: training in progress.** The production SFT stage is running as Slurm
-job `9229` on `crsuse2-m2m-037` (account `amd-primus`, QOS `amd-primus-qos`, a
-guaranteed, non-preemptible pool; 7-day walltime). This document explains what
+**Status: queued, waiting for a node.** The production SFT stage is Slurm job
+`11215` (account `amd-primus`, QOS `amd-primus-qos`, a guaranteed,
+non-preemptible pool; 3-day walltime), pending on `QOSGrpNodeLimit` because that
+pool is capped at 16 nodes and holds 16. An earlier attempt, job `9229` on
+`crsuse2-m2m-037`, trained 150 clean steps before its node died; this run starts
+fresh from the pinned base rather than warm starting from it (see `model_id` in
+docs/DISTRIBUTED.md). This document explains what
 the shipped recipe (`configs/sft_coder30b_a3b.json`) trains, why each
 non-obvious setting is what it is, and what the held-out evals are watching
 for. [`DISTRIBUTED.md`](DISTRIBUTED.md) is the executable launch reference
@@ -45,10 +49,10 @@ pool so every eval group is full size).
 | Checkpoints | every 50 steps, 32 over the run |
 | Measured throughput | ~60 s/step, ~29 hours total |
 
-One epoch, not two or three, for an operational reason: a second epoch crosses
-the 7-day walltime margin this run actually needs (checkpoint writes and
-occasional dispatch failures eat into it), and this checkpoint is a cold start
-for RL rather than a finished model. The held-out eval below (not a guess)
+One epoch, not two or three, because this checkpoint is a cold start for RL
+rather than a finished model. Note that walltime is NOT the binding reason: at
+~29 h/epoch a second epoch (~58 h) still fits inside the 3-day limit, so the
+choice rests on what the artifact is for, not on the clock. The held-out eval below (not a guess)
 decides whether a second epoch is worth scheduling later.
 
 ## Hyperparameters

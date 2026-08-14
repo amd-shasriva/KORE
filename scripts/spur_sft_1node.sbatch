@@ -83,19 +83,26 @@
 # dataloader_num_workers and dataset_num_proc are lowered alongside it, so 8 rank
 # processes plus their workers do not oversubscribe the smaller allocation.
 #SBATCH --cpus-per-task=32
-# 7 days, not 23 hours. The 23h figure was assumed, not measured against the
-# controller: `scontrol show partition amd-spur` reports MaxTime=UNLIMITED, and a
-# probe job submitted with --time=7-00:00:00 was accepted and ran. This matters
-# because one epoch is 1,609 steps and the honest walltime estimate is 26-36h, so a
-# 23h limit GUARANTEED at least one interruption for a run that can otherwise finish
-# in a single allocation. Every interruption costs a full model reload plus a
-# dataloader skip-ahead, and the resume path at 30B has never been exercised
-# end-to-end, so the cheapest way to de-risk it is to not need it.
+# 3 days: comfortably more than the run needs, and not a week of hoarded capacity.
 #
-# This is also the closest thing available to the week-long node reservation this run
-# would ideally have: `scontrol create reservation` requires root or sudo/wheel
-# membership, so a real reservation has to come from the SPUR team via ticket.
-#SBATCH --time=7-00:00:00
+# One epoch is 1,609 steps at a measured ~55-60 s/step, so 26-36 h including the model
+# load and the periodic evals. 3 days is a 2-2.7x margin, which absorbs a slower step
+# time than any yet observed. 23 h, the original figure, was assumed rather than
+# measured and would have GUARANTEED an interruption; the controller reports
+# MaxTime=UNLIMITED so anything here is permitted.
+#
+# It was 7 days, on the reasoning that the run should never need to resume because the
+# 30B resume path had never been exercised end to end. That reason is now retired: the
+# path IS exercised (scripts/smoke_sharded_resume.py, run on 8 ranks on one node, saved
+# a sharded checkpoint and resumed from it), so surviving a boundary is a tested
+# behaviour rather than a hope. Holding a 7-day slot on a pool capped at 16 nodes to
+# insure against a risk we have since measured away is not a good trade with four
+# other jobs queued behind us.
+#
+# A shorter limit is also easier for the scheduler to backfill into a gap, so it can
+# only help placement. The drain timer below derives from SLURM_TIMELIMIT, so it
+# follows this value automatically and self-resubmits an hour before the boundary.
+#SBATCH --time=3-00:00:00
 # NOTE: --requeue is deliberately ABSENT. On this SPUR controller a requeued
 # job trips JobHoldMaxRequeue on its first requeue and is held permanently,
 # so any transient NODE_FAIL became an unrecoverable hold. Recovery now lives
@@ -518,9 +525,13 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
     fi
     # Falls back to the HEADER's walltime minus an hour, not to the old 22h30m
     # constant. That constant was tuned for a 23h limit and would drain a healthy
-    # 7-day run at 22h30m -- the precise interruption the long walltime exists to
-    # prevent. Keep KORE_SFT_WALL_SECONDS in step with the #SBATCH --time above.
-    _drain_after="${_drain_after:-$(( ${KORE_SFT_WALL_SECONDS:-604800} - 3600 ))}"
+    # long run at 22h30m -- the precise interruption the long walltime exists to
+    # prevent. 259200 = 3 days, tracking the #SBATCH --time above; leaving it at the
+    # old 604800 (7 days) would put the fallback drain an entire day AFTER Slurm's own
+    # kill, so a long run would be hard-killed with no graceful drain and no
+    # SFT_RESUBMITTED marker. Recovery would still happen via the supervisor, but by
+    # the slower path. Keep this in step with the header.
+    _drain_after="${_drain_after:-$(( ${KORE_SFT_WALL_SECONDS:-259200} - 3600 ))}"
     echo "[sft-1node] will drain and resubmit after ${_drain_after}s" \
          "(read TimeLimit='${_tl:-unavailable}'; SPUR often does not report it)"
     (

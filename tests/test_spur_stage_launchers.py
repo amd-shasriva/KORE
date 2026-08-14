@@ -25,6 +25,7 @@ resolver directly; nothing submits a job.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -35,9 +36,18 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / "scripts"
 LAUNCH_DISTRIBUTED = SCRIPTS / "launch_distributed.sh"
 
-#: The cluster maximum in use: the midtrain job that produced
-#: runs/midtrain_14b_frontier ran at 23:00:00, so that is the proven ceiling.
-MAX_TIME_SECONDS = 23 * 3600
+#: Upper sanity bound on --time, not a cluster ceiling.
+#:
+#: This was 23*3600, inferred from the midtrain job that produced
+#: runs/midtrain_14b_frontier having run at 23:00:00. That was a description of
+#: one job, not a limit: `scontrol show partition amd-spur` reports
+#: MaxTime=UNLIMITED, a probe at --time=7-00:00:00 was accepted and ran, and the
+#: v5 SFT job is running at this moment with limit=3-00:00:00. Keeping 23h here
+#: made the suite red for a launcher that works.
+#:
+#: 8 days rather than no bound at all, so a typo like --time=300-00:00:00 (which
+#: would sit unschedulable forever against a QoS cap) still fails.
+MAX_TIME_SECONDS = 8 * 24 * 3600
 
 #: Stage -> the launcher that runs it on SPUR. midtrain has several (it also
 #: scales to 3/4/8 nodes); the other three are single-node by design.
@@ -148,9 +158,24 @@ def test_launcher_requests_a_full_node_of_mi355x(stage):
     assert directives.get("--partition") == "amd-spur"
     assert directives.get("--qos") == "amd-general-qos"
     # Full node: either the GRES spelling or the gpus-per-node one, always 8.
+    #
+    # The count is what matters, NOT the type. This asserted mi355x:8 and had to
+    # be relaxed, because the typed spelling does not dispatch on this
+    # controller: it is accepted, a node is picked, and the node never confirms,
+    # leaving the job in JobLaunchFailure forever. Measured head to head, three
+    # trials each, identical otherwise:
+    #
+    #   --gres=gpu:mi355x:8   0 of 3 dispatched
+    #   --gres=gpu:8          2 of 3 dispatched
+    #   --gpus-per-node=8     0 of 3 dispatched
+    #
+    # Every node in amd-spur is MI355X, so naming the model buys nothing, and the
+    # launcher verifies it received eight usable devices at runtime -- which is
+    # the check that actually protects the run. Pinning the typed form here made
+    # the suite demand a spelling that provably never starts.
     gpus = directives.get("--gres") or directives.get("--gpus-per-node")
     assert gpus is not None, "no GPU request at all"
-    assert gpus.endswith("mi355x:8"), gpus
+    assert gpus.endswith(":8") or gpus == "8", gpus
     assert "--exclusive" in directives
 
 
@@ -281,8 +306,35 @@ def test_added_launchers_verify_their_own_requeue_landed(stage):
     # auto-requeue a job that merely times out.
     assert "KORE_REQUEUE_AFTER_SECONDS" in source
     limit = _seconds(_directives(source)["--time"])
-    default = int(source.split("KORE_REQUEUE_AFTER_SECONDS:-")[1].split("}")[0])
-    assert 0 < default < limit, (default, limit)
+
+    # Two designs are legitimate here, and the requirement is the same for both:
+    # whatever the drain resolves to, it must fire BEFORE the wall clock, because
+    # Slurm does not auto-requeue a job that merely times out.
+    #
+    #   dpo/grpo: a numeric default -- sleep "${KORE_REQUEUE_AFTER_SECONDS:-81000}"
+    #   sft:      an EMPTY default, because the drain is DERIVED from the job's
+    #             real TimeLimit at runtime and so tracks --time automatically
+    #             instead of being a constant to update in two places.
+    #
+    # This test used to int() whatever followed `:-`, which raised ValueError on
+    # the empty one -- i.e. it demanded the worse design. Accept either, and
+    # check the property that matters.
+    numeric = re.search(r"KORE_REQUEUE_AFTER_SECONDS:-(\d+)", source)
+    if numeric:
+        default = int(numeric.group(1))
+        assert 0 < default < limit, (default, limit)
+    else:
+        assert "squeue" in source and "%l" in source, (
+            "an empty KORE_REQUEUE_AFTER_SECONDS default is only safe if the "
+            "drain reads the real TimeLimit instead of assuming one")
+        # The numeric fallback matters more than it looks: this controller often
+        # does not report TimeLimit at all, so the fallback is the live path. One
+        # set later than --time means a hard kill with no graceful drain and no
+        # resubmit marker for the supervisor to follow.
+        fallbacks = [int(f) for f in re.findall(r"WALL_SECONDS:-(\d+)", source)]
+        assert fallbacks, "no numeric fallback for a derived drain timer"
+        for fb in fallbacks:
+            assert 0 < fb <= limit, (fb, limit)
 
 
 @pytest.mark.parametrize("stage", NEW_STAGE_LAUNCHERS)

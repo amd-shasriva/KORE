@@ -7,9 +7,14 @@
 #
 #   sbatch scripts/spur_aka_1node.sbatch <discover|baseline|run> [TYPES] [MODEL] [LIMIT] [ARM]
 #SBATCH --job-name=kore-aka
-#SBATCH --account=amd-general
+# The account MUST match the QoS. amd-general paired with a burst or primus QoS
+# is a phantom association: the controller accepts the submission and then never
+# dispatches it, so the job simply pends forever with no error to read. This file
+# carried amd-general/amd-general-qos, which is why nothing submitted through it
+# ever landed. amd-primus/amd-primus-qos is the pair the v5 SFT job runs under.
+#SBATCH --account=amd-primus
 #SBATCH --partition=amd-spur
-#SBATCH --qos=amd-general-qos
+#SBATCH --qos=amd-primus-qos
 #SBATCH --nodes=1
 # gpu:8, not gpu:mi355x:8 -- the typed form does not dispatch on this controller
 # (JobLaunchFailure, 0 of 1 nodes confirmed). Measured 0/3 vs 2/3; see the full
@@ -22,7 +27,11 @@
 # in half. Every restart threw away twelve nearly-finished rollouts per shard,
 # reloaded a 30B model across 16 checkpoint shards, and depended on the
 # supervisor noticing and resubmitting -- which is how v4 lost eight hours.
-#SBATCH --time=3-23:00:00
+# 3-00:00:00 rather than 3-23:00:00: this is the limit amd-primus-qos is known to
+# accept, because the v5 SFT job is running under it right now. The longer value
+# was never tested under this QoS, and an unschedulable walltime fails the same
+# silent way the wrong account did.
+#SBATCH --time=3-00:00:00
 #SBATCH --exclusive
 #SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/aka-%j.out
 #SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/aka-%j.err

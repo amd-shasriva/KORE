@@ -7,16 +7,23 @@
 # a consolidated 244 GB optimizer -- so "the save worked" proves nothing. This
 # submits the smoke test that actually resumes.
 #
-# Deliberately small and cheap so it can run on whatever is free while the real job
-# waits in the amd-primus queue: 15 minutes, and it does NOT ask for --exclusive or
-# all 8 GPUs, because a tiny random model needs neither and asking would put it in
-# the same queue as the job it is meant to de-risk.
+# Deliberately cheap so it can run on whatever is free while the real job waits in the
+# amd-primus queue: 15 minutes, and NO --exclusive. Skipping --exclusive is what keeps
+# it out of the queue it is meant to de-risk -- it lands in seconds on a burst node that
+# already has tenants, which is fine here because a tiny randomly-initialised model does
+# not care about a co-tenant's leftover VRAM the way a 61 GB load does.
+#
+# It does ask for all 8 GPUs, though, which is not greed: a partial gres:2 request
+# dispatched but exposed ZERO devices to the job ("no available devices found", jobs
+# 11376 and 11384), so this cluster only actually hands over render devices on a
+# full-node GRES. Taking all 8 also makes the test mesh identical to production --
+# 8 ranks on one node -- which is the mesh the sharded checkpoint must reload under.
 #
 #   sbatch --account=amd-burst --qos=amd-burst-qos scripts/spur_smoke_sharded_resume.sbatch
 #SBATCH --job-name=kore-smoke-resume
 #SBATCH --partition=amd-spur
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=8
 #SBATCH --time=00:15:00
 #SBATCH --open-mode=append
@@ -33,11 +40,9 @@ export HF_HOME=/home/shasriva/.cache/huggingface
 export TOKENIZERS_PARALLELISM=false
 
 echo "[smoke] host=$(hostname) job=${SLURM_JOB_ID:-none}"
-# NOTE: do NOT unset ROCR_VISIBLE_DEVICES here. spur_sft_1node.sbatch does, and that is
-# correct THERE because it holds the whole node and every render device is bind-mounted,
-# so dropping SPUR's list lets accelerate assign one logical device per rank. On a
-# partial allocation the list is the only thing mapping our two cards, and clearing it
-# left torch with 0 visible GPUs (measured, job 11376).
+# Full-node GRES now, so the same unset as spur_sft_1node.sbatch applies (below, just
+# before launch): every render device is bind-mounted and dropping SPUR's physical list
+# lets accelerate assign one logical device per rank.
 
 # Model is randomly initialised, so a co-tenant's leftover VRAM is survivable here in
 # a way it is not for a 61 GB load; report it rather than refusing the node.
@@ -58,8 +63,10 @@ export SMOKE_KEEP=1
 # flags instead left distributed_type unset, so no rendezvous was configured and the
 # trainer died on "environment variable RANK expected, but not set" (job 11376). Using
 # the real file also means this test exercises the same FSDP wiring as the SFT run.
+unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
+
 accelerate launch --config_file "$REPO/configs/accelerate_fsdp.yaml" \
-    --num_processes 2 --num_machines 1 \
+    --num_processes 8 --num_machines 1 \
     "$REPO/scripts/smoke_sharded_resume.py"
 rc=$?
 echo "[smoke] SMOKE_RC=$rc"

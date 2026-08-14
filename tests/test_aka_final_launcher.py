@@ -235,13 +235,21 @@ def test_submitter_cannot_disturb_a_running_job():
         )
 
 
-def test_submitter_gates_the_sweep_behind_the_live_sft_job():
-    source = SUBMITTER.read_text()
-    # amd-primus enforces a QoS group node limit and job 11215 was held on it for
-    # hours. A sweep holding one of those slots cannot evict SFT (PreemptMode=OFF)
-    # but would block SFT's own resubmission behind a benchmark.
-    assert "--dependency=afterany:" in source
-    assert "--nice=" in source
+def test_submitter_uses_only_flags_this_sbatch_implements():
+    """SPUR's sbatch is a reimplementation with a narrower flag set than Slurm's.
+
+    ``--nice`` does not exist here: passing it aborts the submission with
+    "unexpected argument", which is how the first attempt to queue this sweep
+    failed. Anything the submitter passes must be in the supported set.
+    """
+    supported = {"--account", "--qos", "--export", "--dependency", "--requeue",
+                 "--exclusive", "--hold", "--partition", "--job-name", "--time",
+                 "--gres", "--nodes", "--cpus-per-task", "--open-mode",
+                 "--output", "--error", "--begin"}
+    passed = set(re.findall(r"(--[a-z-]+)=", _code(SUBMITTER)))
+    # KORE_* assignments are environment, not flags.
+    unsupported = {f for f in passed if f not in supported}
+    assert not unsupported, f"SPUR's sbatch does not implement {sorted(unsupported)}"
 
 
 def test_submitter_passes_the_matching_account_and_qos_explicitly():

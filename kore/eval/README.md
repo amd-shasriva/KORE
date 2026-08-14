@@ -68,6 +68,34 @@ the ratio lands near 1.0x. Verified on gfx950 across all three harness dialects:
 `triton2triton/vllm` 0.993x, `instruction2triton/rocmbench` 1.051x, and
 `hip2hip/gpumode` 1.000x.
 
+### Provenance, and the contamination index after an AKA update
+
+Every results file records `arena_provenance` — the AKA commit, its `git
+describe`, and a count of locally modified files. AKA is a sibling clone rather
+than a submodule, so nothing else captures which task set produced a number, and
+that matters: the count moved 413 -> 416 on the `ea4c0ee..b09f5eb` pull, which
+also rewrote `image_kernel` timing code. A dirty AKA checkout is reported
+loudly, because an edited harness can change a timing method or a tolerance and
+the result would still look ordinary.
+
+`data/arena_contamination.json` is deliberately **frozen at the state the v5
+training data was gated against** (built 2026-08-11, 355 arena tasks scored, 68
+unscreened, 24 pool tasks blocked, 16 arena tasks implicated). It is not
+regenerated when AKA moves, because the v5 mixture's provenance is a claim about
+*that* table; rebuilding it would silently break the link between the data and
+the screen that gated it.
+
+The `ea4c0ee..b09f5eb` pull added three tasks —
+`image_kernel/mi355x_vllm_hip_paged_attention_decode`,
+`.../mi355x_vllm_triton_fused_moe_gemma4` and
+`.../mi355x_vllm_triton_unified_attention_gemma4` — so the true unscreened count
+is 71, not the 68 in the frozen metadata. Nothing else changes: all 18
+pre-existing `image_kernel` tasks were already unscreenable (they ship no
+parseable PyTorch reference module to compare against the pool), these three are
+the same, and the blocked and implicated sets are untouched. Any claim on
+`image_kernel` therefore carries no textual contamination evidence in either
+direction, which was already true before the pull.
+
 ## Legacy checkpoint A/B
 
 `checkpoint_ab.py` and `heldout_lm.py` are retained to make the 14B midtrain

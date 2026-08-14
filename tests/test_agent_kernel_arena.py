@@ -155,7 +155,62 @@ def test_summary_does_not_claim_a_win_without_speedups():
     rs = [ArenaResult("t1", "hip2hip", True, False, score=20)]
     s = summarize(rs)["by_type"]["hip2hip"]
     assert s["mean_speedup"] is None
-    assert s["beats_opus"] is False
+    # None, not False. False reads as "measured and lost"; with nothing measured
+    # the honest answer is that the comparison cannot be made, and the note says
+    # which. What must never happen is a claimed win.
+    assert s["beats_opus"] is not True
+    assert s["beats_opus"] is None
+    assert "no speedup measured" in s["beats_opus_note"]
+
+
+def test_summary_reports_speedup_coverage_beside_the_mean():
+    """A mean over 3% of a category is not that category's speedup.
+
+    The 2026-08-10 sweep published "triton2triton mean_speedup 4.42, beats_opus
+    true" computed from 5 measurements across 159 correct tasks, and no field in
+    the output revealed the denominator.
+    """
+    rs = [ArenaResult(f"t{i}", "triton2triton", True, True,
+                      speedup=(9.0 if i == 0 else None), score=120)
+          for i in range(10)]
+    s = summarize(rs)["by_type"]["triton2triton"]
+    assert s["correct"] == 10
+    assert s["speedup_samples"] == 1
+    assert s["speedup_coverage"] == pytest.approx(0.1)
+    # The mean is still reported -- it is a real number over a real sample -- but
+    # it must not be turned into a claim against a full-category published bar.
+    assert s["mean_speedup"] == pytest.approx(9.0)
+    assert s["beats_opus"] is None
+    assert "coverage" in s["beats_opus_note"]
+
+
+def test_summary_allows_the_comparison_once_coverage_is_there():
+    rs = [ArenaResult(f"t{i}", "triton2triton", True, True, speedup=3.0, score=420)
+          for i in range(10)]
+    s = summarize(rs)["by_type"]["triton2triton"]
+    assert s["speedup_coverage"] == pytest.approx(1.0)
+    assert s["beats_opus"] is True
+
+
+def test_summary_says_why_correct_kernels_went_untimed():
+    """A timing failure and an un-improved kernel both score 120.
+
+    Without a reason the two are indistinguishable in the summary, which is how a
+    systematic harness failure stayed invisible across a 413-task sweep.
+    """
+    rs = [
+        ArenaResult("t1", "hip2hip", True, True, score=120,
+                    speedup_note="timed but no denominator -- run `baseline`"),
+        ArenaResult("t2", "hip2hip", True, True, score=120,
+                    speedup_note="timed but no denominator -- run `baseline`"),
+        ArenaResult("t3", "hip2hip", True, True, score=120,
+                    speedup_note="performance failed: TimeoutExpired"),
+    ]
+    s = summarize(rs)["by_type"]["hip2hip"]
+    assert s["speedup_samples"] == 0
+    reasons = s["unmeasured_reasons"]
+    assert reasons["timed but no denominator -- run `baseline`"] == 2
+    assert reasons["performance failed"] == 1
 
 
 def test_published_bars_are_the_paper_numbers():

@@ -331,7 +331,8 @@ def _link_required_repo(task, ws: Path) -> Optional[str]:
     return _provide_task_repo(ws)
 
 
-def _attempt_task(task, ws, dst_rel, prompt, policy, args, ref_latency):
+def _attempt_task(task, ws, dst_rel, prompt, policy, args, ref_latency,
+                  ref_cases=None):
     """Generate, score, and retry with the harness's own feedback. Best wins.
 
     AKA's reference agents run with ``max_iterations: 3`` and full tool access in
@@ -363,7 +364,8 @@ def _attempt_task(task, ws, dst_rel, prompt, policy, args, ref_latency):
             print(f"    attempt {attempt}: generation: {note}", flush=True)
         _write_answer(ws / dst_rel, code)
         r = evaluate_task(task, ws, timeout=args.timeout,
-                          reference_latency=ref_latency)
+                          reference_latency=ref_latency,
+                          reference_cases=ref_cases)
         r.detail = {**(r.detail or {}), "attempt": attempt,
                     "attempts_allowed": args.attempts}
         if best is None or r.score > best.score:
@@ -755,9 +757,38 @@ def cmd_run(args) -> int:
     # Per-task reference latency from the baseline run, which is the denominator
     # for every suite that reports an absolute time instead of a ratio.
     ref_latency = _reference_latencies(out_root)
-    print(f"reference latencies available for {len(ref_latency)} task(s)"
+    ref_cases = _reference_cases(out_root)
+    print(f"reference latencies available for {len(ref_latency)} task(s), "
+          f"per-case rows for {len(ref_cases)} task(s)"
           + ("" if ref_latency else " -- run `baseline` first or speedups will be"
              " unavailable for GEAK-style suites"), flush=True)
+
+    # Refuse to burn a full sweep that cannot produce the number it exists to
+    # produce. The 2026-08-10 run printed the warning above with a count of 0,
+    # nobody read it, and 253 of 302 correct kernels came back with a valid
+    # optimized time and no denominator -- unrecoverable, because the workspaces
+    # are deleted afterwards. A warning that costs a day is not a warning.
+    #
+    # Coverage is measured against the tasks this worker will actually score, so
+    # a deliberately narrow --types run is judged on its own slice.
+    if not args.allow_missing_baseline:
+        need = [t.task_id for t in tasks]
+        have = sum(1 for tid in need
+                   if tid in ref_latency or tid in ref_cases)
+        frac = have / max(1, len(need))
+        if frac < args.min_baseline_coverage:
+            print(f"REFUSING TO RUN: baseline coverage {frac:.0%} "
+                  f"({have}/{len(need)} tasks) is below "
+                  f"--min-baseline-coverage {args.min_baseline_coverage:.0%}.\n"
+                  f"  Most suites report an absolute latency and no ratio, so "
+                  f"without a baseline their speedup is unrecoverable after the "
+                  f"run -- workspaces are deleted.\n"
+                  f"  Fix: run `baseline` first with the SAME --out, then re-run:\n"
+                  f"    ... baseline ... --out {out_root}\n"
+                  f"    ... run      ... --out {out_root}\n"
+                  f"  Override with --allow-missing-baseline to score correctness "
+                  f"only.", flush=True)
+            return 2
 
     if args.num_shards > 1:
         # Stride rather than contiguous blocks: task cost varies a lot by category
@@ -787,7 +818,8 @@ def cmd_run(args) -> int:
                      + _extension_contract(ws, dst_rel, task),
                 context=_render_context(task, ws))
             r = _attempt_task(task, ws, dst_rel, prompt, policy, args,
-                              ref_latency.get(task.task_id))
+                              ref_latency.get(task.task_id),
+                              ref_cases.get(task.task_id))
         except Exception as exc:  # noqa: BLE001 - one bad task must not end the run
             r = ArenaResult(task_id=task.task_id, task_type=task.task_type,
                             error=f"{type(exc).__name__}: {exc}")
@@ -872,6 +904,39 @@ def _reference_latencies(out_root: Path) -> dict:
         # measured against it.
         if tid and lat and r.get("correct"):
             out[tid] = lat
+    return out
+
+
+def _reference_cases(out_root: Path) -> dict:
+    """Baseline PER-CASE rows per task id, from the same ledgers.
+
+    Separate from _reference_latencies because the two are used differently: a
+    scalar latency can only produce a ratio of aggregates, while these rows let
+    the optimized run pair shape-by-shape and average the per-case ratios, which
+    is what AKA does and what the published bars were computed with.
+
+    Same correctness rule -- a reference that failed its own check is not a
+    denominator.
+    """
+    out: dict = {}
+    rows = []
+    for f in sorted(out_root.glob("baseline*.jsonl")):
+        for line in f.read_text().splitlines():
+            try:
+                rows.append(json.loads(line))
+            except Exception:  # noqa: BLE001 - torn last line after a kill
+                continue
+    merged = out_root / "baseline_results.json"
+    if merged.exists():
+        try:
+            rows.extend(json.loads(merged.read_text()).get("results", []))
+        except Exception:  # noqa: BLE001 - a half-written merge must not stop a run
+            pass
+    for r in rows:
+        cases = r.get("perf_cases")
+        tid = r.get("task_id")
+        if tid and cases and r.get("correct"):
+            out[tid] = cases
     return out
 
 
@@ -968,11 +1033,25 @@ def _write(path: Path, results, args) -> None:
         bar = row.get("opus_published_mean_speedup")
         verdict = ""
         if bar is not None:
-            verdict = ("  BEATS Opus" if row.get("beats_opus")
-                       else f"  (Opus {bar}x)")
+            if row.get("beats_opus") is True:
+                verdict = "  BEATS Opus"
+            elif row.get("beats_opus") is None:
+                verdict = f"  (Opus {bar}x, NOT COMPARABLE)"
+            else:
+                verdict = f"  (Opus {bar}x)"
         ms = row["mean_speedup"]
+        # Coverage prints next to the mean, always. A mean whose denominator is
+        # invisible is how 5 measurements across 159 correct tasks were read as a
+        # category result.
+        cov = row.get("speedup_coverage", 0.0)
         print(f"  {ttype:<18} n={row['n']:<4} correct={row['correct']:<4} "
+              f"speedup={row.get('speedup_samples', 0)}/{row['correct']} "
+              f"({cov:.0%})  "
               f"mean_speedup={ms if ms is None else round(ms, 3)}{verdict}")
+        if row.get("beats_opus_note"):
+            print(f"  {'':<18} -> {row['beats_opus_note']}")
+        for reason, count in (row.get("unmeasured_reasons") or {}).items():
+            print(f"  {'':<18} -> {count} untimed: {reason}")
     print(f"\nwrote {path}")
 
 
@@ -1015,6 +1094,25 @@ def main() -> int:
                          "and at 1 every generate call is a batch of one")
     ap.add_argument("--keep-workspaces", action="store_true")
     ap.add_argument("--json-out", default="")
+    # Baseline coverage, enforced rather than warned about.
+    #
+    # Most of the arena reports an absolute latency and no ratio, so those tasks
+    # can only yield a speedup against a baseline run of the same task. When the
+    # baseline is missing the loss is silent AND unrecoverable: the kernel is
+    # generated, compiled, verified, timed, scored 120, and its workspace deleted.
+    # That is what happened on 2026-08-10 -- 253 of 302 correct kernels carried a
+    # valid optimized time and a null denominator, and re-deriving them needs the
+    # whole sweep run again.
+    #
+    # 0.5 rather than 0.8: a run over a mixed selection legitimately includes
+    # suites that produce their own in-process ratio and need no baseline, so the
+    # floor only has to catch the case where the baseline is absent outright.
+    ap.add_argument("--min-baseline-coverage", type=float, default=0.5,
+                    help="refuse to run unless this fraction of the selected "
+                         "tasks have a baseline denominator available")
+    ap.add_argument("--allow-missing-baseline", action="store_true",
+                    help="score correctness only, accepting that speedups will "
+                         "be unavailable and unrecoverable for this run")
     # Task-level sharding. transformers loads this checkpoint with
     # device_map="auto", and a 30B in bf16 is ~60GB against 192GB of HBM per
     # MI350X, so the whole model lands on one GPU and the other seven idle --

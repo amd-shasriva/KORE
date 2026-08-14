@@ -48,8 +48,13 @@ def test_the_performance_command_is_run_under_the_lock():
     """Read the source: the guard has to wrap the timing subprocess, not merely
     exist somewhere in the module."""
     src = Path(aka.__file__).read_text()
-    body = src.split("if task.performance_command:", 1)[1][:900]
-    assert "with _BENCH_LOCK:" in body
+    # Slice the whole performance block rather than a fixed character window. The
+    # window was 900 chars and broke the moment a comment was added above the
+    # lock, which is a property of the comment and not of the guard -- exactly the
+    # kind of false failure that gets a real test deleted.
+    body = src.split("if task.performance_command:", 1)[1]
+    body = body.split("except Exception", 1)[0]
+    assert "with _BENCH_LOCK:" in body, "the timing block does not take the lock"
     lock_at = body.index("with _BENCH_LOCK:")
     run_at = body.index("subprocess.run")
     assert lock_at < run_at, "the lock must be taken before the benchmark runs"

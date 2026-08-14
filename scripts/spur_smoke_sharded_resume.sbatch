@@ -33,7 +33,11 @@ export HF_HOME=/home/shasriva/.cache/huggingface
 export TOKENIZERS_PARALLELISM=false
 
 echo "[smoke] host=$(hostname) job=${SLURM_JOB_ID:-none}"
-unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL
+# NOTE: do NOT unset ROCR_VISIBLE_DEVICES here. spur_sft_1node.sbatch does, and that is
+# correct THERE because it holds the whole node and every render device is bind-mounted,
+# so dropping SPUR's list lets accelerate assign one logical device per rank. On a
+# partial allocation the list is the only thing mapping our two cards, and clearing it
+# left torch with 0 visible GPUs (measured, job 11376).
 
 # Model is randomly initialised, so a co-tenant's leftover VRAM is survivable here in
 # a way it is not for a 61 GB load; report it rather than refusing the node.
@@ -50,8 +54,12 @@ PY
 export SMOKE_DIR=/shared_nfs/shasriva/kore/runs/smoke_sharded_resume_${SLURM_JOB_ID:-0}
 export SMOKE_KEEP=1
 
-accelerate launch --num_processes 2 --num_machines 1 --mixed_precision bf16 \
-    --dynamo_backend no \
+# Use the run's OWN accelerate config, overriding only the process count. Passing bare
+# flags instead left distributed_type unset, so no rendezvous was configured and the
+# trainer died on "environment variable RANK expected, but not set" (job 11376). Using
+# the real file also means this test exercises the same FSDP wiring as the SFT run.
+accelerate launch --config_file "$REPO/configs/accelerate_fsdp.yaml" \
+    --num_processes 2 --num_machines 1 \
     "$REPO/scripts/smoke_sharded_resume.py"
 rc=$?
 echo "[smoke] SMOKE_RC=$rc"

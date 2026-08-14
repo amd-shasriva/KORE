@@ -250,6 +250,18 @@ def test_submitter_passes_the_matching_account_and_qos_explicitly():
     assert "--qos=amd-primus-qos" in source
 
 
+def test_submitter_does_not_smuggle_space_bearing_values_through_export():
+    """``--export`` takes a comma-separated list, and the default arm list is
+    ``base opus``. Putting that inside the list is how the opus arm gets dropped
+    from a three-day sweep with nothing in the log to show it."""
+    source = _code(SUBMITTER)
+    assert "--export=ALL," not in source, (
+        "pass KORE_AKA_* through the environment with a plain --export=ALL"
+    )
+    assert 'export KORE_AKA_ARMS="$ARMS"' in source
+    assert 'export KORE_AKA_OUT="$OUT"' in source
+
+
 def test_submitter_refuses_to_queue_a_second_concurrent_sweep():
     # Two sweeps sharing one --out would delete each other's task workspaces
     # while the other was still evaluating in them.

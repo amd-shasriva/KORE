@@ -610,7 +610,28 @@
       "classification": "diagnostic",
       "lifecycle": "active",
       "deletes_artifacts": false,
-      "note": "GPU-node launcher for the AgentKernelArena runner"
+      "note": "GPU-node launcher for one AgentKernelArena mode at a time; use spur_aka_final.sbatch for a measured multi-arm sweep"
+    },
+    {
+      "path": "scripts/spur_aka_final.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "the measured arena sweep: preflight, then baseline, then one run per arm, all in one allocation and one output directory so every arm divides by identical denominators"
+    },
+    {
+      "path": "scripts/queue_aka_final.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "submits spur_aka_final.sbatch on amd-primus behind a dependency on the live SFT job, so the sweep cannot hold a QoS node slot that an SFT resubmission would need; read-only with respect to every job it did not create"
+    },
+    {
+      "path": "scripts/aka_gateway_preflight.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "one real generation against an API arm's model from the compute node that will run it, so an unreachable gateway fails fast instead of scoring a whole sweep as model failure"
     },
     {
       "path": "scripts/spur_audit_1node.sbatch",

@@ -165,7 +165,23 @@ while :; do
             launch_failures=0
             PENDING_SINCE=""
             age="$(log_age "$JOB")"
-            if [ "$age" -gt "$STALL_SECS" ]; then
+            # STALL_SECS=0 means NEVER cancel a running job, and note that the guard
+            # below is what makes 0 mean that. Without the `-gt 0` test, 0 would make
+            # EVERY poll satisfy `age > 0` and cancel a perfectly healthy run on the
+            # first cycle -- the exact opposite of what setting it to zero looks like
+            # it does. This is the only code path in this supervisor that can kill a
+            # RUNNING job; the other two scancel sites are both inside the PENDING
+            # branch and cannot reach one.
+            #
+            # Disabling it trades away auto-recovery from a job that is hung but still
+            # alive. That is the right trade once a run is making real progress: a hung
+            # job wastes time that a human can notice and fix, while a wrongly cancelled
+            # job destroys hours of completed training. Measured on the live run, the
+            # log is touched every 11-56s against a 2700s threshold -- a ~48x margin --
+            # so a false positive needs something unusual, but "unusual" is precisely
+            # what a 25-hour unattended run is exposed to (a slow sharded save, a long
+            # held-out eval over 899 rows, an NFS stall).
+            if [ "${STALL_SECS:-0}" -gt 0 ] && [ "$age" -gt "$STALL_SECS" ]; then
                 node="$(squeue -j "$JOB" -h -o '%N' 2>/dev/null | head -1)"
                 log "job=$JOB RUNNING but log untouched ${age}s -- wedged on ${node:-?}; cancelling"
                 scancel "$JOB" 2>/dev/null

@@ -61,9 +61,23 @@ export POLL_SECS="${POLL_SECS:-120}"
 export MAX_RESUBMITS="${MAX_RESUBMITS:-300}"
 export MIN_PROGRESS_SECS="${MIN_PROGRESS_SECS:-600}"
 export MAX_FAST_FAILURES="${MAX_FAST_FAILURES:-3}"
-# A 30B load plus a dataset map can legitimately look quiet for a while, and killing
-# a healthy run for being slow is worse than waiting. 45 min.
-export STALL_SECS="${STALL_SECS:-2700}"
+# 0 = NEVER cancel a running job. This supervisor can now only ever RESUBMIT a job
+# that has already left the queue; it cannot end one itself.
+#
+# It was 2700 (45 min), on the theory that a job whose log has gone silent that long is
+# wedged rather than working. The theory is sound and the threshold is generous -- the
+# live run touches its log every 11-56s, a ~48x margin -- but the asymmetry of the bet
+# is wrong for a 25-hour unattended run. A hung job costs the hours until a human looks
+# at it. A wrongly cancelled job destroys every completed step that is not yet in a
+# checkpoint, and the things that could legitimately go quiet for 45 minutes are exactly
+# the things this run does: a sharded save at 30B, a held-out eval over 899 rows across
+# 8 groups, an NFS hiccup.
+#
+# What is given up: nothing recovers a job that is alive but hung. That is a failure a
+# human notices from the step counter not advancing, and it has never been observed on
+# this run. What is kept: recovery from the failure that HAS been observed repeatedly,
+# a node dying, which takes the job out of the queue and is handled by resubmission.
+export STALL_SECS="${STALL_SECS:-0}"
 # 0 = never cancel a merely-waiting job. Queue position is by submit time at equal
 # priority, so resubmitting a pending job sends it to the back of the queue -- on a
 # cluster with zero fully-idle nodes that is strictly worse than waiting. The run

@@ -65,6 +65,21 @@ PUBLISHED_OPUS_MEAN_SPEEDUP = {
     "triton2triton": 2.13,    # Cursor Agent, Opus 4.7 High
 }
 
+#: Fraction of a type's CORRECT tasks that must carry a measured speedup before
+#: its mean may be compared against the published bar above.
+#:
+#: The bars are full-category means. A mean over a handful of measured tasks is a
+#: different quantity, and the bias runs one way: correct-but-unmeasured tasks
+#: are dropped from our mean rather than counted as 1.0x, so sparse coverage
+#: flatters us. The 2026-08-10 sweep reported "triton2triton mean_speedup 4.42,
+#: beats_opus true" from 5 measurements across 159 correct tasks -- 3% coverage,
+#: and nothing in the output said so.
+#:
+#: 0.8 rather than 1.0 because a few tasks legitimately refuse to yield a
+#: comparable number (a benchmark-method mismatch, a harness that times only one
+#: shape), and demanding perfection would suppress an otherwise sound comparison.
+MIN_SPEEDUP_COVERAGE = 0.8
+
 
 #: Harness and packaging files. Never the answer, and never the problem
 #: statement -- writing a kernel into the test runner would be scored as the
@@ -172,6 +187,15 @@ class ArenaResult:
     error: str = ""
     seconds: float = 0.0
     detail: dict = field(default_factory=dict)
+    #: Per-case timing rows exactly as the harness reported them. Persisted so a
+    #: baseline run's cases can be paired shape-by-shape with an optimized run's
+    #: later, which is how AKA computes a speedup; an aggregate cannot be
+    #: re-matched after the fact.
+    perf_cases: list = field(default_factory=list)
+    #: How the speedup was obtained, or why it is missing or suspect. Without it a
+    #: correct-but-untimed task and a correct-but-not-faster task are both a bare
+    #: 120 and cannot be told apart from the ledger.
+    speedup_note: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -180,6 +204,8 @@ class ArenaResult:
             "baseline_seconds": self.baseline_seconds,
             "optimized_seconds": self.optimized_seconds,
             "speedup": self.speedup, "score": self.score,
+            "perf_cases": self.perf_cases,
+            "speedup_note": self.speedup_note,
             # Wide enough to diagnose a failure from the ledger alone. The
             # in-memory .error carries the full diagnostic for retry feedback;
             # this is only what gets persisted.
@@ -418,6 +444,28 @@ def _parse_speedup(text: str) -> tuple[Optional[float], Optional[float], Optiona
                 _num(d.get("optimized_time", d.get("optimized_seconds"))),
                 _num(sp),
             )
+    # A GEAK harness computes its own geometric mean across every shape it timed
+    # and prints it as GEAK_RESULT_GEOMEAN_SPEEDUP. That number is authoritative:
+    # it is derived in-process from all shapes, by the same code that produced the
+    # per-shape lines. Preferring it is not a nicety -- 32 harnesses print it, and
+    # without this branch the generic "speedup=" search below matches the FIRST
+    # per-shape line instead. Measured against a real harness transcript, that
+    # reported 1.2x where the harness's own geomean was 4.5789x, understating the
+    # kernel by 3.8x and feeding it straight into 120 + speedup*100.
+    #
+    # Checked after the JSON blob (an explicit speedup_ratio still wins) and before
+    # the per-case regexes (which are the gpumode dialect and match the wrong line
+    # here). A non-positive value is the harness's failure sentinel, e.g.
+    # GEAK_RESULT_GEOMEAN_SPEEDUP=-1 in flydsl2flydsl/pa_decode_swa_kernel, so it
+    # deliberately falls through rather than being reported as a measurement --
+    # the latency branch below may still yield a usable optimized time.
+    geo = re.search(r"GEAK_RESULT_GEOMEAN_SPEEDUP\s*=\s*"
+                    r"(-?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", text)
+    if geo is not None:
+        val = _num(geo.group(1))
+        if val:
+            return None, None, val
+
     # The gpumode harnesses print a per-case "speedup=" line for every shape and
     # THEN an "Average: ... speedup=" line. Taking the first match records case 0
     # and calls it the task's speedup -- wrong on all 79 hip2hip/torch2hip tasks,
@@ -479,12 +527,58 @@ def _case_time(case: dict) -> Optional[float]:
     return None
 
 
-def _parse_report_files(workspace: Path, task_type: str):
+def _case_method(case: dict) -> Optional[str]:
+    """How this case was timed, if the harness said.
+
+    Kept because the method dominates the number when it differs between the two
+    sides being divided. Measured on gfx950, the same torch.relu call reads
+    0.00514 ms captured in a CUDA graph and 0.01232 ms with per-launch events --
+    a 2.4x gap from the measurement alone. AKA carries this field and warns on a
+    mismatch (src/evaluator.py); dividing a graph-timed baseline by an
+    event-timed optimized run manufactures a 2.4x regression out of nothing.
+    """
+    m = case.get("benchmark_method")
+    return str(m) if m else None
+
+
+def _report_cases(workspace: Path) -> list[dict]:
+    """Per-case rows from whichever report file a harness wrote.
+
+    Returns the raw case dicts rather than an aggregate so the caller can match
+    baseline against optimized case-by-case, which is how AKA computes a speedup.
+    """
+    for parts in _REPORT_CANDIDATES:
+        p = workspace.joinpath(*parts)
+        if not p.is_file():
+            continue
+        try:
+            doc = json.loads(p.read_text())
+        except Exception:  # noqa: BLE001 - a torn report is not a measurement
+            continue
+        if isinstance(doc, dict):
+            cases = doc.get("test_cases") or doc.get("cases") or []
+        elif isinstance(doc, list):
+            cases = doc
+        else:
+            continue
+        rows = [c for c in cases if isinstance(c, dict)]
+        if rows:
+            return rows
+    return []
+
+
+def _parse_report_files(workspace: Path, task_type: str = ""):
     """Timings from the JSON report a harness wrote, if any.
 
     Returns (baseline, optimized, speedup) in the same shape as _parse_speedup.
     An explicit ratio in the report wins; otherwise the per-case device times are
     returned as an aggregate so the caller can divide by a baseline run.
+
+    The aggregate here is a fallback for the case where per-case matching is not
+    possible (a baseline with no stored cases). Prefer speedup_from_cases, which
+    matches cases and averages their ratios the way AKA does; a mean of times
+    divided by a mean of times is dominated by the largest shape and is not the
+    quantity the published bars were computed with.
     """
     for parts in _REPORT_CANDIDATES:
         p = workspace.joinpath(*parts)
@@ -512,6 +606,71 @@ def _parse_report_files(workspace: Path, task_type: str):
     return None, None, None
 
 
+def _case_key(case: dict, index: int) -> str:
+    """Identity used to pair a baseline case with an optimized one.
+
+    Mirrors AKA's precedence (src/testcases.py: match_test_cases): params, then
+    shape, then an explicit id, then position. Position is last because a harness
+    that skips a failing shape shifts every later index, which would silently
+    divide one shape's time by another's.
+    """
+    for k in ("params", "shape"):
+        v = case.get(k)
+        if v not in (None, "", [], {}):
+            return f"{k}={json.dumps(v, sort_keys=True)}"
+    for k in ("test_case_id", "case_id", "name", "op_name"):
+        v = case.get(k)
+        if v not in (None, ""):
+            return f"id={v}"
+    return f"index={index}"
+
+
+def speedup_from_cases(baseline: list[dict], optimized: list[dict]):
+    """Mean of per-case speedup ratios, the way AKA computes it.
+
+    Returns (speedup, note). ``note`` is None when the number is clean, otherwise
+    a short reason the caller should surface rather than silently dropping.
+
+    Two rules are taken from AKA rather than invented here:
+
+    * Match cases by identity and require the sets to agree. AKA refuses outright
+      on an incomplete match ("Incomplete test case match, refusing to calculate
+      speedup") because a partial pairing compares different shapes.
+    * Average the per-case RATIOS, not the ratio of the averages. With a baseline
+      of [1.0, 100.0] ms against an optimized [0.1, 100.0] ms, mean-of-ratios is
+      5.5x and ratio-of-means is 1.005x. The published bars are the former.
+    """
+    if not baseline or not optimized:
+        return None, "no per-case timings on one side"
+    b = {_case_key(c, i): c for i, c in enumerate(baseline)}
+    o = {_case_key(c, i): c for i, c in enumerate(optimized)}
+    shared = set(b) & set(o)
+    if not shared:
+        return None, "no case identities in common"
+    if len(shared) != len(b) or len(shared) != len(o):
+        return None, (f"incomplete case match: {len(shared)} shared of "
+                      f"{len(b)} baseline / {len(o)} optimized")
+    ratios, methods_b, methods_o = [], set(), set()
+    for k in sorted(shared):
+        tb, to = _case_time(b[k]), _case_time(o[k])
+        if not tb or not to:
+            return None, f"non-positive timing for case {k}"
+        ratios.append(tb / to)
+        mb, mo = _case_method(b[k]), _case_method(o[k])
+        if mb:
+            methods_b.add(mb)
+        if mo:
+            methods_o.add(mo)
+    sp = sum(ratios) / len(ratios)
+    if methods_b and methods_o and methods_b != methods_o:
+        # Reported, not suppressed: the number is real but is measuring the
+        # method delta as much as the kernel, and a caller that cannot see that
+        # will read it as kernel quality.
+        return sp, (f"benchmark method mismatch: baseline={sorted(methods_b)} "
+                    f"optimized={sorted(methods_o)}")
+    return sp, None
+
+
 def _num(v: Any) -> Optional[float]:
     try:
         f = float(v)
@@ -534,6 +693,7 @@ def evaluate_task(
     workspace: Path,
     timeout: int = 900,
     reference_latency: Optional[float] = None,
+    reference_cases: Optional[list] = None,
 ) -> ArenaResult:
     """Compile, check, then time -- gated in that order, as AKA does.
 
@@ -545,6 +705,11 @@ def evaluate_task(
     than a ratio -- the GEAK ones, which are most of the arena -- can only yield a
     speedup by comparison with it, so without it a perfectly good measurement is
     thrown away and a correct kernel scores as though it were no faster.
+
+    ``reference_cases`` is the same run's PER-CASE rows. When present it is
+    preferred over ``reference_latency``, because pairing shapes and averaging
+    their ratios is what AKA does and what the published bars were computed with;
+    dividing one aggregate by another is dominated by the largest shape.
     """
     started = time.time()
     res = ArenaResult(task_id=task.task_id, task_type=task.task_type)
@@ -577,6 +742,24 @@ def evaluate_task(
             # measurement the run exists to produce, and the corruption is invisible
             # -- the numbers look plausible, just wrong, and wrong in the direction
             # that understates every kernel.
+            # Delete any report file BEFORE timing, so a perf command that fails
+            # to write one cannot be scored against a stale file. 17 vLLM tasks
+            # ship a build/performance_report.json committed to the AKA repo
+            # (force-added past its own .gitignore), and _workspace() copies the
+            # task tree wholesale. Without this, a failed benchmark silently
+            # adopts AMD's committed number as ours -- and on the baseline side
+            # that number becomes the denominator for every later comparison.
+            # AKA clears these itself (src/performance.py:
+            # clear_performance_report_files); we were not.
+            for parts in _REPORT_CANDIDATES:
+                stale = workspace.joinpath(*parts)
+                try:
+                    stale.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:  # noqa: PERF203 - a locked report is not fatal
+                    pass
+
             with _BENCH_LOCK:
                 proc = subprocess.run(
                     task.performance_command[0][0], shell=True, cwd=str(workspace),
@@ -584,6 +767,11 @@ def evaluate_task(
                     env=_task_env(),
                 )
             base, opt, sp = _parse_speedup((proc.stdout or "") + (proc.stderr or ""))
+            # Keep the per-case rows whatever else happens: they are what lets a
+            # later run pair shape-by-shape instead of dividing two aggregates.
+            res.perf_cases = _report_cases(workspace)
+            note = ""
+
             # AKA reads the JSON report FIRST and stdout only as a fallback, and
             # most harnesses write their timings there and print only a summary
             # line. Reading stdout alone leaves 301 of 402 tasks with no speedup
@@ -591,14 +779,35 @@ def evaluate_task(
             # triton2triton, the category any Opus comparison rests on.
             if sp is None and opt is None:
                 base, opt, sp = _parse_report_files(workspace, task.task_type)
+
+            # Matched per-case ratios beat any aggregate. Only reachable when the
+            # baseline run stored its own cases; falls through quietly otherwise.
+            if sp is None and reference_cases and res.perf_cases:
+                sp_cases, why = speedup_from_cases(reference_cases, res.perf_cases)
+                if sp_cases:
+                    sp, note = sp_cases, (why or "per-case matched ratios")
+                elif why:
+                    note = f"per-case matching declined: {why}"
+
             if base is None and reference_latency:
                 base = reference_latency
             res.baseline_seconds, res.optimized_seconds = base, opt
             if sp is None and base and opt:
                 sp = base / opt
+                note = note or "aggregate ratio (no per-case match available)"
             res.speedup = sp
+            if sp is None and not note:
+                note = ("timed but no denominator -- run `baseline` for this task"
+                        if opt else "no timing parsed from harness output")
+            res.speedup_note = note
         except Exception as exc:  # noqa: BLE001 - a timing failure is not a correctness failure
             res.error = f"performance: {type(exc).__name__}: {exc}"
+            # Distinguish "the timing blew up" from "correct but not faster".
+            # Both scored a bare 120 before, which is how a systematic timing
+            # failure hid behind a plausible-looking correctness result.
+            res.speedup_note = f"performance failed: {type(exc).__name__}"
+    else:
+        res.speedup_note = "task declares no performance_command"
 
     res.score = score_result(res.compiled, res.correct, res.speedup)
     res.seconds = time.time() - started
@@ -651,20 +860,55 @@ def summarize(results: Sequence[ArenaResult]) -> dict:
         "by_type": {},
     }
     for ttype, rs in sorted(by_type.items()):
-        speeds = [r.speedup for r in rs if r.correct and r.speedup]
+        correct = [r for r in rs if r.correct]
+        speeds = [r.speedup for r in correct if r.speedup]
+        # Coverage is the denominator the mean has always been missing. Reporting
+        # a mean without it is how "triton2triton mean_speedup 4.42, beats_opus
+        # true" was read as a result when it was computed over 5 of 159 correct
+        # tasks. A mean over 3% of a category is not that category's speedup.
+        coverage = (len(speeds) / len(correct)) if correct else 0.0
         row = {
             "n": len(rs),
             "compiled": sum(r.compiled for r in rs),
-            "correct": sum(r.correct for r in rs),
+            "correct": len(correct),
+            "speedup_samples": len(speeds),
+            "speedup_coverage": round(coverage, 4),
             "mean_speedup": (statistics.fmean(speeds) if speeds else None),
             "geomean_speedup": (
                 statistics.geometric_mean(speeds) if speeds else None),
             "mean_score": statistics.fmean([r.score for r in rs]) if rs else 0.0,
         }
+        # Why correct kernels went untimed, so a systematic harness problem is
+        # visible in the summary instead of only in a per-task ledger nobody
+        # reads. A timing failure and a genuinely un-improved kernel both scored
+        # a bare 120 before and were indistinguishable here.
+        notes: dict[str, int] = {}
+        for r in correct:
+            if not r.speedup and r.speedup_note:
+                notes[r.speedup_note.split(":")[0]] = (
+                    notes.get(r.speedup_note.split(":")[0], 0) + 1)
+        if notes:
+            row["unmeasured_reasons"] = dict(sorted(
+                notes.items(), key=lambda kv: -kv[1]))
         bar = PUBLISHED_OPUS_MEAN_SPEEDUP.get(ttype)
         if bar is not None:
             row["opus_published_mean_speedup"] = bar
-            row["beats_opus"] = (
-                row["mean_speedup"] is not None and row["mean_speedup"] > bar)
+            # Comparable only against a mean over most of the category. The
+            # published bar is a full-category mean, so claiming to beat it from
+            # a handful of measured tasks compares two different quantities --
+            # and it is the favourable direction, since unmeasured-but-correct
+            # tasks are excluded rather than counted as 1.0x.
+            if row["mean_speedup"] is None:
+                row["beats_opus"] = None
+                row["beats_opus_note"] = "no speedup measured"
+            elif coverage < MIN_SPEEDUP_COVERAGE:
+                row["beats_opus"] = None
+                row["beats_opus_note"] = (
+                    f"speedup coverage {coverage:.0%} is below the "
+                    f"{MIN_SPEEDUP_COVERAGE:.0%} needed to compare against a "
+                    f"full-category published mean ({len(speeds)}/{len(correct)} "
+                    f"correct tasks measured)")
+            else:
+                row["beats_opus"] = row["mean_speedup"] > bar
         out["by_type"][ttype] = row
     return out

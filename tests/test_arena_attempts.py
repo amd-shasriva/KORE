@@ -30,7 +30,8 @@ def _run_attempts(results, attempts=3):
     """Drive _attempt_task against a scripted sequence of harness verdicts."""
     seen = {"n": 0, "feedback": []}
 
-    def fake_eval(task, ws, timeout=0, reference_latency=None):
+    def fake_eval(task, ws, timeout=0, reference_latency=None,
+                  reference_cases=None):
         r = results[min(seen["n"], len(results) - 1)]
         seen["n"] += 1
         return r

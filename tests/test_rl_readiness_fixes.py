@@ -262,6 +262,62 @@ def test_the_sharded_log_reports_clip_engagement():
 
 
 # --------------------------------------------------------------------------- #
+# 3b. the sharding strategy, now that "does it fit" has been measured
+# --------------------------------------------------------------------------- #
+def test_sharding_strategy_defaults_to_zero2_and_accepts_zero3():
+    """Default unchanged, so no existing recipe silently changes topology."""
+    from kore.policy.configs import GRPOConfig
+
+    assert GRPOConfig().fsdp_sharding_strategy == "shard_grad_op"
+    for value in ("shard_grad_op", "full_shard"):
+        assert GRPOConfig(fsdp_sharding_strategy=value).fsdp_sharding_strategy == value
+
+
+def test_an_unknown_sharding_strategy_fails_loudly():
+    """A typo must not silently fall back to a topology that does not fit.
+
+    Measured on 8x gfx950 with the real 30B weights, ZeRO-2 exhausts HBM on every
+    rank. Silently defaulting a misspelled 'full-shard' back to ZeRO-2 would
+    reproduce that OOM with nothing in the log to explain it.
+    """
+    import pytest as _pytest
+
+    from kore.policy.grpo import build_fsdp_plugin
+
+    class _C:
+        model_id = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+        fsdp_transformer_layer_cls = "Qwen3MoeDecoderLayer"
+        fsdp_version = 1
+        cpu_offload = False
+        fsdp_sharding_strategy = "full-shard"  # hyphen, not underscore
+
+    with _pytest.raises(ValueError, match="fsdp_sharding_strategy"):
+        build_fsdp_plugin(_C())
+
+
+def test_the_recipe_records_the_measured_memory_result():
+    """The 'might fit' claim has been replaced by a measurement; keep it that way.
+
+    docs/GRPO_READINESS.md gate 3 asks for a measured 30B MoE memory snapshot from
+    an actual rollout step. This pins that the recipe carries it, so nobody has to
+    re-derive it from an accounting argument that was already wrong once.
+    """
+    import json
+
+    cfg = json.loads(
+        (REPO / "configs" / "grpo_coder30b_a3b_trloo.json").read_text())
+    note = cfg.get("_comment_fsdp_sharding_strategy", "")
+    assert note, "the measured memory result is not recorded in the recipe"
+    for token in ("OUT_OF_RESOURCES", "full_shard", "shard_grad_op", "gfx950"):
+        assert token in note, f"the measurement note omits {token!r}"
+    # ZeRO-2 was measured to exhaust HBM on this backbone, so the recipe must not
+    # ship it.
+    assert cfg.get("fsdp_sharding_strategy") == "full_shard", (
+        "shard_grad_op OOM'd on all 8 ranks with the real 30B weights"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # 4. archival checkpoints, without which retention is unmeasurable
 # --------------------------------------------------------------------------- #
 def _fake_ckpt(root: Path, step: int) -> Path:

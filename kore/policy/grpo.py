@@ -3059,9 +3059,42 @@ def build_fsdp_plugin(config):
     # reshards params to a 1-D flat buffer between forwards, which breaks generate()
     # and is why this co-located rollout cannot use ZeRO-3; larger topologies may
     # require measured offload or a separate inference engine.
-    # FSDP1 wants the sharding-strategy STRING; FSDP2 wants a bool (False = keep
-    # params unsharded after forward). Both express ZeRO-2 (SHARD_GRAD_OP).
-    reshard = False if version >= 2 else "SHARD_GRAD_OP"
+    # THE PARAGRAPH ABOVE IS STALE FOR THE SHARDED PATH, and the distinction is
+    # now load-bearing rather than academic.
+    #
+    # It describes generating on the policy itself, which _train_grpo_distributed
+    # has not done since the full-weight rollout replica was introduced: the
+    # rollout calls _rollout_slice_distributed(gen_replica, ...), and gen_replica is
+    # a plain non-FSDP AutoModelForCausalLM. Nothing on that path ever calls
+    # generate() on the wrapped policy, so resharding params after the forward
+    # cannot break generation there. Under ZeRO-2 the policy's replicated params
+    # buy a faster TRAINING forward (no all-gather), which is throughput, not
+    # correctness.
+    #
+    # That matters because the shipped 30B recipe does not fit on one node with
+    # replicated params. Measured on 8x gfx950 (252 GiB each) with the real
+    # Qwen3-Coder-30B-A3B weights, one rollout+update step at
+    # num_trajectories=8 / max_response_length=4096 died on every rank with
+    #   HSA_STATUS_ERROR_OUT_OF_RESOURCES ... Available Free mem : 0 MB
+    # after peaking at 257.9 of 258.0 GiB. The arithmetic says why: bf16 policy
+    # 61 GiB + bf16 rollout replica 61 GiB + sharded fp32 Adam ~30 GiB is ~160 GiB
+    # of static footprint before a single activation, and the device sat at
+    # ~204 GiB through the rollout. FULL_SHARD takes the policy's 61 GiB down to
+    # ~7.6 GiB per rank and is the one lever that does not remove a capability.
+    #
+    # Default is unchanged, so every existing recipe keeps ZeRO-2 and its
+    # throughput. FSDP1 wants the strategy STRING; FSDP2 wants a bool
+    # (False = keep params unsharded after forward).
+    strategy = str(getattr(config, "fsdp_sharding_strategy", "")
+                   or "shard_grad_op").strip().lower()
+    if strategy not in ("shard_grad_op", "full_shard"):
+        raise ValueError(
+            f"fsdp_sharding_strategy must be 'shard_grad_op' or 'full_shard', "
+            f"got {strategy!r}")
+    if strategy == "full_shard":
+        reshard = True if version >= 2 else "FULL_SHARD"
+    else:
+        reshard = False if version >= 2 else "SHARD_GRAD_OP"
     return FullyShardedDataParallelPlugin(
         fsdp_version=version,
         reshard_after_forward=reshard,              # SHARD_GRAD_OP (ZeRO-2): params replicated

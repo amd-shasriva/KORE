@@ -392,6 +392,38 @@ _SILENT_FALLBACK = re.compile(
     r"except\s*[\w. ,()]*:\s*(?:\n\s*)*(?:return\b|out\s*=)", re.MULTILINE)
 
 
+#: Markers that only appear in C/C++ (HIP) translation units. A Python or Triton
+#: kernel cannot contain them outside a string, and ``#include`` in Python source
+#: is itself a comment, so misclassifying on one is harmless in that direction.
+_CPP_MARKERS = (
+    "#include", "__global__", "__device__", "__host__", 'extern "C"',
+    "hipLaunchKernelGGL", "namespace ", "template <", "template<",
+)
+
+
+def detect_source_language(source: str) -> str:
+    """``"cpp"`` for a HIP/C++ translation unit, else ``"python"``.
+
+    ``language`` selects which comment syntax gets stripped before the hack
+    patterns run, and getting it wrong is not cosmetic: with ``"python"`` the
+    ``//`` and ``/* */`` comments in a HIP kernel survive into the scan, so a
+    line like ``// slightly faster than hipblaslt here`` matches the vendor-call
+    pattern and charges an honest kernel the -1.5 hack floor. Measured over the
+    89 real HIP kernels in AgentKernelArena, 7 were rejected purely for naming a
+    vendor library in a comment.
+
+    The env scan already gets this right because it knows the task's backend
+    (``kore.env.hip_toolchain.source_language``). This exists for the reward-time
+    re-scan, which has an :class:`Observation` and a source string but no task,
+    and which therefore defaulted to Python for every HIP candidate whose env
+    scan came back clean.
+
+    Detection is deliberately one-directional: a positive marker means C++, and
+    anything else stays Python, so the Triton path is untouched.
+    """
+    return "cpp" if any(m in (source or "") for m in _CPP_MARKERS) else "python"
+
+
 def scan_for_hacks(source: str, language: str = "python") -> Optional[str]:
     """Return a reason string if the source looks like a reward hack, else None.
 
@@ -1356,7 +1388,8 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
                    response: Optional[str] = None,
                    roofline_gate: bool = False,
                    t_min_ms: Optional[float] = None,
-                   roofline_tol: float = DEFAULT_ROOFLINE_TOL) -> RewardResult:
+                   roofline_tol: float = DEFAULT_ROOFLINE_TOL,
+                   language: Optional[str] = None) -> RewardResult:
     """Lexicographic, anti-hackable reward. Returns a :class:`RewardResult`.
 
     Tier order (a strictly better outcome in an earlier tier ALWAYS dominates):
@@ -1402,7 +1435,12 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     # Tier 0: anti-hack scan (a hack that "passes" must never be rewarded).
     # Punished STRICTLY harder than a compile failure (reward_hack < reward_compile_fail)
     # and never eligible for any shaping/format credit: cheating is the unique floor.
-    hack = obs.hack_reason or (scan_for_hacks(source) if source else None)
+    # ``language`` when the caller knows the task's backend; otherwise detected.
+    # Scanning a HIP candidate as Python leaves its // comments in the text and
+    # charges -1.5 for merely naming a vendor library in one.
+    hack = obs.hack_reason or (
+        scan_for_hacks(source, language or detect_source_language(source))
+        if source else None)
     # Roofline SPEED-OF-LIGHT ceiling (opt-in): a physically-impossible sub-roofline
     # measured time is a measurement exploit -> the same hack floor. The source scan
     # takes precedence (keeps its specific reason); this only fires when no source
@@ -1531,8 +1569,30 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
         return rr
 
     su_scored = su
-    if su >= cfg.excessive_speedup_flag:
-        flags.append("excessive_speedup")  # likely measurement error; cap contribution
+    # An implausible speedup is evidence about the MEASUREMENT, not about the
+    # kernel, so it earns no speed credit at all.
+    #
+    # Capping su_scored at the flag and letting it through the log term did not
+    # bound the incentive, it inverted it. With the shipped weights a flagged
+    # >=10x scored 0.3 + (1 + ln 10) + 0.02 = 3.62 while a GENUINE 2x scored
+    # 0.3 + (1 + ln 2) + 1.0 + 0.02 = 3.01: withholding the 1.0 of fast_p bonuses
+    # is no penalty at all against a log term that has already grown by 2.30. So
+    # the single highest-reward action available to the policy was to produce a
+    # measurement error, which is the 1541.94x failure this flag exists to
+    # prevent, reintroduced one layer down.
+    #
+    # Zeroing is also the conservative reading of the evidence. We do not know
+    # how fast this kernel is - we know the number we got cannot be right - and
+    # "correct, speed unknown" is already a tier the ladder scores (0.32,
+    # correct_screening). Landing there makes gaming the timer worth exactly as
+    # much as not gaming it, and strictly less than any honest measured win.
+    #
+    # MRS drops the trajectory outright above max_plausible_speedup (12.0). This
+    # closes the [excessive_speedup_flag, max_plausible_speedup) window between
+    # the two thresholds, where the reward was largest.
+    excessive = su >= cfg.excessive_speedup_flag
+    if excessive:
+        flags.append("excessive_speedup")
         su_scored = cfg.excessive_speedup_flag
     if _finite(obs.cv_pct) and float(obs.cv_pct) > float(cfg.cv_threshold_pct):
         flags.append("high_variance")  # noisy timing; keep correctness credit, damp speed
@@ -1542,6 +1602,10 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     # keep the full correctness_weight + speedup.
     if phase == "correctness":
         flags.append("phase:correctness")
+        speed_term = 0.0
+    elif excessive:
+        # Correctness credit only. The profile bonus is skipped with it: it is
+        # baseline-relative and derived from the same untrusted measurement.
         speed_term = 0.0
     else:
         speed_term = _speedup_term(su_scored, su, obs, cfg, flags)
@@ -1565,6 +1629,8 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
     reward = base + speed_term + fmt
     rr = RewardResult(reward, True, su, "correct_timed", flags,
                       f"worst-shape speedup {su:.3f}x vs baseline"
-                      + (" [correctness phase: speed zeroed]" if phase == "correctness" else ""))
+                      + (" [correctness phase: speed zeroed]" if phase == "correctness"
+                         else (" [implausible speedup: measurement rejected, speed credit "
+                               "withheld]" if excessive else "")))
     _log_decision(rr)
     return rr

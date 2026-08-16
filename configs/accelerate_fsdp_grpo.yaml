@@ -55,14 +55,23 @@ fsdp_config:
   fsdp_sharding_strategy: SHARD_GRAD_OP             # ZeRO-2 (deprecated key, but authoritative for FSDP1)
   fsdp_reshard_after_forward: SHARD_GRAD_OP        # ZeRO-2: params stay replicated between forwards -> local generation, no per-decode all_gather deadlock
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
-  # NOT authoritative: grpo.build_fsdp_plugin constructs the plugin explicitly and
-  # overrides this exported value, deriving the class from the config's
-  # fsdp_transformer_layer_cls or from detect_transformer_layer_cls(model_id). The
-  # literal is the 14B/32B DENSE Qwen3 block and is WRONG for the 30B MoE backbone
-  # (Qwen3MoeDecoderLayer); it stays only as the accelerate-CLI fallback. Getting
-  # it wrong is silent -- TRANSFORMER_BASED_WRAP with a class matching nothing wraps
-  # NOTHING and FSDP degrades to one flat parameter for the whole model.
-  fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer
+  # Getting this wrong is silent: TRANSFORMER_BASED_WRAP with a class matching
+  # nothing in the module tree wraps NOTHING, so FSDP degrades to one flat
+  # parameter for the whole model and either OOMs or loses every overlap the
+  # sharding was meant to buy.
+  #
+  # BOTH names, not one. launch_distributed.sh routes every grpo stage through
+  # this file, and that spans two backbones: the 30B A3B MoE
+  # (Qwen3MoeDecoderLayer) and the legacy 14B/32B dense blocks
+  # (Qwen3DecoderLayer). This literal was the dense name ALONE, so the
+  # accelerate-CLI fallback wrapped nothing on the production MoE recipe. A wrap
+  # list matches whichever class the loaded model actually contains.
+  #
+  # NOT authoritative either way: grpo.build_fsdp_plugin constructs the plugin
+  # explicitly and overrides this exported value, deriving the class from the
+  # config's fsdp_transformer_layer_cls or detect_transformer_layer_cls(model_id).
+  # This is the fallback, and a fallback still has to be right.
+  fsdp_transformer_layer_cls_to_wrap: Qwen3MoeDecoderLayer,Qwen3DecoderLayer
   fsdp_backward_prefetch: BACKWARD_PRE
   fsdp_forward_prefetch: false
   fsdp_state_dict_type: FULL_STATE_DICT           # consolidate a plain HF ckpt so soup/eval load it via from_pretrained

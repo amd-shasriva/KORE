@@ -1119,6 +1119,37 @@ def _sample_field(sample, idx, default=None):
     return sample[idx] if len(sample) > idx else default
 
 
+def _record_train_logp(sample, value) -> None:
+    """Store the training-side token-mean log-prob on ``sample`` at field 7.
+
+    Without this the rollout-vs-training divergence diagnostic cannot exist.
+    :func:`_grpo_step_mismatch_stat` reads field 7, samples are built with exactly
+    seven fields (indices 0..6), and nothing ever wrote an eighth -- so every
+    sample hit its ``continue`` and the function returned ``(None, None)``
+    unconditionally, for any input. It was also never called. Both the 30B recipe
+    and docs/GRPO_READINESS.md justify ``mismatch_correction: false`` on the
+    grounds that this diagnostic still runs "unconditionally", which it did not.
+
+    The number matters most on this backbone. GSPO's argument for sequence-level
+    ratios is that MoE expert-activation volatility makes per-token ratios
+    fluctuate wildly between the rollout and the update -- Qwen measured ~10% of
+    tokens switching experts per step on Qwen3-30B-A3B, this exact model -- while
+    the sequence likelihood stays stable. KORE already uses the sequence
+    (token-mean geometric) ratio, so a healthy step should report a mean weight
+    of essentially 1.0. If it drifts, that is routing volatility defeating the
+    thing that is supposed to absorb it, and it is invisible in the loss curve.
+
+    Tolerates an immutable sample (unit-test fixtures pass tuples): the
+    diagnostic then stays null rather than raising into the training step.
+    """
+    try:
+        while len(sample) <= 7:
+            sample.append(None)
+        sample[7] = float(value)
+    except (TypeError, AttributeError):  # tuple fixture; leave the field absent
+        return
+
+
 def group_sample_advantages(samples, *, variance_floor: float = 0.0,
                             avspo_virtual_k: int = 2, adv_eps: float = _EPS,
                             advantage_estimator: str = _trloo.GRPO):
@@ -1253,6 +1284,9 @@ def _accumulate_grpo_grads(kept_groups, logp_fn, *, ref_anchor_coef: float,
             lp = logp_fn(gen_inputs)
             if lp is None:
                 continue
+            # Detached, so the diagnostic never joins the graph. Recorded here
+            # because this is the only place the training-side log-prob exists.
+            _record_train_logp(sample, lp.detach())
             n_tok = max(int(_sample_field(sample, 4, 1) or 1), 1)
             old_lp = _sample_field(sample, 3)
             if old_lp is not None:
@@ -3088,6 +3122,7 @@ def _accumulate_grpo_grads_distributed(local_terms, logp_fn, *, accelerator,
                 dlp = logp_fn(_dummy_gen_inputs(tok, device))
                 accelerator.backward(dlp * 0.0)
                 continue
+            _record_train_logp(sample, lp.detach())
             n_tok = max(int(_sample_field(sample, 4, 1) or 1), 1)
             old_lp = _sample_field(sample, 3)
             if old_lp is not None:
@@ -3766,9 +3801,24 @@ def _train_grpo_distributed(config, tasks):
                 dual_clip_c=float(getattr(config, "dual_clip_c", 0.0) or 0.0))
             if n_terms:
                 _record_optimizer_tokens(config, local_tokens)
-            accelerator.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+            # Keep the clipper's own total norm: it is the pre-clip gradient
+            # magnitude, and TRLOO is deliberately unnormalised (no std division),
+            # so max_grad_norm is where this run's scale is actually controlled.
+            # Logging it is how a scale problem becomes visible as something other
+            # than a flat loss curve.
+            _clip_norm = accelerator.clip_grad_norm_(model.parameters(),
+                                                     config.max_grad_norm)
             opt.step()
         sched.step()
+        try:
+            _grad_norm_value = (float(_clip_norm)
+                                if _clip_norm is not None else None)
+        except (TypeError, ValueError):
+            _grad_norm_value = None
+        try:
+            _lr_value = float(sched.get_last_lr()[0])
+        except (AttributeError, IndexError, TypeError, ValueError):
+            _lr_value = None
         _assert_feature_phase(config, "update")
 
         mean_r = sum(sum(s) / len(s) for s in group_full_scores if s) / max(len(group_full_scores), 1)
@@ -3780,9 +3830,36 @@ def _train_grpo_distributed(config, tasks):
             # used to emit a metrics event on every one of the 2000 steps).
             log_every = max(1, int(getattr(config, "logging_steps", 1) or 1))
             if step % log_every == 0 or step == config.total_steps - 1:
+                # The single-process loop logged these and the sharded one did not,
+                # so on the production path there was no way to confirm from the
+                # step log that TRLOO took effect, that the KL anchor was where it
+                # was meant to be, or that the rollout replica still matched the
+                # policy. mismatch_mean/max is the sequence importance weight,
+                # which must sit at ~1.0 with ppo_epochs=1 and is the only visible
+                # signal of MoE routing volatility defeating the sequence-ratio
+                # design.
+                #
+                # adv_absmean is taken from the advantages the step ACTUALLY used
+                # rather than recomputed. _grpo_step_adv_stats re-derives them from
+                # each group's own returns, which is faithful single-process and
+                # wrong here: distributed_group_advantages builds the baseline from
+                # returns gathered across every rank, so a local recompute would
+                # report a number the trainer never saw.
+                _local_samples = [[s for _, s in local_terms]]
+                _advs = [abs(float(a)) for a, _ in local_terms]
+                adv_absmean = (sum(_advs) / len(_advs)) if _advs else None
+                n_kl = sum(1 for _, s in local_terms
+                           if _sample_field(s, 2) is not None)
+                mm_mean, mm_max = _grpo_step_mismatch_stat(
+                    _local_samples,
+                    float(getattr(config, "mismatch_weight_cap", 2.0) or 2.0))
                 log.event("grpo_step_dist", step=step, backend=backend, world=world,
                           n_groups=len(groups), n_kept_groups=len(keep), n_attempts=attempts,
                           reward_mean=mean_r, loss=loss_value,
+                          adv_absmean=adv_absmean, n_kl_anchored=n_kl,
+                          kl=_grpo_step_kl_stat(_local_samples),
+                          mismatch_mean=mm_mean, mismatch_max=mm_max,
+                          grad_norm=_grad_norm_value, lr=_lr_value,
                           global_tokens=global_total_tokens,
                           n_overlong_masked=n_overlong, **gpu_mem_snapshot())
         # Periodic resumable checkpoint. The predicate reads only rank-invariant

@@ -193,18 +193,52 @@ def test_reward_hack_beats_nothing():
     assert "shaped" not in rr.flags
 
 
-def test_excessive_speedup_flagged_and_capped():
+def test_excessive_speedup_earns_no_speed_credit_at_all():
+    """An implausible speedup banks correctness and nothing else.
+
+    This used to cap ``su_scored`` at the flag and let it through the log term,
+    which did not bound the incentive -- it inverted it. Withholding the 1.0 of
+    fast_p bonuses is no penalty against a log term that has already grown by
+    ln(10) = 2.30, so a flagged outlier scored MORE than any honest win, and the
+    single highest-reward action available to the policy was to break the
+    measurement. See ``test_a_measurement_outlier_never_outscores_an_honest_win``.
+    """
     obs = Observation(compiled=True, validation_passed=True, snr_by_shape={"s": 99.0},
                       wall_by_shape={"s": 0.01}, baseline_by_shape={"s": 1.0})  # 100x
     rr = compute_reward(obs, "x=1", dtype="bf16")
     assert "excessive_speedup" in rr.flags
-    # Excessive speedup: capped to excessive_speedup_flag for the (log-shaped)
-    # continuous term, and fast_p bonuses are WITHHELD (measurement-error outlier),
-    # so the policy cannot farm the bonus with an implausible timing.
-    expected = CONFIG.correctness_weight + _expected_speed_term(
-        CONFIG.excessive_speedup_flag, 100.0, excessive=True)
-    assert abs(rr.reward - expected) < 1e-9
+    assert rr.correct
+    # correctness_weight only. Format credit is absent because "x=1" carries no
+    # FULL_KERNEL response, matching the other tests in this file.
+    assert abs(rr.reward - CONFIG.correctness_weight) < 1e-9
     assert not any(f.startswith("fast_p") for f in rr.flags)
+
+
+def test_a_measurement_outlier_never_outscores_an_honest_win():
+    """The ordering property, stated directly over the whole plausible range.
+
+    The gap this closes is the window between ``excessive_speedup_flag`` (10.0,
+    where the reward capped) and ``max_plausible_speedup`` (12.0, where multi-turn
+    rejection sampling drops the trajectory). Inside it a broken measurement was
+    both accepted AND maximally rewarded: 3.62 against a genuine 2x win's 3.01.
+    """
+    def _reward_at(su: float) -> float:
+        return compute_reward(
+            Observation(compiled=True, validation_passed=True,
+                        snr_by_shape={"s": 99.0}, wall_by_shape={"s": 1.0 / su},
+                        baseline_by_shape={"s": 1.0}),
+            "x=1", dtype="bf16").reward
+
+    honest = [_reward_at(su) for su in (1.05, 1.3, 1.6, 2.0, 4.0, 9.0)]
+    # Every rejected measurement, including the [10, 12) window MRS still admits.
+    rejected = [_reward_at(su) for su in (10.0, 10.5, 11.9, 12.0, 100.0, 1541.94)]
+    assert max(rejected) < min(honest), (
+        f"an implausible speedup scored {max(rejected):.3f}, at or above the "
+        f"weakest honest win at {min(honest):.3f}"
+    )
+    # And it is worth no more than simply being correct, so there is nothing to
+    # gain by attacking the timer rather than writing a correct kernel.
+    assert all(abs(r - CONFIG.correctness_weight) < 1e-9 for r in rejected)
 
 
 # =========================================================================== #

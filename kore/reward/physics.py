@@ -410,6 +410,16 @@ def compute_kernel_reward(
                 evidence=evidence,
             )
             return mask_reward_phase(reward, reward_phase, cfg.correctness_weight)
+    # The task knows its backend, so the hack scan gets the authoritative source
+    # language rather than the detected one. Scanning a HIP candidate as Python
+    # leaves its // comments in the text, and a comment naming a vendor library
+    # then matches the vendor-call pattern and charges the -1.5 hack floor.
+    try:
+        from kore.env import hip_toolchain as _hip  # noqa: PLC0415 - avoid a cycle
+
+        language = _hip.source_language(getattr(task, "backend", None))
+    except Exception:  # noqa: BLE001 - detection is a safe fallback
+        language = None
     reward = compute_reward(
         obs,
         source,
@@ -417,6 +427,7 @@ def compute_kernel_reward(
         cfg=cfg,
         snr_threshold=snr_threshold,
         response=response,
+        language=language,
     )
     if mode == "residual" and reward.correct:
         reward.flags.append("physics_shaping_disabled")

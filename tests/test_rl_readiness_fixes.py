@@ -225,6 +225,158 @@ def test_the_sharded_loop_logs_the_diagnostics_the_recipe_relies_on():
         )
 
 
+def test_clip_engagement_is_measured_not_inferred():
+    """A clipped sample still contributes a term, so clipping is invisible in loss.
+
+    The band is narrow and asymmetric (low 0.03 / high 0.04) because a GSPO
+    sequence ratio is theoretically 1.0 at ppo_epochs=1. Measured over six sharded
+    steps the ratio ranged 0.971-1.022, repeatedly within a thousandth of the 0.97
+    floor -- on a tiny model with none of a 30B MoE's routing volatility.
+    """
+    import math
+
+    from kore.policy.grpo import _grpo_step_clip_rate, _record_train_logp
+
+    def _s(ratio):
+        s = [1.0, [("p", "g")], None, 0.0, 8, None, (0, 0)]
+        _record_train_logp(s, math.log(ratio))  # old_logp is 0.0, so ratio = exp(lp)
+        return s
+
+    # 1.00 inside, 0.96 below the 0.97 floor, 1.10 above the 1.04 ceiling.
+    lo, hi = _grpo_step_clip_rate([[_s(1.00), _s(0.96), _s(1.10), _s(1.02)]],
+                                  0.03, 0.04)
+    assert abs(lo - 0.25) < 1e-9, lo
+    assert abs(hi - 0.25) < 1e-9, hi
+
+    # Null, not zero, when nothing carries a training log-prob: a run that never
+    # recorded one must not read as "no clipping observed".
+    assert _grpo_step_clip_rate([[[1.0, None, None, 0.0, 8, None, (0, 0)]]],
+                                0.03, 0.04) == (None, None)
+
+
+def test_the_sharded_log_reports_clip_engagement():
+    source = (REPO / "kore" / "policy" / "grpo.py").read_text()
+    event = re.search(r'log\.event\(\s*"grpo_step_dist".*?\)\n', source, re.S)
+    assert event and "clip_low_rate=" in event.group(0)
+    assert "clip_high_rate=" in event.group(0)
+
+
+# --------------------------------------------------------------------------- #
+# 4. archival checkpoints, without which retention is unmeasurable
+# --------------------------------------------------------------------------- #
+def _fake_ckpt(root: Path, step: int) -> Path:
+    """A directory the rotation validity predicate accepts.
+
+    Completeness is checked against the writer's own ``kore_grpo_files`` manifest,
+    so every name it lists has to exist -- a directory carrying only a
+    ``global_step`` is deliberately rejected as half-written.
+    """
+    import json
+
+    d = root / f"checkpoint-{step}"
+    d.mkdir(parents=True, exist_ok=True)
+    files = ["model.safetensors", "optimizer.pt"]
+    for name in files:
+        (d / name).write_bytes(b"x")
+    (d / "trainer_state.json").write_text(
+        json.dumps({"global_step": step, "kore_grpo_files": files}))
+    return d
+
+
+class _Cfg:
+    def __init__(self, out, limit=2, archive=0):
+        self.output_dir = str(out)
+        self.save_total_limit = limit
+        self.save_archive_every = archive
+
+
+def test_rotation_still_prunes_when_archiving_is_off(tmp_path):
+    from kore.policy.grpo import _rotate_grpo_checkpoints
+
+    for s in (50, 100, 150, 200):
+        _fake_ckpt(tmp_path, s)
+    keep = tmp_path / "checkpoint-200"
+    removed = _rotate_grpo_checkpoints(_Cfg(tmp_path, limit=2, archive=0), keep)
+    left = sorted(p.name for p in tmp_path.glob("checkpoint-*"))
+    assert left == ["checkpoint-150", "checkpoint-200"], left
+    assert len(removed) == 2
+
+
+def test_archived_steps_survive_rotation(tmp_path):
+    """The whole point: a drift-vs-step curve has to still exist afterwards."""
+    from kore.policy.grpo import _rotate_grpo_checkpoints
+
+    for s in (50, 100, 150, 200, 250, 300):
+        _fake_ckpt(tmp_path, s)
+    keep = tmp_path / "checkpoint-300"
+    _rotate_grpo_checkpoints(_Cfg(tmp_path, limit=2, archive=100), keep)
+    left = sorted(int(p.name.split("-")[1]) for p in tmp_path.glob("checkpoint-*"))
+    # 100/200/300 are on the archive grid; 250 is the rolling window's second
+    # slot; 50 and 150 are neither and go.
+    assert 100 in left and 200 in left and 300 in left, left
+    assert 50 not in left and 150 not in left, left
+
+
+def test_archives_do_not_erode_the_rolling_window(tmp_path):
+    """Archives are skipped, not counted out of the retention budget.
+
+    If they were counted, the candidate slice would eat into the recent
+    checkpoints as archives accumulated, and a crash mid-save would find nothing
+    recent to resume from -- the exact failure save_total_limit>=2 exists to stop.
+    """
+    from kore.policy.grpo import _rotate_grpo_checkpoints
+
+    steps = [100, 200, 300, 400, 500, 510, 520]
+    for s in steps:
+        _fake_ckpt(tmp_path, s)
+    keep = tmp_path / "checkpoint-520"
+    _rotate_grpo_checkpoints(_Cfg(tmp_path, limit=2, archive=100), keep)
+    left = sorted(int(p.name.split("-")[1]) for p in tmp_path.glob("checkpoint-*"))
+    # Every archive survives, and the two most recent non-archive steps are still
+    # present, so a resume has a complete predecessor.
+    for s in (100, 200, 300, 400, 500):
+        assert s in left, (s, left)
+    assert 510 in left and 520 in left, left
+
+
+def test_the_published_checkpoint_is_never_rotated(tmp_path):
+    from kore.policy.grpo import _rotate_grpo_checkpoints
+
+    for s in (10, 20, 30):
+        _fake_ckpt(tmp_path, s)
+    keep = tmp_path / "checkpoint-10"  # oldest, but just published
+    _rotate_grpo_checkpoints(_Cfg(tmp_path, limit=1, archive=0), keep)
+    assert keep.exists()
+
+
+def test_a_bad_archive_interval_cannot_disable_pruning(tmp_path):
+    from kore.policy.grpo import _grpo_archive_every
+
+    for bad in (None, "", "abc", -5, object()):
+        assert _grpo_archive_every(_Cfg(tmp_path, archive=bad)) == 0
+
+
+def test_the_30b_recipe_pins_an_archive_interval():
+    """A recipe with no anchor and no archives cannot be audited at all."""
+    import json
+
+    cfg = json.loads(
+        (REPO / "configs" / "grpo_coder30b_a3b_trloo.json").read_text())
+    assert cfg.get("ref_anchor_coef") == 0.0, (
+        "if the KL anchor is armed, re-derive whether archives are still needed"
+    )
+    every = cfg.get("save_archive_every")
+    assert isinstance(every, int) and every > 0, (
+        "this run has no retention anchor and trains on kernels only, so at "
+        "least some checkpoints must survive rotation to measure drift against "
+        "the post-SFT reference"
+    )
+    assert every % cfg["save_steps"] == 0, (
+        f"save_archive_every={every} is not a multiple of save_steps="
+        f"{cfg['save_steps']}, so no checkpoint would ever land on the grid"
+    )
+
+
 def test_advantages_are_logged_from_the_values_the_step_used():
     """Not recomputed locally, which would be wrong under sharding.
 

@@ -1377,6 +1377,50 @@ def _grpo_step_mismatch_stat(kept_groups, cap: float = 2.0):
     return sum(weights) / len(weights), max(weights)
 
 
+def _grpo_step_clip_rate(kept_groups, clip_ratio_low: float, clip_ratio_high: float):
+    """Fraction of kept samples whose sequence ratio fell outside the clip band.
+
+    ``(low_rate, high_rate)``, or ``(None, None)`` when no sample carries both a
+    rollout and a training log-prob.
+
+    This is the number that says whether the clip bounds are throttling learning,
+    and it is not inferable from the loss. A clipped sample still contributes a
+    term, so a run where every ratio is pinned at a bound looks like a run that is
+    simply learning slowly.
+
+    It matters here because the band is narrow and asymmetric by design --
+    clip_ratio_low 0.03 against clip_ratio_high 0.04, sized for a GSPO sequence
+    ratio that theory puts at exactly 1.0 under ppo_epochs=1. Measured on this
+    codebase over six sharded steps the ratio ranged 0.971 to 1.022: four of six
+    steps below 1.0, repeatedly within a thousandth of the 0.97 floor, on a tiny
+    model with none of the expert-activation volatility a 30B MoE brings. So the
+    tighter bound is on the side the drift actually occupies, and whether it binds
+    is an empirical question that needs an instrument rather than an argument.
+    """
+    lo = 1.0 - float(clip_ratio_low or 0.0)
+    hi = 1.0 + float(clip_ratio_high or 0.0)
+    n = n_lo = n_hi = 0
+    for samples in kept_groups:
+        for s in samples:
+            old_lp = _sample_field(s, 3)
+            train_lp = _sample_field(s, 7)
+            if old_lp is None or train_lp is None:
+                continue
+            n += 1
+            try:
+                ratio = math.exp(float(train_lp) - float(old_lp))
+            except (OverflowError, ValueError):
+                n_hi += 1
+                continue
+            if ratio < lo:
+                n_lo += 1
+            elif ratio > hi:
+                n_hi += 1
+    if not n:
+        return None, None
+    return n_lo / n, n_hi / n
+
+
 def _grpo_step_kl_stat(kept_groups):
     """Mean k3 KL(policy||ref) diagnostic over kept samples (logging only).
 
@@ -1934,22 +1978,44 @@ def _publish_grpo_checkpoint(config, staging, step) -> str:
     return ckpt
 
 
+def _grpo_archive_every(config) -> int:
+    """Step interval whose checkpoints rotation must never delete (0 = off)."""
+    try:
+        every = int(getattr(config, "save_archive_every", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, every)
+
+
 def _rotate_grpo_checkpoints(config, keep_path) -> list:
     """Delete the oldest VALID checkpoints beyond the retention limit.
 
     Only complete checkpoints are counted or removed, and ``keep_path`` (the one
     just published) is never a rotation candidate. Returns the removed paths.
+
+    A checkpoint on the ``save_archive_every`` grid is exempt. Without that, a
+    kernels-only RL run is unauditable: retention is measured by comparing a
+    checkpoint against the post-SFT reference, and at save_steps=50 /
+    save_total_limit=2 every checkpoint that could localise a regression is gone
+    long before anyone suspects one.
     """
     import os
     import shutil
 
     limit = _grpo_save_total_limit(config)
+    every = _grpo_archive_every(config)
     valid = [(step, path)
              for step, path in _grpo_checkpoint_dirs(getattr(config, "output_dir", "runs/grpo"))
              if _read_grpo_trainer_state(path) is not None]
     removed = []
-    for _step, path in valid[:max(0, len(valid) - limit)]:
+    # Archives are skipped rather than counted out of the window, so the rolling
+    # retention of `limit` recent checkpoints is unaffected as archives pile up:
+    # the candidate slice grows with len(valid), and every archive it reaches is
+    # passed over.
+    for step, path in valid[:max(0, len(valid) - limit)]:
         if os.path.abspath(path) == os.path.abspath(keep_path):
+            continue
+        if every and step % every == 0:
             continue
         shutil.rmtree(path, ignore_errors=True)
         removed.append(path)
@@ -3853,12 +3919,15 @@ def _train_grpo_distributed(config, tasks):
                 mm_mean, mm_max = _grpo_step_mismatch_stat(
                     _local_samples,
                     float(getattr(config, "mismatch_weight_cap", 2.0) or 2.0))
+                clip_lo, clip_hi = _grpo_step_clip_rate(
+                    _local_samples, config.clip_ratio_low, config.clip_ratio_high)
                 log.event("grpo_step_dist", step=step, backend=backend, world=world,
                           n_groups=len(groups), n_kept_groups=len(keep), n_attempts=attempts,
                           reward_mean=mean_r, loss=loss_value,
                           adv_absmean=adv_absmean, n_kl_anchored=n_kl,
                           kl=_grpo_step_kl_stat(_local_samples),
                           mismatch_mean=mm_mean, mismatch_max=mm_max,
+                          clip_low_rate=clip_lo, clip_high_rate=clip_hi,
                           grad_norm=_grad_norm_value, lr=_lr_value,
                           global_tokens=global_total_tokens,
                           n_overlong_masked=n_overlong, **gpu_mem_snapshot())

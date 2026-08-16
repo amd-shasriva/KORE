@@ -684,6 +684,24 @@ class GRPOConfig(DistributedMixin):
     # checkpoint out would otherwise leave nothing resumable. A 14B GRPO
     # checkpoint carries fp32 AdamW moments (~140GB), so 2 is ~280GB per run.
     save_total_limit: int = 2
+    # Steps between checkpoints that rotation must NEVER delete. 0 disables it and
+    # is the default, so no existing recipe changes behaviour.
+    #
+    # This exists because retention is otherwise unmeasurable. A kernels-only RL
+    # run with ref_anchor_coef=0.0 has nothing anchoring it to the post-SFT
+    # policy, so drift on general ability is the main risk to watch -- and every
+    # tool for watching it (kore.eval.checkpoint_ab, kore.eval.retention,
+    # kore.eval.heldout_lm) measures a CHECKPOINT against a reference. With
+    # save_steps=50 and save_total_limit=2 only the newest two checkpoints exist
+    # at any moment, so drift as a function of step cannot be reconstructed after
+    # the run: by the time a regression is suspected, every checkpoint that would
+    # localise it has already been rotated away.
+    #
+    # Archives are pinned WHOLE rather than stripped to weights. Dropping
+    # optimizer.pt would leave a directory that still satisfies the rotation
+    # validity predicate (trainer_state.json present) while being unresumable, so
+    # a resume that happened to select it would fail closed for no reason.
+    save_archive_every: int = 0
     report_to: str = "none"
 
     def validate(self, *, tasks=None, runtime=None, require_tasks: bool = False):

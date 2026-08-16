@@ -270,7 +270,23 @@ def test_submitter_does_not_smuggle_space_bearing_values_through_export():
     assert 'export KORE_AKA_OUT="$OUT"' in source
 
 
-def test_submitter_refuses_to_queue_a_second_concurrent_sweep():
+def test_submitter_refuses_to_queue_a_second_copy_of_the_same_sweep():
     # Two sweeps sharing one --out would delete each other's task workspaces
-    # while the other was still evaluating in them.
-    assert "already queued" in SUBMITTER.read_text()
+    # while the other was still evaluating in them. The guard keys on the job
+    # name so a differently-named sweep with its own --out can queue alongside.
+    source = _code(SUBMITTER)
+    assert "already queued" in source
+    assert 'awk -v n="$NAME"' in source
+    assert '--job-name="$NAME"' in source
+
+
+def test_submitter_validates_the_v5_checkpoint_before_the_queue_wait():
+    """A missing or mistyped checkpoint must fail at submit.
+
+    The arena exits 2 on an unloadable model, and discovering that after a
+    multi-day queue wait spends a scarce exclusive allocation on a typo.
+    """
+    source = _code(SUBMITTER)
+    assert "KORE_AKA_V5_MODEL is unset" in source
+    assert "config.json" in source
+    assert "safetensors" in source

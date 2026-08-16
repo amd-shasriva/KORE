@@ -702,6 +702,19 @@ class GRPOConfig(DistributedMixin):
     # validity predicate (trainer_state.json present) while being unresumable, so
     # a resume that happened to select it would fail closed for no reason.
     save_archive_every: int = 0
+    #: ``"shard_grad_op"`` (ZeRO-2, default) or ``"full_shard"`` (ZeRO-3).
+    #:
+    #: ZeRO-2 keeps the policy's params replicated on every rank, which is a
+    #: TRAINING-forward throughput win on the sharded path -- generation happens on
+    #: the separate full-weight replica, so it is unaffected either way. It costs
+    #: the full parameter footprint per rank, and for a 30.5B bf16 backbone that is
+    #: 61 GiB on top of the replica's 61 GiB.
+    #:
+    #: Measured on 8x gfx950 (252 GiB each) with the real Qwen3-Coder-30B-A3B
+    #: weights, the shipped recipe under ZeRO-2 exhausted HBM on every rank
+    #: (HSA_STATUS_ERROR_OUT_OF_RESOURCES, "Available Free mem : 0 MB") during the
+    #: first update. ``full_shard`` reduces the policy to ~7.6 GiB per rank.
+    fsdp_sharding_strategy: str = "shard_grad_op"
     report_to: str = "none"
 
     def validate(self, *, tasks=None, runtime=None, require_tasks: bool = False):

@@ -396,6 +396,127 @@ def _is_api_model(model: str) -> bool:
     return any(m.startswith(p) for p in _API_MODEL_PREFIXES)
 
 
+def _is_local_checkpoint(model: str) -> bool:
+    """Is this a loadable checkpoint directory rather than a Hub repo id?
+
+    Mirrors ``kore.policy.serve._is_local_checkpoint``: the presence of
+    ``config.json`` is the test, not mere directory existence, so a typo'd path
+    fails loudly instead of quietly skipping the revision pin.
+    """
+    try:
+        return os.path.isfile(os.path.join(str(model), "config.json"))
+    except (TypeError, ValueError):  # a non-path-like model is simply a Hub id
+        return False
+
+
+def _known_hub_pins() -> dict[str, str]:
+    """Hub repo ids whose immutable commit KORE already records.
+
+    ``model_spec`` carries the audited pin for every backbone we actually serve,
+    so an arm named by repo id can resolve its own commit instead of requiring
+    the operator to paste a 40-hex snapshot path into the launcher.
+    """
+    from kore.policy.model_spec import (
+        QWEN3_32B_PROFILE,
+        QWEN3_CODER_30B_A3B_PROFILE,
+        UNRESOLVED,
+    )
+
+    return {
+        profile.model_id: profile.revision
+        for profile in (QWEN3_CODER_30B_A3B_PROFILE, QWEN3_32B_PROFILE)
+        if profile.revision != UNRESOLVED
+    }
+
+
+def resolve_policy_checkpoint(
+    model: str,
+    revision: Optional[str] = None,
+    *,
+    environ: Optional[dict] = None,
+) -> str:
+    """Resolve an arm's ``--model`` to what ``load_generate`` can actually load.
+
+    WHY THIS EXISTS
+    ---------------
+    The base arm of the 2026-08-17 sweep (job 13907) was named by Hub repo id,
+    which is the launcher's default. ``load_generate`` correctly refuses a Hub id
+    with no immutable revision -- a floating ref is how you silently evaluate
+    different weights than you think -- and ``cmd_run`` never forwarded
+    ``--revision``, so all 8 shards died with FloatingRevisionError two seconds
+    into the phase, after the baseline had already spent four hours. The arm
+    could not have succeeded under any invocation.
+
+    A repo id is the natural thing to type, and the pin is already recorded in
+    ``model_spec``, so the id is resolved here to the exact local snapshot for
+    that commit. That keeps the fail-closed property (nothing loads from a
+    mutable ref) while making the correct invocation the default one.
+
+    An API model is returned unchanged: it is a label for the gateway, never a
+    path. A local checkpoint directory is returned unchanged: the bytes on disk
+    are its identity and it has no Hub commit to name.
+    """
+    name = str(model or "").strip()
+    if not name:
+        raise SystemExit("refusing to run: --model is empty")
+    if _is_api_model(name):
+        return name
+    if _is_local_checkpoint(name):
+        if revision:
+            print(
+                f"[aka] {name} is a local checkpoint; the configured revision "
+                f"{revision[:12]}... is IGNORED (a directory has no Hub commit)",
+                flush=True,
+            )
+        return name
+
+    from kore.policy.model_spec import (
+        ModelSpecError,
+        hf_cache_roots,
+        resolve_local_snapshot,
+        validate_pinned_revision,
+    )
+
+    env = dict(os.environ if environ is None else environ)
+    pins = _known_hub_pins()
+    chosen = (
+        revision
+        or env.get("KORE_MODEL_REVISION")
+        or pins.get(name)
+    )
+    if not chosen:
+        known = ", ".join(sorted(pins)) or "none"
+        raise SystemExit(
+            f"refusing to run: {name!r} is a Hugging Face repo id with no "
+            "immutable revision, and loading whatever the cache happens to hold "
+            "is not a measurement.\n"
+            f"  Fix: pass --revision <40-hex commit>, or set $KORE_MODEL_REVISION, "
+            "or point --model at a local checkpoint directory.\n"
+            f"  Repo ids with a recorded pin: {known}"
+        )
+    try:
+        pinned = validate_pinned_revision(chosen)
+    except ModelSpecError as exc:
+        raise SystemExit(f"refusing to run: {exc}") from exc
+
+    snapshot = resolve_local_snapshot(name, pinned, environ=env)
+    if snapshot is None:
+        searched = ", ".join(str(root) for root in hf_cache_roots(env))
+        raise SystemExit(
+            f"refusing to run: revision {pinned} of {name!r} is not in any local "
+            f"Hugging Face cache (searched: {searched}).\n"
+            "  These jobs run with HF_HUB_OFFLINE=1, so a commit that is not "
+            "already on disk cannot be loaded at all.\n"
+            "  Fix: download that exact commit, or point $HF_HOME/$HF_HUB_CACHE "
+            "at the cache that holds it."
+        )
+    print(
+        f"[aka] {name} @ {pinned[:12]} -> {snapshot}",
+        flush=True,
+    )
+    return str(snapshot)
+
+
 def _api_generate(args):
     """A ``generate`` for model_policy backed by the AMD LLM gateway.
 
@@ -699,6 +820,46 @@ def cmd_baseline_merge(args) -> int:
     return 0
 
 
+def cmd_check_model(args) -> int:
+    """Resolve an arm's model and report it, without importing torch or vLLM.
+
+    The launcher's old non-API preflight printed "local checkpoint, no gateway
+    needed" for whatever string it was handed and checked nothing, so a Hub id
+    that could never load was announced as ready and the failure surfaced hours
+    later, after the baseline. This is the real check: it exercises exactly the
+    resolution ``cmd_run`` will perform, and costs a directory stat.
+
+    Weight loading is deliberately NOT attempted. Resolution is what fails
+    deterministically at startup; a load failure needs the GPUs the preflight
+    runs before claiming.
+    """
+    if _is_api_model(args.model):
+        print(f"[aka] {args.model}: API arm, resolved by the gateway preflight",
+              flush=True)
+        return 0
+    resolved = resolve_policy_checkpoint(args.model, args.revision)
+    missing = [
+        name for name in ("config.json",)
+        if not os.path.isfile(os.path.join(resolved, name))
+    ]
+    if missing:
+        print(f"refusing to run: {resolved} is missing {', '.join(missing)}",
+              flush=True)
+        return 2
+    import glob
+
+    weights = (
+        glob.glob(os.path.join(resolved, "*.safetensors"))
+        or glob.glob(os.path.join(resolved, "*.safetensors.index.json"))
+    )
+    if not weights:
+        print(f"refusing to run: {resolved} has no safetensors weights",
+              flush=True)
+        return 2
+    print(f"[aka] model OK: {args.model} -> {resolved}", flush=True)
+    return 0
+
+
 def cmd_run(args) -> int:
     out_root = Path(args.out); out_root.mkdir(parents=True, exist_ok=True)
     tasks = discover_tasks(args.arena_root, task_types=args.types or None,
@@ -745,10 +906,12 @@ def cmd_run(args) -> int:
     from kore.eval.policies import model_policy  # local: heavy import
 
     # model_policy takes the checkpoint positionally and has no `revision` or
-    # `model_id` parameter; the previous call passed both by keyword and raised
-    # TypeError before a single task ran. `revision` belongs to the hub-pinning
-    # path and is meaningless for a local checkpoint directory, which is what an
-    # evaluated run always points at.
+    # `model_id` parameter; an earlier call passed both by keyword and raised
+    # TypeError before a single task ran. The pin therefore has to be resolved
+    # BEFORE this call, into the one argument model_policy does accept: a path.
+    # resolve_policy_checkpoint does that, and it is why an arm named by Hub repo
+    # id now loads the recorded commit's snapshot instead of dying on a floating
+    # revision (job 13907's base arm, 8/8 shards, two seconds in).
     #
     # An API model is injected as `generate` rather than served, which is the
     # seam model_policy already exposes. Everything downstream is untouched: the
@@ -756,7 +919,8 @@ def cmd_run(args) -> int:
     # the same scoring. That is the whole point of running one -- a comparison
     # against a frontier model is only worth anything if the harness either side
     # of it is identical.
-    policy = model_policy(args.model,
+    checkpoint = resolve_policy_checkpoint(args.model, args.revision)
+    policy = model_policy(checkpoint,
                           generate=_api_generate(args) if _is_api_model(args.model)
                           else None,
                           max_tokens=args.max_tokens,
@@ -1102,7 +1266,7 @@ def _write(path: Path, results, args) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=("discover", "baseline", "run", "merge",
-                                     "baseline-merge"))
+                                     "baseline-merge", "check-model"))
     ap.add_argument("--arena-root", default=str(DEFAULT_ARENA))
     ap.add_argument("--gpu-arch", default="gfx950")
     ap.add_argument("--types", nargs="*", default=[],
@@ -1110,7 +1274,13 @@ def main() -> int:
     ap.add_argument("--out", default="runs/aka")
     ap.add_argument("--arm", default="kore")
     ap.add_argument("--model", default="Qwen/Qwen3-Coder-30B-A3B-Instruct")
-    ap.add_argument("--revision", default=None)
+    # Only meaningful when --model is a Hub repo id: it selects which commit's
+    # local snapshot is loaded. Ignored, with a log line, for a local checkpoint
+    # directory, which has no Hub commit. When omitted, a repo id falls back to
+    # $KORE_MODEL_REVISION and then to the pin model_spec records for it.
+    ap.add_argument("--revision", default=None,
+                    help="immutable 40-hex Hub commit for a --model given as a "
+                         "repo id (see resolve_policy_checkpoint)")
     ap.add_argument("--limit", type=int, default=0)
     # AKA allows 3600s per gate (src/evaluator.py, src/performance.py) and no task
     # overrides it. At 900s we were failing exactly the expensive ones -- cpp
@@ -1174,7 +1344,8 @@ def main() -> int:
         ap.error(f"--shard must be in [0, {args.num_shards}), got {args.shard}")
     return {"discover": cmd_discover, "baseline": cmd_baseline,
             "run": cmd_run, "merge": cmd_merge,
-            "baseline-merge": cmd_baseline_merge}[args.mode](args)
+            "baseline-merge": cmd_baseline_merge,
+            "check-model": cmd_check_model}[args.mode](args)
 
 
 if __name__ == "__main__":

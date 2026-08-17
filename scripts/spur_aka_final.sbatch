@@ -151,7 +151,27 @@ for arm in $ARMS; do
             continue
         fi
     else
-        echo "--- preflight $arm ($m): local checkpoint, no gateway needed ---"
+        # A served arm gets a REAL check, not a reassuring message.
+        #
+        # This branch used to print "local checkpoint, no gateway needed" for
+        # whatever string it was handed, without looking at it. On 2026-08-17 the
+        # base arm was the launcher's default -- a Hub repo id, not a path -- and
+        # a repo id with no pinned revision cannot be loaded at all. Preflight
+        # announced it ready, the baseline ran for four hours, and then all 8
+        # shards of the arm died two seconds in. check-model resolves the model
+        # exactly the way the run will, and imports no GPU framework to do it.
+        echo "--- preflight $arm ($m) ---"
+        "$PY" scripts/run_agent_kernel_arena.py check-model --model "$m" \
+              ${KORE_AKA_BASE_REVISION:+--revision "$KORE_AKA_BASE_REVISION"}
+        mrc=$?
+        if [ "$mrc" != "0" ]; then
+            # Same reasoning as a failed gateway preflight: keep the allocation
+            # for the baseline and any arm that can still run, and make the gap
+            # loud at the end rather than silently shipping a missing arm.
+            echo "WARNING: arm '$arm' failed model preflight (rc=$mrc); it will be SKIPPED."
+            SKIPPED_ARMS="$SKIPPED_ARMS $arm"
+            continue
+        fi
     fi
     RESOLVED_ARMS="$RESOLVED_ARMS $arm"
 done
@@ -227,6 +247,13 @@ RC=0
 phase baseline "" "" "${KORE_AKA_BASELINE_CONCURRENCY:-4}" || RC=1
 
 # ---- phases 2..N: one per arm --------------------------------------------
+# An arm that scored nothing at all is a different failure from an arm that
+# scored badly, and only the first one is a bug in the run. Job 13907 logged
+# "all shards exited (rc=1); merging" and "merge: no ledgers found", then moved
+# on to the next arm as though a phase had completed -- which is how a dead
+# control arm stays invisible until someone reads the artifact list. Count the
+# ledger rows and name the arm dead when there are none.
+DEAD_ARMS=""
 for arm in $RESOLVED_ARMS; do
     m="$(model_for_arm "$arm")"
     conc="${AKA_TASK_CONCURRENCY:-4}"
@@ -236,6 +263,24 @@ for arm in $RESOLVED_ARMS; do
     # waiting is allocation time burned. Halved by default.
     is_api_model "$m" && conc="${KORE_AKA_OPUS_CONCURRENCY:-2}"
     phase run "$arm" "$m" "$conc" || RC=1
+
+    rows=$(cat "$OUT"/results_"$arm"*.jsonl 2>/dev/null | wc -l)
+    if [ "${rows:-0}" -eq 0 ]; then
+        echo ""
+        echo "########################################################################"
+        echo "# ARM '$arm' PRODUCED ZERO SCORED TASKS."
+        echo "# model=$m"
+        echo "# Every shard exited without writing a ledger row, so there is no"
+        echo "# results_$arm.json to compare against any other arm. This is a"
+        echo "# failed run, not a bad score. First error from shard 0:"
+        sed -n '/Traceback/,$p' "$OUT/run_${arm}_shard0.log" 2>/dev/null \
+            | tail -12 | sed 's/^/#   /'
+        echo "########################################################################"
+        DEAD_ARMS="$DEAD_ARMS $arm"
+        RC=1
+    else
+        echo "arm '$arm': $rows scored task row(s) on disk"
+    fi
 done
 
 # ---- report ---------------------------------------------------------------
@@ -269,6 +314,12 @@ PYEOF
 if [ -n "$SKIPPED_ARMS" ]; then
     echo "INCOMPLETE: arms skipped after failed preflight:$SKIPPED_ARMS"
     echo "  fix the gateway, then resubmit with KORE_AKA_ARMS=\"$(echo "$SKIPPED_ARMS" | xargs)\" and the same KORE_AKA_OUT=$OUT"
+    RC=1
+fi
+if [ -n "$DEAD_ARMS" ]; then
+    echo "INCOMPLETE: arms that ran but scored nothing:$DEAD_ARMS"
+    echo "  resubmit with KORE_AKA_ARMS=\"$(echo "$DEAD_ARMS" | xargs)\" and the same KORE_AKA_OUT=$OUT"
+    echo "  the baseline and any healthy arm in that directory are reused, not rerun"
     RC=1
 fi
 echo "aka-final rc=$RC"

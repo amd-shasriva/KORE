@@ -2012,8 +2012,26 @@ class KoreEnv:
         if os.environ.get("KORE_TIMING_LOCK", "1").strip().lower() in ("0", "false", "no"):
             yield
             return
-        physid = str(self._gpu if self._gpu is not None
-                     else os.environ.get("HIP_VISIBLE_DEVICES", "0")).split(",")[0].strip() or "0"
+        # ROCR_VISIBLE_DEVICES is consulted too, and it is not cosmetic: it is the
+        # difference between a per-GPU lock and one global lock.
+        #
+        # A worker can be pinned to its GPU three ways: an explicit KoreEnv(gpu=N),
+        # HIP_VISIBLE_DEVICES, or ROCR_VISIBLE_DEVICES. The arena sweep uses the
+        # third, because it fans out one worker per GPU and kore.policy.serve
+        # refuses two masks at once ("double masks are forbidden"), so it narrows
+        # the inherited ROCR mask and explicitly UNSETS HIP_VISIBLE_DEVICES.
+        # Reading only HIP_VISIBLE_DEVICES therefore resolved every one of those
+        # workers to physid "0", so all 8 took the SAME lock and the timing phase
+        # ran one task at a time across the whole node while compiles proceeded in
+        # parallel. Execution was on the correct GPU throughout -- this was pure
+        # serialisation, which is why it looked like uniformly slow tasks rather
+        # than a fault.
+        _pin = self._gpu
+        if _pin is None:
+            _pin = (os.environ.get("HIP_VISIBLE_DEVICES")
+                    or os.environ.get("ROCR_VISIBLE_DEVICES")
+                    or "0")
+        physid = str(_pin).split(",")[0].strip() or "0"
         lp = (Path(tempfile.gettempdir())
               / f"kore_timing_gpu_{physid}.uid{os.getuid()}.lock")
         fd = _open_private_lockfile(lp)

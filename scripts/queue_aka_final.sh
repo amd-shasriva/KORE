@@ -139,6 +139,10 @@ export KORE_AKA_OUT="$OUT"
 # depend on the state of whatever tree happens to be at the default path when the
 # node finally frees, days later.
 export KORE_REPO="$REPO"
+# Baseline inheritance, if the caller asked for it. Exported explicitly rather than
+# relying on --export=ALL alone, for the same reason the arm list is: a knob that
+# silently fails to reach the job is how an arm ends up measuring the wrong thing.
+[ -n "${KORE_AKA_SEED_BASELINE_FROM:-}" ] && export KORE_AKA_SEED_BASELINE_FROM
 
 # The account MUST match the QoS; validated at the top of this script. Passed
 # explicitly as well as in the sbatch header (which defaults to primus) so these

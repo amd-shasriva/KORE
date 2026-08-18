@@ -110,21 +110,25 @@ def test_final_launcher_walltime_matches_a_limit_this_qos_accepts():
 
 
 def test_final_launcher_does_not_set_requeue():
-    """--requeue is a permanent hold on this controller, not a retry.
+    """--requeue turns the first requeue into a permanent hold on this controller.
 
-    This assertion was the exact opposite until 2026-08-18, and it contradicted
-    tests/test_spur_stage_launchers.py::test_launcher_is_requeue_safe, which
-    records the measurement: paired in one scheduling window on identical scripts
-    differing only in this directive, WITH --requeue the job went straight to
-    PENDING(JobHoldMaxRequeue) and WITHOUT it the job was scheduled and ran. SPUR
-    trips MaxRequeue on the FIRST requeue, so a transient NODE_FAIL becomes an
-    unrecoverable hold.
+    This assertion was the exact opposite until 2026-08-18, contradicting
+    tests/test_spur_stage_launchers.py::test_launcher_is_requeue_safe.
 
-    The stage launchers dropped the directive when that was found. The arena
-    launcher kept it, and kept a test demanding it, so the sweep most likely to eat
-    a node failure was the one carrying the flag that makes a node failure fatal.
-    Recovery is resubmission against the same --out, which resumes from the ledgers
-    and also survives the job id changing.
+    Be precise about the failure mode, because the loose version of this rule
+    misleads in both directions. The directive does NOT stop a job being scheduled:
+    job 13907 was submitted twelve minutes after the commit that added it and ran
+    for days. Reasoning from "a requeue job never lands" would misattribute a queue
+    stall that is actually a QOS group node cap.
+
+    What it does is trip MaxRequeue on the FIRST requeue: the stage-launcher
+    measurement paired identical scripts differing only in this directive, and the
+    one carrying it ended in PENDING(JobHoldMaxRequeue) while the other ran. So it
+    is harmless until a transient NODE_FAIL -- reported in the hundreds on this
+    cluster -- after which the sweep is dead in a hold rather than retried.
+
+    It also buys nothing: resubmitting against the same --out resumes from the
+    ledgers and survives the job id changing, which a requeue does not.
     """
     directives = _directives(FINAL.read_text())
     assert "--requeue" not in directives, (

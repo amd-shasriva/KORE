@@ -132,11 +132,67 @@ ARCH="${KORE_AKA_GPU_ARCH:-gfx950}"
 BASE_MODEL="${KORE_AKA_BASE_MODEL:-Qwen/Qwen3-Coder-30B-A3B-Instruct}"
 OPUS_MODEL="${KORE_AKA_OPUS_MODEL:-claude-opus-5}"
 V5_MODEL="${KORE_AKA_V5_MODEL:-}"
+# Inherit an existing baseline instead of re-timing one. See seed_baseline below.
+SEED_FROM="${KORE_AKA_SEED_BASELINE_FROM:-}"
 mkdir -p "$OUT" "$REPO/runs"
 
 echo "=== kore-aka-final job=${SLURM_JOB_ID:-manual} host=$(hostname) ==="
 echo "arms=$ARMS  out=$OUT  arena=$ARENA  arch=$ARCH  types=${TYPES:-ALL}  limit=$LIMIT"
 echo "started=$(date -Is)"
+
+# ---- baseline inheritance ------------------------------------------------
+# A sweep in a fresh --out re-times all 416 reference kernels: 4h22m measured.
+# Worse than the cost, it produces DIFFERENT denominators, measured on another
+# node at another time, so its speedups cannot be compared with an arm that ran
+# elsewhere -- which is the whole reason this script keeps arms in one --out.
+#
+# Job 16441 did exactly that on 2026-08-18: it was pointed at an empty directory
+# and started re-timing the baseline from scratch, silently producing numbers
+# that would not line up with the completed opus arm.
+#
+# COPY, NEVER LINK. Seeding was first done by hand with `ln` to save 13MB, and
+# that shares one inode between the two directories: cmd_baseline APPENDS to
+# baseline.shard<i>of8.jsonl, so a baseline with real work to do writes rows
+# straight into the ledger the other run's published numbers are divided by.
+# Nothing detects it. The 13MB is not worth the failure mode.
+seed_baseline() {
+    [ -n "$SEED_FROM" ] || return 0
+    if [ ! -d "$SEED_FROM" ]; then
+        echo "FATAL: KORE_AKA_SEED_BASELINE_FROM=$SEED_FROM is not a directory"
+        return 1
+    fi
+    if [ "$(cd "$SEED_FROM" && pwd -P)" = "$(cd "$OUT" && pwd -P)" ]; then
+        echo "seed: source and --out are the same directory; nothing to do"
+        return 0
+    fi
+    local have
+    have=$(cat "$OUT"/baseline*.jsonl 2>/dev/null | wc -l)
+    if [ "${have:-0}" -gt 0 ]; then
+        echo "seed: $OUT already holds $have baseline row(s); leaving it alone"
+        return 0
+    fi
+    local n=0 f b
+    for f in "$SEED_FROM"/baseline*.jsonl "$SEED_FROM"/baseline_results.json; do
+        [ -f "$f" ] || continue
+        b="$(basename "$f")"
+        cp --preserve=timestamps "$f" "$OUT/$b.seeding" || return 1
+        mv -f "$OUT/$b.seeding" "$OUT/$b" || return 1
+        n=$((n+1))
+    done
+    local rows
+    rows=$(cat "$OUT"/baseline*.jsonl 2>/dev/null | wc -l)
+    echo "seed: copied $n baseline file(s) from $SEED_FROM -> $rows row(s) in $OUT"
+    # An independent copy is the point; assert we did not inherit a shared inode.
+    local linked
+    linked=$(find "$OUT" -maxdepth 1 -type f -links +1 2>/dev/null | wc -l)
+    if [ "${linked:-0}" -ne 0 ]; then
+        echo "FATAL: $linked seeded file(s) share an inode with the source"
+        return 1
+    fi
+    [ "${rows:-0}" -gt 0 ] || { echo "FATAL: seeding produced no baseline rows"; return 1; }
+    return 0
+}
+seed_baseline || exit 2
 
 model_for_arm() {
     case "$1" in

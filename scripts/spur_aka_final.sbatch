@@ -72,8 +72,18 @@
 #SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/aka-final-%j.err
 
 set -uo pipefail
-REPO="/home/shasriva/Kore-RL/KORE"
-PY="/home/shasriva/kore-venv/bin/python"
+# Which checkout to run FROM, overridable so a sweep can be launched against a
+# pinned tree while a different sweep is still running out of the main one.
+#
+# This is a safety mechanism, not a convenience. Bash reads a script incrementally
+# as it executes, and it is not established that SPUR spools the batch file rather
+# than running it from disk, so editing this file while a multi-day sweep is
+# mid-flight can corrupt that job's remaining execution. On 2026-08-18 the base-arm
+# fix had to reach a new sweep while job 13907 was 10 hours into its opus arm out of
+# the main checkout: pointing the new job at its own tree makes landing the fix a
+# non-event for the running one, instead of a race against it.
+REPO="${KORE_REPO:-/home/shasriva/Kore-RL/KORE}"
+PY="${KORE_PY:-/home/shasriva/kore-venv/bin/python}"
 cd "$REPO" || exit 2
 # shellcheck disable=SC1091
 source /home/shasriva/kore-venv/bin/activate

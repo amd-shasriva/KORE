@@ -305,6 +305,23 @@ def test_the_stale_preemption_claim_is_corrected():
         "the real consequence is that OUR burst job is the preemptible one"
 
 
+def test_the_launcher_can_run_from_a_pinned_checkout():
+    """Editing a running sweep's own script can corrupt it mid-flight.
+
+    Bash reads a script incrementally, and SPUR is not known to spool the batch
+    file, so a new sweep must be able to run out of its own tree instead of forcing
+    an edit to the tree a live job is executing from.
+    """
+    code = _code_lines(FINAL.read_text())
+    assert 'REPO="${KORE_REPO:-/home/shasriva/Kore-RL/KORE}"' in code, \
+        "the sbatch must accept KORE_REPO and default to the usual path"
+    assert 'REPO="/home/shasriva/Kore-RL/KORE"' not in code, \
+        "the repo path must no longer be hardcoded"
+    submitter = _code_lines(SUBMITTER.read_text())
+    assert 'export KORE_REPO="$REPO"' in submitter, \
+        "the submitter must pin the job to the checkout it was invoked from"
+
+
 def test_the_launcher_still_keeps_the_allocation_when_one_arm_is_unusable():
     """A scarce node that can produce the baseline is worth more than a clean exit."""
     source = FINAL.read_text()

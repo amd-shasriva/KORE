@@ -135,6 +135,10 @@ mkdir -p "$OUT" "$REPO/runs"
 export KORE_AKA_ARMS="$ARMS"
 export KORE_AKA_OUT="$OUT"
 [ -n "$V5_MODEL" ] && export KORE_AKA_V5_MODEL="$V5_MODEL"
+# Run the job from THIS checkout, so a sweep launched from a pinned tree does not
+# depend on the state of whatever tree happens to be at the default path when the
+# node finally frees, days later.
+export KORE_REPO="$REPO"
 
 # The account MUST match the QoS; validated at the top of this script. Passed
 # explicitly as well as in the sbatch header (which defaults to primus) so these

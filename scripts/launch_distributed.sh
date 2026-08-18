@@ -70,6 +70,16 @@ if [ "$STAGE" = "grpo" ]; then
 else
   ACCEL_CONFIG="$REPO_ROOT/configs/accelerate_fsdp.yaml"
 fi
+# KORE_ACCEL_CONFIG replaces the stage default. The multi-node GRPO launcher
+# needs configs/accelerate_fsdp_grpo_2node.yaml, which differs in the one place
+# that cannot be expressed on the command line: fsdp_sharding_strategy. Under
+# FSDP1 accelerate wraps with `sharding_strategy or reshard_after_forward` and
+# ALWAYS exports FSDP_SHARDING_STRATEGY (argparse default "FULL_SHARD"), so the
+# strategy is decided by the YAML, and a 2-node run that inherited the
+# single-node YAML would silently run the wrong topology.
+if [ -n "${KORE_ACCEL_CONFIG:-}" ]; then
+  ACCEL_CONFIG="$KORE_ACCEL_CONFIG"
+fi
 
 # Build the accelerate command. Passing PYTHONPATH keeps `-m kore.policy.<stage>`
 # importable without an editable install.
@@ -87,6 +97,25 @@ if [ -n "${GPU_IDS:-}" ]; then
 fi
 if [ -n "$NPROC" ]; then
   ACCEL_ARGS+=("--num_processes" "$NPROC")
+fi
+
+# ---- multi-node rendezvous (all four unset => single-node, unchanged) ---- #
+# These come from the per-node srun task, not from the YAML, because three of
+# them differ per node or per allocation. KORE_MAIN_IP must be a literal IP:
+# compute nodes here cannot resolve each other by name (`hostname -f` returns
+# localhost.localdomain and `scontrol show hostnames` is not implemented on this
+# controller), so a hostname rendezvous fails with rank 0 exiting 1 and every
+# other rank taking a SIGTERM.
+if [ -n "${KORE_NUM_MACHINES:-}" ] && [ "${KORE_NUM_MACHINES}" != "1" ]; then
+  : "${KORE_MACHINE_RANK:?KORE_MACHINE_RANK required when KORE_NUM_MACHINES>1}"
+  : "${KORE_MAIN_IP:?KORE_MAIN_IP required when KORE_NUM_MACHINES>1 (literal IP, not a hostname)}"
+  case "$KORE_MAIN_IP" in
+    *[!0-9.]*) echo "error: KORE_MAIN_IP must be a literal IPv4 address, got '$KORE_MAIN_IP'" >&2; exit 1 ;;
+  esac
+  ACCEL_ARGS+=("--num_machines" "$KORE_NUM_MACHINES"
+               "--machine_rank" "$KORE_MACHINE_RANK"
+               "--main_process_ip" "$KORE_MAIN_IP"
+               "--main_process_port" "${KORE_MAIN_PORT:-29577}")
 fi
 ACCEL_ARGS+=("-m" "kore.policy.$STAGE" "$CONFIG")
 

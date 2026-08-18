@@ -1,0 +1,79 @@
+# KORE distributed GRPO (online RL), TWO NODES - FSDP HYBRID_SHARD.
+#
+# Used by scripts/launch_distributed.sh for the `grpo` stage when
+# KORE_ACCEL_CONFIG points here (scripts/spur_grpo_2node.sh does that), e.g.
+#   accelerate launch --config_file configs/accelerate_fsdp_grpo_2node.yaml \
+#       --machine_rank $SLURM_NODEID --main_process_ip <MASTER_IP> \
+#       -m kore.policy.grpo <config.json>
+#
+# WHY HYBRID_SHARD AND NOT THE SINGLE-NODE SHARD_GRAD_OP OR FULL_SHARD
+#   These nodes have NO RDMA fabric. Each carries one Ethernet interface (ens3)
+#   and every existing GRPO log is full of "NCCL WARN Could not find any local
+#   path from gpu N to net". A 16-rank inter-node all_reduce measured 4.5 GB/s,
+#   versus hundreds of GB/s for intra-node xGMI. So the design rule for this
+#   cluster is: cross the node boundary as FEW times per step as possible.
+#
+#   FULL_SHARD would re-gather parameters over that 4.5 GB/s link on every
+#   forward and every backward, which makes two nodes slower than one.
+#   SHARD_GRAD_OP replicates params but still reduces gradients across all 16
+#   ranks each step. HYBRID_SHARD applies FULL_SHARD *within* a node and
+#   REPLICATES across nodes, so the only inter-node traffic is one gradient
+#   all-reduce per step, and the intra-node sharding group is the same 8 GPUs
+#   that already measured 199.2 GiB/rank on the 30B A3B recipe.
+#
+# BOTH SHARDING KEYS SAY HYBRID_SHARD, AND THAT IS NOT BELT-AND-BRACES PEDANTRY.
+#   accelerate's launcher exports FSDP_SHARDING_STRATEGY UNCONDITIONALLY
+#   (utils/launch.py: current_env["FSDP_SHARDING_STRATEGY"] =
+#   str(args.fsdp_sharding_strategy), whose argparse default is "FULL_SHARD"),
+#   and the plugin's __post_init__ then fills sharding_strategy from it for
+#   fsdp_version==1. prepare_model wraps with
+#       sharding_strategy or reshard_after_forward
+#   so the deprecated key WINS and reshard_after_forward is dead under FSDP1.
+#   Omitting fsdp_sharding_strategy here would therefore silently run FULL_SHARD
+#   on two nodes: the exact pathological case above, on hardware booked for the
+#   opposite. kore.policy.grpo.build_fsdp_plugin also sets the authoritative
+#   field itself for hybrid so this cannot be defeated from the environment;
+#   this file agrees with it so the launcher and the code tell the same story.
+#
+# num_machines/machine_rank/main_process_ip are DEFAULTS ONLY. The per-node
+# launcher overrides machine_rank and main_process_ip on the command line
+# (rank from SLURM_NODEID, master as a literal IP because compute nodes cannot
+# resolve each other by name - `hostname -f` returns localhost.localdomain).
+
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: FSDP
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+machine_rank: 0             # overridden per node by --machine_rank $SLURM_NODEID
+main_process_ip: null       # overridden by --main_process_ip <literal IP>
+main_process_port: 29577
+main_training_function: main
+mixed_precision: bf16
+num_machines: 2
+num_processes: 16           # 2 nodes x 8 MI355X (gfx950 / CDNA4); one process per GPU
+rdzv_backend: static
+same_network: true
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+
+fsdp_config:
+  fsdp_version: 1
+  fsdp_sharding_strategy: HYBRID_SHARD              # authoritative for FSDP1 (see above)
+  fsdp_reshard_after_forward: HYBRID_SHARD          # kept in agreement; dead field under FSDP1
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  # Both names: this launcher serves the 30B A3B MoE (Qwen3MoeDecoderLayer) and
+  # the legacy dense 14B/32B blocks (Qwen3DecoderLayer). A wrap class matching
+  # nothing wraps NOTHING and silently degrades FSDP to one flat parameter.
+  # build_fsdp_plugin overrides this from the config anyway; a fallback still
+  # has to be right.
+  fsdp_transformer_layer_cls_to_wrap: Qwen3MoeDecoderLayer,Qwen3DecoderLayer
+  fsdp_backward_prefetch: BACKWARD_PRE
+  fsdp_forward_prefetch: false
+  fsdp_state_dict_type: FULL_STATE_DICT             # consolidate a plain HF ckpt for soup/eval
+  fsdp_use_orig_params: true
+  fsdp_activation_checkpointing: false              # done via HF gradient_checkpointing (use_reentrant=False)
+  fsdp_cpu_ram_efficient_loading: false             # keep every rank's params on-device
+  fsdp_sync_module_states: true
+  fsdp_offload_params: false

@@ -3085,18 +3085,100 @@ def build_fsdp_plugin(config):
     # Default is unchanged, so every existing recipe keeps ZeRO-2 and its
     # throughput. FSDP1 wants the strategy STRING; FSDP2 wants a bool
     # (False = keep params unsharded after forward).
+    # hybrid_shard exists for MULTI-NODE on a cluster with no RDMA fabric.
+    #
+    # Measured 2026-08-18 on two gfx950 nodes: they carry a single Ethernet
+    # interface (ens3, 10.245.0.0/20) and NO InfiniBand, which is why every
+    # single-node log already prints "NCCL WARN Could not find any local path from
+    # gpu N to net" and why an inter-node group only forms with NCCL_IB_DISABLE=1
+    # NCCL_SOCKET_IFNAME=ens3. A 16-rank all_reduce over that path measured
+    # 4.5 GB/s bus bandwidth, against hundreds of GB/s for intra-node xGMI.
+    #
+    # FULL_SHARD across nodes re-gathers parameters on every forward and backward,
+    # so all of that traffic would cross the 4.5 GB/s link and multi-node would be
+    # SLOWER than one node. HYBRID_SHARD shards within a node and replicates
+    # across, so the only inter-node traffic is one gradient all-reduce per step:
+    # ~61 GiB of bf16 grads is ~27 s on two nodes, against a rollout-dominated GRPO
+    # step measured at ~90 minutes. That is a ~0.5% tax to halve the rollout, which
+    # is only a good trade because THIS workload's steps are enormous; on a job
+    # with second-scale steps the same sync would be ruinous.
+    #
+    # Per-rank memory is unchanged from full_shard on one node: hybrid shards
+    # across the 8 GPUs inside a node, which is exactly the grouping that measured
+    # 199.2 GiB/rank. FSDP1 only; FSDP2 expresses this through a device mesh rather
+    # than a strategy enum, so it is refused rather than silently downgraded.
     strategy = str(getattr(config, "fsdp_sharding_strategy", "")
                    or "shard_grad_op").strip().lower()
-    if strategy not in ("shard_grad_op", "full_shard"):
+    _v1_strategies = {
+        "shard_grad_op": "SHARD_GRAD_OP",
+        "full_shard": "FULL_SHARD",
+        "hybrid_shard": "HYBRID_SHARD",
+        "hybrid_shard_zero2": "_HYBRID_SHARD_ZERO2",
+    }
+    if strategy not in _v1_strategies:
         raise ValueError(
-            f"fsdp_sharding_strategy must be 'shard_grad_op' or 'full_shard', "
-            f"got {strategy!r}")
-    if strategy == "full_shard":
-        reshard = True if version >= 2 else "FULL_SHARD"
+            f"fsdp_sharding_strategy must be one of "
+            f"{sorted(_v1_strategies)}, got {strategy!r}")
+    # reshard_after_forward ALONE DOES NOT DECIDE ANYTHING UNDER FSDP1.
+    #
+    # accelerator.py (1.14.0, prepare_model) builds the wrapper with
+    #     "sharding_strategy": fsdp_plugin.sharding_strategy or
+    #                          fsdp_plugin.reshard_after_forward
+    # and the plugin's __post_init__ ALWAYS fills sharding_strategy for
+    # fsdp_version==1, from $FSDP_SHARDING_STRATEGY or, failing that, the literal
+    # default "FULL_SHARD". The left operand is therefore never falsy and
+    # reshard_after_forward is dead on this path. Measured truth table:
+    #     env=SHARD_GRAD_OP  in-code FULL_SHARD    -> SHARD_GRAD_OP
+    #     env=SHARD_GRAD_OP  in-code HYBRID_SHARD  -> SHARD_GRAD_OP
+    #     env unset          in-code HYBRID_SHARD  -> FULL_SHARD
+    # So `accelerate launch --config_file configs/accelerate_fsdp_grpo.yaml`,
+    # which exports FSDP_SHARDING_STRATEGY=SHARD_GRAD_OP, pins ZeRO-2 no matter
+    # what this function requests: a config asking for full_shard has been
+    # getting ZeRO-2, and asking for hybrid would get ZeRO-2 too.
+    #
+    # A silently-ignored strategy is merely wasteful for the two single-node
+    # values, but for hybrid it is a wrong-topology run on hardware booked for a
+    # topology it did not get, so hybrid sets the authoritative field itself
+    # (accepting accelerate's deprecation warning) rather than asking the YAML
+    # nicely. The single-node values keep passing reshard_after_forward ONLY, so
+    # every recipe already in flight resolves exactly as it does today and an
+    # in-flight run cannot change strategy underneath itself; the disagreement is
+    # merely reported.
+    if strategy.startswith("hybrid"):
+        if version >= 2:
+            raise ValueError(
+                f"fsdp_sharding_strategy={strategy!r} requires fsdp_version=1; "
+                "FSDP2 expresses hybrid sharding with a device mesh, not a "
+                "strategy enum, and silently falling back would change the "
+                "topology without saying so")
+        reshard = _v1_strategies[strategy]
+        authoritative = {"sharding_strategy": reshard}
     else:
-        reshard = False if version >= 2 else "SHARD_GRAD_OP"
+        authoritative = {}
+        if strategy == "full_shard":
+            reshard = True if version >= 2 else "FULL_SHARD"
+        else:
+            reshard = False if version >= 2 else "SHARD_GRAD_OP"
+        # Unset is NOT neutral: __post_init__ falls back to the literal
+        # "FULL_SHARD", so a bare `python -m kore.policy.grpo` with
+        # shard_grad_op also runs something other than what it was asked for.
+        # Compare against what will actually be used, not against the env alone.
+        env_strategy = os.environ.get("FSDP_SHARDING_STRATEGY", "").strip().upper()
+        if version < 2 and (env_strategy or "FULL_SHARD") != _v1_strategies[strategy]:
+            source = (f"$FSDP_SHARDING_STRATEGY={env_strategy}, which accelerate "
+                      f"launch exports from its --config_file"
+                      if env_strategy else
+                      "accelerate's FULL_SHARD default, because "
+                      "$FSDP_SHARDING_STRATEGY is unset")
+            print(
+                f"[grpo] WARNING: fsdp_sharding_strategy={strategy!r} is being "
+                f"OVERRIDDEN to {env_strategy or 'FULL_SHARD'} by {source}. Under "
+                f"FSDP1 that value wins over this config, so the run is executing "
+                f"{env_strategy or 'FULL_SHARD'}. Set fsdp_sharding_strategy in "
+                f"the accelerate YAML to make this config effective.")
     return FullyShardedDataParallelPlugin(
         fsdp_version=version,
+        **authoritative,
         reshard_after_forward=reshard,              # SHARD_GRAD_OP (ZeRO-2): params replicated
         auto_wrap_policy="transformer_based_wrap",
         transformer_cls_names_to_wrap=[layer_cls],

@@ -35,12 +35,25 @@
 #   KORE_AKA_ARMS=v5 KORE_AKA_V5_MODEL=/path/to/final sbatch ... scripts/spur_aka_final.sbatch
 # It then divides by the identical denominators base and opus used.
 #
-# RESUMPTION IS FREE
+# RESUMPTION IS FREE -- AND IS WHY --requeue IS NOT USED
 #
 # Every phase is idempotent. `baseline` skips task ids already present in any
 # baseline*.jsonl ledger; `run` skips ids already in any results_<arm>*.jsonl.
 # Re-running this script against a populated --out resumes; it does not restart.
-# That is what makes --requeue safe after a node failure.
+#
+# Recovery is therefore RESUBMISSION, not requeue. This file used to carry
+# `#SBATCH --requeue` on the reasoning that resumability made it safe. It is not
+# safe on this controller, and that was measured: tests/test_spur_stage_launchers.py
+# records a paired experiment in one scheduling window on identical scripts
+# differing only in this directive -- WITH --requeue the job went straight to
+# PENDING(JobHoldMaxRequeue), WITHOUT it the job was scheduled and ran. SPUR trips
+# MaxRequeue on the FIRST requeue, so a transient NODE_FAIL (this cluster reports
+# them in the hundreds) turns into an unrecoverable hold instead of a retry.
+#
+# The stage launchers dropped the directive when that was found; the arena launcher
+# did not, and kept a test asserting the opposite. Resubmitting this script with the
+# same --out is strictly more capable than a requeue anyway, because it also
+# survives the job id changing.
 #
 #SBATCH --job-name=kore-aka-final
 # amd-primus with amd-primus-qos. The account MUST match the QoS: amd-general
@@ -64,9 +77,12 @@
 # Without --exclusive, burst placed jobs on nodes already holding 207-288 GiB of
 # someone else's VRAM. A timing run on a shared GPU is not a measurement.
 #SBATCH --exclusive
-# Node failure should cost the tasks in flight, not the sweep. Safe only because
-# every phase resumes from its ledger.
-#SBATCH --requeue
+# NO --requeue. See "RESUMPTION IS FREE" above: on this controller it is an
+# immediate, permanent JobHoldMaxRequeue rather than a retry. Recovery is to
+# resubmit against the same --out, which resumes from the ledgers.
+#
+# --open-mode=append is kept and still matters: a resubmitted sweep writing to the
+# same log must not truncate the evidence of the attempt that preceded it.
 #SBATCH --open-mode=append
 #SBATCH --output=/home/shasriva/Kore-RL/KORE/runs/aka-final-%j.out
 #SBATCH --error=/home/shasriva/Kore-RL/KORE/runs/aka-final-%j.err

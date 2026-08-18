@@ -154,6 +154,171 @@ def test_build_fsdp_plugin_autodetects_llama_layer():
     assert plug.transformer_cls_names_to_wrap == ["LlamaDecoderLayer"]
 
 
+# --------------------------------------------------------------------------- #
+# HYBRID_SHARD: multi-node on a cluster with no RDMA fabric
+#
+# These nodes have one Ethernet interface and no InfiniBand; a 16-rank inter-node
+# all_reduce measured 4.5 GB/s against hundreds of GB/s for intra-node xGMI. So a
+# 2-node run MUST shard inside a node and replicate across it (HYBRID_SHARD),
+# because FULL_SHARD would re-gather parameters over that link on every forward
+# and make two nodes slower than one.
+#
+# The subtlety these tests exist for: under FSDP1, accelerate wraps with
+#     sharding_strategy or reshard_after_forward
+# and the plugin's __post_init__ ALWAYS fills sharding_strategy for fsdp_version 1
+# (from $FSDP_SHARDING_STRATEGY, else the literal "FULL_SHARD"). accelerate's
+# launcher exports that variable UNCONDITIONALLY. So reshard_after_forward alone
+# decides NOTHING here, and a hybrid request expressed that way would silently run
+# whatever the YAML said - the wrong topology on hardware booked for the right one.
+# --------------------------------------------------------------------------- #
+def _hybrid_cfg(strategy="hybrid_shard", version=1):
+    class _C:
+        model_id = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+        fsdp_transformer_layer_cls = "Qwen3MoeDecoderLayer"
+        fsdp_version = version
+        cpu_offload = False
+        fsdp_sharding_strategy = strategy
+    return _C()
+
+
+def _effective(plug):
+    """Reproduce accelerate's own choice in Accelerator.prepare_model (FSDP1)."""
+    return plug.sharding_strategy or plug.reshard_after_forward
+
+
+@_REQUIRES_ACCELERATOR
+@pytest.mark.parametrize("hostile_env", [None, "SHARD_GRAD_OP", "FULL_SHARD"])
+def test_hybrid_shard_wins_over_the_launcher_env(monkeypatch, hostile_env):
+    """A hybrid request must survive whatever accelerate launch exports.
+
+    Otherwise a 2-node allocation runs FULL_SHARD over a 4.5 GB/s link with
+    nothing in the log to say so.
+    """
+    pytest.importorskip("accelerate")
+    monkeypatch.delenv("FSDP_SHARDING_STRATEGY", raising=False)
+    if hostile_env:
+        monkeypatch.setenv("FSDP_SHARDING_STRATEGY", hostile_env)
+    plug = grpo.build_fsdp_plugin(_hybrid_cfg())
+    assert _effective(plug).name == "HYBRID_SHARD", (
+        f"env={hostile_env!r} defeated the config; the run would use "
+        f"{_effective(plug).name} across nodes"
+    )
+
+
+@_REQUIRES_ACCELERATOR
+def test_hybrid_shard_zero2_variant_maps_to_the_torch_enum(monkeypatch):
+    """_HYBRID_SHARD_ZERO2 is spelled with a leading underscore in torch's enum
+    but WITHOUT one in accelerate's name list, so this mapping is easy to get
+    wrong and silently fall back."""
+    pytest.importorskip("accelerate")
+    monkeypatch.setenv("FSDP_SHARDING_STRATEGY", "SHARD_GRAD_OP")
+    plug = grpo.build_fsdp_plugin(_hybrid_cfg("hybrid_shard_zero2"))
+    assert _effective(plug).name == "_HYBRID_SHARD_ZERO2"
+
+
+def test_hybrid_shard_is_refused_on_fsdp2():
+    """FSDP2 expresses hybrid sharding with a device mesh, not a strategy enum.
+
+    Silently downgrading would change the topology without saying so, which is
+    the failure mode this whole area is guarding against.
+    """
+    pytest.importorskip("accelerate")
+    with pytest.raises(ValueError, match="fsdp_version=1"):
+        grpo.build_fsdp_plugin(_hybrid_cfg(version=2))
+
+
+@_REQUIRES_ACCELERATOR
+@pytest.mark.parametrize("strategy", ["shard_grad_op", "full_shard"])
+def test_single_node_strategies_do_not_start_setting_the_deprecated_key(monkeypatch, strategy):
+    """The single-node recipes must resolve EXACTLY as they did before hybrid landed.
+
+    A live 1000-step RL run is mid-flight on one of these configs. Setting the
+    authoritative field for them too would flip its effective topology on the
+    next requeue - correct in principle, but not something a run should discover
+    underneath itself. So hybrid sets it and these do not.
+    """
+    pytest.importorskip("accelerate")
+    monkeypatch.setenv("FSDP_SHARDING_STRATEGY", "SHARD_GRAD_OP")
+    plug = grpo.build_fsdp_plugin(_hybrid_cfg(strategy))
+    assert _effective(plug).name == "SHARD_GRAD_OP", (
+        "the launcher env no longer decides for single-node recipes, so an "
+        "in-flight run's topology just changed"
+    )
+
+
+@_REQUIRES_ACCELERATOR
+def test_a_silently_overridden_strategy_is_reported(monkeypatch, capsys):
+    """The override is invisible otherwise.
+
+    configs/accelerate_fsdp_grpo.yaml pins SHARD_GRAD_OP, so a recipe asking for
+    full_shard has been getting ZeRO-2 with nothing saying so. Report it rather
+    than raise: raising would kill the in-flight run on its next requeue.
+    """
+    pytest.importorskip("accelerate")
+    monkeypatch.setenv("FSDP_SHARDING_STRATEGY", "SHARD_GRAD_OP")
+    grpo.build_fsdp_plugin(_hybrid_cfg("full_shard"))
+    out = capsys.readouterr().out
+    assert "OVERRIDDEN" in out and "full_shard" in out and "SHARD_GRAD_OP" in out
+
+
+def test_the_2node_accelerate_config_pins_hybrid_in_the_authoritative_key():
+    """Both keys, for the reason spelled out at the top of this block."""
+    cfg = Path(__file__).resolve().parents[1] / "configs" / "accelerate_fsdp_grpo_2node.yaml"
+    text = cfg.read_text()
+    assert "fsdp_sharding_strategy: HYBRID_SHARD" in text, (
+        "without the deprecated key the launcher's FULL_SHARD default wins and "
+        "the 2-node run re-gathers params over a 4.5 GB/s link"
+    )
+    assert "fsdp_reshard_after_forward: HYBRID_SHARD" in text
+    assert "num_machines: 2" in text and "num_processes: 16" in text
+
+
+def test_the_launcher_wires_multi_node_rendezvous_and_demands_an_ip():
+    """Compute nodes here cannot resolve each other by name, so a hostname
+    rendezvous fails with rank 0 exiting 1 and the rest taking a SIGTERM. Fail at
+    argument-parse time instead, before 16 ranks load a 30B model."""
+    import subprocess as _sp
+
+    repo = Path(__file__).resolve().parents[1]
+    launcher = repo / "scripts" / "launch_distributed.sh"
+    cfg = repo / "configs" / "grpo_coder30b_a3b_trloo.json"
+
+    env = {**os.environ, "DRY_RUN": "1", "KORE_NUM_MACHINES": "2",
+           "KORE_MACHINE_RANK": "1", "KORE_MAIN_IP": "10.245.155.224",
+           "KORE_ACCEL_CONFIG": str(repo / "configs" / "accelerate_fsdp_grpo_2node.yaml")}
+    ok = _sp.run(["bash", str(launcher), "grpo", str(cfg)],
+                 capture_output=True, text=True, env=env)
+    assert ok.returncode == 0, ok.stderr
+    for token in ("--num_machines 2", "--machine_rank 1",
+                  "--main_process_ip 10.245.155.224",
+                  "accelerate_fsdp_grpo_2node.yaml"):
+        assert token in ok.stdout, f"missing {token!r} in: {ok.stdout}"
+
+    env["KORE_MAIN_IP"] = "crsuse2-m2m-185"          # a hostname, not an IP
+    bad = _sp.run(["bash", str(launcher), "grpo", str(cfg)],
+                  capture_output=True, text=True, env=env)
+    assert bad.returncode != 0 and "literal IPv4" in bad.stderr
+
+
+def test_single_node_launcher_output_is_unchanged_by_the_multi_node_support():
+    """With none of the KORE_* multi-node variables set, the command must be
+    exactly the single-node one."""
+    import subprocess as _sp
+
+    repo = Path(__file__).resolve().parents[1]
+    cfg = repo / "configs" / "grpo_coder30b_a3b_trloo.json"
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("KORE_NUM_MACHINES", "KORE_MACHINE_RANK",
+                                "KORE_MAIN_IP", "KORE_MAIN_PORT", "KORE_ACCEL_CONFIG"))}
+    env["DRY_RUN"] = "1"
+    res = _sp.run(["bash", str(repo / "scripts" / "launch_distributed.sh"), "grpo", str(cfg)],
+                  capture_output=True, text=True, env=env)
+    assert res.returncode == 0, res.stderr
+    assert "accelerate_fsdp_grpo.yaml" in res.stdout
+    for token in ("--num_machines", "--machine_rank", "--main_process_ip"):
+        assert token not in res.stdout, f"{token} leaked into the single-node command"
+
+
 def test_build_deepspeed_plugin_zero3():
     pytest.importorskip("accelerate")
     pytest.importorskip("deepspeed")

@@ -42,18 +42,30 @@
 # Re-running this script against a populated --out resumes; it does not restart.
 #
 # Recovery is therefore RESUBMISSION, not requeue. This file used to carry
-# `#SBATCH --requeue` on the reasoning that resumability made it safe. It is not
-# safe on this controller, and that was measured: tests/test_spur_stage_launchers.py
-# records a paired experiment in one scheduling window on identical scripts
-# differing only in this directive -- WITH --requeue the job went straight to
-# PENDING(JobHoldMaxRequeue), WITHOUT it the job was scheduled and ran. SPUR trips
-# MaxRequeue on the FIRST requeue, so a transient NODE_FAIL (this cluster reports
-# them in the hundreds) turns into an unrecoverable hold instead of a retry.
+# `#SBATCH --requeue` on the reasoning that resumability made it safe.
 #
-# The stage launchers dropped the directive when that was found; the arena launcher
-# did not, and kept a test asserting the opposite. Resubmitting this script with the
-# same --out is strictly more capable than a requeue anyway, because it also
-# survives the job id changing.
+# WHAT THE DIRECTIVE ACTUALLY DOES HERE -- state it precisely, because the loose
+# version of this rule is dangerous in both directions.
+#
+# It does NOT prevent a job from being scheduled. Job 13907 was submitted at
+# 2026-08-14T21:22:34, twelve minutes after the commit that added this directive,
+# and it dispatched and ran for days. So "a job with --requeue never lands" is
+# false, and anyone reasoning from that will misdiagnose a queue problem that is
+# really a QOS node cap.
+#
+# What it does is turn the FIRST requeue into a permanent hold.
+# tests/test_spur_stage_launchers.py records the paired measurement on identical
+# stage scripts differing only in this directive: the one carrying it ended in
+# PENDING(JobHoldMaxRequeue), the one without it was scheduled and ran. So the
+# directive is harmless right up until a transient NODE_FAIL -- which this cluster
+# reports in the hundreds -- at which point the sweep is not retried, it is dead in
+# a hold no operator is watching for.
+#
+# That is the whole reason it is gone: it converts a recoverable node failure into
+# an unrecoverable one, and buys nothing, because resubmitting this script against
+# the same --out already resumes from the ledgers and also survives the job id
+# changing. The stage launchers dropped it when that was found; the arena launcher
+# did not, and kept a test demanding it.
 #
 #SBATCH --job-name=kore-aka-final
 # amd-primus with amd-primus-qos. The account MUST match the QoS: amd-general

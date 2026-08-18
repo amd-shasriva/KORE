@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
 # Queue the final measured arena sweep on amd-primus.
 #
-# The job just needs to be in the queue so it lands when a node frees. It cannot
-# affect the running SFT job: amd-spur reports PreemptMode=OFF, so nothing queued
-# can evict anything running, and the SFT job runs to completion on its own node.
+# The job just needs to be in the queue so it lands when a node frees.
+#
+# PREEMPTION, CORRECTED. This header used to claim "amd-spur reports
+# PreemptMode=OFF, so nothing queued can evict anything running". As of
+# 2026-08-18 `scontrol show partition amd-spur` reports PreemptMode=CANCEL with
+# PriorityTier=100, so that reassurance was false. What actually keeps this
+# submission from harming another job is narrower and still true: submitting adds
+# a job to the queue and touches nothing else, and this script issues no scancel
+# and no scontrol update. A queued job of ours cannot evict a running job of ours
+# because they share one account and QOS at the same priority tier.
+#
+# The consequence to keep in mind is the reverse direction: a job WE submit on a
+# preemptible QOS (amd-burst-qos) can itself be cancelled. That is survivable here
+# only because every phase is idempotent and each task is ledgered as it finishes.
 #
 # This script is read-only with respect to every job it did not create: no
 # scancel, no scontrol update, no write anywhere under the SFT output tree. It
@@ -28,6 +39,51 @@ DRY="${KORE_AKA_DRY_RUN:-0}"
 # the SAME sweep is still refused.
 NAME="${KORE_AKA_JOB_NAME:-kore-aka-final}"
 V5_MODEL="${KORE_AKA_V5_MODEL:-}"
+
+# Which account/QOS to submit under, and why this is a knob rather than a constant.
+#
+# amd-primus-qos has a GROUP NODE CAP. On 2026-08-18 it was 16/16 with 32 jobs
+# waiting on QOSGrpNodeLimit, ours 20th, and 15 of the 16 nodes were parked shells
+# (sdc-hold14, ethany-hold, amc-hold, gc-reserve-primus, dev-node) idling for up to
+# 4 days. Position in that queue does not improve when OUR job ends: the freed node
+# goes to the head of the line, not back to us. amd-burst-qos had 98 nodes running
+# and ZERO jobs blocked by a node cap.
+#
+# This user is associated with amd-burst, amd-general and amd-primus, so the burst
+# route is available -- but ONLY as a matching pair. The controller rejects
+# amd-primus + amd-burst-qos outright:
+#   QOS 'amd-burst-qos' is not permitted for user 'shasriva' under account 'amd-primus'
+# which is the same "account must match the QoS" rule spur_aka_final.sbatch already
+# documents. _matching_qos below encodes it so a mismatch fails here, in a second,
+# instead of after a queue wait.
+#
+# Burst is the preemptible tier and this partition reports PreemptMode=CANCEL, so a
+# burst job CAN be killed. That is acceptable for this sweep specifically because
+# every phase is idempotent and every task's result is written to a durable ledger
+# as it completes: a preempted run resumes into the same --out and re-scores
+# nothing. Observed burst jobs had been running 3-4 days, so it is not frequent.
+ACCOUNT="${KORE_AKA_ACCOUNT:-amd-primus}"
+
+_matching_qos() {
+    case "$1" in
+        amd-primus) echo "amd-primus-qos" ;;
+        amd-burst)  echo "amd-burst-qos" ;;
+        amd-general) echo "amd-general-qos" ;;
+        *)          echo "" ;;
+    esac
+}
+
+QOS="${KORE_AKA_QOS:-$(_matching_qos "$ACCOUNT")}"
+if [ -z "$QOS" ]; then
+    echo "unknown account '$ACCOUNT': no QOS mapping. Set KORE_AKA_QOS explicitly." >&2
+    exit 2
+fi
+expected_qos="$(_matching_qos "$ACCOUNT")"
+if [ -n "$expected_qos" ] && [ "$QOS" != "$expected_qos" ]; then
+    echo "REFUSING: account '$ACCOUNT' with QOS '$QOS' is a cross-family pair." >&2
+    echo "  The controller rejects these at submit; '$ACCOUNT' pairs with '$expected_qos'." >&2
+    exit 2
+fi
 
 command -v squeue >/dev/null 2>&1 || { echo "no squeue on PATH" >&2; exit 2; }
 command -v sbatch >/dev/null 2>&1 || { echo "no sbatch on PATH" >&2; exit 2; }
@@ -80,10 +136,10 @@ export KORE_AKA_ARMS="$ARMS"
 export KORE_AKA_OUT="$OUT"
 [ -n "$V5_MODEL" ] && export KORE_AKA_V5_MODEL="$V5_MODEL"
 
-# The account MUST match the QoS. amd-general paired with a primus or burst QoS
-# is a phantom association: accepted at submit, never dispatched. Passed
-# explicitly as well as in the sbatch header, the way ensure_sft.sh does.
-set -- --account=amd-primus --qos=amd-primus-qos --export=ALL \
+# The account MUST match the QoS; validated at the top of this script. Passed
+# explicitly as well as in the sbatch header (which defaults to primus) so these
+# win over it, the way ensure_sft.sh does.
+set -- --account="$ACCOUNT" --qos="$QOS" --export=ALL \
        --job-name="$NAME" "$REPO/scripts/spur_aka_final.sbatch"
 
 echo "sbatch $*"

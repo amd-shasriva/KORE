@@ -253,9 +253,24 @@ def test_submitter_uses_only_flags_this_sbatch_implements():
 
 
 def test_submitter_passes_the_matching_account_and_qos_explicitly():
-    source = SUBMITTER.read_text()
-    assert "--account=amd-primus" in source
-    assert "--qos=amd-primus-qos" in source
+    """Both flags must be passed, and they must be a matching family pair.
+
+    These were literal ``--account=amd-primus --qos=amd-primus-qos`` until
+    2026-08-18, when amd-primus-qos turned out to carry a group node cap that was
+    16/16 with 32 jobs queued behind it. They are now variables so a sweep can be
+    routed to the uncapped amd-burst pair, and the pairing rule the controller
+    enforces is checked inside the submitter instead of being spelled literally
+    here. The invariant this test defends is unchanged: never submit one without
+    the other, and never cross families.
+    """
+    source = _code(SUBMITTER)
+    assert '--account="$ACCOUNT"' in source
+    assert '--qos="$QOS"' in source
+    assert 'ACCOUNT="${KORE_AKA_ACCOUNT:-amd-primus}"' in source, \
+        "the default must stay primus so existing invocations are unchanged"
+    for account, qos in ACCOUNT_QOS.items():
+        if account in source:
+            assert qos in source, f"{account} must map to {qos}"
 
 
 def test_submitter_does_not_smuggle_space_bearing_values_through_export():

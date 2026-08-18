@@ -247,6 +247,64 @@ def test_the_launcher_treats_a_zero_row_arm_as_a_failed_run():
     assert 'echo "aka-final rc=$RC"' in source
 
 
+# --------------------------------------------------------------------------- #
+# account/QOS routing
+#
+# amd-primus-qos carries a group node cap. On 2026-08-18 it was 16/16 with 32 jobs
+# blocked on QOSGrpNodeLimit -- ours 20th -- while 15 of the 16 nodes were parked
+# shells idling for up to 4 days. amd-burst-qos had 98 nodes running and zero jobs
+# blocked. The route out is real but must be a MATCHING pair: the controller
+# rejects amd-primus + amd-burst-qos, and accepts amd-burst + amd-burst-qos.
+# --------------------------------------------------------------------------- #
+SUBMITTER = REPO / "scripts" / "queue_aka_final.sh"
+
+
+def test_the_submitter_lets_the_account_and_qos_be_chosen():
+    """Hardcoding primus is what pinned every sweep behind the capped queue."""
+    code = _code_lines(SUBMITTER.read_text())
+    assert "KORE_AKA_ACCOUNT" in code
+    assert "--account=\"$ACCOUNT\"" in code or '--account="$ACCOUNT"' in code
+    assert '--qos="$QOS"' in code
+    assert "--account=amd-primus --qos=amd-primus-qos" not in code, \
+        "the submitter must no longer hardcode the capped primus pair"
+
+
+def test_the_submitter_knows_which_qos_each_account_pairs_with():
+    code = _code_lines(SUBMITTER.read_text())
+    for account, qos in (("amd-primus", "amd-primus-qos"),
+                         ("amd-burst", "amd-burst-qos"),
+                         ("amd-general", "amd-general-qos")):
+        assert account in code and qos in code, f"{account} -> {qos} mapping missing"
+
+
+def test_the_submitter_refuses_a_cross_family_account_qos_pair():
+    """amd-primus + amd-burst-qos is rejected by the controller; fail locally first."""
+    code = _code_lines(SUBMITTER.read_text())
+    assert "cross-family" in code
+    assert "REFUSING" in code
+
+
+def test_the_submitter_defaults_to_primus_so_existing_invocations_are_unchanged():
+    code = _code_lines(SUBMITTER.read_text())
+    assert 'ACCOUNT="${KORE_AKA_ACCOUNT:-amd-primus}"' in code
+
+
+def test_the_stale_preemption_claim_is_corrected():
+    """The header asserted PreemptMode=OFF; the partition reports CANCEL.
+
+    The old sentence is allowed to survive as a quotation being corrected -- that
+    is how the next reader learns the claim was checked -- so this asserts the
+    correction is present rather than that the words are absent.
+    """
+    source = SUBMITTER.read_text()
+    assert "PreemptMode=CANCEL" in source, \
+        "record what the partition actually reports"
+    assert "was false" in source, \
+        "the stale claim must be marked as corrected, not silently deleted"
+    assert "can itself be cancelled" in source, \
+        "the real consequence is that OUR burst job is the preemptible one"
+
+
 def test_the_launcher_still_keeps_the_allocation_when_one_arm_is_unusable():
     """A scarce node that can produce the baseline is worth more than a clean exit."""
     source = FINAL.read_text()

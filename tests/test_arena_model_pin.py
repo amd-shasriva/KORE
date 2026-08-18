@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -303,6 +304,48 @@ def test_the_stale_preemption_claim_is_corrected():
         "the stale claim must be marked as corrected, not silently deleted"
     assert "can itself be cancelled" in source, \
         "the real consequence is that OUR burst job is the preemptible one"
+
+
+# --------------------------------------------------------------------------- #
+# baseline inheritance
+#
+# A sweep in a fresh --out re-times all 416 reference kernels (4h22m measured) AND
+# produces different denominators, so its speedups cannot be compared with an arm
+# that ran in another directory. Job 16441 did exactly that on 2026-08-18. Seeding
+# fixes it -- but only if it COPIES: the first hand-rolled seeding used `ln`, and
+# because cmd_baseline appends to baseline.shard<i>of8.jsonl, a shared inode lets
+# one run append rows into the ledger another run's published numbers divide by.
+# --------------------------------------------------------------------------- #
+def test_the_launcher_can_inherit_a_baseline_instead_of_retiming_it():
+    code = _code_lines(FINAL.read_text())
+    assert "KORE_AKA_SEED_BASELINE_FROM" in code
+    assert "seed_baseline" in code, "seeding must be a named, testable step"
+    assert "seed_baseline || exit 2" in code, \
+        "a failed seed must abort before the baseline phase burns the allocation"
+
+
+def test_baseline_seeding_copies_and_never_hard_links():
+    """The inode hazard is the whole reason this is in the launcher."""
+    code = _code_lines(FINAL.read_text())
+    seed = code.split("seed_baseline()", 1)[1].split("\nseed_baseline ||", 1)[0]
+    assert "cp --preserve=timestamps" in seed, "seeding must copy"
+    assert not re.search(r"^\s*ln\s", seed, re.M), \
+        "seeding must never hard-link: cmd_baseline appends to the shard ledgers"
+    assert "-links +1" in seed, \
+        "seeding must assert afterwards that no seeded file shares an inode"
+
+
+def test_baseline_seeding_refuses_to_clobber_existing_rows():
+    """Resuming into a populated --out must not overwrite its ledgers."""
+    seed = _code_lines(FINAL.read_text()).split("seed_baseline()", 1)[1]
+    assert "leaving it alone" in seed
+    assert "already holds" in seed
+
+
+def test_baseline_seeding_is_a_no_op_when_unset():
+    """Every existing invocation must behave exactly as before."""
+    seed = _code_lines(FINAL.read_text()).split("seed_baseline()", 1)[1]
+    assert '[ -n "$SEED_FROM" ] || return 0' in seed
 
 
 def test_the_launcher_can_run_from_a_pinned_checkout():

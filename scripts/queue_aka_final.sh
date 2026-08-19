@@ -108,17 +108,36 @@ case " $ARMS " in
             echo "arms include v5 but KORE_AKA_V5_MODEL is unset" >&2
             exit 2
         fi
-        if [ ! -f "$V5_MODEL/config.json" ]; then
+        # This check cannot run from every host, and pretending otherwise blocked
+        # the sweep completely. The v5 checkpoint lives under /shared_nfs, which is
+        # mounted on COMPUTE NODES ONLY, so from the login node the stat below
+        # fails no matter how healthy the checkpoint is. Measured: both arms were
+        # un-resubmittable for ~10 hours across 105 launch rounds once their 12h
+        # allocations expired.
+        #
+        # Skip ONLY when the path's leading component is itself absent, i.e. an
+        # unmounted volume. If the root is mounted and the checkpoint under it is
+        # missing or weightless, that is the typo this gate exists to catch and it
+        # still fails at submit.
+        v5_root=""
+        case "$V5_MODEL" in
+            /*) v5_root="/$(printf '%s' "${V5_MODEL#/}" | cut -d/ -f1)" ;;
+        esac
+        if [ -n "$v5_root" ] && [ ! -e "$v5_root" ]; then
+            echo "KORE_AKA_V5_MODEL=$V5_MODEL: UNVERIFIED from this host" \
+                 "($v5_root is not mounted here); deferring the check to the" \
+                 "compute node, which can see it"
+        elif [ ! -f "$V5_MODEL/config.json" ]; then
             echo "KORE_AKA_V5_MODEL=$V5_MODEL has no config.json; that is not a" \
                  "loadable checkpoint" >&2
             exit 2
-        fi
-        if [ ! -f "$V5_MODEL/model.safetensors.index.json" ] \
-           && ! ls "$V5_MODEL"/*.safetensors >/dev/null 2>&1; then
+        elif [ ! -f "$V5_MODEL/model.safetensors.index.json" ] \
+             && ! ls "$V5_MODEL"/*.safetensors >/dev/null 2>&1; then
             echo "KORE_AKA_V5_MODEL=$V5_MODEL has no weights" >&2
             exit 2
+        else
+            echo "v5 checkpoint verified: $V5_MODEL"
         fi
-        echo "v5 checkpoint verified: $V5_MODEL"
         ;;
 esac
 

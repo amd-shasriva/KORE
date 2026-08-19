@@ -105,6 +105,47 @@ if [[ "$VISIBLE_GPUS" != "8" ]]; then
     exit 2
 fi
 
+# Refuse a node whose GPUs are already occupied, BEFORE loading 30B of weights.
+#
+# Job 29554 died on crsuse2-m2m-192 with:
+#   HIP out of memory ... GPU 0 has a total capacity of 287.98 GiB of which
+#   0 bytes is free. Of the allocated memory 26.76 GiB is allocated by PyTorch
+# at grpo.py:3751, placing the full-weight rollout replica. Our own process held
+# 27 GiB while the device had nothing left, so ~260 GiB belonged to something
+# else. This job asks for --exclusive and was granted gpu:8/node, and this
+# controller exposes no OverSubscribe field to confirm exclusivity, so the two
+# candidates are a stale process left by a previously cancelled job or an
+# exclusivity request that was not enforced. Both look identical from inside.
+#
+# The cost of guessing is an entire allocation: the failure surfaced ~15 minutes
+# in, after both models had started loading. This check costs one already-paid
+# torch import and turns that into a few seconds, and it PRINTS what is holding
+# the memory, so the next occurrence identifies the cause instead of repeating
+# the ambiguity. Exiting non-zero simply lets the watchdog place the job
+# elsewhere, which is the correct response to a bad node either way.
+GPU_DIRTY_GB="${KORE_GPU_DIRTY_GB:-8}"
+DIRTY="$("$PY" - "$GPU_DIRTY_GB" <<'PY'
+import sys
+import torch
+limit = float(sys.argv[1])
+bad = []
+for i in range(torch.cuda.device_count()):
+    free, total = torch.cuda.mem_get_info(i)
+    used = (total - free) / 2**30
+    if used > limit:
+        bad.append(f"gpu{i}={used:.1f}GiB")
+print(" ".join(bad))
+PY
+)"
+if [[ -n "$DIRTY" ]]; then
+    echo "[grpo-1node] FATAL node $(hostname) has occupied GPUs before we start: $DIRTY" >&2
+    echo "[grpo-1node] expected every device idle under --exclusive; who holds it:" >&2
+    rocm-smi --showpids 2>&1 | head -20 >&2
+    rocm-smi --showmeminfo vram 2>&1 | grep -iE "GPU|used" | head -20 >&2
+    exit 2
+fi
+echo "[grpo-1node] all 8 GPUs idle (< ${GPU_DIRTY_GB} GiB used); node is clean"
+
 # Full-node GRES bind-mounts all eight render devices; drop SPUR's physical list
 # so accelerate assigns one logical device per rank. grpo.py then maps each
 # rank's LOCAL_RANK back through the accelerate-set CUDA_VISIBLE_DEVICES to the

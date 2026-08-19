@@ -57,6 +57,29 @@ if [[ "$VISIBLE_GPUS" != "8" ]]; then
     exit 2
 fi
 
+# Same guard as the 1-node launcher, and it matters more here: a dirty GPU on
+# EITHER node kills all 16 ranks, so the chance of losing the allocation doubles.
+# See the long note in scripts/spur_grpo_1node.sbatch for the failure this
+# prevents (job 29554, OOM placing the rollout replica while ~260 GiB on the
+# device belonged to something outside our process).
+GPU_DIRTY_GB="${KORE_GPU_DIRTY_GB:-8}"
+DIRTY="$("$PY" - "$GPU_DIRTY_GB" <<'PY'
+import sys
+import torch
+limit = float(sys.argv[1])
+print(" ".join(
+    f"gpu{i}={(t - f) / 2**30:.1f}GiB"
+    for i, (f, t) in ((i, torch.cuda.mem_get_info(i))
+                      for i in range(torch.cuda.device_count()))
+    if (t - f) / 2**30 > limit))
+PY
+)"
+if [[ -n "$DIRTY" ]]; then
+    echo "[grpo-2node/node$NODEID] FATAL $(hostname) has occupied GPUs before we start: $DIRTY" >&2
+    rocm-smi --showpids 2>&1 | head -20 >&2
+    exit 2
+fi
+
 # ---- interconnect ---- #
 # No RDMA on these nodes: one Ethernet interface, which is why every run logs
 # "NCCL WARN Could not find any local path from gpu N to net". Pin the socket

@@ -58,7 +58,15 @@ PY="${KORE_PY:-/home/shasriva/kore-venv/bin/python}"
 # --export KEY=VALUE into a requeued child; positional args survive requeue.
 CFG="${1:-$REPO/configs/grpo_coder30b_a3b_trloo_2node.json}"
 FROM_STAGE="${2:-/shared_nfs/shasriva/kore/runs/sft_coder30b_a3b_v5}"
-OUT_DIR="${3:-/shared_nfs/shasriva/kore/runs/grpo_v5_trloo_2node}"
+# DEFAULTS TO THE SAME LINEAGE AS THE 1-NODE RUN, NOT A "_2node" SIBLING.
+# The frozen held-out shape lane lives INSIDE the output dir
+# (<output_dir>/shape_splits). A fresh directory freezes a NEW lane at whatever
+# HEAD is current, so the 2-node run would be training and evaluating against
+# DIFFERENT hidden shapes than the AKA baseline and v5 arms were measured on --
+# and the comparison this whole campaign exists to make would quietly stop being
+# valid, with nothing failing to announce it. Changing the topology must not
+# change the lineage.
+OUT_DIR="${3:-/shared_nfs/shasriva/kore/runs/grpo_v5_trloo}"
 DATA_ROOT="${4:-data/b05factory}"
 
 cd "$REPO" || exit 2
@@ -235,12 +243,16 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
     setsid srun --nodes="${SLURM_JOB_NUM_NODES:-2}" --ntasks-per-node=1 \
         bash "$REPO/scripts/spur_grpo_2node_inner.sh" "$RESOLVED" &
     CHILD_PID="$!"
-    if wait "$CHILD_PID"; then
-        RC=0
+    # Capture wait's status directly. `RC=$?` AFTER a failed `if` reads the status
+    # of the *if statement*, and an if whose condition is false with no else exits
+    # 0 -- so job 24465 died with node1 at rc=1 and still reported "grpo failed
+    # rc=0 / GRPO_RC=0", telling the scheduler it had succeeded.
+    wait "$CHILD_PID"
+    RC=$?
+    if [[ "$RC" -eq 0 ]]; then
         echo "[grpo-2node] grpo completed"
         break
     fi
-    RC=$?
     # Only the step-creation race is worth retrying, and the per-node logs are how
     # to tell the two apart: the inner script's first act is to create
     # runs/grpo2n-$JOBID/node$N.log, so if none exists then no task ever started.

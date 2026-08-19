@@ -3243,9 +3243,41 @@ def build_grpo_accelerator(config):
 
     backend = grpo_sharding_backend(config)
     mp = "bf16" if getattr(config, "bf16", True) else "no"
+
+    # RAISE THE COLLECTIVE TIMEOUT. torch's default process-group timeout is 10
+    # minutes, which is far shorter than the spread between ranks in THIS loop and
+    # killed a healthy 2-node run at step 4.
+    #
+    # Every rank rolls out its own slice, and a slice COMPILES AND BENCHMARKS
+    # kernels. That is unbounded work with enormous variance -- the arena sweeps
+    # measured individual compiles hitting the 3600s ceiling. Ranks that finish
+    # early then sit inside the cross-rank gather waiting for the slowest, so the
+    # collective is held open for the straggler's full compile. Exceed the timeout
+    # and the watchdog aborts that rank, it closes its sockets, and every peer dies
+    # with "socketProgress: Connection closed by remote peer" -- which is exactly
+    # what job 24465 logged on both nodes simultaneously, with no Python traceback,
+    # after four healthy steps.
+    #
+    # The exposure grows with rank count (16 ranks have more chances to contain a
+    # straggler than 8), which is why multi-node hit it first, but the single-node
+    # recipe was always one slow compile away from the same death.
+    #
+    # Too SHORT loses the whole allocation and every step since the last checkpoint.
+    # Too LONG only delays detection of a genuinely wedged job, and the launcher's
+    # own walltime plus the watchdog already bound that. So this is deliberately
+    # generous rather than tight.
+    from datetime import timedelta
+
+    from accelerate.utils import InitProcessGroupKwargs
+
+    timeout_s = int(os.environ.get("KORE_DIST_TIMEOUT_S")
+                    or getattr(config, "dist_timeout_seconds", 0) or 10800)
+    handlers = [InitProcessGroupKwargs(timeout=timedelta(seconds=timeout_s))]
     if backend == "deepspeed":
-        return Accelerator(mixed_precision=mp, deepspeed_plugin=build_deepspeed_plugin(config))
-    return Accelerator(mixed_precision=mp, fsdp_plugin=build_fsdp_plugin(config))
+        return Accelerator(mixed_precision=mp, kwargs_handlers=handlers,
+                           deepspeed_plugin=build_deepspeed_plugin(config))
+    return Accelerator(mixed_precision=mp, kwargs_handlers=handlers,
+                       fsdp_plugin=build_fsdp_plugin(config))
 
 
 def _dummy_gen_inputs(tok, device):

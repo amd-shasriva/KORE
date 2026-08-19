@@ -409,6 +409,33 @@ def _is_local_checkpoint(model: str) -> bool:
         return False
 
 
+def _unmounted_root(model: str) -> Optional[str]:
+    """For an absolute path, the leading component that does not exist here.
+
+    Distinguishes a path this HOST cannot see from a path that is simply wrong,
+    which the arena launcher has to tell apart. ``/shared_nfs`` is mounted on
+    COMPUTE NODES ONLY on this cluster, so every checkpoint under it is invisible
+    from the login node where the launcher's preflight runs. A repo id never
+    starts with a separator, so an absolute path is never a Hub id no matter
+    whether it currently resolves.
+
+    Returns the missing mount root (e.g. ``/shared_nfs``) when the path is
+    absolute and its FIRST component is absent -- an unmounted volume. Returns
+    ``None`` when the root exists, in which case a missing checkpoint under it is
+    a real error and must still fail loudly.
+    """
+    try:
+        if not os.path.isabs(str(model)):
+            return None
+    except (TypeError, ValueError):
+        return None
+    parts = [p for p in str(model).split(os.sep) if p]
+    if not parts:
+        return None
+    root = os.sep + parts[0]
+    return None if os.path.exists(root) else root
+
+
 def _known_hub_pins() -> dict[str, str]:
     """Hub repo ids whose immutable commit KORE already records.
 
@@ -468,6 +495,27 @@ def resolve_policy_checkpoint(
                 f"{revision[:12]}... is IGNORED (a directory has no Hub commit)",
                 flush=True,
             )
+        return name
+
+    # An ABSOLUTE PATH on a volume this host cannot see is still a local
+    # checkpoint, not a Hub id. Without this the v5 arm was unlaunchable: its
+    # checkpoint lives under /shared_nfs, which is mounted on COMPUTE NODES ONLY,
+    # so _is_local_checkpoint (which stats config.json) said False on the login
+    # node, the name fell through to Hub-id handling, and the launcher refused
+    # with "is a Hugging Face repo id with no immutable revision". Measured cost:
+    # both arena arms sat un-resubmittable for ~10 hours across 105 launch rounds
+    # after their 12h allocations expired.
+    #
+    # Only an UNMOUNTED root is forgiven. If the root exists and the checkpoint
+    # under it does not, that is a typo and must still fail loudly.
+    unmounted = _unmounted_root(name)
+    if unmounted is not None:
+        print(
+            f"[aka] {name}: cannot verify from this host -- {unmounted} is not "
+            f"mounted here (compute-node-only volume). Treating it as a local "
+            f"checkpoint; the job will resolve it where the mount exists.",
+            flush=True,
+        )
         return name
 
     from kore.policy.model_spec import (
@@ -838,6 +886,17 @@ def cmd_check_model(args) -> int:
               flush=True)
         return 0
     resolved = resolve_policy_checkpoint(args.model, args.revision)
+    # A checkpoint on a volume this host cannot see is unverifiable HERE, not
+    # broken. Refusing would block the launch forever from a node that
+    # structurally cannot stat the path -- which is what kept both arena arms
+    # down for ~10 hours. Say so plainly and let the job do the real check on a
+    # node where the mount exists; the resolution logic above has already
+    # confirmed the root is genuinely absent rather than the path being wrong.
+    unmounted = _unmounted_root(resolved)
+    if unmounted is not None:
+        print(f"[aka] {resolved}: UNVERIFIED from this host ({unmounted} not "
+              f"mounted); deferring the check to the compute node", flush=True)
+        return 0
     missing = [
         name for name in ("config.json",)
         if not os.path.isfile(os.path.join(resolved, name))

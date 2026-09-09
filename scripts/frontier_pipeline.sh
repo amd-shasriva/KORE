@@ -80,14 +80,20 @@ REPAIR_ROOTS="${REPAIR_ROOTS:-${REG_HIP_ROOT:-data/registry_hip_frontier}}"
 #: unconsumed. The already-gated FlyDSL set stays promoted and sharded by the
 #: harvest, so resuming it later costs nothing.
 #:
-#: Same forward reference as REPAIR_ROOTS above, and it needs the same literal
-#: defaults for the same reason: both REG_*_ROOT are defined 31 and 37 lines
-#: below this, so under `set -u` a bare $REG_HIP_ROOT aborts the script here.
-#: REPAIR_ROOTS was fixed and this line, six below it, was not -- so running the
-#: pipeline by hand still died on an unbound variable, just seven lines later
-#: than before. It worked under ensure_loops, which supplies both from the
-#: environment, and died by hand, which is the worst way round to debug.
-GATE_ROOTS="${GATE_ROOTS:-${REG_HIP_ROOT:-data/registry_hip_frontier} ${REG_FLYDSL_ROOT:-data/registry_flydsl_frontier}}"
+#: Both roots are declared 31 and 37 lines below, and GATE_ROOTS reads them
+#: here. Under `set -u` a bare $REG_HIP_ROOT therefore aborted the script at
+#: this line. REPAIR_ROOTS above was given a literal default for exactly that
+#: reason and this line, six below it, was not -- so the pipeline still died on
+#: an unbound variable when run by hand, seven lines later than before, while
+#: continuing to work under ensure_loops, which supplies both from the
+#: environment. That is the worst way round for something you debug.
+#:
+#: Seeded with `:=` rather than inlining defaults into the expansion below, so
+#: the declarations at the bottom stay the single place the literals are
+#: written and GATE_ROOTS keeps reading two plain variables.
+: "${REG_HIP_ROOT:=data/registry_hip_frontier}"
+: "${REG_FLYDSL_ROOT:=data/registry_flydsl_frontier}"
+GATE_ROOTS="${GATE_ROOTS:-$REG_HIP_ROOT $REG_FLYDSL_ROOT}"
 
 #: The pool-sourced roots: seeded, gated and harvested, but no longer mined.
 #:

@@ -148,6 +148,10 @@ ABSENT_PATHS: dict[str, str] = {
         "GRPO distill sink; created by the run",
     "data/b05factory/opus_scores.json":
         "co-evolution score cache; populated by the run's first step",
+    "data/b05factory/sft/v5_sft.jsonl":
+        "where data/release/reassemble.sh writes the v5 mixture before linking "
+        "it to data/v5_sft.jsonl; named in docs/REPRODUCING.md so the reader "
+        "knows which path the script actually produces",
     "data/v5_sft.jsonl":
         "the v5 SFT mixture scripts/v5_stage4_mixture.py writes (--out default) "
         "and configs/sft_coder30b_a3b.json trains on; gitignored because 1.8 GB "

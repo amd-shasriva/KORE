@@ -3280,6 +3280,37 @@ def build_grpo_accelerator(config):
                        fsdp_plugin=build_fsdp_plugin(config))
 
 
+def _release_cached_blocks() -> dict:
+    """Return dead allocator segments to the driver, and report what is left.
+
+    A step ends having generated with ``use_cache=True`` on the full-weight
+    replica, so its KV blocks are unreachable but still held as cached segments.
+    The scored forward that follows is where the step peaks: job 31593 aborted
+    inside it with HSA_STATUS_ERROR_OUT_OF_RESOURCES and "Available Free mem :
+    0 MB", on a recipe the config notes already measure at 199.2 GB of 252 GiB
+    (84%). Releasing first costs one synchronize and stops dead segments
+    competing with the forward that needs the room.
+
+    The returned figures are logged so a recurrence leaves the actual split in
+    our log, instead of only a driver-level abort with no attribution.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return {}
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        free, total = torch.cuda.mem_get_info()
+        return {"alloc_gb": round(torch.cuda.memory_allocated() / 2 ** 30, 1),
+                "reserved_gb": round(torch.cuda.memory_reserved() / 2 ** 30, 1),
+                "peak_gb": round(torch.cuda.max_memory_allocated() / 2 ** 30, 1),
+                "free_gb": round(free / 2 ** 30, 1),
+                "total_gb": round(total / 2 ** 30, 1)}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _dummy_gen_inputs(tok, device):
     """A trivial ``[(prompt_ids, gen_ids)]`` for a padding (lockstep) forward.
 
@@ -4002,6 +4033,13 @@ def _train_grpo_distributed(config, tasks):
         def _logp_fn(gen_inputs):
             return _recompute_logp(model, tok, gen_inputs, config.temperature) if gen_inputs else None
 
+        # Rollout is done; the scored forward below is this step's peak. Give the
+        # generation KV segments back first, and record the margin we actually
+        # have so the next OOM is attributable to a term rather than to a guess.
+        log.info("grpo(dist) optimizer phase", step=step, rank=rank,
+                 micro_steps=max_micro, local_terms=len(local_terms),
+                 **_release_cached_blocks())
+
         loss_value, n_terms = 0.0, 0
         for _epoch in range(ppo_epochs):
             opt.zero_grad()
@@ -4612,22 +4650,87 @@ def _recompute_logp(model, tok, gen_inputs, temperature: float = 1.0):
     return token_mean_logprob(total, n_tok)  # DAPO length-debias (item 3)
 
 
-def _seq_logprob(model, tok, prompt_ids, gen_ids, temperature: float = 1.0):
+#: Token-chunk width for scoring log-probs, 0 to disable.
+#:
+#: Job 31593 died in this function with HSA_STATUS_ERROR_OUT_OF_RESOURCES and
+#: "Available Free mem : 0 MB" on the recipe the config notes already measure at
+#: 199.2 GB of 252 GiB per rank (84%). Two terms here are avoidable at that
+#: margin, and both reductions are EXACT rather than approximations:
+#:   * the vocab projection over prompt positions, which is sliced away
+#:     immediately (see ``logits_to_keep`` below);
+#:   * the fp32 ``log_softmax`` output, which autograd holds until the backward.
+#: Scoring in chunks under ``checkpoint`` bounds the second to [chunk, vocab] and
+#: recomputes it in the backward. The config's max_prompt_length note names
+#: chunked log-probs as the prerequisite for raising the length caps at all.
+_LOGP_CHUNK_TOKENS = int(os.environ.get("KORE_LOGP_CHUNK_TOKENS", "512") or 0)
+
+#: Set False the first time a backbone rejects ``logits_to_keep`` so the probe
+#: does not repeat per scored sequence. transformers 4.57 Qwen3-MoE/Qwen3 accept
+#: it; anything older or non-HF falls back to the full projection.
+_LOGITS_TO_KEEP_OK = True
+
+
+def _gathered_logprob(logits, idx, temperature: float = 1.0):
+    """Summed ``log_softmax(logits)`` at the targets in ``idx``.
+
+    Kept pure and shape-agnostic so the chunked and single-shot paths execute the
+    SAME arithmetic. Chunking over the token axis is exact because the result is a
+    sum of independent per-token terms.
+    """
+    import torch
+
+    if temperature and temperature > 0:
+        logits = logits / temperature
+    logp = torch.log_softmax(logits, dim=-1)
+    return logp.gather(-1, idx).squeeze(-1).sum()
+
+
+def _seq_logprob(model, tok, prompt_ids, gen_ids, temperature: float = 1.0,
+                 chunk_tokens: Optional[int] = None):
     """Summed log-prob of ``gen_ids`` under ``model`` (temperature-scaled logits).
 
     Divides the logits by ``temperature`` before ``log_softmax`` so the scored
     distribution matches the sampling distribution used to generate the tokens.
     """
+    global _LOGITS_TO_KEEP_OK
     import torch
 
     full = torch.cat([prompt_ids[0], gen_ids]).unsqueeze(0)
-    out = model(full)
-    logits = out.logits[0, prompt_ids.shape[1] - 1:-1, :]
-    if temperature and temperature > 0:
-        logits = logits / temperature
-    logp = torch.log_softmax(logits, dim=-1)
+    n_gen = int(gen_ids.shape[0])
+    # Only positions [P-1, S-1) are ever scored, so projecting the prompt to
+    # vocab builds a [prompt, 151936] tensor for the sole purpose of slicing it
+    # away. At 4096 prompt tokens that is 1.2 GiB of bf16 held in the graph.
+    if _LOGITS_TO_KEEP_OK:
+        try:
+            out = model(full, logits_to_keep=n_gen + 1)
+            logits = out.logits[0, :-1, :]
+        except TypeError:
+            _LOGITS_TO_KEEP_OK = False
+            out = model(full)
+            logits = out.logits[0, prompt_ids.shape[1] - 1:-1, :]
+    else:
+        out = model(full)
+        logits = out.logits[0, prompt_ids.shape[1] - 1:-1, :]
+
     idx = gen_ids.unsqueeze(-1)
-    return logp.gather(-1, idx).squeeze(-1).sum()
+    cs = _LOGP_CHUNK_TOKENS if chunk_tokens is None else int(chunk_tokens)
+    n = int(logits.shape[0])
+    if cs <= 0 or n <= cs:
+        return _gathered_logprob(logits, idx, temperature)
+
+    from torch.utils.checkpoint import checkpoint
+
+    total = None
+    graph = torch.is_grad_enabled() and logits.requires_grad
+    for a in range(0, n, cs):
+        b = min(a + cs, n)
+        if graph:
+            s = checkpoint(_gathered_logprob, logits[a:b], idx[a:b], temperature,
+                           use_reentrant=False)
+        else:
+            s = _gathered_logprob(logits[a:b], idx[a:b], temperature)
+        total = s if total is None else total + s
+    return total
 
 
 def _task_prompt(task) -> str:
@@ -4683,6 +4786,45 @@ def grpo_config_from_dict(d: dict):
     return config
 
 
+def _order_training_tasks(config, task_ids: list) -> list:
+    """Return the order round-robin sampling will walk ``task_ids`` in.
+
+    The default draw is ``tasks[cursor % len(tasks)]`` and the registry ships tasks
+    GROUPED BY FAMILY, so the cursor spends whole steps inside one family. Measured
+    on step 0 of a real run: the first 15 draws were all ``flash_attn_*``, and 11 of
+    them produced ZERO correct kernels across all 16 trajectories. A group whose
+    reward std is zero carries no gradient, so DAPO/StarPO-S discard it -- roughly
+    three quarters of the step's rollout bought nothing, and dynamic sampling then
+    burned toward its ``3 * target_groups`` attempt ceiling refilling from the same
+    unsolvable family.
+
+    ``KORE_TASK_ORDER=shuffled`` permutes once so consecutive draws span families,
+    which is what makes a group likely to contain both successes and failures.
+
+    Determinism is a correctness requirement, not a preference: under FSDP every rank
+    must draw the SAME task or the per-step collectives desync, and this function runs
+    on every rank. The permutation is therefore seeded from ``config.seed`` alone, so
+    all ranks agree and a resumed run reproduces the identical order.
+
+    Env-gated rather than config-gated on purpose: ``audit_requested_capabilities``
+    runs with ``KORE_GRPO_INERT_FEATURES=error`` and fails the run on config keys it
+    cannot tie to a live consumer, so a new key would need registry surgery to ship.
+    """
+    mode = str(os.environ.get("KORE_TASK_ORDER", "listed") or "listed").strip().lower()
+    if mode not in ("listed", "shuffled"):
+        raise ValueError(
+            f"KORE_TASK_ORDER must be 'listed' or 'shuffled', got {mode!r}")
+    if mode == "listed" or len(task_ids) < 2:
+        return task_ids
+    import random
+    seed = int(getattr(config, "seed", 0) or 0)
+    ordered = list(task_ids)
+    random.Random(seed).shuffle(ordered)
+    log.info("grpo task order: shuffled", seed=seed, n_tasks=len(ordered),
+             first=ordered[:3])
+    return ordered
+
+
 def _main(argv: Optional[list] = None) -> int:
     import json
     import sys
@@ -4704,6 +4846,7 @@ def _main(argv: Optional[list] = None) -> int:
     # why the rank-0 guard and the barrier live here rather than in ``train_grpo``
     # (a routing shim that never sees a rank).
     task_ids = list(tasks) if tasks else default_grpo_task_ids()
+    task_ids = _order_training_tasks(cfg, task_ids)
     freeze_training_shape_splits(cfg, task_ids)
     out = train_grpo(cfg, tasks=task_ids)
     print(f"[grpo] -> {out}")

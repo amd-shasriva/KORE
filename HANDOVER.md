@@ -1,0 +1,136 @@
+# Handover
+
+Where everything lives, what you need access to, and what it takes to pick this
+up. Written on the last day of the internship that produced it, so it says what
+is true rather than what was planned.
+
+Start with `docs/REPRODUCING.md` for how to run the pipeline. This document is
+about where the artifacts are and who to ask.
+
+## 1. What exists, and where
+
+| Artifact | Location | In this repo? |
+| --- | --- | --- |
+| Source, tests, scripts, configs | this repository | yes |
+| v5 training corpus, 206,000 rows | `data/release/sft/v5_sft.jsonl.gz.part{aa..ad}` | yes, as sub-100 MB shards |
+| v5 held-out eval slice, 899 rows | `data/release/sft/v5_eval.jsonl.gz` | yes |
+| Earlier corpora (multicap, v4, midtrain, DPO) | `data/release/` | yes |
+| RL run evidence: resolved config, event log, three arena ledgers | `docs/evidence/rl_v5_frontier/` | yes |
+| The RL recipe that produced checkpoint-30 | `configs/grpo_coder30b_a3b_trloo_frontier.json` | yes |
+| SFT checkpoint the RL run started from | `/mnt/vast/shasriva/models/sft_coder30b_a3b_v5` | **no** |
+| RL checkpoint-30 (the model every result describes) | `/mnt/vast/shasriva/runs/grpo_v5_frontier` | **no** |
+| Base model, `Qwen3-Coder-30B-A3B-Instruct` @ `b2cff646` | HuggingFace Hub | no, and does not need to be |
+
+Rebuild the corpus from a clean checkout with:
+
+```bash
+cd data/release && ./reassemble.sh
+```
+
+That writes `data/b05factory/sft/v5_sft.jsonl` and links it to the
+`data/v5_sft.jsonl` path the SFT config reads. No network, no hub account.
+
+## 2. The checkpoints are the gap, and it is the important one
+
+Neither the SFT checkpoint nor RL checkpoint-30 is in this repository, and
+neither can be. A 30B checkpoint is about 488 GB against GitHub's 100 MB
+per-file limit, and `LICENSE` separately forbids publishing a model checkpoint
+derived from this work to any public or third-party registry without written
+AMD authorization.
+
+They were written to `/mnt/vast/shasriva/...`, which is not the SPUR
+`/shared_nfs` volume the committed configs target. Whoever picks this up needs
+to establish, in this order:
+
+1. Does `/mnt/vast/shasriva/runs/grpo_v5_frontier` still exist, and who now has
+   read access to it?
+2. If it is gone, is there a copy? `save_total_limit` was 2, so old checkpoints
+   were rotated out during the run and only the most recent survive by design.
+3. If nothing survives, stage 2 must be rerun to produce a new SFT checkpoint
+   before stage 3 can start. The recipe is committed and the corpus is here, so
+   this is a compute problem rather than a knowledge problem.
+
+**Every published number describes checkpoint-30 specifically.** If the
+checkpoint is gone, the numbers in `docs/evidence/RL_RUN_PROVENANCE.md` remain
+attributable — the ledgers that produced them are committed — but they cannot
+be re-derived without rerunning both stages.
+
+## 3. Access you will need
+
+| What | Why | Who to ask |
+| --- | --- | --- |
+| SPUR cluster account, `amd-general` | Every training and evaluation launcher | cluster ops |
+| `/mnt/vast` read access | The only place the checkpoints were written | whoever provisioned that volume |
+| `AMD_LLM_API_KEY`, `AMD_NTID` | Corpus generation only. Not needed to train on the committed corpus. | AMD LLM gateway owners |
+| AgentKernelArena checkout @ `b09f5eb` | Evaluation. Not vendored here. | the AKA repository |
+| `aiter` source | Vendor baselines. Without it every speedup inflates. | the aiter repository |
+
+`docs/CLUSTER_OPERATIONS.md` records which account and QoS pairings actually
+schedule on SPUR, which is not obvious: a pairing can be accepted by `sbatch`
+and then never become a scheduling candidate.
+
+## 4. State of the work
+
+Stages 1 and 2 are complete and reproducible. Stage 3 ran once, for 31 of a
+configured 1,000 optimizer steps, and stopped; it was not converged. Stage 4
+scored all four arms on 416 tasks.
+
+The results, and the honest reading of them, are in
+`docs/evidence/RL_RUN_PROVENANCE.md`. Correctness went 52.4% to 62.3% against
+the fine-tuned model, paired at 63 tasks fixed and 22 broken. Compile rate went
+82.7% to 93.8%. Speed did not move.
+
+## 5. The first thing to fix
+
+`overlong_buffer_len` is 512 against a `max_response_length` of 1024, so the
+overlong mask dropped every response of 512 tokens or more rather than only the
+truncated tail. It cost the run 908 training samples across 31 steps, counted
+from the event log, and it falls hardest on long responses — which is where
+optimised kernels live. It is the leading explanation for the flat speed
+result.
+
+Three changes, cheapest first:
+
+1. Shrink the buffer to a small fraction of the limit rather than half of it.
+2. Raise the generation limit. 1024 tokens is not room for a tiled kernel. This
+   costs nodes, not code, or a trade of group width for context.
+3. Log the mask rate as a live training metric, so the next run sees this at
+   step one instead of in a post-mortem.
+
+## 6. Things known to be true and not yet acted on
+
+Recorded here because they were found and verified, not fixed.
+
+`kore/policy/dpo.py` no longer consolidates its final save. Periodic
+checkpoints moved to `SHARDED_STATE_DICT` so a run could resume, and the
+consolidation that the cross-stage handoff needs was added to `train_sft` only.
+A full fine-tune DPO run therefore writes a sharded final artifact that the
+next stage cannot open on a different mesh. The parallel to copy is
+`kore/policy/sft.py`'s final-save block.
+
+`POOL_STREAMS=1` in `scripts/frontier_pipeline.sh` reintroduces a bug the tests
+were written against: it seeds the pool roots but `GATE_ROOTS` still names only
+the registry roots, so those seeds would never be gated. Under the default the
+invariant holds. Making the switch safe to flip means growing `GATE_ROOTS`
+alongside it.
+
+`runs/shards_frontier_twins` is still refreshed by the pipeline and nothing
+mines it. The merged `frontierhip` shard set is built by
+`scripts/build_balanced_stream.py`, which is invoked by hand, so twins gated
+after the stream merge do not automatically join a mined set.
+
+## 7. Conventions worth keeping
+
+Two mechanisms in this repository do real work and are cheap to preserve.
+
+`tests/test_docs_contract.py` asserts that every filesystem path named in a
+markdown file exists or is explicitly explained. It is the reason the
+documentation here can be trusted; it was red for a month and is now green.
+When it fails, the doc is usually right and the allowlist is stale — read the
+failure before editing prose.
+
+`scripts/operations_registry.json` names every operational script and says
+whether it is active, diagnostic, deprecated or destructive, and a test derives
+its expectation from the filesystem. Add a script, add an entry, in the same
+change. Two scripts in it rewrite the committed corpus in place with no dry
+run; that is exactly the kind of thing the registry exists to make visible.

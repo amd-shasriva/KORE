@@ -5,12 +5,23 @@ set -e
 mkdir -p ../b05factory/midtrain ../b05factory/sft ../b05factory/dpo ../../kore_offline
 cat midtrain/corpus.jsonl.gz.part* | gunzip > ../b05factory/midtrain/corpus.jsonl
 cat sft/multicap.jsonl.gz.part*   | gunzip > ../b05factory/sft/multicap.jsonl
-# multicap_v2 is the mixture SFT actually trains on: the base mix plus filtered
-# multi-turn kernel-refinement trajectories. It is rebuilt here by concatenation
-# rather than downloaded, so a fresh checkout reproduces it with no network.
-cat sft/kernel_multiturn_refine.jsonl.gz.part* | gunzip > ../b05factory/sft/kernel_multiturn_refine.jsonl
-cat ../b05factory/sft/multicap.jsonl ../b05factory/sft/kernel_multiturn_refine.jsonl \
-    > ../b05factory/sft/multicap_v2.jsonl
+# multicap_v2 was the 14B-era mixture: the base mix plus filtered multi-turn
+# kernel-refinement trajectories. configs/sft_14b_full.json and
+# configs/sft_14b_pathb.json still point at it.
+#
+# Its kernel_multiturn_refine shards are NOT in this release, so v2 cannot be
+# rebuilt from a fresh checkout. Guarded rather than deleted, because under
+# `set -e` a bare `cat` on a glob that matches nothing failed HERE and aborted
+# the script before the v5 rebuild at the bottom -- and v5 is the mixture the
+# 30B config actually trains on. The recovery path for the current model was
+# therefore dead while the message on screen was about a legacy artifact.
+if compgen -G "sft/kernel_multiturn_refine.jsonl.gz.part*" > /dev/null; then
+    cat sft/kernel_multiturn_refine.jsonl.gz.part* | gunzip > ../b05factory/sft/kernel_multiturn_refine.jsonl
+    cat ../b05factory/sft/multicap.jsonl ../b05factory/sft/kernel_multiturn_refine.jsonl \
+        > ../b05factory/sft/multicap_v2.jsonl
+else
+    echo "skip: multicap_v2 -- kernel_multiturn_refine shards are not in this release" >&2
+fi
 cat dpo/pairs.jsonl.gz.part*      | gunzip > ../b05factory/dpo/pairs.jsonl
 cat curriculum/curriculum_all.jsonl.gz.part* | gunzip > ../../kore_offline/curriculum_all.jsonl 2>/dev/null || true
 cat provenance/datagen.tar.gz.part* | gunzip | tar -C ../b05factory -xf -
@@ -36,4 +47,15 @@ cat sft/v5_sft.jsonl.gz.part* | gunzip > ../b05factory/sft/v5_sft.jsonl
 # halves keeps the train/eval boundary reproducible byte-for-byte, which is the
 # whole point of holding rows out.
 gunzip -c sft/v5_eval.jsonl.gz > ../b05factory/sft/v5_eval.jsonl
+
+# configs/sft_coder30b_a3b.json reads data/v5_sft.jsonl and data/v5_eval.jsonl,
+# one directory above where every other reassembled artifact lands. Without
+# these links the config's own comment -- "reassemble.sh reproduces exactly this
+# file" -- is false, and kore/policy/sft.py fails at load telling you to run a
+# script that has already run.
+#
+# Linked rather than copied: v5_sft.jsonl is 1.8 GB, and a second physical copy
+# of the training corpus is the kind of thing that quietly fills a node.
+ln -sfn b05factory/sft/v5_sft.jsonl  ../v5_sft.jsonl
+ln -sfn b05factory/sft/v5_eval.jsonl ../v5_eval.jsonl
 echo reassembled

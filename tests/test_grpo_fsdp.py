@@ -396,7 +396,16 @@ def test_grpo_main_reads_json_and_runs(monkeypatch, tmp_path):
 
     monkeypatch.setattr(grpo, "train_grpo", fake_train)
     p = tmp_path / "grpo.json"
+    # output_dir under tmp_path, because _main freezes the held-out shape split
+    # into <output_dir>/shape_splits and that manifest pins the repository's git
+    # HEAD. Defaulting it wrote into the real runs/grpo, where it survived the
+    # test and then rejected every later run: the manifest is only valid for the
+    # commit that wrote it, so the NEXT commit -- any commit, including a
+    # docs-only one -- failed this test with a code-identity mismatch. The
+    # rejection is correct and deliberate; leaving the artifact outside tmp_path
+    # was the defect.
     p.write_text(json.dumps({"model_id": "Qwen/Qwen3-14B", "use_lora": False,
+                             "output_dir": str(tmp_path / "grpo_out"),
                              "tasks": ["rmsnorm_aiter"]}))
     assert grpo._main([str(p)]) == 0
     assert seen["cfg"].distributed is True           # defaulted by the entry

@@ -104,11 +104,26 @@
       "note": "read-only probe of whether each pool task's oracle is a function of its declared inputs; also scans each pool seed with the real integrity gate"
     },
     {
+      "path": "scripts/borrow_run_grpo.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "production": false,
+      "role": "lender-side entrypoint for running GRPO as an `srun --overlap` step inside somebody else's allocation, which is the only way to hand a specific node to a specific person on a cluster where every job sits at priority 1000; sets KORE_BORROWED_ALLOCATION=1 so spur_grpo_1node.sbatch performs no scontrol write, no requeue and no drain against a job it does not own, and checkpoints into a directory the lender owns"
+    },
+    {
       "path": "scripts/build_agentic_sft_slice.py",
       "classification": "active",
       "lifecycle": "active",
       "deletes_artifacts": false,
       "note": "filters and decontaminates agentic shards into an SFT slice; never mutates the shards it reads"
+    },
+    {
+      "path": "scripts/build_balanced_stream.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "interleave a task list family-by-family so that any prefix of a shard is as balanced as supply allows, instead of mining the 94% GEMM order the sources happen to arrive in; starts the rotation on whichever family is furthest behind in what is already on disk, then hands the list to partition_any_tasks.py"
     },
     {
       "path": "scripts/build_hipkittens_sft.py",
@@ -170,6 +185,14 @@
       "note": "mines external PyTorch modules into the decontaminated task pool; writes only its --out dir and never mutates the registry it reads"
     },
     {
+      "path": "scripts/claim_soonest_nodes.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "side_effect_free_by_default": false,
+      "role": "re-point an IGNORE_JOBS reservation at the busy nodes whose current jobs end soonest, computing time-left as TimeLimit minus Elapsed because the scheduler will not report it; keeps nodes running our own work, skips unlimited and unlaunchable ones, and applies hysteresis so the hold does not churn. --dry-run prints the trade without touching the reservation"
+    },
+    {
       "path": "scripts/cleanup_stale_artifacts.sh",
       "classification": "destructive",
       "lifecycle": "active",
@@ -213,10 +236,24 @@
       "role": "SPUR-compatible additive wins worker"
     },
     {
+      "path": "scripts/dialect_token_parity.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "read-only token share per kernel dialect across every mined root, which is the number the mining plan is steered by; counts tokens rather than rows because an agentic HIP row is several times longer than a Triton one, and excludes quarantine, per-attempt ledgers and built mixtures so one dataset is not charged for three times"
+    },
+    {
       "path": "scripts/ensure_loops.sh",
       "classification": "active",
       "lifecycle": "active",
       "role": "start any unattended loop that is not running; idempotent, driven by cron"
+    },
+    {
+      "path": "scripts/ensure_sft.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "cron-owned guard over the whole v5 SFT tree: the supervisor cannot survive its own death, so this checks under flock whether the run has genuinely finished, whether a kore-sft job exists in any state, and whether a supervisor is watching it, and submits or restarts only what is missing within a bounded attempt budget"
     },
     {
       "path": "scripts/eval_bakeoff_multi.py",
@@ -234,6 +271,13 @@
       "classification": "deprecated",
       "lifecycle": "deprecated",
       "replacement": "scripts/spur_supervise_datagen.py"
+    },
+    {
+      "path": "scripts/flyseed_watch.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "keep exactly one verified-FlyDSL seeding job alive until the task list is exhausted, so a controller outage does not leave the one dialect missing from the mixture waiting for a human; decides work-remaining from the seeding ledger rather than from submissions, which is what makes a job the controller forgot indistinguishable from one that finished"
     },
     {
       "path": "scripts/frontier_pipeline.sh",
@@ -304,6 +348,14 @@
       "replacement": "scheduler-native job dependencies"
     },
     {
+      "path": "scripts/kore_status.sh",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "side_effect_free": true,
+      "deletes_artifacts": false,
+      "role": "one read-only page answering whether KORE is producing anything right now rather than merely looking busy: queue, which unattended daemons are up, files written in the last fifteen minutes, mined trainable tokens, arena progress and the verified-FlyDSL seeding pass rate"
+    },
+    {
       "path": "scripts/kore_supervise.py",
       "classification": "deprecated",
       "lifecycle": "deprecated",
@@ -360,10 +412,31 @@
       "role": "dry-run-first JSONL shard migration CLI (writes gated behind --apply)"
     },
     {
+      "path": "scripts/mined_trainable_tokens.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "read-only estimate of what the mined roots would add to a mixture in trainable tokens, counting both ranked_group candidates and repair/win conversations; counting only the first understated HIP threefold and the parity plan was built on that number"
+    },
+    {
       "path": "scripts/mixture_composition.py",
       "classification": "diagnostic",
       "lifecycle": "active",
       "role": "break an SFT mixture down by source with row and token counts, so the AMD-native fraction is measured rather than recalled"
+    },
+    {
+      "path": "scripts/mixture_dialect_split.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "read-only rows and tokens of a built SFT mixture split by capability and kernel dialect; asks the parity question of the file that is actually trained on, and reads the dialect from the code the model sees because a mixture row has no twin suffix left to read"
+    },
+    {
+      "path": "scripts/node_scavenger.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "unattended daemon that takes capacity the moment it appears instead of forecasting when a node will free: reserves a drained node first and only then resumes it, so uncontested capacity stays ours, holds no more nodes than the job cap can use, and staffs miners onto what it wins"
     },
     {
       "path": "scripts/package_v4_release.sh",
@@ -396,6 +469,14 @@
       "classification": "diagnostic",
       "lifecycle": "active",
       "role": "offline fail-closed Qwen3-32B model/resource preflight (read-only)"
+    },
+    {
+      "path": "scripts/probe_ckpt_tooling.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "side_effect_free": true,
+      "deletes_artifacts": false,
+      "role": "check the two accelerate checkpoint APIs the SFT run only exercises at the very end of a multi-day job -- that set_state_dict_type accepts the plain 'FULL_STATE_DICT' string and that merge_fsdp_weights exists as the offline fallback -- so a final-save failure is found in seconds rather than after 30 hours"
     },
     {
       "path": "scripts/probe_composable_kernel.sh",
@@ -569,14 +650,36 @@
       "replacement": "scheduler SFT and retention-gate jobs"
     },
     {
+      "path": "scripts/sft_launch_verify.sh",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "side_effect_free": true,
+      "deletes_artifacts": false,
+      "role": "read-only health verdict on a live SFT job from its own log rather than from the fact that squeue says RUNNING: all eight ranks reaching the model, assistant-only loss masking, MoE router collapse, NaN/Inf loss, retention regression, step progress and checkpoints -- any FAIL is a reason to kill the job before it burns a 26-36h allocation"
+    },
+    {
       "path": "scripts/sft_smoke.py",
       "classification": "diagnostic",
       "lifecycle": "active"
     },
     {
+      "path": "scripts/sft_supervise_v5.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "single entrypoint that starts the v5 SFT run on amd-primus under watch_and_resume.sh and keeps it alive; encodes the account/QoS pairing, the output_dir the completion test depends on and the crash-loop bounds, and adopts an in-flight kore-sft job rather than submitting a second one that would interleave checkpoint writes"
+    },
+    {
       "path": "scripts/smoke_env.py",
       "classification": "diagnostic",
       "lifecycle": "active"
+    },
+    {
+      "path": "scripts/smoke_sharded_resume.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "trains, saves and then RESUMES a tiny Qwen3-MoE under the run's own FSDP settings, because the predecessor checkpoint format saved fine and could not be loaded back; removes only the scratch output dir it created, and SMOKE_KEEP=1 keeps that too"
     },
     {
       "path": "scripts/split_remaining_datagen.py",
@@ -718,6 +821,21 @@
       "role": "single-node 8-rank legacy-14B multi-turn GRPO launcher (ZeRO-2, in-process rollout replica; spans requeues); a 30B RL launch must supply a reviewed 30B recipe"
     },
     {
+      "path": "scripts/spur_grpo_2node.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "two-node 16-rank multi-turn GRPO launcher using FSDP HYBRID_SHARD, which is the only sharding that pays on nodes with no RDMA: it shards inside a node and replicates across, leaving one gradient all-reduce per step over the single Ethernet link. Derives the rendezvous from its own address, keeps the 1-node run's output lineage so the frozen held-out shape lane stays comparable, and self-requeues on a timer rather than relying on --requeue"
+    },
+    {
+      "path": "scripts/spur_grpo_2node_inner.sh",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "entrypoint": false,
+      "role": "per-node body of spur_grpo_2node.sbatch, one copy per node under srun; mirrors the 1-node launcher's environment exactly (aiter vendor baselines, offline hub, GPU fail-closed check) so the recipe's measured speedups stay honest, and adds the multi-node rendezvous and per-node logs. Removes only the job-scoped node-local scratch tree it created"
+    },
+    {
       "path": "scripts/spur_hip_verify_1node.sbatch",
       "classification": "diagnostic",
       "lifecycle": "active",
@@ -820,6 +938,13 @@
       "role": "multi-node FSDP SFT across 4 nodes x 8 GPUs; the v4 mixture is ~26h on one node"
     },
     {
+      "path": "scripts/spur_smoke_sharded_resume.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "note": "15-minute non-exclusive full-GRES launcher for smoke_sharded_resume.py, deliberately cheap so it can prove the sharded save+resume path on real GPUs without queueing behind the SFT run it is meant to de-risk; keeps the checkpoint on shared storage so its layout can be inspected"
+    },
+    {
       "path": "scripts/spur_stage_array.sbatch",
       "classification": "active",
       "lifecycle": "active",
@@ -851,6 +976,13 @@
       "classification": "active",
       "lifecycle": "active",
       "production": true
+    },
+    {
+      "path": "scripts/spur_verified_flydsl.sbatch",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "one-node GPU launcher for verified_flydsl_seed.py: generation talks to the gateway and verification compiles and runs each candidate, so it needs real gfx950. Pins teacher thinking off so a stale environment cannot reproduce the run that returned zero characters on all 96 calls, and ledgers per task so losing the allocation costs only what is in flight"
     },
     {
       "path": "scripts/spur_verify_spec_1node.sbatch",
@@ -889,6 +1021,113 @@
       "replacement": "scripts/spur_supervise_datagen.py"
     },
     {
+      "path": "scripts/v5_audit.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "read v4 and v5 end to end with the real tokenizer and report what is actually in them, so every headline number can be checked independently of the builder that produced it; deliberately surfaces the places a headline flatters the dataset -- generation versus question-answering on the kernel side, repetition inside a slice, and token-weighted against row-weighted composition"
+    },
+    {
+      "path": "scripts/v5_build_arena_index.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "build the frozen pool-task to AgentKernelArena contamination table that every v5 stage screens against; scores each pool task against every arena task shipping a parseable PyTorch source and records the single best match, so the threshold is applied at read time and rebuilding is an explicit act with a reviewable diff"
+    },
+    {
+      "path": "scripts/v5_build_replay.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "build the v5 replay mixture budgeted in tokens rather than rows, after measurement showed four fifths of the inherited replay was one bucket of long chain-of-thought math that the non-thinking target model was never built to emit; cuts that bucket, buys breadth in short chat, code and tool-use rows, re-renders tool calls into the model's own syntax and decontaminates replay against the benchmark"
+    },
+    {
+      "path": "scripts/v5_fix_truncated.py",
+      "classification": "destructive",
+      "lifecycle": "active",
+      "deletes_artifacts": true,
+      "side_effect_free_by_default": false,
+      "role": "drop assistant targets that were cut off mid-generation, which the build's length gate passes by construction because truncation is how they got under the cap; rewrites data/v5_sft.jsonl and data/v5_eval.jsonl IN PLACE and has no dry-run, and backfills eval from clean training rows so the two stay disjoint rather than leaving the math group too small to score"
+    },
+    {
+      "path": "scripts/v5_probe_agentic.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "read-only survey of the 108,822 agentic multi-turn episodes -- the only records carrying per-turn correctness and speedup -- to decide how many are worth training on before stage 3 spends effort on them; streams because the three directories are 3.9GB"
+    },
+    {
+      "path": "scripts/v5_split_eval.py",
+      "classification": "destructive",
+      "lifecycle": "active",
+      "deletes_artifacts": true,
+      "side_effect_free_by_default": false,
+      "role": "carve a capability-labelled held-out slice out of the v5 mixture so instruction-following collapse is visible during the run instead of 30 hours later; REWRITES data/v5_sft.jsonl in place without the held-out rows, matching by message hash so the mixture's upsampled duplicates go too -- copying instead of removing would measure memorisation"
+    },
+    {
+      "path": "scripts/v5_stage1_gather.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "stage 1 of the v5 build: gather every mined record across 13 roots, remove the 35% that are cross-root duplicates of the same task mined twice under a per-root resume contract, thin repair down from 9.24 answers per distinct problem, and cache typed records so no later stage re-scans 3.5GB"
+    },
+    {
+      "path": "scripts/v5_stage2_translate.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "stage 2 of the v5 build: rewrite verified twins into the question shapes the arena asks and v4 never posed (torch2hip, torch2flydsl, triton2flydsl, instruction2*), by pairing each gate-passed kernel with the reference.py it was synthesised from; generates nothing and re-runs nothing, and reaches the twin registries directly rather than being capped at one row per winning task"
+    },
+    {
+      "path": "scripts/v5_stage2b_flydsl.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "stage 2b of the v5 build: a FlyDSL language anchor drawn from the DSL's own test suite and tutorials, since the base model already writes FlyDSL and v4 unlearned it; excludes flydsl/kernels/ wholesale because that library is the corpus the arena draws its FlyDSL tasks from, and the value here is the language rather than the operations"
+    },
+    {
+      "path": "scripts/v5_stage2c_recover_extra.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "stage 2c of the v5 build: three recoveries needing no GPU and no new generation -- the chosen side of DPO pairs we are not training on, filtered for real per-row correctness rather than the corpus-level verified flag; an orphaned modality slice never wired into a mixture; and replay rows present in an older mixture and missing from v4"
+    },
+    {
+      "path": "scripts/v5_stage3_recover.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "stage 3 of the v5 build: recover the generation signal SFT never read -- ranked groups, which build_sft silently drops, reframed as optimization demonstrations gated on a real gain over the sibling; and agentic trajectories, cut into correctness-preserving high-gain revision steps so training teaches a local improver rather than imitation of a whole search"
+    },
+    {
+      "path": "scripts/v5_stage4_mixture.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "stage 4 of the v5 build: assemble the mixture and its receipt, weighted by what the arena measurably pays for. v4 lost precisely where the question shape was missing, so this buys shapes rather than more kernels, upsamples FlyDSL and reports the residual gap rather than hiding it, and holds replay inside the 30-50% band that prevents catastrophic forgetting"
+    },
+    {
+      "path": "scripts/v5_verify.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "stage 5: prove a built v5 file is clean and trainable before a GPU is spent on it, one gate per way the dataset could be wrong invisibly -- held-out leakage matched on the base id rather than the twin-suffixed one, arena contamination, provenance shape, a single assistant turn, torch-delegating reward hacks, over-cap and truncated targets, bad roles, empty content and duplication"
+    },
+    {
+      "path": "scripts/v5_verify.sbatch",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "run v5_verify_all.sh on a CPU compute node, because tokenizing ~206k rows on the login node's one core against NFS takes 10-15 minutes per pass and blocks the session; requests no GPU so it cannot queue behind real training"
+    },
+    {
+      "path": "scripts/v5_verify_all.sh",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "full pre-launch data verification: the shipped release parts must reproduce both halves of the mixture byte-for-byte, train and eval must be disjoint by message hash including upsampled duplicates, and BOTH halves must clear the v5_verify.py gates -- a bad eval row corrupts the retention signal as surely as a bad training row corrupts the weights"
+    },
+    {
       "path": "scripts/validate_evolve_gpu.py",
       "classification": "diagnostic",
       "lifecycle": "active",
@@ -899,6 +1138,20 @@
       "classification": "diagnostic",
       "lifecycle": "active",
       "role": "hardware validation of the rocprofv3 kernel-trace path: dominant/minor/decoy workloads on gfx950"
+    },
+    {
+      "path": "scripts/verified_flydsl_seed.py",
+      "classification": "active",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "seed FlyDSL twins with the verifier inside the generation loop -- compile and check on the spot, hand the exact traceback back, regenerate -- because one-shot seeding passed 10% and the existing seed/gate/repair round trip rescued zero FlyDSL kernels by the time the error had become a summary; a passing task is left in the output root as an ordinary seed, so harvest and mining need no changes. Removes only the rejected candidate directory it wrote itself, which would otherwise be counted as a judged twin"
+    },
+    {
+      "path": "scripts/verify_arena_speedup_e2e.py",
+      "classification": "diagnostic",
+      "lifecycle": "active",
+      "deletes_artifacts": false,
+      "role": "prove on real GPUs that the arena can produce a speedup at all, by timing a task and then resubmitting its byte-identical source as the optimization: the expected answer is 1.0x, so anything else is a defect in the measurement path rather than an opinion about a kernel. Written after a sweep scored 302 correct kernels and only 49 speedups while every unit test passed, because none of them ran a task and asked whether a number came out. Removes only the temporary workspaces it staged"
     },
     {
       "path": "scripts/verify_arena_toolchain.py",

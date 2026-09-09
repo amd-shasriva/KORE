@@ -148,6 +148,20 @@ ABSENT_PATHS: dict[str, str] = {
         "GRPO distill sink; created by the run",
     "data/b05factory/opus_scores.json":
         "co-evolution score cache; populated by the run's first step",
+    "data/v5_sft.jsonl":
+        "the v5 SFT mixture scripts/v5_stage4_mixture.py writes (--out default) "
+        "and configs/sft_coder30b_a3b.json trains on; gitignored because 1.8 GB "
+        "of raw JSONL does not belong in the history, and shipped instead as "
+        "gzip parts under data/release/sft/ that data/release/reassemble.sh "
+        "reassembles and links back to this path",
+    "data/v5_eval.jsonl":
+        "the 899-row held-out retention slice scripts/v5_split_eval.py writes "
+        "(--out-eval default); gitignored and shipped as "
+        "data/release/sft/v5_eval.jsonl.gz, linked back by reassemble.sh",
+    "data/v5_sft.receipt.json":
+        "the build receipt scripts/v5_stage4_mixture.py writes beside the "
+        "mixture, recording every count docs/DATASET_SPEC.md quotes; gitignored "
+        "with the mixture itself",
     # ---- quoted as historic defects, deliberately kept in the text --------- #
     "data/sft/multicap.jsonl":
         "the path nothing produces; quoted in docs/SFT_READINESS.md Blocker 1 as "
@@ -259,6 +273,11 @@ def test_absent_path_allowlist_has_no_dead_entries():
         # else's project gets cloned when it is needed to build against.
         and not token.startswith((
             "data/b05factory/", "data/full14b/", "configs/sft_14b_full.resolved",
+            # The v5 mixture, its held-out half and its receipt appear the
+            # moment scripts/v5_stage4_mixture.py or reassemble.sh runs, and
+            # vanish again on a clean checkout. Same come-and-go as the
+            # b05factory corpora above.
+            "data/v5_",
             "repos/"))
     ]
     assert not stale, f"ABSENT_PATHS entries that now resolve: {stale}"

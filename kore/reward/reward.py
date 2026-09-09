@@ -1507,6 +1507,37 @@ def compute_reward(obs: Observation, source: str = "", dtype: str = "fp32",
             or (grade in ("legacy", "compat")
                 and getattr(obs, "timing_requested", False))):
         if not _timing_complete(obs):
+            if grade == "screening":
+                # Control only reaches Tier 3 because the correctness gate above
+                # PASSED, so this kernel is verified correct and merely
+                # unmeasurable. Returning reward_incorrect here threw that
+                # verdict away and scored it 0.0, identical to a kernel that
+                # returned wrong numbers.
+                #
+                # It is the same situation as `correct_no_bench` below, which
+                # already pays base + fmt for "correct; no timing". The only
+                # difference is that timing was attempted and did not survive,
+                # which is a fact about the bench subprocess and not about the
+                # kernel. Measured on a shared 128-core node at load 47 with 19
+                # other tenants: the paired multi-shape bench overran its
+                # timeout and 32 of the first 54 verified-correct kernels in a
+                # run were scored as failures.
+                #
+                # No speed credit, and no reward-hack surface: the speed term is
+                # ADDITIVE on base (see Tier 3), so a measured kernel scores at
+                # least what this pays. Evading measurement can only lower a
+                # kernel's reward, never raise it.
+                flags.append("timing:unmeasured")
+                rr = RewardResult(
+                    base + fmt, True, None, "correct_unmeasured", flags,
+                    obs.error_text
+                    or "correct; timing incomplete, so no speed credit",
+                )
+                _log_decision(rr)
+                return rr
+            # legacy/compat replay observations keep the original verdict: their
+            # timing contract predates the screening grade and rewriting it
+            # would change what an already-recorded run is worth.
             flags.extend(["infra", "incomplete_timing"])
             rr = RewardResult(
                 cfg.reward_incorrect, False, None, "infra", flags,

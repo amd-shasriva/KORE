@@ -244,17 +244,30 @@ def test_genuine_infrastructure_failures_stay_infra(tmp_path, exec_result):
     assert not obs.validation_passed
 
 
-def test_incomplete_timing_data_remains_infra(tmp_path):
-    """A bench subprocess that returned no samples is still an infra failure."""
+def test_incomplete_timing_banks_correctness_and_grants_no_speed(tmp_path):
+    """A bench that returned no samples is a fact about the subprocess, not the
+    kernel: the candidate reached the timing stage only because correctness had
+    already passed.
+
+    This asserted infra_error until a shared 128-core node at load 47 discarded
+    32 of the first 54 verified-correct kernels in a run that way -- GRPO drops
+    infra turns from the batch outright, so a correct kernel taught the policy
+    nothing because the bench ran out of wall clock. It now demotes instead:
+    correctness credit banked, no speed credit."""
     env, task, _cfg = _env(tmp_path)
     _stub_subprocess(env, pairs=None)
 
     obs = _run(env, task, tmp_path)
 
-    assert obs.infra_error
-    assert obs.timing_grade == "rejected"
+    assert not obs.infra_error
+    assert obs.timing_grade == "screening"
     assert obs.performance_eligible is False
-    assert compute_reward(obs, _SOURCE, dtype="bf16").tier == "infra"
+
+    result = compute_reward(obs, _SOURCE, dtype="bf16")
+    assert result.tier == "correct_unmeasured"
+    # Strictly above the incorrect tier, and no speed credit on top of base.
+    assert result.reward >= REWARD_CONFIG.correctness_weight
+    assert result.reward > REWARD_CONFIG.reward_incorrect
 
 
 def test_noise_demoted_observation_is_never_replayed(tmp_path):

@@ -412,6 +412,33 @@ def _noise_demoted_timing(obs: Observation) -> bool:
             and getattr(obs, "timing_pair_count", None) is not None)
 
 
+def _resolve_subprocess_timeout(name: str, explicit: Optional[int], default: int) -> int:
+    """Resolve a verifier subprocess timeout: explicit arg, then env, then default.
+
+    The 300 s defaults were chosen on an EXCLUSIVE 8-GPU node, where the compile and
+    bench subprocesses had the machine to themselves. They do not survive a shared
+    one. Measured on a 128-core box at load 47 with 19 other tenants: the paired
+    multi-shape bench (5 shapes, cold-cache flushes, alternating AB/BA) overran 300 s
+    and returned NO timing at all, and 32 of the first 54 verified-correct kernels in
+    a run were discarded because of it.
+
+    An env knob rather than a new default, because the default is right for the
+    exclusive case and only a contended run needs to raise it. Explicit callers
+    (scripts/verify_*_e2e.py, run_kernelbench_amd.py, tests) keep winning.
+    """
+    if explicit is not None:
+        return int(explicit)
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    return default
+
+
 def _timing_completeness_error(expected_names, candidate, baseline) -> Optional[str]:
     """Return why per-shape timing is incomplete, else ``None``."""
     expected_list = list(expected_names)
@@ -459,7 +486,8 @@ class KoreEnv:
     """Task-bound verified environment. One per task; call ``step`` per candidate."""
 
     def __init__(self, task: Task, config=CONFIG, use_replay: bool = True,
-                 correctness_timeout: int = 300, bench_timeout: int = 300,
+                 correctness_timeout: Optional[int] = None,
+                 bench_timeout: Optional[int] = None,
                  gpu: Optional[str] = None,
                  isolation_controller: Optional["IsolationController"] = None,
                  sandbox_config: Optional["SandboxConfig"] = None,
@@ -468,8 +496,10 @@ class KoreEnv:
                  budget_ledger: Optional[BudgetLedgerV1] = None):
         self.task = task
         self.cfg = config
-        self.correctness_timeout = correctness_timeout
-        self.bench_timeout = bench_timeout
+        self.correctness_timeout = _resolve_subprocess_timeout(
+            "KORE_CORRECTNESS_TIMEOUT", correctness_timeout, 300)
+        self.bench_timeout = _resolve_subprocess_timeout(
+            "KORE_BENCH_TIMEOUT", bench_timeout, 300)
         self.use_replay = use_replay
         # Physical GPU for the compile/bench SUBPROCESS (HIP_VISIBLE_DEVICES).
         # Under distributed GRPO every rank must bench on its OWN GPU; otherwise
@@ -1436,13 +1466,29 @@ class KoreEnv:
         if timing_error:
             # No usable measurement came back for some requested shape - the bench
             # subprocess was killed/timed out, or the driver broke the pair protocol.
-            # There is no timing evidence to judge, so this stays an infra failure.
+            #
+            # This is NOT infra_error, for the same reason the CV/CI branch below is
+            # not. Control only reaches the timing stage when ``correct and do_bench``
+            # held (see the early return above), so every candidate arriving here is
+            # ALREADY VERIFIED CORRECT. Marking it infra_error made kore.policy.grpo
+            # drop the turn from the training batch outright, discarding a
+            # verified-correct kernel because the bench subprocess ran out of wall
+            # clock - measured on a shared 128-core node at load 47 with 19 other
+            # users, where 32 of the first 54 correct kernels in a run were thrown
+            # away this way and every surviving reward was pinned at exactly
+            # correctness_weight.
+            #
+            # Demote instead, identically to unadmitted timing: the ``screening`` tier
+            # banks the correctness credit and grants NO speed credit, which is the
+            # honest verdict for a correct-but-unmeasurable candidate. This opens no
+            # reward-hack surface: speed credit is additive on top of
+            # correctness_weight, so evading measurement can only LOWER a kernel's
+            # reward, never raise it.
             _ev("WARN", "eval_bench_incomplete", task=task.task_id,
                 source_sha=_sha12(source), reason=timing_error)
-            obs.timing_grade = "rejected"
+            obs.timing_grade = "screening"
             obs.performance_eligible = False
-            obs.infra_error = True
-            obs.error_text = f"infra: timing admission failed: {timing_error}"
+            obs.error_text = f"timing not measurable (bench incomplete): {timing_error}"
             return obs
         if admission_errors:
             # Complete candidate+baseline timing exists for every requested shape; it

@@ -28,8 +28,8 @@ capability claim; it describes the pipeline and the state of training.
 | Schedule | 1,609 optimizer steps, 1 epoch, ~29 hours expected |
 | Launcher | [`scripts/sft_supervise_v5.sh`](scripts/sft_supervise_v5.sh) over [`scripts/spur_sft_1node.sbatch`](scripts/spur_sft_1node.sbatch) |
 
-**Training data.** The v5 mixture is 206,000 rows / 490,174,073 tokens, 61.2%
-kernel and 38.8% replay by rows, spanning six task shapes: optimize, repair,
+**Training data.** The v5 mixture is 206,000 rows / 490,174,073 tokens, 61.38%
+kernel and 38.62% replay by rows, spanning six task shapes: optimize, repair,
 PyTorch-to-kernel, spec-to-kernel, dialect port, and language fluency. A
 held-out evaluation split of 899 rows across 8 capability groups is scored
 during training and has zero row-level overlap with the training set.
@@ -38,12 +38,23 @@ Kernel-language rows split Triton 61.2% / HIP 32.3% / FlyDSL 6.5%. See
 [`DATAGEN_OVERVIEW.md`](DATAGEN_OVERVIEW.md) for how the corpus is mined,
 generated, and verified on hardware.
 
-**Why six task shapes, not one.** The prior dataset, v4 (69,851 rows / 288.4M
-tokens), taught a single task shape: "here is a slow kernel, make it
+**Why six task shapes, not one.** The prior SFT mixture was 69,851 rows and
+taught a single task shape: "here is a slow kernel, make it
 faster." Evaluated on AgentKernelArena it scored 55.1% against a 55.9%
 baseline: supervised fine-tuning made the model *worse*. The diagnosis was
 shape monoculture, not insufficient volume, which is why v5 was built around
 the five other shapes the benchmark actually asks for.
+
+Mind the naming trap when you go looking for that mixture. The 69,851-row file
+is `data/b05factory/sft/multicap_v3.jsonl`, which
+[`configs/sft_coder30b_a3b.json`](configs/sft_coder30b_a3b.json) labels v3 in
+`_comment_dataset_path_v3` (69,851 rows, ~255M tokens) — but every v5 build
+script calls it "v4", because `scripts/v5_stage4_mixture.py` binds `V4_SFT` to
+that path. A separate `multicap_v4.jsonl` also exists and is a different
+artifact: 244,732 rows, counted by reassembling the release parts and matching
+[`data/release/sft/multicap_v4.manifest.json`](data/release/sft/multicap_v4.manifest.json),
+and described by the same config's `_comment_dataset_path`. The 288.4M token
+figure this paragraph used to carry belongs to neither file.
 
 **Where to look next.** [`docs/SFT_READINESS.md`](docs/SFT_READINESS.md) is
 the pre-launch checklist this run went through.
@@ -150,7 +161,8 @@ the `INTEGRITY_ONLY` verdict.
 
 `scripts/run_agent_kernel_arena.py` evaluates AgentKernelArena in copied
 workspaces using its compile → correctness → performance contract and its score.
-The gfx950 filter admits 402 of the benchmark's 412 tasks. Published Claude
+The gfx950 filter admits 416 of the benchmark's 426 tasks, measured with
+`run_agent_kernel_arena.py discover` against AKA `b09f5eb`. Published Claude
 Opus comparison means are 6.89x (`torch2hip`), 6.69x (`hip2hip`), and 2.13x
 (`triton2triton`); these are external bars, not KORE claims.
 
@@ -188,8 +200,14 @@ authorized release decision.
 
 ```bash
 PYTHONPATH=. /home/shasriva/kore-venv/bin/python -m pytest tests/ -q \
-  -p no:warnings -k "not gpu"
+  -p no:warnings
 ```
+
+No deselection flag is needed. `pyproject.toml`'s `addopts` already applies
+`-m "not gpu and not release"`, which selects by *marker*. An earlier revision
+of this command passed `-k "not gpu"`, which filters by test *name*: it
+deselected every test with "gpu" in its id, GPU-marked or not, and kept every
+`@pytest.mark.gpu` test whose name happens not to contain the substring.
 
 ## Documentation
 

@@ -1,20 +1,28 @@
 # SFT readiness: Qwen3-Coder-30B-A3B production run
 
-**Status: queued, waiting for a node.** The production SFT stage is Slurm job
-`11215` (account `amd-primus`, QOS `amd-primus-qos`, a guaranteed,
-non-preemptible pool; 3-day walltime), pending on `QOSGrpNodeLimit` because that
-pool is capped at 16 nodes and holds 16. An earlier attempt, job `9229` on
-`crsuse2-m2m-037`, trained 150 clean steps before its node died; this run starts
-fresh from the pinned base rather than warm starting from it (see `model_id` in
-docs/DISTRIBUTED.md). This document explains what
+**Status: no job of this recipe is on the cluster.** This is a record of the
+recipe and of what was submitted, not a live status board. Job `9229` on
+`crsuse2-m2m-037` (account `amd-primus`, QOS `amd-primus-qos`, a guaranteed,
+non-preemptible pool; 3-day walltime) trained 150 clean steps on 2026-08-13
+before its node died. Job `11215` was submitted on 2026-08-14 against the same
+account and QOS and sat pending on `QOSGrpNodeLimit`, because that pool is
+capped at 16 nodes and held 16; it started fresh from the pinned base rather
+than warm starting from 9229's step 150 (see `model_id` in
+docs/DISTRIBUTED.md). Neither job exists now. A completed v5 SFT checkpoint
+from this recipe does exist and was consumed by the RL run recorded in
+[`evidence/RL_RUN_PROVENANCE.md`](evidence/RL_RUN_PROVENANCE.md); that run ran
+on storage outside this repository, so which submission produced the checkpoint
+is not recorded here. This document explains what
 the shipped recipe (`configs/sft_coder30b_a3b.json`) trains, why each
 non-obvious setting is what it is, and what the held-out evals are watching
 for. [`DISTRIBUTED.md`](DISTRIBUTED.md) is the executable launch reference
 (FSDP mechanics, the pinned config block, disk arithmetic, launch commands).
 
-Do not resubmit this job. `scripts/spur_sft_1node.sbatch` takes a single-trainer
-lock on `output_dir`; a second submission observes the lock and exits without
-training, but there is no reason to test that while the run is live.
+Check the scheduler before submitting anything.
+`scripts/spur_sft_1node.sbatch` takes a single-trainer lock on `output_dir`, so
+a second submission against a live run observes the lock and exits without
+training rather than corrupting the first — but that is a safety net, not a
+reason to submit blind.
 
 ## Model and hardware
 

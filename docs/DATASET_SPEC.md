@@ -38,9 +38,22 @@ decompresses them back to the two files above, byte-for-byte; `scripts/v5_verify
 is the check that the shipped parts actually reproduce them and that both halves
 still pass every gate below.
 
-Of the 206,000 training rows, 165,047 carry a distinct assistant target across
-11,793 distinct tasks; the remainder are the deliberate, capped repetitions of a
-scarce shape or dialect described below, not accidental duplication.
+Of the 206,000 training rows, 163,817 carry a distinct assistant target; the
+remainder are the deliberate, capped repetitions of a scarce shape or dialect
+described below, not accidental duplication. That figure is recomputable from
+the shipped parts — stream them through `gunzip` and count distinct SHA-256
+digests of each row's last assistant message — as are the row count and the
+490,174,073 token total, which is the sum of the per-row `_tokens` field.
+
+The build also recorded these rows as covering **11,791 distinct source tasks**,
+and that one is *not* recomputable from the release. A released row carries only
+`_provenance`, `_source`, `_tokens` and `messages`, and `_provenance` holds just
+`kind`, `anchor` and `snr_db` on kernel rows (`hf` on replay rows) — there is no
+task identifier anywhere in the file. Counting proxies does not recover it
+either: distinct `def NAME(` in the prompts gives 12,392, distinct first-user
+-message digests give 156,442. Treat 11,791 as build-time metadata, carried
+forward because it is the honest provenance of the mixture, not as a property
+you can check against the artifact.
 
 ## Row contract
 
@@ -63,9 +76,9 @@ its rows still exceeded the true cap and were silently dropped at train time.
 
 ## Composition
 
-**61.2% of rows are kernel, 38.8% are general replay.** Weighted by tokens
+**61.38% of rows are kernel, 38.62% are general replay.** Weighted by tokens
 instead (the unit the optimizer actually sees, and the unit every mixture
-result in the literature is stated in), replay is **12.0% of tokens**. That is
+result in the literature is stated in), replay is **12.17% of tokens**. That is
 below the 25-30% plateau the forgetting-mitigation literature reports, and it is
 the single largest known deviation from best practice in this build. The build
 targets 14% of tokens (`scripts/v5_stage4_mixture.py --replay-target`); the
@@ -75,12 +88,39 @@ was set (see "Truncated targets" below), and that loss was never made up. If
 retained-capability loss climbs during training, the fix is more replay, not a
 lower learning rate.
 
-**Six task shapes, not v4's one.** v4 (the SFT mixture this cycle replaces)
-was 69,851 rows and 288.4M tokens, all of it one shape: "here is a kernel,
+The percentage moves with where you draw the line, so the line is written down
+here. Replay counts every `_source` beginning `replay_`, `general_` or `math_`,
+the literals `instruction_following` and `chat`, plus `agentic_tooluse` and one
+untagged slice. Draw it narrowly — the prefixes and two literals only — and the
+same file measures 11.89%. Both are the same corpus; neither is wrong; quoting
+one without its rule is what makes them look contradictory.
+
+The untagged slice is 286 rows and 1,047,250 tokens (0.21%) whose `_source` is
+the empty string. It is counted as replay above because nothing about it is
+kernel supervision, but its provenance was not recorded at build time and
+cannot now be recovered from the file. It is small enough not to move any
+decision and large enough that it should not be silently absorbed into a
+number, which is why it is named rather than rounded away.
+
+**Six task shapes, not the prior mixture's one.** The SFT mixture this cycle
+replaces was 69,851 rows, all of it one shape: "here is a kernel,
 improve or fix it." It scored 55.1% on AgentKernelArena against 55.9% for the
 base model it was fine-tuned from, i.e. SFT made the model worse. The diagnosed
 cause was shape monoculture, not data quality: the benchmark asks five distinct
-questions and v4 had zero training examples of three of them. v5 answers six:
+questions and that mixture had zero training examples of three of them.
+
+Its file is `data/b05factory/sft/multicap_v3.jsonl`, and the version label is a
+trap worth stating once. `configs/sft_coder30b_a3b.json` calls that file v3
+(`_comment_dataset_path_v3`: 69,851 rows, ~255M tokens), while every v5 build
+script calls it v4 because `scripts/v5_stage4_mixture.py` binds `V4_SFT` to it.
+A different 244,732-row `multicap_v4.jsonl` also exists (the count is
+reproducible from the release parts and matches
+[`../data/release/sft/multicap_v4.manifest.json`](../data/release/sft/multicap_v4.manifest.json))
+and is what the config's `_comment_dataset_path` describes. An earlier revision
+of this section paired the 69,851 row count with 288.4M tokens, which belongs
+to neither file.
+
+v5 answers six shapes:
 
 | Shape | Question | Source |
 | --- | --- | --- |

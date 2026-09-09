@@ -31,8 +31,15 @@ cat provenance/datagen.tar.gz.part* | gunzip | tar -C ../b05factory -xf -
 cat sft/multicap_v4.jsonl.gz.part* | gunzip > ../b05factory/sft/multicap_v4.jsonl
 
 # v5: what the 30B SFT config now points at. 206,586 rows after the eval split
-# (207,782 built, 1,196 removed), 165,047 distinct targets over 11,793 tasks;
-# 61.2% kernel / 38.8% replay by rows and 14% replay by tokens. Six task shapes
+# (207,782 built, 1,196 removed), then 206,000 after v5_fix_truncated.py.
+# Recomputable from this file: 163,817 distinct targets and 490,174,073 tokens.
+# 61.38% kernel / 38.62% replay by rows and 12.17% replay by tokens, counting
+# agentic_tooluse and one untagged slice as replay (11.89% without them --
+# docs/DATASET_SPEC.md writes the rule down). The 11,791 distinct source tasks
+# quoted elsewhere is build-time metadata: released rows carry no task id.
+# 14% of tokens was the build TARGET (v5_stage4_mixture.py --replay-target);
+# the realised share is lower because v5_fix_truncated.py removed 9.3M tokens
+# of truncated math chain-of-thought from the replay side afterwards. Six shapes
 # rather than v4's one, every kernel target verified numerically on gfx950, and
 # screened against the evaluation benchmark's own sources -- which v4 never was.
 #

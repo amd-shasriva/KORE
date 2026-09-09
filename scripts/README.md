@@ -22,7 +22,6 @@ six-node QoS limit.
 | `build_task_pool.py` | Mine, screen, decontaminate, and index external tasks without mutating the registry. |
 | `spur_build_task_pool.sbatch` | CPU scheduler entrypoint for the pool build. |
 | `spur_data_driver.sh` | Drive task pool then saturated agentic datagen; never starts training. |
-| `build_sft_v3_mixture.py` | Admit v2, recovered, and step-centric rows through one dedup/decontamination gate. |
 | `run_agent_kernel_arena.py` | Run AgentKernelArena in copied workspaces under its native scoring formula. |
 | `spur_aka_1node.sbatch` | GPU-node entrypoint for AgentKernelArena. |
 | `run_kernelbench_amd.py` | Materialize and score KernelBench tasks through KORE. |
@@ -32,6 +31,28 @@ six-node QoS limit.
 The model-side benchmark command defaults to
 `Qwen/Qwen3-Coder-30B-A3B-Instruct`; AgentKernelArena discovery filters to
 gfx950-compatible tasks before any GPU time is spent.
+
+## Building the v5 SFT mixture
+
+Seven stages, in this order. Each reads the previous stage's default output, so
+running one out of order silently builds against a stale input:
+
+| Order | Script | Writes |
+| ---: | --- | --- |
+| 1 | `v5_stage1_gather.py` | `runs/v5_build/stage1.pkl` — every mined record, deduplicated and thinned |
+| 2 | `v5_stage2_translate.py` | the translate slice — verified twins re-posed as the shapes the arena asks |
+| 3 | `v5_stage3_recover.py` | `runs/v5_build/` — ranked groups recovered as generation supervision |
+| 4 | `v5_stage4_mixture.py` | `data/v5_sft.jsonl` — the mixture, with replay budgeted in tokens |
+| 5 | `v5_split_eval.py` | `data/v5_eval.jsonl`, and rewrites the mixture without those rows |
+| 6 | `v5_fix_truncated.py` | both files — drops cut-off targets and backfills the eval math group |
+| 7 | `v5_verify.py` | nothing; runs the twelve correctness gates and a token-length pass |
+
+`scripts/v5_verify_all.sh` runs the round-trip, the disjointness check, and both
+verification passes together as the pre-launch gate.
+
+`build_sft_v3_mixture.py` built the superseded v3 mixture and
+`build_sft_v2_mixture.py` the one before it. Both are retained to reproduce
+those artifacts; neither is on the path to the shipped 30B config.
 
 ## Legacy scripts
 

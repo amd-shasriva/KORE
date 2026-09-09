@@ -12,10 +12,27 @@ The retained 14B fixtures pin `Qwen/Qwen3-14B` at
 reproducibility of the historical CPT/SFT/DPO tests; it is not a recommended
 model target.
 
-The next SFT output is `data/b05factory/sft/multicap_v3.jsonl`, built by
-`scripts/build_sft_v3_mixture.py`. It admits the v2 base, recovered rows, and
-step-centric AMD trajectories only after deduplication, held-out task/family
-screening, and the 17,408-token length limit.
+The production SFT mixture is v5 (`data/v5_sft.jsonl`, with its held-out half
+at `data/v5_eval.jsonl`), which is what `configs/sft_coder30b_a3b.json` points
+at. It is built by a seven-stage chain, in this order:
+
+```text
+scripts/v5_stage1_gather.py     -> runs/v5_build/stage1.pkl
+scripts/v5_stage2_translate.py  -> the re-posed translate slice
+scripts/v5_stage3_recover.py    -> runs/v5_build/
+scripts/v5_stage4_mixture.py    -> the mixture (data/v5_sft.jsonl)
+scripts/v5_split_eval.py        -> the eval half, and rewrites the mixture
+scripts/v5_fix_truncated.py     -> both files
+scripts/v5_verify.py            -> the twelve correctness gates
+```
+
+`data/b05factory/sft/multicap_v3.jsonl`, built by
+`scripts/build_sft_v3_mixture.py`, is the superseded v3 mixture. It admits the
+v2 base, recovered rows, and step-centric AMD trajectories only after
+deduplication, held-out task/family screening, and the 17,408-token length
+limit, and it is retained to reproduce that build, not as the next SFT input.
+See [`docs/DATASET_SPEC.md`](docs/DATASET_SPEC.md) for the v5 contract and for
+the v3/v4 naming trap around that filename.
 
 ## Measured historical artifacts
 

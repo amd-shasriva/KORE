@@ -7,11 +7,22 @@ DPO, or chat-vector launchers: they are legacy experiments and their artifacts
 are not inputs to this recipe. See [`SFT_READINESS.md`](SFT_READINESS.md) for
 why each hyperparameter is what it is; this page is the launch mechanics.
 
-**A run is live.** Job `9229` on `crsuse2-m2m-037` (account `amd-primus`, QOS
-`amd-primus-qos`, a guaranteed non-preemptible pool, 7-day walltime) is
-training against this exact config. Do not `sbatch`, `scancel`, or `squeue`
-against it; the commands below are the launch reference, not an instruction to
-relaunch.
+**No run is live.** This page is the launch reference, not a status board. The
+job history against this exact config, as recorded here and in
+[`SFT_READINESS.md`](SFT_READINESS.md): job `9229` on `crsuse2-m2m-037`
+(account `amd-primus`, QOS `amd-primus-qos`, a guaranteed non-preemptible pool)
+held its node for a measured 2 h 59 m on 2026-08-13, banked 150 clean steps and
+reached 154, and then died with the node. Job `11215` was submitted against the
+same account and QOS on 2026-08-14 and sat pending on `QOSGrpNodeLimit`,
+because that pool is capped at 16 nodes and held 16. Neither job exists on the
+cluster now, and neither is the thing to check when you want to know whether
+something is training — ask the scheduler.
+
+A completed v5 SFT checkpoint from this recipe does exist: the RL run in
+[`evidence/RL_RUN_PROVENANCE.md`](evidence/RL_RUN_PROVENANCE.md) trained
+against one between 2026-08-27 and 2026-08-30. That run used storage and a
+resolved config outside this repository, so which submission produced the
+checkpoint is not recorded here.
 
 ## Hardware and topology
 
@@ -21,6 +32,7 @@ relaunch.
 | CPUs | 236 |
 | Host RAM | 2.75 TB |
 | Sharding | FSDP `full_shard` (ZeRO-3 equivalent): params, gradients, and optimizer state all sharded |
+| Walltime | 3 days (`#SBATCH --time=3-00:00:00` in `scripts/spur_sft_1node.sbatch`, which is authoritative) |
 
 The MoE wrap class is explicit (`fsdp_transformer_layer_cls:
 "Qwen3MoeDecoderLayer"`). Wrapping anything other than `Qwen3MoeDecoderLayer`
@@ -138,14 +150,18 @@ micro-batches; `12875 // 8 accumulation = 1,609`). Measured throughput is
 and 12-16 hours on this page described an earlier, smaller mixture and no
 longer applies.
 
-A checkpoint (bf16 weights + fp32 optimizer state) is measured at **456 GB**
+A checkpoint (bf16 weights + fp32 optimizer state) is measured at **488 GB**
 under the old `FULL_STATE_DICT` layout: `optimizer.bin` 244 GB,
 `pytorch_model_fsdp.bin` 122 GB, and a consolidated safetensors copy 122 GB.
-`save_total_limit: 2` holds two at steady state (~912 GB); the trainer writes
+`save_total_limit: 2` holds two at steady state (~976 GB); the trainer writes
 the new checkpoint *before* rotating the old one out, so the rotation window
-transiently holds three (~1.37 TB peak). `/shared_nfs` is the target for
-exactly this reason: the model-relative volume this project has used before
-could not hold that peak.
+transiently holds three (~1.46 TB peak). That is the figure
+[`configs/README.md`](../configs/README.md) and the config's own
+`_comment_save` state, and it is the sum of the three files above; an earlier
+revision of this page led with 456 GB while itemising 488, which is the kind of
+disagreement that gets a volume sized against the smaller number.
+`/shared_nfs` is the target for exactly this reason: the model-relative volume
+this project has used before could not hold that peak.
 
 Periodic checkpoints are now `SHARDED_STATE_DICT`, which holds a comparable
 total but writes it as eight per-rank slices in parallel instead of gathering
@@ -162,8 +178,8 @@ This was briefly 25, for a reason specific to `amd-burst`. There the cluster
 was taking the node away every 10-30 minutes (`NODE_FAIL` on ...301, ...297,
 ...296, ...331, ...291, ...317), so a first checkpoint 57 minutes out was one
 the run never reached, and six attempts banked nothing. `amd-primus` is
-guaranteed and non-preemptible, and the run has held a node there for a
-measured 2 h 59 m (job 9229 on `crsuse2-m2m-037`, 154 steps). Against that,
+guaranteed and non-preemptible, and job 9229 held a node there for a measured
+2 h 59 m (`crsuse2-m2m-037`, 154 steps). Against that,
 halving the interval buys ~11 minutes of expected recovery per failure while
 doubling checkpoint I/O. If nodes start dying inside an hour again, lower it.
 
@@ -177,7 +193,7 @@ PYTHONPATH=. bash scripts/launch_distributed.sh sft \
   configs/sft_coder30b_a3b.json --dry-run
 ```
 
-The live run was started through `scripts/sft_supervise_v5.sh`, which wraps
+Both jobs above were started through `scripts/sft_supervise_v5.sh`, which wraps
 `scripts/watch_and_resume.sh` around `scripts/spur_sft_1node.sbatch` with the
 account/QOS pairing that actually schedules on this cluster:
 

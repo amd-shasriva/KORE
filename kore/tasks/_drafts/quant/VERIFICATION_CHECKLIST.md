@@ -16,11 +16,14 @@ measured.
   `kore/tasks/`). The registry discovers tasks with `TASKS_DIR.glob("*/task.yaml")` (ONE
   level, see `kore/tasks/registry.py::_discover`), so these are NOT auto-discovered and
   cannot enter any train/eval run or the running campaign. Verified on-node:
-  `registry.task_ids()` returns 251 tasks and contains NONE of the 8 draft ids.
+  `registry.task_ids()` is unchanged by these drafts and contains NONE of the 8 draft
+  ids. (It now returns 1,546. This line used to pin 251, the count when the drafts were
+  staged; non-discovery is the claim, and a stale absolute number only makes it look
+  like the registry froze.)
 - All 8 operations contain `gemm`, so they classify as the trainable `gemm` family (not
   the held-out `mla` / `paged_attention` families). Verified via `operator_family` (all 8
   return `gemm`; `HELDOUT_FAMILIES = ("mla", "paged_attention")`).
-- No draft id collides with a live task id (verified against the 251 live ids). The ids
+- No draft id collides with a live task id (verified against the live id set). The ids
   are deliberately distinct from the live `gemm_fp8_a8w8` (per-tensor), `gemm_mxfp4`
   (weight-only), `gemm_w4a16` (per-channel symmetric), `genv_gemm_a8w8_int8` (per-tensor
   generated) -- each draft is a genuinely different quant scheme (see the table).

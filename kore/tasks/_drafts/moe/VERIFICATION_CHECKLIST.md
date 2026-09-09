@@ -15,7 +15,10 @@ been run, and no timing has been measured.
   `kore/tasks/`). The registry discovers tasks with `TASKS_DIR.glob("*/task.yaml")` (ONE
   level, see `kore/tasks/registry.py::_discover`), so these are NOT auto-discovered and
   cannot enter any train/eval run or the running campaign. Verified: `registry.task_ids()`
-  is unchanged at 251 and contains none of the 8 draft ids; none collide with a live id.
+  is unchanged by these drafts and contains none of the 8 draft ids; none collide with a
+  live id. (The registry now holds 1,546 tasks. This checklist used to pin 251, the count
+  when the drafts were staged; the pin was never the point (non-discovery is), and a
+  stale absolute number reads as though the registry had stopped growing.)
 - Operation names all contain `moe` (routers also contain `topk`) and none contain
   `mla` / `latent` / `paged` / `attn`, so `operator_family()` returns the trainable
   `moe` (6 tasks) or `moe_router` (2 tasks) families -- NOT the held-out `mla` /

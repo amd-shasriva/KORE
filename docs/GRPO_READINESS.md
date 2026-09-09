@@ -77,22 +77,70 @@ key, the trainer raises `AdvantageKeyError` rather than silently falling back
 to the pooled estimator, so a broken key can never train a different
 estimator than the config asked for without saying so.
 
-## Distributed topology: SHARD_GRAD_OP, not FULL_SHARD
+## Distributed topology: what the configs request, and what takes effect
 
-Unlike SFT (`FULL_SHARD`, ZeRO-3, since SFT never generates), GRPO's FSDP
-plugin (`build_fsdp_plugin`) uses `SHARD_GRAD_OP` (ZeRO-2): gradients and
-optimizer state are sharded, but parameters stay resident and un-resharded
-after the forward pass. This is the enabler for co-located online RL:
-`FULL_SHARD` reshards parameters to a flat 1-D buffer between forwards, which
-breaks `model.generate()` and would force an all-gather on every decode step.
+`build_fsdp_plugin` reads `fsdp_sharding_strategy` and accepts `shard_grad_op`,
+`full_shard`, `hybrid_shard`, and `hybrid_shard_zero2`, rejecting anything else
+rather than falling back. The dataclass default is `shard_grad_op`, and the
+three 30B recipes each override it differently:
 
-The live policy is synced once per step into a plain, un-sharded per-rank
-replica (`_summon_full_params_ctx` + `_sync_gen_replica`), and every rollout
-generates *locally* on that replica with zero FSDP collectives. That is what
-lets `synced_gpus` stay off and ragged agentic turn counts not deadlock the
-group: the only cross-rank synchronization point is the per-roll
-`_all_gather_object` that reconstructs each Kevin group's full reward
-baseline, which tolerates a different sample count per rank by design.
+| Config | `fsdp_sharding_strategy` | Why |
+| --- | --- | --- |
+| `configs/grpo_coder30b_a3b_trloo.json` | `full_shard` | ZeRO-3: takes the replicated bf16 policy from ~61 GiB to ~7.6 GiB per rank. |
+| `configs/grpo_coder30b_a3b_trloo_2node.json` | `hybrid_shard` | FULL_SHARD inside a node, REPLICATE across; these nodes have no RDMA fabric and a 16-rank inter-node all-reduce measured 4.5 GB/s. |
+| `configs/grpo_coder30b_a3b_trloo_burst.json` | `shard_grad_op` | Records what the single-node path has actually been executing, for the reason below. |
+
+**The field is honoured for `hybrid_shard` and only requested for the other
+two.** Under FSDP1, `accelerate`'s `prepare_model` wraps with
+`sharding_strategy or reshard_after_forward`, and the plugin's `__post_init__`
+always fills `sharding_strategy` from `$FSDP_SHARDING_STRATEGY` (falling back
+to the literal `FULL_SHARD`), so the left operand is never falsy and
+`reshard_after_forward` is dead. `accelerate launch` exports that variable
+unconditionally from its `--config_file`, and `scripts/launch_distributed.sh`
+routes every `grpo` stage through `configs/accelerate_fsdp_grpo.yaml`, which
+pins `SHARD_GRAD_OP`. `build_fsdp_plugin` therefore sets the authoritative
+`sharding_strategy` field itself for hybrid — a wrong topology on hardware
+booked for the right one is not a recoverable mistake — and for the two
+single-node values passes `reshard_after_forward` only, then prints a warning
+naming the value that will actually win. Job `28437`'s log carries exactly
+that: `fsdp_sharding_strategy=full_shard is being OVERRIDDEN to
+SHARD_GRAD_OP`. So `_trloo.json`'s `full_shard` is a request the launcher
+declines; `_burst.json` states the executed value instead so the recipe can be
+read on its own without being wrong.
+
+**What the measurements say.** Measured 2026-08-16 on 8x gfx950 (252 GiB HBM
+each) with the real weights at the pinned revision, one full rollout+update
+step, `num_trajectories=8`: at `max_prompt` 17408 / `max_response` 4096 both
+`shard_grad_op` and `full_shard` OOM'd on all eight ranks (device peak 257,904
+and 257,594 of 258,048 MiB). Freeing ~53 GiB of parameters changed nothing, so
+the binding term is sequence length, not parameter footprint — the log-prob
+recompute materializes logits of seq x 151,936 vocab, 18.3 GiB at 21,504 tokens
+once cross-entropy upcasts to fp32, per sample, with no chunking. Cutting to
+4096 / 1024 completed: peak 199.2 GB allocated per rank, 217,003 MiB device
+(84%). Read that completed point with the override above in mind — it ran as
+ZeRO-2 whatever the config asked for, which is the basis for `_burst.json`'s
+claim that ZeRO-2 fits at response length 1024. A fourth point, 8192 / 2048,
+did not OOM (221,178 MiB) but died with `CheckpointError`: recomputed
+activations carried different metadata than the forward, an unresolved second
+failure mode that must be understood before `max_prompt_length` is raised.
+
+**Generation does not depend on any of this.** The live policy is synced once
+per step into a plain, un-sharded per-rank replica (`_summon_full_params_ctx` +
+`_sync_gen_replica`), and every rollout generates *locally* on that replica
+with zero FSDP collectives, so resharding the policy after its forward cannot
+break `model.generate()`. Ragged agentic turn counts therefore cannot deadlock
+the group: the only cross-rank synchronization point is the per-roll
+`_all_gather_object` that reconstructs each Kevin group's full reward baseline,
+which tolerates a different sample count per rank by design.
+
+All three 30B configs set `"synced_gpus": true`, and that key is inert.
+`_train_grpo_distributed` unconditionally sets `_grpo_synced_gpus = False`
+before the first rollout, and both `generate()` call sites read
+`_grpo_synced_gpus`; nothing in `kore/` ever reads `config.synced_gpus`.
+Lockstep generation exists for the legacy path that generated on the sharded
+policy, and the replica removed that whole failure class. The config value is
+not honoured and does not need to be — but do not read it as a statement about
+the run.
 
 ## Checkpoint and resume mechanics
 

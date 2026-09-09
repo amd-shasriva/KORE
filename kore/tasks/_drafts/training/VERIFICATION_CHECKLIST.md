@@ -28,8 +28,10 @@ backward, paged-KV backward. None present.
   `kore/tasks/`). The registry discovers tasks with `TASKS_DIR.glob("*/task.yaml")`
   (ONE level, see `kore/tasks/registry.py::_discover`), so these are NOT
   auto-discovered and cannot enter any train/eval run or the running campaign.
-  VERIFIED: `registry.task_ids()` == 251 (unchanged), contains none of the 4 draft
-  ids, and the one-level glob matches nothing under `_drafts/`.
+  VERIFIED: `registry.task_ids()` is unchanged by these drafts, contains none of the
+  4 draft ids, and the one-level glob matches nothing under `_drafts/`. (It now
+  returns 1,546. This line used to pin 251, the count when the drafts were staged;
+  the claim is non-discovery, and a frozen absolute number states something else.)
 - Family classification (built directly, not via registry): `flash_attn_backward` ->
   `attention`, `layernorm_backward` -> `layernorm`, `softmax_backward` -> `softmax`,
   `gemm_backward` -> `gemm`. All are TRAINABLE families (none is `mla` /

@@ -12,10 +12,14 @@ easy to undo accidentally:
 - One epoch is **1,609 steps** (206,000 rows at a global batch of 128), not
   478. An earlier revision of this file said 478; the config's own
   `_comment_epochs_and_lr` records that figure as wrong, left over from a
-  `repair_loss_weight`-inflated row count that no longer applies. One epoch
-  does not fit a 23-hour allocation, which is why the launcher requests seven
-  days instead; see [`docs/CLUSTER_OPERATIONS.md`](../docs/CLUSTER_OPERATIONS.md)
-  for the measured walltime and the reasoning.
+  `repair_loss_weight`-inflated row count that no longer applies. At ~60 s/step
+  that is ~29 h, and the launcher requests **three days**
+  (`#SBATCH --time=3-00:00:00` in `scripts/spur_sft_1node.sbatch`, the
+  authoritative value), so even a second epoch would fit. An earlier revision of
+  this file said seven days and blamed a 23-hour allocation; neither figure is
+  in the sbatch. See
+  [`docs/CLUSTER_OPERATIONS.md`](../docs/CLUSTER_OPERATIONS.md) for the measured
+  walltime and the reasoning.
 - A checkpoint is about 488 GB. `save_total_limit: 2`, not 1: the Trainer
   writes the new checkpoint before rotating the old one out, so normal
   rotation transiently holds three checkpoints (~1.46 TB) against 42 TB free

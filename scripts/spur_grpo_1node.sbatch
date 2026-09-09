@@ -85,6 +85,22 @@ FROM_STAGE="${2:-runs/dpo_14b_frontier}"
 OUT_DIR="${3:-runs/grpo_14b_frontier}"
 DATA_ROOT="${4:-data/b05factory}"
 
+# BORROWED ALLOCATION. This script normally owns its Slurm job, so it is free to
+# requeue itself and to rewrite its own ExcNodeList. Both are wrong when it runs
+# as a step inside SOMEONE ELSE'S allocation (srun --overlap --jobid=THEIRS),
+# where SLURM_JOB_ID names a job we must never touch: the dirty-GPU guard below
+# would requeue the lender's job, and the drain timer would tear it down at the
+# 22h30m fallback. KORE_BORROWED_ALLOCATION=1 runs the training and nothing else
+# - no scontrol writes, no drain, no self-requeue.
+BORROWED="${KORE_BORROWED_ALLOCATION:-0}"
+if [[ "$BORROWED" == 1 ]]; then
+    # Artifacts land under the lender's uid, and this tree's owner has to be able
+    # to resume from the checkpoints they produce, so keep the group write bit.
+    umask 002
+    echo "[grpo-1node] BORROWED allocation ${SLURM_JOB_ID:-none}:" \
+         "will not requeue, drain, or otherwise modify this job"
+fi
+
 cd "$REPO"
 mkdir -p runs
 command -v scontrol >/dev/null || { echo "[grpo-1node] missing required command: scontrol" >&2; exit 2; }
@@ -94,7 +110,18 @@ source /home/shasriva/kore-venv/bin/activate
 # The gateway credential lives in .env.local on a shared multi-user cluster, so
 # refuse a symlink, a foreign owner, or group/other-writable modes before sourcing.
 source "$REPO/scripts/lib/ops_runtime.sh"
-kore_secure_source_env "$REPO/.env.local"
+# A borrowed allocation reads this tree as a foreign uid, so the ownership check
+# fails by design (and mode 600 makes the file unreadable anyway). Skip the file
+# instead of relaxing the check, which would mean handing the gateway credential
+# to the lender: GRPO does not need it. The only RL-relevant key it carries,
+# KORE_USE_VENDOR_BASELINE, is exported with a default below, and AMD_LLM_API_KEY
+# reaches kore_env only through the ambient-secret deny-list that strips it from
+# the bench subprocess.
+if [[ "$BORROWED" == 1 ]]; then
+    echo "[grpo-1node] borrowed: skipping .env.local (its teacher credential is unused by GRPO)"
+else
+    kore_secure_source_env "$REPO/.env.local"
+fi
 
 # Fail closed BEFORE the physical masks are dropped: a SPUR partial-GPU allocation
 # mounts an unusable device subset, and once ROCR_VISIBLE_DEVICES is unset torch
@@ -142,6 +169,51 @@ if [[ -n "$DIRTY" ]]; then
     echo "[grpo-1node] expected every device idle under --exclusive; who holds it:" >&2
     rocm-smi --showpids 2>&1 | head -20 >&2
     rocm-smi --showmeminfo vram 2>&1 | grep -iE "GPU|used" | head -20 >&2
+    printf '%s %s\n' "$(date +%s)" "$(hostname -s)" \
+        >> "${KORE_DIRTY_NODES:-/home/shasriva/.kore_dirty_nodes}" 2>/dev/null || true
+
+    # A borrowed allocation gets the diagnosis above and nothing else. Excluding
+    # the node and requeueing would be applied to the lender's job, which is both
+    # destructive and useless: their allocation is pinned to this node, so the
+    # requeue cannot move us off it.
+    if [[ "$BORROWED" == 1 ]]; then
+        echo "[grpo-1node] borrowed: not excluding or requeueing the lender's job" >&2
+        exit 2
+    fi
+
+    # Do not die on a bad node: add it to THIS job's own exclusion list and
+    # requeue. Exiting instead needs an external resubmitter, and a dirty node is
+    # the scheduler's next free candidate every time, so the job would be handed
+    # the same one repeatedly. Self-excluding makes each cycle strictly better
+    # informed than the last with nothing watching over it.
+    #
+    # Capped, because the failure this cannot distinguish is "the whole partition
+    # is busy": past the cap, excluding more nodes only makes the job
+    # unschedulable, and a held job is worse than a failed one to diagnose.
+    EXC_CAP="${KORE_EXCLUDE_CAP:-12}"
+    PRIOR="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
+             | tr ' ' '\n' | sed -n 's/^ExcNodeList=//p' | grep -v '^(null)$' || true)"
+    COUNT=0
+    [[ -n "$PRIOR" ]] && COUNT=$(( $(tr ',' '\n' <<<"$PRIOR" | grep -c .) ))
+    if (( COUNT < EXC_CAP )); then
+        NEXT="$(hostname -s)"
+        [[ -n "$PRIOR" ]] && NEXT="$PRIOR,$NEXT"
+        if scontrol update jobid="$SLURM_JOB_ID" ExcNodeList="$NEXT" 2>&1; then
+            echo "[grpo-1node] excluded $(hostname -s) (now $((COUNT + 1))/$EXC_CAP); requeueing" >&2
+            # requeue_self() is defined much further down, so inline it here. As
+            # noted there, SPUR's scontrol exits 0 even when it cannot reach the
+            # controller, so the output has to be inspected rather than the status.
+            RQ="$(scontrol requeue "$SLURM_JOB_ID" 2>&1)"
+            if ! grep -qiE 'error|failed|unavailable|no leader|refused' <<<"$RQ"; then
+                exit 0
+            fi
+            printf '%s\n' "$RQ" >&2
+        fi
+        echo "[grpo-1node] requeue failed; exiting so the node is released" >&2
+    else
+        echo "[grpo-1node] FATAL $COUNT nodes already excluded; the partition is busy, "\
+             "not broken. Not shrinking the pool further." >&2
+    fi
     exit 2
 fi
 echo "[grpo-1node] all 8 GPUs idle (< ${GPU_DIRTY_GB} GiB used); node is clean"
@@ -166,6 +238,16 @@ export GPU_TARGET=gfx950
 # ---- OFFLINE (air-gapped): never touch the hub ----
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
 export HF_HOME=/home/shasriva/.cache/huggingface
+# This cache is mode 700 under one user's home, so a borrowed run cannot read it,
+# and transformers wants to create paths under HF_HOME even when it fetches
+# nothing. Give the lender its own cache: offline mode plus an absolute model
+# path means nothing is downloaded into it, it only has to be writable.
+if [[ "$BORROWED" == 1 ]]; then
+    for _hf in "/mnt/m2m_nobackup/${USER}/kore/hf" "${TMPDIR:-/tmp}/kore-hf-${USER}"; do
+        if mkdir -p "$_hf" 2>/dev/null; then export HF_HOME="$_hf"; break; fi
+    done
+    echo "[grpo-1node] borrowed: HF_HOME=$HF_HOME"
+fi
 export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
 # Intra-node RCCL only (one node, no IB fabric to pin).
 export NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -317,6 +399,15 @@ else
 fi
 
 RESOLVED="$REPO/runs/grpo-${SLURM_JOB_ID:-manual}.resolved.json"
+# A borrowed allocation runs under the lender's uid, which has no write access to
+# this tree, so the resolved config cannot live in it. OUT_DIR is the right home:
+# the run must be able to write there anyway or it could not save a checkpoint,
+# and keeping the config beside the checkpoints it produced is what a later
+# resume wants to read.
+if [[ "$BORROWED" == 1 ]]; then
+    mkdir -p "$OUT_DIR" || { echo "[grpo-1node] FATAL borrowed run cannot write OUT_DIR=$OUT_DIR" >&2; exit 2; }
+    RESOLVED="$OUT_DIR/grpo-${SLURM_JOB_ID:-manual}.resolved.json"
+fi
 "$PY" scripts/spur_resolve_launch_config.py \
     --stage grpo --config "$CFG" --out "$RESOLVED" \
     --from-stage "$FROM_STAGE" --output-dir "$OUT_DIR" --data-root "$DATA_ROOT"
@@ -366,6 +457,12 @@ _requeue_attempt() {
     return 1
 }
 requeue_self() {
+    # Single choke point for every requeue path, so a borrowed allocation is
+    # refused here even if a new caller is added later.
+    if [[ "$BORROWED" == 1 ]]; then
+        echo "[grpo-1node] borrowed: refusing to requeue a job this run does not own" >&2
+        return 1
+    fi
     _requeue_attempt && return 0
     # Retry against an explicit controller: the CLI's localhost default is wrong
     # on any node that does not itself run spurctld. Subshell so the override
@@ -397,12 +494,60 @@ trap handle_requeue_warning USR1
 # failure). Warn locally at 22h30m of the 23h limit so the run drains and
 # EXPLICITLY requeues itself with 30 min to spare - which is how a 2000-step RL
 # run crosses many allocations.
-if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+
+# Slurm duration ([DD-]HH:MM:SS, [DD-]HH:MM, MM:SS, UNLIMITED) -> seconds, 0 if
+# it cannot be read. Used to size the drain against the allocation we actually
+# got rather than against a constant.
+_slurm_secs() {
+    local t="${1:-}" d=0 s=0
+    [[ -z "$t" || "$t" == UNLIMITED || "$t" == "?" || "$t" == "N/A" ]] && { echo 0; return; }
+    if [[ "$t" == *-* ]]; then d="${t%%-*}"; t="${t#*-}"; fi
+    local IFS=:; local -a p; read -ra p <<<"$t"
+    case ${#p[@]} in
+        3) s=$(( 10#${p[0]} * 3600 + 10#${p[1]} * 60 + 10#${p[2]} )) ;;
+        2) s=$(( 10#${p[0]} * 60 + 10#${p[1]} )) ;;
+        1) s=$(( 10#${p[0]} )) ;;
+        *) s=0 ;;
+    esac
+    echo $(( d * 86400 + s ))
+}
+
+# The drain wants to fire just before OUR wall, so derive it from the allocation
+# instead of trusting a constant. A hardcoded 39600 (tuned for burst's 12h
+# ceiling) was carried onto a 7-day primus allocation, which would have requeued
+# a healthy run after 11 hours and sent it back to the queue for the remaining
+# six days. A constant cannot be right for both queues; the time limit can.
+# KORE_REQUEUE_AFTER_SECONDS still wins when it is SHORTER, so an explicit early
+# drain is still possible, but it can no longer silently truncate a long one.
+if [[ -n "${SLURM_JOB_ID:-}" && "$BORROWED" != 1 ]]; then
+    REQUEUE_MARGIN="${KORE_REQUEUE_MARGIN_SECONDS:-1800}"
+    LIMIT_S="$(_slurm_secs "$(squeue -h -j "$SLURM_JOB_ID" -o '%l' 2>/dev/null | tr -d '[:space:]')")"
+    DERIVED=0
+    (( LIMIT_S > REQUEUE_MARGIN )) && DERIVED=$(( LIMIT_S - REQUEUE_MARGIN ))
+    REQUEUE_AFTER="${KORE_REQUEUE_AFTER_SECONDS:-0}"
+    # Take the derived value when the env is unset, and when the env asks for a
+    # drain LONGER than the allocation can honour. An env that asks for a
+    # shorter one is an explicit early drain and is kept, which is what the
+    # comment above promises. Written as `DERIVED > REQUEUE_AFTER` this was the
+    # max of the two, so `KORE_REQUEUE_AFTER_SECONDS=3600` against a 23h wall
+    # was silently replaced by 81000 and the early drain never happened.
+    if (( REQUEUE_AFTER <= 0 || DERIVED < REQUEUE_AFTER )); then
+        REQUEUE_AFTER="$DERIVED"
+    fi
+    (( REQUEUE_AFTER > 0 )) || REQUEUE_AFTER=81000        # limit unreadable
+    echo "[grpo-1node] self-requeue drain in ${REQUEUE_AFTER}s" \
+         "(time limit ${LIMIT_S}s, margin ${REQUEUE_MARGIN}s," \
+         "env ${KORE_REQUEUE_AFTER_SECONDS:-unset})"
     (
-        sleep "${KORE_REQUEUE_AFTER_SECONDS:-81000}"
+        sleep "$REQUEUE_AFTER"
         kill -USR1 "$$"
     ) &
     REQUEUE_TIMER_PID="$!"
+elif [[ "$BORROWED" == 1 ]]; then
+    # The drain exists to hand a wall-limited allocation back cleanly. In a
+    # borrowed one it would only kill the lender's job, and its own wall is
+    # theirs to manage, so there is nothing here to drain against.
+    echo "[grpo-1node] borrowed: drain timer not armed (the allocation's wall belongs to its owner)"
 fi
 
 # setsid puts accelerate + its 8 workers (and their bench subprocesses) in their

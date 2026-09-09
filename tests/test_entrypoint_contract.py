@@ -15,10 +15,23 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 
-# amd-burst-qos was deleted cluster-side (173dbbf); the General team's allocation is
-# eight guaranteed non-preemptible nodes on amd-general-qos. A job that still asks
-# for the removed QoS is rejected at submission.
-REMOVED_QOS = "amd-burst-qos"
+# Account and QoS are not independent choices: a pairing can be ACCEPTED by
+# sbatch and then never become a scheduling candidate. docs/CLUSTER_OPERATIONS.md
+# holds the measured table; these are the three pairings observed to actually
+# place work for this user.
+#
+# This started life as a check that no sbatch requested amd-burst-qos, on the
+# basis that the QoS had been deleted cluster-side (173dbbf). It came back:
+# 21 files reference it as a live option and two scripts default to it. What
+# never came back is a burst pairing that SCHEDULES -- amd-general + burst sat
+# nine hours at Reason=None while 42 later jobs ran, and amd-burst + burst would
+# not place a 1-GPU 5-minute probe even after ops added the account. So check
+# the property that is still true rather than the one that expired.
+SCHEDULABLE_PAIRINGS = frozenset({
+    ("amd-general", "amd-general-qos"),
+    ("amd-primus", "amd-primus-qos"),
+    ("amd-primus", "amd-general-qos"),
+})
 
 # Deployment root of the SPUR checkout. The hardcoded paths in the sbatch files are
 # only meaningful on that host, so the check that uses this skips elsewhere.
@@ -102,14 +115,26 @@ def test_no_shell_entrypoint_is_empty() -> None:
 
 
 @pytest.mark.shell
-def test_no_sbatch_requests_the_removed_burst_qos() -> None:
-    offenders = sorted(
-        path.relative_to(ROOT).as_posix()
-        for path in SCRIPTS.glob("*.sbatch")
-        if re.search(rf"^#SBATCH\s+--qos={re.escape(REMOVED_QOS)}\s*$",
-                     path.read_text(encoding="utf-8"), re.M)
-    )
-    assert not offenders, f"{REMOVED_QOS} no longer exists on SPUR: {offenders}"
+def test_no_sbatch_pairs_a_qos_its_account_cannot_schedule() -> None:
+    """A pairing sbatch accepts but never schedules is worse than a rejection.
+
+    A rejected submission tells you immediately. A non-placing pairing sits at
+    Reason=None with StartTime=N/A and looks exactly like a busy queue, so the
+    failure is invisible until somebody notices that later-submitted jobs keep
+    starting first."""
+    offenders = []
+    for path in sorted(SCRIPTS.glob("*.sbatch")):
+        text = path.read_text(encoding="utf-8")
+        account = re.search(r"^#SBATCH\s+--account=(\S+)", text, re.M)
+        qos = re.search(r"^#SBATCH\s+--qos=(\S+)", text, re.M)
+        if not (account and qos):
+            continue
+        pairing = (account.group(1), qos.group(1))
+        if pairing not in SCHEDULABLE_PAIRINGS:
+            offenders.append((path.relative_to(ROOT).as_posix(), *pairing))
+    assert not offenders, (
+        "account/QoS pairings not observed to schedule for this user "
+        f"(see docs/CLUSTER_OPERATIONS.md): {offenders}")
 
 
 @pytest.mark.shell

@@ -33,9 +33,17 @@
 #   script. Being a real batch job is worth the re-test: it keeps the timed
 #   self-requeue, append-mode logs, and survives an ssh drop.
 #SBATCH --job-name=kore-grpo-2n
-#SBATCH --account=amd-burst
+# amd-general + amd-general-qos, which is what spur_grpo_1node.sbatch and
+# spur_sft_1node.sbatch use and what every job that has actually run on this
+# cluster used. This launcher was written with amd-burst + amd-burst-qos five
+# days AFTER docs/CLUSTER_OPERATIONS.md recorded that pairing as accepted by
+# sbatch and never scheduled -- a minimal 1-GPU 5-minute probe would not place
+# even once ops had added this user to the amd-burst account. General is capped
+# at 8 nodes and can genuinely queue on QOSGrpNodeLimit, which is a real wait
+# rather than a job that is not a scheduling candidate at all.
+#SBATCH --account=amd-general
 #SBATCH --partition=amd-spur
-#SBATCH --qos=amd-burst-qos
+#SBATCH --qos=amd-general-qos
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 # gpu:8, not gpu:mi355x:8 -- the typed form does not dispatch on this controller.

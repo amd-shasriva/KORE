@@ -9,11 +9,15 @@
 #SBATCH --job-name=kore-v5-verify
 #SBATCH --account=amd-general
 #SBATCH --partition=amd-spur
-# amd-burst-qos, not amd-general-qos. General is capped at 8 nodes for the whole
-# team and was full, so this pended on QOSGrpNodeLimit indefinitely; burst reaches
-# all 282 nodes. Burst jobs can be preempted, which is irrelevant here -- this is a
-# read-only verification that costs an hour and can simply be resubmitted.
-#SBATCH --qos=amd-burst-qos
+# amd-general-qos. This asked for amd-burst-qos to escape QOSGrpNodeLimit, on
+# the reasoning that general is capped at 8 nodes for the team while burst
+# reaches all 282. That reasoning was sound and the pairing does not work: one
+# day later, docs/CLUSTER_OPERATIONS.md recorded amd-general + amd-burst-qos as
+# accepted by sbatch and never scheduled -- Reason=None, StartTime=N/A for nine
+# hours while 42 later-submitted jobs ran, and zero of 60 sampled running burst
+# jobs used the amd-general account. Queueing on QOSGrpNodeLimit is a real wait
+# that ends; not being a scheduling candidate is a wait that does not.
+#SBATCH --qos=amd-general-qos
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=32
 #SBATCH --time=01:00:00

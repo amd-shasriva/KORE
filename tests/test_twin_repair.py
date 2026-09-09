@@ -171,9 +171,24 @@ def test_repair_goes_where_it_works():
     """It covered both dialects until the numbers came in: ~9,500 repairs
     rescued 121 HIP kernels and zero FlyDSL ones. The model can act on a HIP
     error; it cannot act on a FlyDSL one, because it does not know the language
-    well enough for the message to mean anything."""
+    well enough for the message to mean anything.
+
+    The default has to repeat the literal root as well as naming the variable.
+    0b727253 put it there: REPAIR_ROOTS is expanded well above the line that
+    declares REG_HIP_ROOT, so a bare $REG_HIP_ROOT aborted the script under
+    `set -u` on its first line of work whenever it ran without ensure_loops to
+    supply the variable from the environment -- it worked under the loop and
+    died by hand, which is the worst way round for something you debug. So this
+    reads the default rather than matching one spelling of it; the property is
+    which roots the budget goes to, not how the fallback is written.
+    """
     src = (REPO / "scripts" / "frontier_pipeline.sh").read_text()
-    assert 'REPAIR_ROOTS="${REPAIR_ROOTS:-$REG_HIP_ROOT}"' in src
+    line = next(l for l in src.splitlines() if l.startswith("REPAIR_ROOTS="))
+    assert "REG_HIP_ROOT" in line, f"the repair budget left the registry HIP root: {line}"
+    assert "data/registry_hip_frontier" in line, \
+        "no literal fallback, so a run by hand aborts under set -u"
+    assert "flydsl" not in line.lower(), \
+        f"a FlyDSL root is back in the repair budget, which rescued none: {line}"
     block = src.split("--- 1b")[1].split("--- 2.")[0]
     assert "$REPAIR_ROOTS" in block, "repair still walks a hardcoded root list"
 

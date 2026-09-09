@@ -166,12 +166,41 @@ def test_registry_roots_do_not_mask_each_other():
 
 
 def test_every_seed_root_is_gated():
-    """A root that is seeded but never gated produces no training rows at all."""
+    """A root that is seeded but never gated produces no training rows at all.
+
+    The gate loop names no roots of its own since 01dcc807; it walks
+    $GATE_ROOTS, which scoped gating to the roots something downstream actually
+    mines after two FlyDSL gates took general-QoS nodes to produce passers that
+    nothing consumed. The invariant did not change, so it is checked through
+    the indirection instead: the roots the pipeline seeds on every pass are
+    exactly the roots GATE_ROOTS names.
+
+    The two pool roots are the other half of the same property. They are seeded
+    only inside the POOL_STREAMS switch, and that switch is also what keeps
+    them out of GATE_ROOTS: data/pool_hip_frontier is not gated at all, so
+    every seed it ever produced was dead on arrival, which is why the switch
+    defaults to 0. Reviving one without the other is the bug this pins.
+    """
     src = (Path(__file__).resolve().parents[1]
            / "scripts" / "frontier_pipeline.sh").read_text()
     gate_line = next(l for l in src.splitlines() if l.strip().startswith("for root in"))
-    for root in ("REG_HIP_ROOT", "REG_FLYDSL_ROOT", "HIP_ROOT", "FLYDSL_ROOT"):
-        assert root in gate_line, f"{root} is seeded but never gated"
+    assert gate_line.strip() == "for root in $GATE_ROOTS; do"
+    gate_roots = next(l for l in src.splitlines() if l.startswith("GATE_ROOTS="))
+    for root in ("REG_HIP_ROOT", "REG_FLYDSL_ROOT"):
+        assert root in gate_roots, f"{root} is seeded but never gated"
+        # GATE_ROOTS reads both roots above the lines that declare them, so
+        # under `set -u` an unseeded one aborts the pipeline before it does any
+        # work -- and only when run by hand, since ensure_loops supplies both
+        # from the environment.
+        assert f': "${{{root}:=' in src, \
+            f"{root} is unbound where GATE_ROOTS reads it"
+
+    pool_block = src.split('if [ "$POOL_STREAMS" = "1" ]; then')[1].split("\n    fi")[0]
+    seeds = [l for l in src.splitlines() if l.strip().startswith("start_materializer ")]
+    assert seeds, "no pool materializer is started, so this checks nothing"
+    for line in seeds:
+        assert line in pool_block, \
+            f"a pool root is seeded outside the switch that ungates it: {line.strip()}"
 
 
 def test_task_list_filters_to_the_selection(tmp_path):

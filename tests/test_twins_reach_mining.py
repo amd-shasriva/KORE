@@ -94,11 +94,25 @@ def test_harvest_filters_to_the_selection(harvest, pipeline):
 # ---- and something must mine them -----------------------------------------
 
 def test_a_stream_is_staffed_on_the_twins(loops, staff):
+    """The twins have to be mined by something; which stream is a plan detail.
+
+    1c517146 merged the two HIP sources into one ``frontierhip`` stream -- the
+    211 registry frontier twins and the 1,857 scored hard-pool tasks -- because
+    mining them separately gave 45% attention on one and 94% GEMM on the other,
+    which is only what each source happens to hold. ``frontiertwins`` went to 0
+    in the same commit: its tasks are inside frontierhip now and staffing both
+    would cover them twice. It stays declared so its ledger and shard set
+    survive, which is what makes reviving it one number.
+    """
     for src, name in ((loops, "ensure_loops.sh"), (staff, "staff_datagen.sh")):
         assert "frontiertwins:runs/shards_frontier_twins" in src, \
-            f"{name} declares no twin mining stream"
-        want = _wanted(src, "frontiertwins")
-        assert int(want) > 0, f"{name} staffs the twin stream with {want} workers"
+            f"{name} deleted the twin stream instead of retiring it, losing its ledger"
+        assert "frontierhip:runs/shards_frontierhip:data/v5frontierhip" in src, \
+            f"{name} declares no merged HIP stream for the twins to have been folded into"
+        wants = dict(_stream_wants(src))
+        carrying = {s: wants.get(s, 0) for s in ("frontierhip", "frontiertwins")}
+        assert sum(carrying.values()) > 0, \
+            f"{name} staffs no stream on the frontier twins: {carrying}"
 
 
 def _wanted(src: str, name: str) -> str:
@@ -118,14 +132,50 @@ def test_staffing_default_matches_the_live_config(loops, staff):
             f"{name}: ensure_loops wants {a}, staff_datagen default is {b}"
 
 
-def test_pool_flydsl_passers_are_harvested_and_mined(pipeline, loops, staff):
-    """FlyDSL is 25% of the arena and 0.6% of the corpus, so its gated twins
-    must be both promoted and worked. Repair stays off it -- 121 HIP kernels
-    rescued against zero FlyDSL -- but mining a kernel that already passes is a
-    different question from trying to fix one that does not."""
-    assert "POOL_FLYDSL_OK_ROOT" in pipeline, "pool FlyDSL passers are not promoted"
+def _pool_guarded_blocks(pipeline: str) -> list[str]:
+    """The bodies of the POOL_STREAMS switch, in file order."""
+    return [b.split("\n    fi")[0]
+            for b in pipeline.split('if [ "$POOL_STREAMS" = "1" ]; then')[1:]]
+
+
+def test_pool_flydsl_is_seeded_harvested_and_mined_together(pipeline, loops, staff):
+    """Whatever the pool FlyDSL stream is doing, it must do all of it or none.
+
+    It used to be promoted and worked because FlyDSL is 25% of the arena and
+    0.6% of the corpus. dac7d257 measured it against runs/frontier_tasks.txt
+    instead: 226 tasks, 0% of them on the list -- kbk_actor, kbk_mlp,
+    kbk_classifier at fp32, scraped modules baselined against eager torch
+    rather than AITER or hipBLASLt. It is the right dialect and the wrong
+    difficulty, so it goes to 0.
+
+    What this file exists to stop is a stage that half-runs. The whole pipeline
+    stalled once because the gate wrote a verdict nothing promoted, and 1,104
+    registry-HIP and 309 registry-FlyDSL twins reached that verdict and stopped
+    -- so seeding a twin nothing will mine is worse than not seeding it, and it
+    is worse in exactly the same way whether the missing stage is the harvest
+    or the miner. Hence one switch over all three stages: POOL_STREAMS gates
+    the materializer and the harvest, and the stream's own count is 0 to match.
+    """
+    assert 'POOL_STREAMS="${POOL_STREAMS:-0}"' in pipeline, \
+        "the pool streams have no single switch any more"
+
+    blocks = _pool_guarded_blocks(pipeline)
+    assert len(blocks) == 2, f"expected a seed block and a harvest block, got {len(blocks)}"
+    assert any('materialize_pool_flydsl.py "$FLYDSL_ROOT"' in b for b in blocks), \
+        "the pool FlyDSL materializer runs whether or not the stream is revived"
+    assert any('HIP_PROMOTED="$REPO/$POOL_FLYDSL_OK_ROOT"' in b for b in blocks), \
+        "the pool FlyDSL harvest runs whether or not the stream is revived"
+
+    # The promoted root and shard set stay declared at the top level so the
+    # already-gated 172 passers survive the retirement: 01dcc807 made a point of
+    # keeping them promoted and sharded so resuming is a config change, not a
+    # rebuild.
+    for var in ("POOL_FLYDSL_OK_ROOT=", "POOL_FLYDSL_SHARD_DIR="):
+        assert var in pipeline, f"{var} was deleted, so reviving the stream is a rebuild"
+
     assert _wanted(loops, "poolflydsl") == _wanted(staff, "poolflydsl")
-    assert int(_wanted(loops, "poolflydsl")) > 0, "FlyDSL gated twins are not mined"
+    assert int(_wanted(loops, "poolflydsl")) == 0, \
+        "the stream is staffed while POOL_STREAMS leaves its seeds unharvested"
 
 
 def test_pool_flydsl_is_not_pooled_into_the_frontier_set(pipeline):
@@ -149,12 +199,23 @@ def test_twin_shards_are_kept_current(pipeline):
         "the twin shard set is never refreshed against the current commit"
 
 
-#: The dialects the arena scores that the corpus is short of. Triton is not one
-#: of them: 11,884 Triton rows against 738 HIP and 229 FlyDSL, so a marginal
-#: Triton row is worth close to nothing and a slot spent on it is a slot not
-#: spent on the two dialects that are 47% of the arena between them.
-HIP_FLYDSL_STREAMS = ("frontiertwins", "poolflydsl", "hipreg", "poolhip")
-TRITON_STREAMS = ("frontier", "pooltriton")
+#: Streams whose task list was chosen by score rather than by whatever the
+#: source happened to hold. select_frontier_tasks ranks both halves:
+#: runs/frontier_tasks.txt is the 482 registry ids above the histogram break,
+#: and --out-pool --min-score 2 is the 1,857 pool tasks at a million elements
+#: or more. frontierhip mines the two interleaved, frontiertriton the registry
+#: half in Triton; frontier, frontiertwins and hardpool are the predecessors
+#: those two merged, kept declared at 0 so their ledgers survive.
+SCORED_STREAMS = ("frontierhip", "frontiertriton", "frontiertwins", "hardpool",
+                  "frontier")
+
+#: Streams that mine a source end to end. dac7d257 measured each against
+#: runs/frontier_tasks.txt: hipreg is 1% frontier -- it reads
+#: runs/unmined_hip.txt, which is hip_abs_fp16 and hip_div_fp32, the generated
+#: elementwise set -- and poolflydsl is 0%. poolhip and pooltriton mine the raw
+#: KernelBook pool, where the median baseline is 17us and 86-92% is under
+#: 100us, so no amount of it teaches tiling, LDS staging or MFMA scheduling.
+BREADTH_STREAMS = ("poolflydsl", "hipreg", "poolhip", "pooltriton")
 
 
 def _stream_wants(src):
@@ -163,31 +224,72 @@ def _stream_wants(src):
             if ":runs/shards" in t]
 
 
-def test_no_triton_is_mined(loops, staff):
-    """Triton mining is switched off outright, not merely deprioritised."""
+def test_triton_mining_is_aimed_at_the_frontier_not_the_pool(loops, staff):
+    """Triton mining is not switched off any more, it is aimed.
+
+    The old rule was per-dialect -- 11,884 Triton rows against 738 HIP and 229
+    FlyDSL, so a marginal Triton row was worth close to nothing -- and it was
+    right about the pool and wrong about the registry. 1c517146 separated them:
+    pool-Triton is 6,064 launch-bound rows, median baseline 16us, zero
+    attention and zero MoE, while the registry frontier still has 354 unmined
+    Triton tasks worth ~24M tokens, and triton2triton is 38% of the arena and
+    15 points behind Opus. So the pool stream stays at 0 and the frontier one
+    gets miners until it runs out.
+
+    Asserting on .get(name) rather than .get(name, 0): a renamed or deleted
+    stream must fail here, because the version of this test that defaulted to 0
+    went on passing while three of six miners sat on Triton.
+    """
     for src, name in ((loops, "ensure_loops.sh"), (staff, "staff_datagen.sh")):
         wants = dict(_stream_wants(src))
-        for stream in TRITON_STREAMS:
-            assert wants.get(stream, 0) == 0, \
-                f"{name} still staffs {stream} with {wants[stream]} worker(s)"
+        assert wants.get("pooltriton") == 0, \
+            f"{name} staffs pool-Triton with {wants.get('pooltriton')} worker(s)"
+        assert wants.get("frontiertriton", 0) > 0, \
+            f"{name} mines no Triton at all, with 354 registry frontier tasks left"
 
 
-def test_every_worker_goes_to_hip_or_flydsl(loops, staff):
+def test_every_worker_goes_to_a_scored_stream(loops, staff):
+    """The rule was per-dialect until the dialect stopped predicting value.
+
+    dac7d257 measured every active stream against runs/frontier_tasks.txt --
+    frontiertwins 100% frontier, hipreg 1%, poolflydsl 0% -- and hipreg had
+    mined 3,250 rows, more than any other stream, which made the largest part
+    of the corpus its least difficult part. Four of six miners were on work the
+    frontier list rejects. What decides whether a slot is worth spending is
+    whether the stream's task list was scored, not which language it is in;
+    that is why frontiertriton may hold miners while poolflydsl may not.
+    """
     for src, name in ((loops, "ensure_loops.sh"), (staff, "staff_datagen.sh")):
         wants = dict(_stream_wants(src))
         staffed = {s for s, w in wants.items() if w > 0}
         assert staffed, f"{name} staffs nothing at all"
-        assert staffed <= set(HIP_FLYDSL_STREAMS), \
-            f"{name} staffs a non-HIP/FlyDSL stream: {staffed - set(HIP_FLYDSL_STREAMS)}"
+        assert staffed <= set(SCORED_STREAMS), \
+            f"{name} staffs an unscored stream: {staffed - set(SCORED_STREAMS)}"
+        # A retirement is reversed by editing one number in place, so the
+        # breadth streams have to still be here under these names for the check
+        # above to mean anything.
+        assert set(BREADTH_STREAMS) <= set(wants), \
+            f"{name} no longer declares {set(BREADTH_STREAMS) - set(wants)}, " \
+            "so this test would pass however they were revived"
 
 
 def test_frontier_difficulty_twins_are_staffed_first(loops, staff):
-    """Streams are staffed in declaration order, so order is priority. The
-    frontier twins are the only HIP set whose difficulty comes from the task
-    rather than the dialect."""
+    """Streams are staffed in declaration order, so order is priority.
+
+    The frontier twins are still the set whose difficulty comes from the task
+    rather than the dialect -- primary scales from 16.7M to 68.7B elements
+    against the pool's uniform 1M, and AITER and hipBLASLt baselines rather
+    than eager torch -- and since 1c517146 they are mined as the registry half
+    of frontierhip. So the merged HIP stream is what has to come first, and it
+    has to be genuinely staffed: declaring it first at 0 workers would hand the
+    first free slot to frontiertriton instead.
+    """
     for src, name in ((loops, "ensure_loops.sh"), (staff, "staff_datagen.sh")):
-        order = [s for s, _ in _stream_wants(src)]
-        assert order[0] == "frontiertwins", f"{name} staffs {order[0]} first"
+        wants = _stream_wants(src)
+        order = [s for s, _ in wants]
+        assert order[0] == "frontierhip", f"{name} staffs {order[0]} first"
+        assert dict(wants)["frontierhip"] > 0, \
+            f"{name} declares frontierhip first and gives it no workers"
 
 
 def test_repair_budget_follows_the_dialect_it_can_actually_fix(loops):
@@ -199,7 +301,23 @@ def test_repair_budget_follows_the_dialect_it_can_actually_fix(loops):
     assert "$REPAIR_ROOTS" in block, "repair still walks a hardcoded root list"
 
 
-def test_lowest_value_stream_is_still_last(loops):
-    order = [s for s, _ in _stream_wants(loops)]
-    assert order.index("poolhip") > order.index("frontiertwins"), \
-        "launch-bound pool HIP would take a slot before the frontier twins"
+def test_lowest_value_stream_is_still_last(loops, staff):
+    """No retired stream may sit ahead of a staffed one in the declaration.
+
+    Comparing two retired streams to each other proves nothing -- neither takes
+    a slot -- and the ordering only ever matters at the moment a retirement is
+    reversed, which is a supported operation here: every retired stream is kept
+    declared at 0 precisely so its ledger survives and reviving it is one
+    number, edited in place. Declaring poolhip -- 6,457 pool twins, 86% under
+    100us, median 17us -- above frontierhip would put it first in line for
+    every slot that frees the moment somebody typed that number.
+    """
+    for src, name in ((loops, "ensure_loops.sh"), (staff, "staff_datagen.sh")):
+        wants = _stream_wants(src)
+        staffed = [i for i, (_, w) in enumerate(wants) if w > 0]
+        retired = [i for i, (_, w) in enumerate(wants) if w == 0]
+        assert staffed, f"{name} staffs nothing at all"
+        assert retired, f"{name} retires nothing, so this check is vacuous"
+        assert max(staffed) < min(retired), \
+            f"{name} declares a retired stream ahead of a staffed one: " \
+            f"{[(s, w) for s, w in wants]}"

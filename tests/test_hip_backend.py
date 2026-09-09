@@ -51,12 +51,23 @@ def test_hip_candidate_is_a_hip_file():
     assert hip.candidate_filename("hip").endswith(".hip")
 
 
+def test_flydsl_shares_the_triton_candidate_filename():
+    """A FlyDSL candidate is Python. Staging it as kernel.hip would hand hipcc a
+    Python file and record a compile failure that says nothing about the kernel."""
+    assert hip.candidate_filename("flydsl") == "kernel.py"
+
+
 def test_unknown_backend_fails_closed():
     """Defaulting to kernel.py would stage a candidate the driver cannot compile
-    and then report it as the model's compile failure."""
+    and then report it as the model's compile failure.
+
+    Uses a backend that is genuinely absent from SUPPORTED_BACKENDS. This test
+    named "flydsl" until FlyDSL became a real backend, at which point it stopped
+    exercising the fail-closed path at all and started asserting that a
+    supported backend raises."""
     with pytest.raises(hip.HipToolchainError) as excinfo:
-        hip.candidate_filename("flydsl")
-    assert "flydsl" in str(excinfo.value)
+        hip.candidate_filename("cutlass")
+    assert "cutlass" in str(excinfo.value)
     assert "triton" in str(excinfo.value)  # the message names what IS supported
 
 

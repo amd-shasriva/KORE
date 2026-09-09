@@ -557,7 +557,7 @@ def test_dpo_wires_latest_checkpoint_into_trainer_train():
     assert "trainer.train(resume_from_checkpoint=_resume)" in source
 
 
-def test_fsdp_kwargs_wrap_the_qwen3_decoder_and_consolidate_the_handoff():
+def test_fsdp_kwargs_wrap_the_qwen3_decoder_and_shard_checkpoints_for_resume():
     from kore.policy.configs import build_fsdp_kwargs, fsdp_enabled
     from kore.policy.dpo import dpo_config_from_dict
 
@@ -566,7 +566,13 @@ def test_fsdp_kwargs_wrap_the_qwen3_decoder_and_consolidate_the_handoff():
     kwargs = build_fsdp_kwargs(config)
     assert kwargs["fsdp"] == "full_shard auto_wrap"
     assert kwargs["fsdp_config"]["transformer_layer_cls_to_wrap"] == ["Qwen3DecoderLayer"]
-    assert kwargs["fsdp_config"]["state_dict_type"] == "FULL_STATE_DICT"
+    # PERIODIC saves are sharded so the run can resume at all. FULL made every
+    # save a rank-0 gather of the whole model and optimizer, and reading the
+    # 244 GB optimizer file back SIGBUSed all eight ranks on two separate nodes.
+    # The cross-stage handoff, which does face a different mesh, is the job of
+    # the final consolidated save, not of this setting. The SFT twin of this
+    # test asserts the same value; this copy was missed when it changed.
+    assert kwargs["fsdp_config"]["state_dict_type"] == "SHARDED_STATE_DICT"
 
 
 # --------------------------------------------------------------------------- #

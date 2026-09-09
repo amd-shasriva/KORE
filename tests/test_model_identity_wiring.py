@@ -229,6 +229,19 @@ def fake_training_stack(monkeypatch):
         def __init__(self, **kwargs):
             self.model = _Model()
             self.kwargs = kwargs
+            # A real Trainer always carries both of these, and train_sft now
+            # uses them: .accelerator for the FULL_STATE_DICT flip on the final
+            # save and for the NFS write barriers, .args to rank-guard the
+            # tokenizer rewrite. Without them the stage dies at the first
+            # barrier, before any identity assertion in this test can run.
+            #
+            # fsdp_plugin is None on purpose: that is what a single-process run
+            # looks like, and it keeps the non-FSDP branch honest.
+            self.accelerator = types.SimpleNamespace(
+                state=types.SimpleNamespace(fsdp_plugin=None),
+                wait_for_everyone=lambda: calls.append(("barrier", "", {})),
+            )
+            self.args = types.SimpleNamespace(should_save=True)
 
         def train(self, resume_from_checkpoint=None):
             calls.append(("train", str(resume_from_checkpoint), {}))

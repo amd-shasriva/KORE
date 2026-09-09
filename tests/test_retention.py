@@ -98,8 +98,17 @@ def test_strip_think_removes_reasoning_trace():
     from kore.policy.serve import _strip_think
     assert _strip_think("<think>weigh the options</think>B") == "B"
     assert _strip_think("<think>a</think>\nThe answer is C.") == "The answer is C."
-    # budget-truncated (unclosed) trace -> nothing survives (no stray-letter pollution)
-    assert _strip_think("<think>consider A vs B vs C before deciding") == ""
+    # Budget-truncated (unclosed) trace. The cut is at the first answer marker,
+    # not to end of string: cutting to the end took finished kernels along with
+    # the scratchpad and scored them as having produced nothing.
+    assert _strip_think(
+        "<think>weighing options\n```python\nk=1\n```"
+    ) == "```python\nk=1\n```"
+    # And with no marker at all there is nothing to keep, so the raw text comes
+    # back rather than "". A parser gets more out of that than out of nothing.
+    assert _strip_think(
+        "<think>consider A vs B vs C before deciding"
+    ) == "<think>consider A vs B vs C before deciding"
     assert _strip_think("D") == "D"  # no trace -> untouched
 
 

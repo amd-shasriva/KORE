@@ -1800,8 +1800,19 @@ def collect_amd_gpu_devices(
         render_by_bdf.setdefault(bdf, []).append(render.name)
 
     devices: list[GPUDevice] = []
+    # /sys/class/drm carries one entry per CARD (card0, card1, ...) and one per
+    # CONNECTOR on that card (card0-VGA-1, card0-DP-1, ...). Connector entries
+    # match this same glob but are not cards, so parsing the suffix as an ordinal
+    # raises on any host with a display output wired up: measured on an MI355X
+    # node whose onboard VGA produced card0-VGA-1 and took down all 8 ranks
+    # before the first step. Keep only "card" followed by digits and nothing else.
+    cards = [
+        path
+        for path in root.glob("card[0-9]*")
+        if path.name.removeprefix("card").isdigit()
+    ]
     for card in sorted(
-        root.glob("card[0-9]*"),
+        cards,
         key=lambda path: int(path.name.removeprefix("card")),
     ):
         device = card / "device"

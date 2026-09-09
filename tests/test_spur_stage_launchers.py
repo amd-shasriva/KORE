@@ -319,7 +319,11 @@ def test_added_launchers_verify_their_own_requeue_landed(stage):
     # This test used to int() whatever followed `:-`, which raised ValueError on
     # the empty one -- i.e. it demanded the worse design. Accept either, and
     # check the property that matters.
-    numeric = re.search(r"KORE_REQUEUE_AFTER_SECONDS:-(\d+)", source)
+    # `:-0` is a SENTINEL for "the env did not set one", not a drain length: the
+    # grpo launcher uses it to mean "take the derived value". Reading it as a
+    # constant default sent grpo down the wrong branch and failed it on 0.
+    # Only a nonzero literal is a real constant to bound against --time.
+    numeric = re.search(r"KORE_REQUEUE_AFTER_SECONDS:-([1-9]\d*)", source)
     if numeric:
         default = int(numeric.group(1))
         assert 0 < default < limit, (default, limit)
@@ -331,7 +335,17 @@ def test_added_launchers_verify_their_own_requeue_landed(stage):
         # does not report TimeLimit at all, so the fallback is the live path. One
         # set later than --time means a hard kill with no graceful drain and no
         # resubmit marker for the supervisor to follow.
-        fallbacks = [int(f) for f in re.findall(r"WALL_SECONDS:-(\d+)", source)]
+        # sft spells the fallback `WALL_SECONDS:-N`; grpo assigns it bare, as
+        # `REQUEUE_AFTER=N` guarded by a zero test, on the branch where squeue
+        # did not report a TimeLimit. Same role, so accept either spelling
+        # rather than demanding one launcher's variable name.
+        fallbacks = [
+            int(value)
+            for pair in re.findall(
+                r"WALL_SECONDS:-(\d+)|\bREQUEUE_AFTER=(\d+)", source)
+            for value in pair
+            if value
+        ]
         assert fallbacks, "no numeric fallback for a derived drain timer"
         for fb in fallbacks:
             assert 0 < fb <= limit, (fb, limit)

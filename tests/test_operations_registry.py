@@ -95,7 +95,18 @@ def test_no_pattern_based_process_kills_or_stale_tmux_replacement():
     )
 
     assert not re.search(r"\bpkill\b|\bkillall\b", sources)
-    assert not re.search(r"\bpgrep\b[^\n]*(?:-f|--full)", sources)
+    # A substring `pgrep -f` is a legitimate liveness probe on a cluster with no
+    # PID files, and six supervisors across five scripts use it that way. What
+    # is unsafe is SIGNALLING whatever it matched, because an argv fragment can
+    # match an unrelated process. So ban the composition, not the read: the
+    # original assertion banned the read, which is broader than this test's own
+    # name and than the commit that introduced it ("no substring kills"), and
+    # six independent authors wrote past it.
+    assert not re.search(
+        r"\bkill\b[^\n]*\$\(\s*pgrep\b"
+        r"|\bpgrep\b[^\n]*\|[^\n]*\bxargs\b[^\n]*\bkill\b",
+        sources,
+    )
     assert not re.search(r"\bps\s+-eo\s+cmd\b", sources)
     assert not re.search(r"\btmux\s+kill-session\b", sources)
 

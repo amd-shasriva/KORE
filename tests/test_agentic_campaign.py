@@ -66,9 +66,16 @@ def _run_partition(tmp_path, task_ids, *, shards, episodes, existing=None):
         "HOME": str(tmp_path),
     }
     result = subprocess.run(
+        # --no-pool because these tests are about the PARTITION invariants --
+        # exactly-once coverage, balanced shards, honest manifest counts -- and
+        # they assert them against a 20-id stub. cd4541fc made planning union in
+        # data/task_pool by default (13,570 tasks), which is right for a real
+        # campaign and drowns the stub. The pool union itself is covered by
+        # tests/test_partition_pool_union.py.
         [sys.executable, str(script),
          "--out-dir", str(out_dir), "--shard-dir", str(shard_dir),
-         "--shards", str(shards), "--episodes-per-task", str(episodes)],
+         "--shards", str(shards), "--episodes-per-task", str(episodes),
+         "--no-pool"],
         cwd=str(REPO), env=env, text=True, capture_output=True, timeout=180,
     )
     assert result.returncode == 0, result.stderr

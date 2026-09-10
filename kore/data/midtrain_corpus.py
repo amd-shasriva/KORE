@@ -546,26 +546,6 @@ def _collect_documents(
     return out, dropped_lineage
 
 
-def _collect_files(
-    roots: Iterable[Path],
-    exts: tuple[str, ...],
-    max_files: int,
-    scan_budget: int,
-    content_filter: Optional[Callable[[str], bool]] = None,
-    max_chars_per_file: int = 200_000,
-) -> list[tuple[Path, str]]:
-    """Backward-compatible path/text collector used by external callers."""
-    specs = [
-        _root_from_path(Path(root), None, development_mode=True)
-        for root in roots if Path(root).is_dir()
-    ]
-    docs, _ = _collect_documents(
-        specs, exts, "compat", max_files, scan_budget, content_filter,
-        max_chars_per_file, policy={"families": (), "task_ids": ()},
-    )
-    return [(doc.path, doc.text) for doc in docs]
-
-
 def _normalize_document(doc: SourceDocument) -> SourceDocument:
     if doc.source not in _KORE_AUTHORED_SOURCES:
         return doc

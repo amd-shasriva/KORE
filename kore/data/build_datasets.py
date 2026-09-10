@@ -335,18 +335,6 @@ def negative_kind(chosen_c: dict, rejected_c: dict) -> tuple[Optional[str], Opti
     return None, None
 
 
-def _is_correctness_pair(chosen_c: dict, rejected_c: dict) -> bool:
-    """True when the pair is a correctness (not speed) preference.
-
-    Reward-hack hard negatives (``hard_negative`` label), repair pairs
-    (``failure_class`` on the broken side), and any pair missing a comparable wall
-    time on either side are correctness pairs - kept at neutral weight, never
-    dropped, never treated as a speed signal. This is what preserves the mined
-    reward-hack negatives untouched.
-    """
-    return negative_kind(chosen_c, rejected_c)[0] is not None
-
-
 def _beats_baseline_weight(margin: Optional[float], chosen_speedup: Optional[float],
                            family: str, policy: DPOPrefPolicy) -> float:
     """Up-weight a beats-baseline pair by (log) margin + (log) absolute headroom,

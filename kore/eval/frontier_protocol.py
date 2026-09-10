@@ -1473,34 +1473,6 @@ def _baseline_valid(
     )
 
 
-def _fastp_inputs(
-    cells: Sequence[Optional[PairedTaskSample]],
-    side: str,
-    baseline_kind: BaselineKind,
-) -> tuple[list[bool], list[Optional[float]], list[float], list[bool]]:
-    correctness: list[bool] = []
-    baseline_times: list[Optional[float]] = []
-    actual_times: list[float] = []
-    successes: list[bool] = []
-    for sample in cells:
-        observation = getattr(sample, side) if sample is not None else None
-        baseline = _baseline_map(sample).get(baseline_kind) if sample is not None else None
-        valid = bool(
-            sample is not None
-            and _timing_valid(observation, sample.sol_time_ms)
-            and _baseline_valid(baseline, sample.sol_time_ms)
-        )
-        baseline_time = float(baseline.time_ms) if valid and baseline is not None else None
-        actual_time = float(observation.time_ms) if valid and observation is not None else math.inf
-        correctness.append(valid)
-        baseline_times.append(baseline_time)
-        actual_times.append(actual_time)
-        successes.append(
-            bool(valid and baseline_time is not None and baseline_time / actual_time > 1.0)
-        )
-    return correctness, baseline_times, actual_times, successes
-
-
 def _successes_at_p(
     cells: Sequence[Optional[PairedTaskSample]],
     side: str,

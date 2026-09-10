@@ -39,10 +39,6 @@ def _norm_source(src: str) -> str:
     return re.sub(r"\s+", " ", src).strip()
 
 
-def win_speedup(rec: Any) -> Optional[float]:
-    return rec.speedup if isinstance(rec, WinRecord) else None
-
-
 def passes_win_filter(rec: Any, tau: float = 1.0,
                       min_snr: Optional[float] = None) -> bool:
     """A record is a keepable win iff it is a WinRecord that (a) beats the

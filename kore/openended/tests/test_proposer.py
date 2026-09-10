@@ -58,10 +58,6 @@ def _base_score(stats: DescriptorStats, w: ScoreWeights = DEFAULT_WEIGHTS) -> fl
             + w.novelty * clamp(stats.novelty))
 
 
-def _rank_ids(ranked) -> list[str]:
-    return [d.task_id for _s, d in ranked]
-
-
 # --------------------------------------------------------------------------- #
 # 0. weights surface: new knob added, defaults + backward-compat preserved
 # --------------------------------------------------------------------------- #

@@ -104,31 +104,6 @@ def spearman(x: list[float], y: list[float]) -> Optional[float]:
     return _pearson(_rank(x), _rank(y))
 
 
-def ols_r2(X: list[list[float]], y: list[float]) -> Optional[float]:
-    """R^2 of an ordinary-least-squares fit y ~ [X | 1]. Needs numpy; None if absent
-    or under-determined."""
-    try:
-        import numpy as np
-    except Exception:  # noqa: BLE001
-        return None
-    if len(y) < 3 or len(X) != len(y):
-        return None
-    A = np.array([row + [1.0] for row in X], dtype=float)
-    b = np.array(y, dtype=float)
-    if A.shape[0] <= A.shape[1]:  # under-determined -> trivial/meaningless R^2
-        return None
-    try:
-        coef, *_ = np.linalg.lstsq(A, b, rcond=None)
-    except Exception:  # noqa: BLE001
-        return None
-    pred = A @ coef
-    ss_res = float(((b - pred) ** 2).sum())
-    ss_tot = float(((b - b.mean()) ** 2).sum())
-    if ss_tot == 0:
-        return None
-    return 1.0 - ss_res / ss_tot
-
-
 # --------------------------------------------------------------------------- #
 # GPU measurement: stage kernel, run driver for correctness + candidate/vendor
 # timing, and (optionally) profile PMC counters via rocprofv3. Mirrors KoreEnv's
@@ -656,10 +631,6 @@ def _baseline_table(measures: list[KernelMeasure]) -> tuple[list[dict], dict]:
     return table, comp
 
 
-def check_a(measures: list[KernelMeasure]) -> dict:
-    return check_a_rigorous(measures)
-
-
 def check_a_rigorous(
     measures: list[KernelMeasure],
     *,
@@ -815,14 +786,6 @@ def _counter_rows(measures: list[KernelMeasure]) -> tuple[list[dict], int]:
             "gap": max(0.0, min(1.0, residual / candidate)),
         })
     return rows, impossible
-
-
-def _normalized_cv_r2(rows: list[dict]) -> Optional[float]:
-    return _cluster_cv(
-        rows,
-        lambda row: [row["stall"], row["occ_deficit"]],
-        lambda row: row["gap"],
-    )["r2"]
 
 
 def _family_evidence(
@@ -1166,19 +1129,6 @@ def _select_shapes(task, n: int) -> list:
     if not ordered and task.shapes:
         ordered = [s for s in task.shapes if s.name != "minimal"] or list(task.shapes)
     return ordered[:max(1, n)]
-
-
-def _bootstrap_check_cis(all_measures: list, per_task: dict, B: int,
-                         seed: int = 12345) -> tuple:
-    """Compatibility summary of the new task-cluster bootstraps."""
-    a = check_a_rigorous(all_measures, permutations=0, bootstrap=B, seed=seed)
-    b = check_b(all_measures, permutations=0, bootstrap=B, seed=seed + 1)
-    c = check_c(per_task, bootstrap=B, seed=seed + 2)
-    return (
-        a.get("rho_ci95_task_bootstrap"),
-        (b.get("normalized_primary") or {}).get("ci95_task_bootstrap"),
-        c.get("ci95_task_bootstrap"),
-    )
 
 
 def decide(a: dict, b: dict, c: dict, dry_run: bool) -> str:

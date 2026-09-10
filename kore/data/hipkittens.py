@@ -1435,34 +1435,6 @@ def _swizzle_angle_lead(lay: SwizzleLayout, angle: str) -> str:
     return ""
 
 
-def _swizzle_derivation(lay: SwizzleLayout) -> str:
-    """Narrate what the parsed XOR terms do, in bank units."""
-    row_bytes = lay.cols * lay.dtype_bytes
-    out = [f"### What it does\n",
-           f"A row of this tile is {lay.cols} x {lay.dtype_bytes} B = {row_bytes} B, "
-           f"which spans {row_bytes // 4} four-byte banks."]
-    for i, (mod, sr, sl) in enumerate(lay.terms, 1):
-        out.append(
-            f"\n**Term {i}: `((offset % {mod}) >> {sr}) << {sl}`.** It takes the address "
-            f"bits at and above the {1 << sr}-byte boundary within a {mod}-byte window "
-            f"and XORs them into bit {sl}, displacing the address by up to "
-            f"{1 << sl} B = {(1 << sl) // 4} banks. Rows that would otherwise land on the "
-            f"same banks are rotated apart."
-        )
-    if len(lay.terms) > 1:
-        out.append(
-            f"\nThis layout needs {len(lay.terms)} terms, not one: a single XOR toggles "
-            f"one address-bit pattern, and this tile has more than one stride on which "
-            f"same-phase lanes collide, so each term breaks one of them."
-        )
-    out.append(
-        f"\nThe result is a permutation of the {lay.rows * lay.cols * lay.dtype_bytes} "
-        f"byte offsets in the tile -- verified bijective, so no element is lost or "
-        f"aliased."
-    )
-    return "\n".join(out)
-
-
 def _sibling_note(lay: SwizzleLayout, layouts: list[SwizzleLayout]) -> str:
     """A one-line contrast against another layout at the same element width."""
     sibs = [l for l in layouts

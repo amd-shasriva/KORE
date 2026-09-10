@@ -2212,23 +2212,6 @@ def _rec_type(rec) -> str:
     return _rec_dict(rec).get("type", "")
 
 
-def _rec_op(rec) -> str:
-    d = _rec_dict(rec)
-    op = d.get("operation")
-    if op:
-        return op
-    tid = d.get("task_id", "") or ""
-    return tid.split("_")[0] if tid else ""
-
-
-def _rec_arch(rec):
-    # Fall back arch<-gpu so a record tagged only with ``gpu`` (e.g. hard negatives)
-    # is still arch-checked by _rec_is_heldout; a foreign arch in ``gpu`` alone would
-    # otherwise slip past the held-out filter (audit C5).
-    d = _rec_dict(rec)
-    return d.get("arch") or d.get("gpu")
-
-
 def _rec_is_heldout(rec, heldout_ids: set) -> bool:
     """True iff a record belongs to the AUTHORITATIVE held-out split (item 1).
 
@@ -2237,8 +2220,8 @@ def _rec_is_heldout(rec, heldout_ids: set) -> bool:
     arch/dtype is foreign, or its product leaf / near-probe root is eval-only. This
     SUBSUMES the ad-hoc ``_force_holdout`` (which hard-coded gfx950 + "first op
     family") with the registry as the single authority, so a stray held-out record
-    can never leak into TRAIN. (``_rec_dict``/``_rec_op``/``_rec_arch`` are retained
-    as the record-normalization helpers used elsewhere and by the registry adapter.)
+    can never leak into TRAIN. (``_rec_dict``/``_rec_type`` are retained as the
+    record-normalization helpers used elsewhere in this module.)
     """
     from kore.tasks.registry import is_heldout_record
     return is_heldout_record(rec, heldout_ids)

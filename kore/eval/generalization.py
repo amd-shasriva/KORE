@@ -58,22 +58,10 @@ def family_of(task_id: str) -> Optional[str]:
     return classify(task_id)
 
 
-def all_families() -> tuple[str, ...]:
-    return FAMILIES
-
-
 def registry_task_ids() -> list[str]:
     """All task IDs from the fail-closed KORE registry."""
     from kore.tasks.registry import all_tasks
     return [t.task_id for t in all_tasks()]
-
-
-def families_of_tasks(task_ids) -> dict:
-    """Group task ids by family -> {family: sorted[task_id]}."""
-    out: dict[str, list] = {}
-    for t in task_ids:
-        out.setdefault(family_of(t), []).append(t)
-    return {k: sorted(v) for k, v in out.items()}
 
 
 @dataclass

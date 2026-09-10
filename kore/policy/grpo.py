@@ -4623,11 +4623,6 @@ class _HFChatPolicy:
         return self.tok.decode(seq, skip_special_tokens=True)
 
 
-def _sample_token_count(gen_inputs) -> int:
-    """Total generated-token count across a sample's ``(prompt_ids, gen_ids)`` pairs."""
-    return sum(max(int(gen_ids.shape[0]), 1) for _prompt_ids, gen_ids in gen_inputs)
-
-
 def _recompute_logp(model, tok, gen_inputs, temperature: float = 1.0):
     """Recompute a sample's *token-mean* log-prob against the live policy.
 

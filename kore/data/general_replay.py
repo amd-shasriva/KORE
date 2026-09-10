@@ -388,21 +388,3 @@ def load_general_replay(
     if not pool:
         pool = load_bundled_samples(kind)
     return _resize(pool, n, seed)
-
-
-def load_all_general_replay(
-    counts: dict[str, int],
-    seed: int = 0,
-    use_hf: Optional[bool] = None,
-) -> dict[str, list[dict]]:
-    """Load several replay kinds at once.
-
-    ``counts`` maps ``kind -> n``. Returns ``{kind: rows}``. Each kind gets a
-    decorrelated but deterministic sub-seed.
-    """
-    out: dict[str, list[dict]] = {}
-    for i, kind in enumerate(k for k in REPLAY_KINDS if k in counts):
-        out[kind] = load_general_replay(
-            kind, counts[kind], seed=seed + 1 + i, use_hf=use_hf
-        )
-    return out

@@ -141,11 +141,6 @@ def _act_table(t, F):
     }
 
 
-def act_names() -> tuple:
-    t, F = _lazy()
-    return tuple(_act_table(t, F))
-
-
 def middle_prims() -> dict[str, Primitive]:
     """MATRIX -> MATRIX transforms: activations, binaries, bias, gates, norms, scale."""
     t, F = _lazy()

@@ -41,10 +41,6 @@ from typing import Callable, Optional, Protocol, runtime_checkable
 DEFAULT_LCB_Z: float = 1.0
 
 
-class BudgetExhausted(Exception):
-    """Raised by helpers that must not silently proceed once the cap is hit."""
-
-
 @dataclass
 class Budget:
     """A hard cap on the number of verifier (``env.step``) calls the search may make.

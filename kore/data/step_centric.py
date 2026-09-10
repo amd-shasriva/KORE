@@ -54,10 +54,6 @@ log = get_logger("data.step_centric")
 MIN_GAIN = 0.05
 
 
-class StepCentricError(RuntimeError):
-    """A trajectory cannot be decomposed into steps."""
-
-
 @dataclass
 class Step:
     """One revision, with the evidence that it was worth keeping."""

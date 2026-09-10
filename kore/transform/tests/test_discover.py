@@ -22,7 +22,6 @@ from __future__ import annotations
 from kore.transform import (
     LIBRARY,
     RELATION_APPROX,
-    RELATION_EXACT,
     ErrorBudget,
     admissible_actions,
     apply_sequence,
@@ -38,7 +37,7 @@ from kore.transform.discover import (
     propose_knob_sweeps,
     propose_vectorize_widths,
 )
-from kore.transform.discover import _DISCOVER_EPS_FLOOR, _FUSION_EPS
+from kore.transform.discover import _DISCOVER_EPS_FLOOR
 from kore.transform.tests.test_transform import BF16_ACC, ELEMENTWISE, GEMM
 
 

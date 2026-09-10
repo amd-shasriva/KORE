@@ -37,7 +37,6 @@ from kore.agent.harness import (
     AgentHarness,
     AgentEpisode,
     WinsKB,
-    build_agent_user_prompt,
     PHASE_CORRECTNESS,
     PHASE_OPTIMIZE,
 )

@@ -32,7 +32,6 @@ expensive execution probe, and every gate is independently sufficient to drop.
 from __future__ import annotations
 
 import ast
-import os
 import signal
 from collections import Counter
 from contextlib import contextmanager

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-import errno
 import fcntl
 import hashlib
 import json
@@ -24,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import BinaryIO, Callable, Iterable, Mapping, Protocol, Sequence
+from typing import BinaryIO, Iterable, Mapping, Protocol, Sequence
 
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")

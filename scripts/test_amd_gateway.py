@@ -8,7 +8,6 @@ exactly what to add.
 from __future__ import annotations
 
 import os
-import sys
 
 from kore.data.prompts import extract_kernel
 from kore.data.teacher import ClaudeTeacher, load_env_local

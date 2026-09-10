@@ -22,7 +22,7 @@ from kore.data.onpolicy import (
     dagger_teacher_frac,
     iterative_dpo,
 )
-from kore.data.schemas import RankedGroupRecord, RepairRecord, WinRecord
+from kore.data.schemas import RankedGroupRecord, RepairRecord
 from kore.data.teacher import StubTeacher, TeacherClient
 from kore.reward.reward import Observation
 

@@ -20,7 +20,6 @@ import ast
 import pytest
 import torch
 
-from kore.tasks._genops import DTYPES
 from kore.tasks.breadth import moe_ext as M
 
 DTYPE_NAMES = ("bf16", "fp16", "fp32", "fp8")

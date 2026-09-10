@@ -38,7 +38,7 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from kore.obs import get_logger
 

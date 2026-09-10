@@ -30,8 +30,7 @@ Levers (all deterministic, PURE stdlib):
 
 from __future__ import annotations
 
-import re
-from typing import Any, Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 # ``_family_of`` is a pure string classifier (no registry/GPU); reuse it.
 from kore.data.decontam import _family_of

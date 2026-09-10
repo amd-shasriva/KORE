@@ -6,7 +6,6 @@ never triggered (use_hf=False or monkeypatched) so everything runs offline.
 
 from __future__ import annotations
 
-import random
 
 import pytest
 

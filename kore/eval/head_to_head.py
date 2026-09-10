@@ -64,11 +64,7 @@ from kore.eval.opus_policy import (
     _loud_warn,
     try_opus_policy,
 )
-from kore.eval.paired_stats import (
-    format_paired_report,
-    paired_comparison,
-    paired_speedup_comparison,
-)
+from kore.eval.paired_stats import paired_comparison, paired_speedup_comparison
 from kore.eval.policies import PolicyFn
 from kore.obs import get_logger
 

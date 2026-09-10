@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import stat
-from typing import Iterable, Mapping
+from typing import Iterable
 
 from .runtime import ArtifactStatus, task_set_identity
 

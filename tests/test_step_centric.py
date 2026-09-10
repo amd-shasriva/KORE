@@ -13,7 +13,6 @@ one is a distinct way of learning the wrong lesson.
 from __future__ import annotations
 
 from kore.data.step_centric import (
-    Step,
     decompose,
     decompose_with_trajectories,
     extract_full_trajectory,

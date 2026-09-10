@@ -13,7 +13,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
 from kore.data.parallel_datagen import write_receipt_for_existing_shard
 from kore.data.schemas import (

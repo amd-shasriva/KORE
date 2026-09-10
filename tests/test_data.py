@@ -16,11 +16,7 @@ from kore.data.schemas import (
     read_jsonl,
     record_from_dict,
 )
-from kore.data.prompts import (
-    SYSTEM_PROMPT,
-    build_turn_prompt,
-    extract_kernel,
-)
+from kore.data.prompts import build_turn_prompt, extract_kernel
 from kore.data.teacher import StubTeacher, TeacherClient
 from kore.data import mutate
 from kore.data.gen_groups import rank_candidates, build_preferences

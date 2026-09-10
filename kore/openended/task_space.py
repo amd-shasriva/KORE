@@ -35,7 +35,7 @@ from __future__ import annotations
 import functools
 import random
 from dataclasses import dataclass, replace
-from typing import Iterable, Optional
+from typing import Iterable
 
 from kore.tasks import taxonomy
 

@@ -14,7 +14,6 @@ pays out on an implausible speedup trains the measurement exploit directly.
 
 from __future__ import annotations
 
-import math
 
 import pytest
 

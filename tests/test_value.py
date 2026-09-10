@@ -7,7 +7,6 @@ the pure-numpy fallback), candidate reranking, and the replay-validation metrics
 
 from __future__ import annotations
 
-import math
 
 import numpy as np
 import pytest

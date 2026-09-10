@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kore.analysis.roofline import make_physical_model
-from kore.reward.physics import PhysicsSignal, residual_descent_frac
+from kore.reward.physics import PhysicsSignal
 from kore.reward.reward import Observation
 from kore.reward.shaping import FamilyShapingEvidence
 from kore.reward import whitebox

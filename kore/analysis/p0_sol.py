@@ -38,7 +38,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -49,11 +48,7 @@ from kore.analysis.roofline import (
     make_physical_model,
     model_from_peak_mapping,
 )
-from kore.analysis.rooflines import (
-    Roofline,
-    roofline,
-    shape_to_str,
-)
+from kore.analysis.rooflines import roofline, shape_to_str
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

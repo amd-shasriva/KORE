@@ -33,7 +33,6 @@ from kore.env.kore_env import KoreEnv, _metamorphic_gate
 from kore.tasks.base import Shape, Task
 from kore.verify.metamorphic import metamorphic_relations
 from kore.verify.production import (
-    DEFAULT_MAX_ELEMENTS,
     GENOPS_METAMORPHIC_OP_CLASS,
     METAMORPHIC_DTYPES,
     RUNNER_SHIM_NAME,

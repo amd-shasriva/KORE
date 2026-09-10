@@ -26,7 +26,6 @@ from kore.data import mutate
 from kore.data.build_datasets import build_dpo
 from kore.data.evolve import (
     DMABBandit,
-    EliteRecord,
     EvolveConfig,
     MapElitesArchive,
     behavior_descriptor,

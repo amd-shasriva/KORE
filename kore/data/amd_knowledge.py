@@ -25,7 +25,6 @@ from __future__ import annotations
 import functools
 import re
 from pathlib import Path
-from typing import Optional
 
 _PLAYBOOK_PATH = Path(__file__).resolve().parent / "knowledge" / "amd_triton_playbook.md"
 

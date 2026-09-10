@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from kore.openended import task_space as ts
 from kore.openended.proposer import (
-    DEFAULT_WEIGHTS,
     DescriptorStats,
     ScoreWeights,
     descriptor_novelty,

@@ -41,7 +41,6 @@ from kore.search.evolve_agent import (
     Proposal,
     ScaledStep,
     StableEvaluator,
-    StrategySignature,
     Trial,
     candidate_from_trial,
     evolve,

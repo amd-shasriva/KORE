@@ -41,7 +41,7 @@ protocol was admissible.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Iterable, Optional
 
 # Measured on this repo's mixtures; used only for budgeting and length gates.
 CHARS_PER_TOKEN = 3.6

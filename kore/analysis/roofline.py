@@ -24,7 +24,7 @@ import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence, Union
+from typing import Any, Mapping, Optional, Union
 
 
 class ModelError(ValueError):

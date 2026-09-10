@@ -17,7 +17,6 @@ from kore.eval.frontier_protocol import (
     BaselineKind,
     BaselineObservation,
     BudgetEnvelope,
-    DataQuality,
     Disclosure,
     EvidenceRef,
     Fingerprint,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 
 from kore.reward.reward import Observation
 from kore.eval.fastp import (

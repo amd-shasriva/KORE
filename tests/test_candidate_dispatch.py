@@ -16,7 +16,6 @@ which is precisely the set the whole frontier effort exists to produce.
 from __future__ import annotations
 
 import sys
-import types
 from pathlib import Path
 
 import pytest

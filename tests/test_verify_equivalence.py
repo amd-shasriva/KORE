@@ -15,8 +15,6 @@ import numpy as np
 import pytest
 
 from kore.verify import (
-    MetamorphicRelation,
-    PairComparison,
     ProngSamples,
     Tolerance,
     VerificationResult,

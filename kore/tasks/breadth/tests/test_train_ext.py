@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import ast
 import importlib.util
-import math
 
 import pytest
 import torch

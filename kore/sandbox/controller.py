@@ -10,7 +10,6 @@ import signal
 import subprocess
 import time
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Optional, Protocol, Sequence
 
 from kore.sandbox.broker import (

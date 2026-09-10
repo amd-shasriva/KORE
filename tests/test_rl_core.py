@@ -3,7 +3,6 @@ ToolRL compositing, and model soup. No torch/transformers imported at top level.
 
 from __future__ import annotations
 
-import math
 
 from kore.policy import grpo
 

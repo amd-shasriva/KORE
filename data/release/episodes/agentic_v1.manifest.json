@@ -1,0 +1,14 @@
+{
+  "bundle": "episodes/agentic_v1",
+  "description": "First-wave agentic episodes.",
+  "sources": [
+    "/home/shasriva/vultr_stage/KORE/data/b05factory/agentic"
+  ],
+  "parts": [
+    "agentic_v1.tar.gz.part00"
+  ],
+  "compressed_bytes": 6932927,
+  "sha256_of_reassembled_tar_gz": "65850d303da494456411de9fa685374816129e888851268e340a29a8ca44123b",
+  "file_count": 3,
+  "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+}

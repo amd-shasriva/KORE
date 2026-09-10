@@ -1,0 +1,145 @@
+{
+  "bundles": [
+    {
+      "bundle": "episodes/agentic_v2",
+      "description": "Raw agentic episodes, v2 wave: full multi-turn messages, phase traces, reflections, and rewards verified on gfx950.",
+      "sources": [
+        "/home/shasriva/vultr_stage/KORE/data/b05factory/agentic_v2"
+      ],
+      "parts": [
+        "agentic_v2.tar.gz.part00",
+        "agentic_v2.tar.gz.part01",
+        "agentic_v2.tar.gz.part02",
+        "agentic_v2.tar.gz.part03"
+      ],
+      "compressed_bytes": 338130897,
+      "sha256_of_reassembled_tar_gz": "89ed2046c5bfd0b13116c963e3ef8da76f9cfeaf762d7ce7455f1041c17723e0",
+      "file_count": 16,
+      "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+    },
+    {
+      "bundle": "episodes/agentic_mt",
+      "description": "Multi-turn agentic episodes; source of the step-centric revisions.",
+      "sources": [
+        "/home/shasriva/vultr_stage/KORE/data/b05factory/agentic_mt"
+      ],
+      "parts": [
+        "agentic_mt.tar.gz.part00",
+        "agentic_mt.tar.gz.part01"
+      ],
+      "compressed_bytes": 183685458,
+      "sha256_of_reassembled_tar_gz": "15261767c87c22b88ca23a47d772f9da817d3e07a2c7cd4f152cf446e72a220c",
+      "file_count": 5,
+      "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+    },
+    {
+      "bundle": "episodes/agentic_v1",
+      "description": "First-wave agentic episodes.",
+      "sources": [
+        "/home/shasriva/vultr_stage/KORE/data/b05factory/agentic"
+      ],
+      "parts": [
+        "agentic_v1.tar.gz.part00"
+      ],
+      "compressed_bytes": 6932927,
+      "sha256_of_reassembled_tar_gz": "65850d303da494456411de9fa685374816129e888851268e340a29a8ca44123b",
+      "file_count": 3,
+      "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+    },
+    {
+      "bundle": "episodes/groups",
+      "description": "Per-task ranked candidate groups the recovery stage consumed.",
+      "sources": [
+        "/home/shasriva/vultr_stage/KORE/data/b05factory/groups"
+      ],
+      "parts": [
+        "groups.tar.gz.part00",
+        "groups.tar.gz.part01"
+      ],
+      "compressed_bytes": 119819082,
+      "sha256_of_reassembled_tar_gz": "aa002b38446f408bedec76b53daf6f2f357a6a8e7eaf20805fc9ae50e1a3f25d",
+      "file_count": 4851,
+      "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+    },
+    {
+      "bundle": "episodes/b501_waves",
+      "description": "b501 datagen waves: 17,572 raw episodes with telemetry.",
+      "sources": [
+        "/home/shasriva/Kore-RL/KORE/data/b501supp",
+        "/home/shasriva/Kore-RL/KORE/data/b501remain",
+        "/home/shasriva/Kore-RL/KORE/data/b501wave3"
+      ],
+      "parts": [
+        "b501_waves.tar.gz.part00"
+      ],
+      "compressed_bytes": 63171079,
+      "sha256_of_reassembled_tar_gz": "ae197109ac881bfa79d768064ee909c5165515fdbeb9cb1bf65e04041e901aa4",
+      "file_count": 67,
+      "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+    },
+    {
+      "bundle": "v5_stages/intermediates",
+      "description": "The v5 build slices between mining and the final mixture.",
+      "sources": [
+        "/home/shasriva/vultr_stage/KORE/data/v5_replay.jsonl",
+        "/home/shasriva/vultr_stage/KORE/data/v5_translate_audited.jsonl",
+        "/home/shasriva/vultr_stage/KORE/data/v5_translate_strict.jsonl",
+        "/home/shasriva/vultr_stage/KORE/data/v5_modality.jsonl",
+        "/home/shasriva/vultr_stage/KORE/data/v5_flydsl_lang.jsonl",
+        "/home/shasriva/vultr_stage/KORE/data/v5_dpo_chosen.jsonl"
+      ],
+      "parts": [
+        "intermediates.tar.gz.part00",
+        "intermediates.tar.gz.part01"
+      ],
+      "compressed_bytes": 173679113,
+      "sha256_of_reassembled_tar_gz": "f06fe058c2a66268aafc54f28c58a13cfa5b03d162fb71ad5fa5b0f3a5d17f4d",
+      "file_count": 6,
+      "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+    },
+    {
+      "bundle": "quarantine/contamination",
+      "description": "Rows held back by the decontamination and benchmark-contamination screens: evidence the gates ran and what they caught.",
+      "sources": [
+        "/home/shasriva/vultr_stage/KORE/data/_contaminated_quarantine",
+        "/home/shasriva/vultr_stage/KORE/data/b05factory/_quarantine"
+      ],
+      "parts": [
+        "contamination.tar.gz.part00"
+      ],
+      "compressed_bytes": 6221289,
+      "sha256_of_reassembled_tar_gz": "df21dd1c65e99ff14559467a560133a62c0e08b3c15c453b0e804e65bc5754c6",
+      "file_count": 105,
+      "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+    },
+    {
+      "bundle": "campaign_14b/full14b",
+      "description": "The 14B campaign: groups, repair, midtrain, wins, events.",
+      "sources": [
+        "/home/shasriva/Kore-RL/KORE/data/full14b"
+      ],
+      "parts": [
+        "full14b.tar.gz.part00"
+      ],
+      "compressed_bytes": 9998183,
+      "sha256_of_reassembled_tar_gz": "67902809e3ea0af81708d146d3e5e83f5720c22ae916f24aa22916232aae4581",
+      "file_count": 332,
+      "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+    },
+    {
+      "bundle": "arena_runs/aka_evaluations",
+      "description": "AgentKernelArena evaluation runs behind every published score. Generated kernels and eval_result.yaml kept; vendored aiter trees and compiled objects excluded as rebuildable.",
+      "sources": [
+        "/home/shasriva/crusoe_backup_20260828/KORE_runs"
+      ],
+      "parts": [
+        "aka_evaluations.tar.gz.part00"
+      ],
+      "compressed_bytes": 85177289,
+      "sha256_of_reassembled_tar_gz": "83ea3002a82b6daf3c83808811e718634e6e1f15c04208b839bb68e290fbac57",
+      "file_count": 4319,
+      "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+    }
+  ],
+  "total_compressed_bytes": 986815317
+}

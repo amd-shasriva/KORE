@@ -1,0 +1,15 @@
+{
+  "bundle": "episodes/agentic_mt",
+  "description": "Multi-turn agentic episodes; source of the step-centric revisions.",
+  "sources": [
+    "/home/shasriva/vultr_stage/KORE/data/b05factory/agentic_mt"
+  ],
+  "parts": [
+    "agentic_mt.tar.gz.part00",
+    "agentic_mt.tar.gz.part01"
+  ],
+  "compressed_bytes": 183685458,
+  "sha256_of_reassembled_tar_gz": "15261767c87c22b88ca23a47d772f9da817d3e07a2c7cd4f152cf446e72a220c",
+  "file_count": 5,
+  "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+}

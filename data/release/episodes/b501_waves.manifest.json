@@ -1,0 +1,16 @@
+{
+  "bundle": "episodes/b501_waves",
+  "description": "b501 datagen waves: 17,572 raw episodes with telemetry.",
+  "sources": [
+    "/home/shasriva/Kore-RL/KORE/data/b501supp",
+    "/home/shasriva/Kore-RL/KORE/data/b501remain",
+    "/home/shasriva/Kore-RL/KORE/data/b501wave3"
+  ],
+  "parts": [
+    "b501_waves.tar.gz.part00"
+  ],
+  "compressed_bytes": 63171079,
+  "sha256_of_reassembled_tar_gz": "ae197109ac881bfa79d768064ee909c5165515fdbeb9cb1bf65e04041e901aa4",
+  "file_count": 67,
+  "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+}

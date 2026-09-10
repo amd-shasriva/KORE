@@ -1,0 +1,20 @@
+{
+  "bundle": "v5_stages/intermediates",
+  "description": "The v5 build slices between mining and the final mixture.",
+  "sources": [
+    "/home/shasriva/vultr_stage/KORE/data/v5_replay.jsonl",
+    "/home/shasriva/vultr_stage/KORE/data/v5_translate_audited.jsonl",
+    "/home/shasriva/vultr_stage/KORE/data/v5_translate_strict.jsonl",
+    "/home/shasriva/vultr_stage/KORE/data/v5_modality.jsonl",
+    "/home/shasriva/vultr_stage/KORE/data/v5_flydsl_lang.jsonl",
+    "/home/shasriva/vultr_stage/KORE/data/v5_dpo_chosen.jsonl"
+  ],
+  "parts": [
+    "intermediates.tar.gz.part00",
+    "intermediates.tar.gz.part01"
+  ],
+  "compressed_bytes": 173679113,
+  "sha256_of_reassembled_tar_gz": "f06fe058c2a66268aafc54f28c58a13cfa5b03d162fb71ad5fa5b0f3a5d17f4d",
+  "file_count": 6,
+  "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+}

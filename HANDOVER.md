@@ -15,6 +15,11 @@ about where the artifacts are and who to ask.
 | v5 training corpus, 206,000 rows | `data/release/sft/v5_sft.jsonl.gz.part{aa..ad}` | yes, as sub-100 MB shards |
 | v5 held-out eval slice, 899 rows | `data/release/sft/v5_eval.jsonl.gz` | yes |
 | Earlier corpora (multicap, v4, midtrain, DPO) | `data/release/` | yes |
+| Raw agentic episodes the corpus was distilled from | `data/release/episodes/` | yes, via `restore_upstream.sh` |
+| Intermediate v5 build slices | `data/release/v5_stages/` | yes, via `restore_upstream.sh` |
+| Contamination quarantines | `data/release/quarantine/` | yes, via `restore_upstream.sh` |
+| 14B campaign | `data/release/campaign_14b/` | yes, via `restore_upstream.sh` |
+| Arena evaluation runs behind the scores | `data/release/arena_runs/` | yes, via `restore_upstream.sh` |
 | RL run evidence: resolved config, event log, three arena ledgers | `docs/evidence/rl_v5_frontier/` | yes |
 | The RL recipe that produced checkpoint-30 | `configs/grpo_coder30b_a3b_trloo_frontier.json` | yes |
 | SFT checkpoint the RL run started from | `/mnt/vast/shasriva/models/sft_coder30b_a3b_v5` | **no** |
@@ -46,26 +51,39 @@ shards reproduces it byte for byte.
 Nothing newer than this corpus exists. Every uncommitted data directory on the
 origin machine predates it, so all of it is upstream of what is committed here.
 
-### What was on the origin machine and not in git
+### The upstream material is committed too
 
-About 10.2 GB of upstream material was never committed, and most of it is
-expensive rather than impossible to recreate: the raw agentic episodes behind
-the corpus, each carrying full multi-turn messages, phase traces, reflections
-and rewards verified on real gfx950; the intermediate v5 build slices between
-mining and mixture; the contamination quarantine; the 14B campaign; and 3 GB of
-AgentKernelArena evaluation runs that are the raw evidence behind every
-published score. The committed provenance archive
-(`data/release/provenance/datagen.tar.gz.part00` and `.part01`, concatenated by
-`reassemble.sh`) holds the *distilled* groups, repair and wins — 12,286
-entries — not those episodes.
+Everything the corpus was built *from* is in this repository as well, which was
+not true for most of this project's life. 10.2 GB of raw material compresses to
+941 MB across 15 sub-100 MB parts:
 
-It was inventoried with sizes and SHA-256 digests before the internship ended.
-If that hand-off happened, the manifest went with it; if it did not, the
-material was on the origin machine under `~/vultr_stage/KORE/data/`,
-`~/crusoe_backup_20260828/`, and this repository's own ignored `data/b501*` and
-`data/full14b` directories.
+```bash
+cd data/release && ./restore_upstream.sh                    # ~10 GB, check space
+cd data/release && ./restore_upstream.sh /tmp/x episodes     # or one group
+```
 
-Three things deliberately excluded as recreatable, so nobody hunts for them:
+Nine bundles, each with a manifest carrying the SHA-256 of its reassembled
+stream, which `restore_upstream.sh` verifies before extracting — a truncated
+part is otherwise a silent corruption that surfaces much later as unparseable
+JSON. The bundles hold the raw agentic episodes behind the corpus, each carrying
+full multi-turn messages, phase traces, reflections and rewards verified on real
+gfx950 (`episodes/`); the intermediate v5 build slices between mining and
+mixture (`v5_stages/`); both contamination quarantines, kept as evidence the
+gates ran and what they caught (`quarantine/`); the 14B campaign
+(`campaign_14b/`); and the AgentKernelArena evaluation runs behind every
+published score (`arena_runs/`).
+
+This matters because `data/release/provenance/` holds only the *distilled*
+groups, repair and wins — 12,286 entries. Rebuilding a corpus with a different
+mixture, or auditing where one training row came from, needs the episodes, and
+those cost GPU hours and gateway credits to produce.
+
+Two exclusions inside the arena bundle, both deliberate: vendored `aiter`
+subtrees and compiled objects were dropped as rebuildable, which is what takes
+that material from 3.1 GB to 1 GB. The generated kernels and their
+`eval_result.yaml` scores are kept, because those are the evidence.
+
+Three things left out entirely as recreatable, so nobody hunts for them:
 the replay pool, which is `allenai/tulu-3-sft-mixture` and redownloadable; the
 13,570-task pool, which `scripts/build_task_pool.py` regenerates
 deterministically from KernelBook at pinned revision

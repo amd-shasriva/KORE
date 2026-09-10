@@ -1,0 +1,14 @@
+{
+  "bundle": "arena_runs/aka_evaluations",
+  "description": "AgentKernelArena evaluation runs behind every published score. Generated kernels and eval_result.yaml kept; vendored aiter trees and compiled objects excluded as rebuildable.",
+  "sources": [
+    "/home/shasriva/crusoe_backup_20260828/KORE_runs"
+  ],
+  "parts": [
+    "aka_evaluations.tar.gz.part00"
+  ],
+  "compressed_bytes": 85177289,
+  "sha256_of_reassembled_tar_gz": "83ea3002a82b6daf3c83808811e718634e6e1f15c04208b839bb68e290fbac57",
+  "file_count": 4319,
+  "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+}

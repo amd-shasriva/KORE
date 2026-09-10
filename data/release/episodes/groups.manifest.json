@@ -1,0 +1,15 @@
+{
+  "bundle": "episodes/groups",
+  "description": "Per-task ranked candidate groups the recovery stage consumed.",
+  "sources": [
+    "/home/shasriva/vultr_stage/KORE/data/b05factory/groups"
+  ],
+  "parts": [
+    "groups.tar.gz.part00",
+    "groups.tar.gz.part01"
+  ],
+  "compressed_bytes": 119819082,
+  "sha256_of_reassembled_tar_gz": "aa002b38446f408bedec76b53daf6f2f357a6a8e7eaf20805fc9ae50e1a3f25d",
+  "file_count": 4851,
+  "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+}

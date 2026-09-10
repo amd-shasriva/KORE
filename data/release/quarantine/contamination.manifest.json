@@ -1,0 +1,15 @@
+{
+  "bundle": "quarantine/contamination",
+  "description": "Rows held back by the decontamination and benchmark-contamination screens: evidence the gates ran and what they caught.",
+  "sources": [
+    "/home/shasriva/vultr_stage/KORE/data/_contaminated_quarantine",
+    "/home/shasriva/vultr_stage/KORE/data/b05factory/_quarantine"
+  ],
+  "parts": [
+    "contamination.tar.gz.part00"
+  ],
+  "compressed_bytes": 6221289,
+  "sha256_of_reassembled_tar_gz": "df21dd1c65e99ff14559467a560133a62c0e08b3c15c453b0e804e65bc5754c6",
+  "file_count": 105,
+  "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+}

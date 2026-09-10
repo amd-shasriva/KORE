@@ -1,0 +1,14 @@
+{
+  "bundle": "campaign_14b/full14b",
+  "description": "The 14B campaign: groups, repair, midtrain, wins, events.",
+  "sources": [
+    "/home/shasriva/Kore-RL/KORE/data/full14b"
+  ],
+  "parts": [
+    "full14b.tar.gz.part00"
+  ],
+  "compressed_bytes": 9998183,
+  "sha256_of_reassembled_tar_gz": "67902809e3ea0af81708d146d3e5e83f5720c22ae916f24aa22916232aae4581",
+  "file_count": 332,
+  "excluded": "vendored aiter subtrees, compiled objects (.so/.o/.a), __pycache__, lock and pid files"
+}

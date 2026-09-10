@@ -30,6 +30,48 @@ cd data/release && ./reassemble.sh
 That writes `data/b05factory/sft/v5_sft.jsonl` and links it to the
 `data/v5_sft.jsonl` path the SFT config reads. No network, no hub account.
 
+### The committed corpus is the one that was trained on
+
+Verified rather than assumed, because "the release matches the run" is the kind
+of claim that is usually true and occasionally catastrophic. The file SFT
+actually read was still on the origin machine at
+`/home/shasriva/vultr_stage/KORE/data/v5_sft.jsonl`; reassembling the committed
+shards reproduces it byte for byte.
+
+| File | Rows | MD5 |
+| --- | --- | --- |
+| `v5_sft.jsonl` | 206,000 | `b91f1adb7d735c9a97f451ecc5e1ee01` |
+| `v5_eval.jsonl` | 899 | `837186333e688fd16ff9ec538486d6ab` |
+
+Nothing newer than this corpus exists. Every uncommitted data directory on the
+origin machine predates it, so all of it is upstream of what is committed here.
+
+### What was on the origin machine and not in git
+
+About 10.2 GB of upstream material was never committed, and most of it is
+expensive rather than impossible to recreate: the raw agentic episodes behind
+the corpus, each carrying full multi-turn messages, phase traces, reflections
+and rewards verified on real gfx950; the intermediate v5 build slices between
+mining and mixture; the contamination quarantine; the 14B campaign; and 3 GB of
+AgentKernelArena evaluation runs that are the raw evidence behind every
+published score. The committed provenance archive
+(`data/release/provenance/datagen.tar.gz.part00` and `.part01`, concatenated by
+`reassemble.sh`) holds the *distilled* groups, repair and wins — 12,286
+entries — not those episodes.
+
+It was inventoried with sizes and SHA-256 digests before the internship ended.
+If that hand-off happened, the manifest went with it; if it did not, the
+material was on the origin machine under `~/vultr_stage/KORE/data/`,
+`~/crusoe_backup_20260828/`, and this repository's own ignored `data/b501*` and
+`data/full14b` directories.
+
+Three things deliberately excluded as recreatable, so nobody hunts for them:
+the replay pool, which is `allenai/tulu-3-sft-mixture` and redownloadable; the
+13,570-task pool, which `scripts/build_task_pool.py` regenerates
+deterministically from KernelBook at pinned revision
+`b76504d85f7f14ef4b1fad81f136f638f2ce625b` plus template synthesis; and the
+96,675 DPO pairs, which are already committed under `data/release/dpo/`.
+
 ## 2. The checkpoints are the gap, and it is the important one
 
 Neither the SFT checkpoint nor RL checkpoint-30 is in this repository, and

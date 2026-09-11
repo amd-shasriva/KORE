@@ -47,10 +47,38 @@ Set `KORE_SPUR_SSH=<NTID>@crs-spur.crusoe.amd.com` if you are not already on a
 login node. The script resumes a broken transfer instead of restarting it, then
 checks the shard count and reads `global_step` back.
 
-The equivalent by hand, if you would rather see exactly what it does:
+### Reaching the cluster
+
+Worth stating explicitly, because it is not obvious and it caught out more than
+one person on this project: **losing your GPU node does not lose your files.**
+Compute allocations and storage are separate. When the reservation ends the
+compute node goes away, but `/shared_nfs` stays mounted on the SPUR *login*
+nodes, and anything you left there is still readable.
+
+So the way in is the login node, not the node you trained on:
 
 ```bash
-ssh <NTID>@crs-spur.crusoe.amd.com
+ssh <NTID>@crs-spur.crusoe.amd.com          # load balancer across the login nodes
+```
+
+Authenticate with your NTID and LDAP password. `crs-spur` fronts
+`crsuse2-slog-003`, `-004` and `-005`; use one of those directly if the load
+balancer misbehaves. Note that `crs-m2m-cpu-spur-login` was decommissioned and
+the `crs-m2m-cpu-spur-*` compute nodes are a different machine family with
+different home directories, so a key authorised on one is not authorised on the
+other.
+
+Two separate filesystems, and the distinction matters when you are copying
+hundreds of gigabytes:
+
+| Mount | Size | Notes |
+| --- | --- | --- |
+| `/shared_nfs` | 360 TB, ~91% used | Where large artifacts belong. Visible from every node. |
+| `/home` | 10 TB, effectively full | Do not stage a checkpoint here. |
+
+Then pull the weights:
+
+```bash
 cat /shared_nfs/shasriva/KORE_HANDOFF/README.md
 
 # weights only: what you want in order to evaluate, serve, or fine-tune
@@ -61,6 +89,17 @@ rsync -av --partial --append-verify \
 # verify the transfer
 ls ~/kore-weights/model-*-of-00025.safetensors | wc -l   # 25
 python3 -c "import json;print(json.load(open('$HOME/kore-weights/trainer_state.json'))['global_step'])"   # 30
+```
+
+Every file under `rl_checkpoint-30/` is world-readable, so you do not need to be
+the owner to copy it. That was not true originally: the safetensors shards were
+written `-rw-------` while the enclosing directories were world-readable, which
+looks fine from the outside and fails only at the moment somebody else tries to
+read a shard. If you are leaving artifacts behind for colleagues, check the
+files rather than the directory:
+
+```bash
+find <your_dir> -type f ! -perm -o+r | wc -l    # anything but 0 is a problem
 ```
 
 **Take the 114 GB unless you intend to continue the interrupted RL run.** The

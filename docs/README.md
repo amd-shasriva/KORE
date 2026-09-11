@@ -8,6 +8,7 @@ the active footprint is why it is viable for the on-device deliverable.
 | Doc | What it establishes |
 | --- | --- |
 | [`REPRODUCING.md`](REPRODUCING.md) | What a stranger can rerun from a clone, what they cannot, and the external prerequisites. Start here. |
+| [`CLUSTER_ACCESS.md`](CLUSTER_ACCESS.md) | How to reach SPUR and pull the checkpoint off it, including why losing a compute node does not lose your files. |
 | [`DISTRIBUTED.md`](DISTRIBUTED.md) | The 30B SFT launch contract and storage constraint. |
 | [`SFT_READINESS.md`](SFT_READINESS.md) | Why each SFT hyperparameter is what it is, and what the held-out evals watch for. |
 | [`GRPO_READINESS.md`](GRPO_READINESS.md) | The reviewed 30B RL recipe, why it uses TRLOO, and its launch gate. |

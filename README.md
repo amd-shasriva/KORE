@@ -49,58 +49,36 @@ checks the shard count and reads `global_step` back.
 
 ### Reaching the cluster
 
-Worth stating explicitly, because it is not obvious and it caught out more than
-one person on this project: **losing your GPU node does not lose your files.**
-Compute allocations and storage are separate. When the reservation ends the
-compute node goes away, but `/shared_nfs` stays mounted on the SPUR *login*
-nodes, and anything you left there is still readable.
-
-So the way in is the login node, not the node you trained on:
+**Losing your GPU node does not lose your files.** Compute and storage are
+separate on SPUR: when a reservation ends the node goes away, but `/shared_nfs`
+stays mounted on the *login* nodes and anything left there is still readable.
+That was not obvious to anyone on this project, and it is the difference between
+"the weights are gone" and a ten-minute `rsync`.
 
 ```bash
-ssh <NTID>@crs-spur.crusoe.amd.com          # load balancer across the login nodes
-```
-
-Authenticate with your NTID and LDAP password. `crs-spur` fronts
-`crsuse2-slog-003`, `-004` and `-005`; use one of those directly if the load
-balancer misbehaves. Note that `crs-m2m-cpu-spur-login` was decommissioned and
-the `crs-m2m-cpu-spur-*` compute nodes are a different machine family with
-different home directories, so a key authorised on one is not authorised on the
-other.
-
-Two separate filesystems, and the distinction matters when you are copying
-hundreds of gigabytes:
-
-| Mount | Size | Notes |
-| --- | --- | --- |
-| `/shared_nfs` | 360 TB, ~91% used | Where large artifacts belong. Visible from every node. |
-| `/home` | 10 TB, effectively full | Do not stage a checkpoint here. |
-
-Then pull the weights:
-
-```bash
+ssh <NTID>@crs-spur.crusoe.amd.com    # NTID + LDAP password
 cat /shared_nfs/shasriva/KORE_HANDOFF/README.md
 
-# weights only: what you want in order to evaluate, serve, or fine-tune
+# weights only: what you want to evaluate, serve, or fine-tune
 rsync -av --partial --append-verify \
   --exclude optimizer.pt --exclude rng_state.pth --exclude scheduler.pt \
   /shared_nfs/shasriva/rl_checkpoint-30/ ~/kore-weights/
 
-# verify the transfer
+# verify
 ls ~/kore-weights/model-*-of-00025.safetensors | wc -l   # 25
 python3 -c "import json;print(json.load(open('$HOME/kore-weights/trainer_state.json'))['global_step'])"   # 30
 ```
 
 Every file under `rl_checkpoint-30/` is world-readable, so you do not need to be
-the owner to copy it. That was not true originally: the safetensors shards were
-written `-rw-------` while the enclosing directories were world-readable, which
-looks fine from the outside and fails only at the moment somebody else tries to
-read a shard. If you are leaving artifacts behind for colleagues, check the
-files rather than the directory:
+the owner to copy it. Note that `/home` is at 99% with 182 GB free, so stage
+large artifacts on `/shared_nfs` instead.
 
-```bash
-find <your_dir> -type f ! -perm -o+r | wc -l    # anything but 0 is a problem
-```
+[`docs/CLUSTER_ACCESS.md`](docs/CLUSTER_ACCESS.md) is the full version: the
+login-node list, why a key authorised on the `crs-m2m-cpu-spur-*` machines is
+not authorised on the login nodes, why remote commands need `bash -c` and not
+`bash -lc` (tcsh, and a profile that stalls on NFS), the permission trap that
+nearly cost this project its weights, and a table of failure messages with
+causes.
 
 **Take the 114 GB unless you intend to continue the interrupted RL run.** The
 other 228 GB is `optimizer.pt`, `rng_state.pth` and `scheduler.pt`, which are

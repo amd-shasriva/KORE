@@ -52,6 +52,14 @@ targets `/shared_nfs`. Reproducing this run therefore needs both a config change
 and a different storage layout; it is not a matter of pointing an existing
 launcher at a new checkpoint.
 
+The resulting checkpoint was later copied to
+`/shared_nfs/shasriva/rl_checkpoint-30`, where it survives and is fetchable with
+`scripts/fetch_weights.sh`. It verifies as 25 safetensors shards on a
+`qwen3_moe` config of 48 layers and 128 experts, with `trainer_state.json`
+reporting `global_step` 30. The SFT checkpoint it started from was not found
+there, so the `/mnt/vast` paths above are a record of where the run ran rather
+than a place to go looking.
+
 ## 2. What the run produced
 
 All four arms ran the same 416 AgentKernelArena tasks through the same harness

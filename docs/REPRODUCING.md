@@ -14,12 +14,18 @@ stage. This is the map.
 | 1. Build the corpus | Yes for the mixture, no for generation. The v5 corpus ships committed; regenerating it needs an AMD-internal teacher endpoint. |
 | 2. Supervised fine-tuning | Yes, given the hardware. Config, data and pinned model revision are all here. |
 | 3. Multi-turn RL | Recipe yes, run no. The config is now committed; the SFT checkpoint it starts from is not in this repository. |
-| 4. AgentKernelArena evaluation | Yes, given the benchmark checkout and a checkpoint to score. |
+| 4. AgentKernelArena evaluation | Yes. The benchmark checkout is external, and the RL checkpoint it scored is fetchable. |
 
-The single hard blocker is stage 3's input. The frontier run started from an SFT
-checkpoint at `/mnt/vast/shasriva/models/sft_coder30b_a3b_v5`, on infrastructure
-this cluster cannot see. You can rerun stage 2 to produce your own, but it will
-not be bit-identical, so stage 3 and 4 numbers will differ. See
+**Stage 4 is reproducible against the original artifact.** RL checkpoint-30 is
+on the SPUR shared volume at `/shared_nfs/shasriva/rl_checkpoint-30` and
+`scripts/fetch_weights.sh` retrieves it, so the published numbers can be
+re-measured against the same weights rather than a re-trained approximation.
+
+**Stage 3's input is the hard blocker.** The frontier run started from an SFT
+checkpoint at `/mnt/vast/shasriva/models/sft_coder30b_a3b_v5`, and that path was
+not found on the shared volume; `save_total_limit` was 2, so it was most likely
+rotated out. Rerunning stage 2 produces a replacement but not a bit-identical
+one, and no stage here is deterministic, so stage 3 numbers would differ. See
 `docs/evidence/RL_RUN_PROVENANCE.md` for what the original run actually did.
 
 Everything else below is honest about its prerequisites rather than assuming a

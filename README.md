@@ -14,6 +14,81 @@ MoE compute is about ten times lower than a comparable 32B dense model while
 retaining comparable memory requirements. The pinned, full-parameter SFT
 recipe is [`configs/sft_coder30b_a3b.json`](configs/sft_coder30b_a3b.json).
 
+## Getting started
+
+Everything except the model weights is in this repository, including the full
+training corpus. No cluster access is needed for the code or the data.
+
+```bash
+git clone https://github.com/amd-shasriva/KORE.git
+cd KORE
+cd data/release && ./reassemble.sh   # rebuild the 206,000-row corpus, offline
+./restore_upstream.sh                # optional, ~10 GB of raw agentic episodes
+```
+
+`reassemble.sh` reconstructs `data/v5_sft.jsonl` and its held-out half from the
+committed gzip parts. The result is byte-identical to the file training actually
+consumed, which was verified rather than assumed: MD5
+`b91f1adb7d735c9a97f451ecc5e1ee01`, 206,000 rows.
+
+### The model weights
+
+Not in this repository, and not by choice: a checkpoint is 342 GB against
+GitHub's 100 MB per-file hard limit, and [`LICENSE`](LICENSE) separately
+prohibits publishing a derived checkpoint to a public registry. RL
+checkpoint-30 lives on the SPUR shared volume and is world-readable.
+
+```bash
+./scripts/fetch_weights.sh ~/kore-weights            # 114 GB, the model
+./scripts/fetch_weights.sh ~/kore-weights --resume   # 342 GB, adds training state
+```
+
+Set `KORE_SPUR_SSH=<NTID>@crs-spur.crusoe.amd.com` if you are not already on a
+login node. The script resumes a broken transfer instead of restarting it, then
+checks the shard count and reads `global_step` back.
+
+The equivalent by hand, if you would rather see exactly what it does:
+
+```bash
+ssh <NTID>@crs-spur.crusoe.amd.com
+cat /shared_nfs/shasriva/KORE_HANDOFF/README.md
+
+# weights only: what you want in order to evaluate, serve, or fine-tune
+rsync -av --partial --append-verify \
+  --exclude optimizer.pt --exclude rng_state.pth --exclude scheduler.pt \
+  /shared_nfs/shasriva/rl_checkpoint-30/ ~/kore-weights/
+
+# verify the transfer
+ls ~/kore-weights/model-*-of-00025.safetensors | wc -l   # 25
+python3 -c "import json;print(json.load(open('$HOME/kore-weights/trainer_state.json'))['global_step'])"   # 30
+```
+
+**Take the 114 GB unless you intend to continue the interrupted RL run.** The
+other 228 GB is `optimizer.pt`, `rng_state.pth` and `scheduler.pt`, which are
+required only to resume from step 30. Check `global_step` rather than the
+directory name: two checkpoint directories exist from different cycles.
+
+Then load it:
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+model = AutoModelForCausalLM.from_pretrained(
+    "~/kore-weights", torch_dtype="bfloat16", device_map="auto")
+```
+
+The checkpoint sits under a personal directory on an account that is closing.
+Copying it somewhere team-owned is the most time-sensitive item in
+[`HANDOVER.md`](HANDOVER.md).
+
+### Running the tests
+
+```bash
+python -m pytest        # 9,232 tests, CPU only, no GPU or cluster required
+```
+
+`docs/REPRODUCING.md` is the honest account of which stages a stranger can rerun
+and which they cannot, including every external prerequisite.
+
 ## Status
 
 **All four stages have run. The cycle is complete and stopped, not converged.**

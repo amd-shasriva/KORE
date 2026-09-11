@@ -136,7 +136,7 @@ rather than re-confirming.
 | What | Why | Who to ask |
 | --- | --- | --- |
 | SPUR cluster account, `amd-general` | Every training and evaluation launcher | cluster ops |
-| `/mnt/vast` read access | The only place the checkpoints were written | whoever provisioned that volume |
+| `/shared_nfs` read access | Holds RL checkpoint-30 and its arena ledgers. Files are world-readable; the risk is the directory, not the mode bits. | cluster ops |
 | `AMD_LLM_API_KEY`, `AMD_NTID` | Corpus generation only. Not needed to train on the committed corpus. | AMD LLM gateway owners |
 | AgentKernelArena checkout @ `b09f5eb` | Evaluation. Not vendored here. | the AKA repository |
 | `aiter` source | Vendor baselines. Without it every speedup inflates. | the aiter repository |

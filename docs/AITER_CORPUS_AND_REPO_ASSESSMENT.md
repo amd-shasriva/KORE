@@ -99,7 +99,7 @@ their machines**, not ours, and must never be relabelled as our numbers.
 ### The blocking precondition: decontamination
 
 This is the part that would sink the effort if it were skipped. **63 of our
-1,334 tasks use an `aiter*` comparison baseline.** For any task whose baseline
+1,546 tasks use an `aiter*` comparison baseline.** For any task whose baseline
 resolves to an AITER *Triton* kernel, training on that kernel's source is
 training on the answer, and a subsequent win over that baseline would be
 contaminated rather than earned.

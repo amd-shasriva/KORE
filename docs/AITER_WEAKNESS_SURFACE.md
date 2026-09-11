@@ -145,9 +145,10 @@ these attention commits landed and would need re-checking before any claim:
 
 ## What our task pool measures today [source]
 
-Counted over the 1,334 tasks under `kore/tasks/`:
+Counted over the 1,546 tasks under `kore/tasks/` (this was written when the
+registry held 1,334; the AITER count has not moved, so only the share has):
 
-- **63** tasks (~4.7%) declare an `aiter*` comparison baseline. The rest are
+- **63** tasks (~4.1%) declare an `aiter*` comparison baseline. The rest are
   torch/hipBLASLt.
 - **80** backward tasks exist. **Every one** of them uses a torch baseline.
 - **7** are attention-backward. All are `head_dim=128`, all **causal**, all

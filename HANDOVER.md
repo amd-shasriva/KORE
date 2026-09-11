@@ -22,8 +22,9 @@ about where the artifacts are and who to ask.
 | Arena evaluation runs behind the scores | `data/release/arena_runs/` | yes, via `restore_upstream.sh` |
 | RL run evidence: resolved config, event log, three arena ledgers | `docs/evidence/rl_v5_frontier/` | yes |
 | The RL recipe that produced checkpoint-30 | `configs/grpo_coder30b_a3b_trloo_frontier.json` | yes |
-| SFT checkpoint the RL run started from | `/mnt/vast/shasriva/models/sft_coder30b_a3b_v5` | **no** |
-| RL checkpoint-30 (the model every result describes) | `/mnt/vast/shasriva/runs/grpo_v5_frontier` | **no** |
+| RL checkpoint-30 (the model every result describes) | `/shared_nfs/shasriva/rl_checkpoint-30`, 342 GB | no, fetch with `scripts/fetch_weights.sh` |
+| Arena ledgers for that checkpoint | `/shared_nfs/shasriva/aka_results_ckpt30`, 32 MB | no, on the cluster |
+| SFT checkpoint the RL run started from | not located; see below | **no** |
 | Base model, `Qwen3-Coder-30B-A3B-Instruct` @ `b2cff646` | HuggingFace Hub | no, and does not need to be |
 
 Rebuild the corpus from a clean checkout with:
@@ -90,30 +91,45 @@ deterministically from KernelBook at pinned revision
 `b76504d85f7f14ef4b1fad81f136f638f2ce625b` plus template synthesis; and the
 96,675 DPO pairs, which are already committed under `data/release/dpo/`.
 
-## 2. The checkpoints are the gap, and it is the important one
+## 2. The weights: where they are and how to get them
 
-Neither the SFT checkpoint nor RL checkpoint-30 is in this repository, and
-neither can be. A 30B checkpoint is about 488 GB against GitHub's 100 MB
-per-file limit, and `LICENSE` separately forbids publishing a model checkpoint
-derived from this work to any public or third-party registry without written
-AMD authorization.
+RL checkpoint-30 exists and is complete. It is at
+`/shared_nfs/shasriva/rl_checkpoint-30` on the SPUR cluster, verified as 25
+safetensors shards plus index, tokenizer, `optimizer.pt` and a
+`trainer_state.json` reporting `global_step` 30, on a `qwen3_moe` config with
+48 layers and 128 experts. One command fetches it:
 
-They were written to `/mnt/vast/shasriva/...`, which is not the SPUR
-`/shared_nfs` volume the committed configs target. Whoever picks this up needs
-to establish, in this order:
+```bash
+./scripts/fetch_weights.sh /your/destination            # 114 GB, the model
+./scripts/fetch_weights.sh /your/destination --resume   # 342 GB, + training state
+```
 
-1. Does `/mnt/vast/shasriva/runs/grpo_v5_frontier` still exist, and who now has
-   read access to it?
-2. If it is gone, is there a copy? `save_total_limit` was 2, so old checkpoints
-   were rotated out during the run and only the most recent survive by design.
-3. If nothing survives, stage 2 must be rerun to produce a new SFT checkpoint
-   before stage 3 can start. The recipe is committed and the corpus is here, so
-   this is a compute problem rather than a knowledge problem.
+**Take the 114 GB unless you intend to continue the interrupted RL run.** The
+other 228 GB is optimizer, RNG and scheduler state, needed only to resume from
+step 30 — not to evaluate, serve, or fine-tune. `KORE_SPUR_SSH` points the
+script at a login node if you are not already on one.
 
-**Every published number describes checkpoint-30 specifically.** If the
-checkpoint is gone, the numbers in `docs/evidence/RL_RUN_PROVENANCE.md` remain
-attributable — the ledgers that produced them are committed — but they cannot
-be re-derived without rerunning both stages.
+`/shared_nfs/shasriva/KORE_HANDOFF/` collects the checkpoint, its arena
+ledgers and a byte-size manifest behind symlinks, with its own README. It
+duplicates nothing, because that volume is at 91%.
+
+It cannot live in this repository: 342 GB against a 100 MB per-file limit, and
+`LICENSE` separately forbids publishing a derived checkpoint to any public or
+third-party registry without written AMD authorization.
+
+Two things still open. **The SFT checkpoint was not found** — only the RL one
+is on `/shared_nfs`, so it was likely rotated out, `save_total_limit` being 2.
+Reproducing stage 3 from scratch therefore means rerunning stage 2 first,
+roughly 29 hours on 8 MI355X. And **the path is a personal directory** on an
+account being closed, so the single most urgent action in this document is
+getting `/shared_nfs/shasriva/rl_checkpoint-30` copied somewhere team-owned, or
+its ownership transferred.
+
+**Every published number describes checkpoint-30 specifically.** If it is lost,
+the figures in `docs/evidence/RL_RUN_PROVENANCE.md` remain attributable, since
+the ledgers behind them are committed — but no stage is deterministic, so a
+rerun produces a different checkpoint and the numbers would need re-measuring
+rather than re-confirming.
 
 ## 3. Access you will need
 

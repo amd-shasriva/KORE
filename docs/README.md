@@ -7,6 +7,7 @@ the active footprint is why it is viable for the on-device deliverable.
 
 | Doc | What it establishes |
 | --- | --- |
+| [`REPRODUCING.md`](REPRODUCING.md) | What a stranger can rerun from a clone, what they cannot, and the external prerequisites. Start here. |
 | [`DISTRIBUTED.md`](DISTRIBUTED.md) | The 30B SFT launch contract and storage constraint. |
 | [`SFT_READINESS.md`](SFT_READINESS.md) | Why each SFT hyperparameter is what it is, and what the held-out evals watch for. |
 | [`GRPO_READINESS.md`](GRPO_READINESS.md) | The reviewed 30B RL recipe, why it uses TRLOO, and its launch gate. |
@@ -28,8 +29,11 @@ number can be traced to the artifact that produced it rather than to prose:
 | [`evidence/HARDWARE_VALIDATION.md`](evidence/HARDWARE_VALIDATION.md) | Which components had only ever run against scripted fakes, and what touching a GPU changed. |
 | [`evidence/coverage_denominator.md`](evidence/coverage_denominator.md) | What `rocprofv3` actually measures for the coverage reward on real gfx950. |
 
-The raw artifacts behind the RL document are in `evidence/rl_v5_frontier/`
-(resolved config, checkpoint manifest, event log, and the four arena ledgers).
+The raw artifacts behind the RL document are in `evidence/rl_v5_frontier/`:
+the resolved config, the checkpoint manifest, the event log, and **three** of
+the four arena ledgers — RL, fine-tuned, and Opus. The base-model ledger is the
+one input to that document's results table which is not committed here, so the
+base row is the only one a reader cannot re-derive from this repository.
 
 ## Production decisions, with the failure modes they prevent
 

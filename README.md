@@ -16,17 +16,48 @@ recipe is [`configs/sft_coder30b_a3b.json`](configs/sft_coder30b_a3b.json).
 
 ## Status
 
-**KORE is running its first full v5 supervised fine-tuning job. No
-post-training result exists yet.** Nothing below this line is a model
-capability claim; it describes the pipeline and the state of training.
+**All four stages have run. The cycle is complete and stopped, not converged.**
+Supervised fine-tuning finished, multi-turn RL ran for 31 of a configured 1,000
+optimizer steps, and all four arms were scored on the same 416 AgentKernelArena
+tasks. The numbers below are measured, and the ledgers behind them are committed
+under [`docs/evidence/rl_v5_frontier/`](docs/evidence/rl_v5_frontier/).
+
+| Arm | Correct | Compiles | Speedup (geomean, own correct set) |
+| --- | --- | --- | --- |
+| Base `Qwen3-Coder-30B-A3B-Instruct` | 28.6% | 49.0% | 0.841x |
+| + supervised fine-tuning | 52.4% | 82.7% | 0.951x |
+| + multi-turn RL, step 30 | **62.3%** | **93.8%** | 0.955x |
+| Claude Opus (external bar) | 67.3% | 78.8% | 1.617x |
+
+**RL bought correctness and did not buy speed.** Paired on identical task IDs
+against the fine-tuned model, RL fixed 63 tasks and broke 22, McNemar z = 4.34
+with continuity correction — a net 41 tasks, or 9.9 points. Compile rate rose
+11.1 points. On the 186 tasks where both models produced a correct, timed
+kernel, the geometric means are 0.940x and 0.878x, a ratio of 0.934x with a
+paired t of -2.84 on the log ratio; RL is faster on 56 of the 186. So speed
+regressed slightly rather than holding flat.
+
+The leading explanation is a configuration bug rather than a limit of the
+method. `overlong_buffer_len` was 512 against a `max_response_length` of 1024,
+so the overlong mask dropped every response of 512 tokens or more instead of
+only the truncated tail. Counted from the committed event log that is **908**
+discarded samples across 31 steps, a mean of 29.3 per step, and it falls
+hardest on long responses — which is where optimised kernels live.
+[`HANDOVER.md`](HANDOVER.md) has the three-part fix, cheapest first.
+
+Two caveats on that table. Opus was measured against its own baseline ledger,
+so its speedup rests on a different denominator — the correctness and compile
+columns are directly comparable, the speedup column is not. And the base-model
+ledger is the one row not committed here, so it is the only figure a reader
+cannot re-derive from this repository.
 
 | | |
 | --- | --- |
-| Stage | v5 SFT training in progress, the first full run on the v5 mixture |
-| Model | `Qwen/Qwen3-Coder-30B-A3B-Instruct`, full-parameter SFT |
-| Hardware | 8x MI355X, one node, `amd-primus-qos` (guaranteed pool) |
-| Schedule | 1,609 optimizer steps, 1 epoch, ~29 hours expected |
-| Launcher | [`scripts/sft_supervise_v5.sh`](scripts/sft_supervise_v5.sh) over [`scripts/spur_sft_1node.sbatch`](scripts/spur_sft_1node.sbatch) |
+| Model | `Qwen/Qwen3-Coder-30B-A3B-Instruct`, full-parameter SFT, then GRPO with TRLOO |
+| SFT | 1,609 optimizer steps, 1 epoch over 206,000 rows, 8x MI355X |
+| RL | 31 of 1,000 steps, 2026-08-27 to 2026-08-30, 81.8 h at world size 8 |
+| Recipe | [`configs/sft_coder30b_a3b.json`](configs/sft_coder30b_a3b.json), then [`configs/grpo_coder30b_a3b_trloo_frontier.json`](configs/grpo_coder30b_a3b_trloo_frontier.json) |
+| Checkpoints | **Not in this repository.** ~488 GB each; see [`HANDOVER.md`](HANDOVER.md) |
 
 **Training data.** The v5 mixture is 206,000 rows / 490,174,073 tokens, 61.38%
 kernel and 38.62% replay by rows, spanning six task shapes: optimize, repair,
@@ -56,12 +87,17 @@ artifact: 244,732 rows, counted by reassembling the release parts and matching
 and described by the same config's `_comment_dataset_path`. The 288.4M token
 figure this paragraph used to carry belongs to neither file.
 
-**Where to look next.** [`docs/SFT_READINESS.md`](docs/SFT_READINESS.md) is
-the pre-launch checklist this run went through.
+**Where to look next.** [`HANDOVER.md`](HANDOVER.md) is the map: where every
+artifact lives, what is missing, and three defects found and deliberately left
+open. [`docs/REPRODUCING.md`](docs/REPRODUCING.md) is honest about which stages
+a stranger can rerun and which they cannot.
+[`docs/evidence/RL_RUN_PROVENANCE.md`](docs/evidence/RL_RUN_PROVENANCE.md)
+records exactly what the RL run did.
+[`docs/SFT_READINESS.md`](docs/SFT_READINESS.md) is the pre-launch checklist
+that run went through, and
 [`docs/CLUSTER_OPERATIONS.md`](docs/CLUSTER_OPERATIONS.md) covers how a run is
-scheduled, supervised, and resumed on this cluster. Once training finishes,
-the SFT checkpoint is evaluated against the exact instruct checkpoint it
-started from before any downstream stage consumes it (see
+scheduled, supervised, and resumed here. Each stage was evaluated against the
+exact checkpoint it started from before the next stage consumed it (see
 [`kore/eval/README.md`](kore/eval/README.md)).
 
 ## The production path
@@ -100,13 +136,15 @@ flowchart LR
    [`docs/P0_RESULTS.md`](docs/P0_RESULTS.md).
 5. `kore/policy/sft.py` runs the full-parameter SFT stage described in
    [Status](#status) above, from the vendor instruct checkpoint. There is no
-   production continued-pretraining, chat-vector merge, or DPO stage.
-6. `kore/policy/grpo.py` runs multi-turn RL via GRPO after SFT; it has not yet
-   started for this cycle. Multi-turn RL consumes execution feedback directly.
-   Kernel quality is verifiable by compile, correctness, and timing, which
-   is a stronger signal than an offline preference pair, and the multi-turn
-   path avoids applying a plain GRPO estimator to a setting where its policy
-   gradient is biased.
+   production continued-pretraining, chat-vector merge, or DPO stage. This
+   stage completed and took correctness from 28.6% to 52.4%.
+6. `kore/policy/grpo.py` runs multi-turn RL via GRPO after SFT, and it ran for
+   this cycle — 31 steps, taking correctness to 62.3%. Multi-turn RL consumes
+   execution feedback directly. Kernel quality is verifiable by compile,
+   correctness, and timing, which is a stronger signal than an offline
+   preference pair, and the multi-turn path avoids applying a plain GRPO
+   estimator to a setting where its policy gradient is biased. Credit is
+   assigned per turn by TRLOO, a turn-level REINFORCE leave-one-out estimator.
 
 ## Why the older recipe is not production
 
@@ -171,23 +209,29 @@ For KernelBench Triton, Kernel-Smith-235B reports 3.70 average speedup versus
 with test-time scaling on KernelBench L2, compared with GPT-5 at 28.6% and
 Claude-4.5-Sonnet at 26.7%. KORE reports its own results through
 KernelBench-AMD and paired `vs_opus` evaluation rather than importing those
-numbers as its own. Per [Status](#status), no KORE checkpoint has been
-scored against any of these yet: the v5 SFT run in progress is the first
-candidate.
+numbers as its own. Per [Status](#status), KORE's own arms have now been scored
+on AgentKernelArena: 62.3% correct at the RL step-30 checkpoint against 67.3%
+for Opus on the same 416 tasks. KORE has not been scored on KernelBench L2, so
+none of the Dr. Kernel or Kernel-Smith figures above is a comparison against a
+KORE result.
 
 ## Operations
 
-Corpus generation for v5 is complete; the current cluster activity is the SFT
-run described in [Status](#status), scheduled and supervised as documented in
-[`docs/CLUSTER_OPERATIONS.md`](docs/CLUSTER_OPERATIONS.md). The data driver
-itself stops before training and leaves `runs/DATA_NOT_FINAL` in place for
-human review; that sentinel is not removed automatically, and a fresh datagen
-pass would still need to go through it.
+Corpus generation, SFT, RL and evaluation have all run; there is no active
+cluster work. Scheduling and supervision are documented in
+[`docs/CLUSTER_OPERATIONS.md`](docs/CLUSTER_OPERATIONS.md), which also records
+which account and QoS pairings actually schedule here — a pairing can be
+accepted by `sbatch` and then never become a scheduling candidate. The data
+driver stops before training and leaves `runs/DATA_NOT_FINAL` in place for human
+review; that sentinel is not removed automatically, and a fresh datagen pass
+would still need to go through it.
 
 For the production SFT invocation and the checkpoint storage constraint, see
 [`docs/DISTRIBUTED.md`](docs/DISTRIBUTED.md). A 30B checkpoint is about 488 GB;
 `save_total_limit` is sized against the shared volume's free space, which is
-re-measured before each launch rather than assumed.
+re-measured before each launch rather than assumed. It was 2 for these runs, so
+older checkpoints were rotated out by design — which is why
+[`HANDOVER.md`](HANDOVER.md) treats rescuing the surviving ones as urgent.
 
 ## Release prerequisites
 
